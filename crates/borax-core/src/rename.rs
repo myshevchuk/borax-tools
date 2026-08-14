@@ -12,7 +12,9 @@
 //! approximation of Windows/macOS filesystem folding — so a plan made
 //! on Linux stays valid after a sync to a case-insensitive filesystem.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::bib_output::letter_suffix;
 
 /// What to do when a desired target is taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +100,83 @@ pub fn plan(
     existing: &BTreeMap<String, Option<String>>,
     policy: CollisionPolicy,
 ) -> Vec<PlanItem> {
-    let _ = (items, existing, policy);
-    todo!("plan the batch")
+    let mut claimed: BTreeSet<String> = existing.keys().map(|path| path.to_lowercase()).collect();
+    let mut planned = Vec::with_capacity(items.len());
+
+    for item in items {
+        let source_key = item.source.to_lowercase();
+        let exempt = existing
+            .keys()
+            .any(|path| path.to_lowercase() == source_key)
+            .then_some(source_key.as_str());
+        let target_key = item.target.to_lowercase();
+
+        let action = if item.source == item.target || occupied_by_twin(item, existing, exempt) {
+            PlannedAction::AlreadyNamed
+        } else if is_free(&target_key, &claimed, exempt) {
+            claimed.insert(target_key);
+            PlannedAction::Rename {
+                to: item.target.clone(),
+            }
+        } else {
+            match policy {
+                CollisionPolicy::Suffix => {
+                    let mut index = 0;
+                    loop {
+                        let candidate = with_suffix(&item.target, &letter_suffix(index));
+                        let candidate_key = candidate.to_lowercase();
+                        if is_free(&candidate_key, &claimed, exempt) {
+                            claimed.insert(candidate_key);
+                            break PlannedAction::Rename { to: candidate };
+                        }
+                        index += 1;
+                    }
+                }
+                CollisionPolicy::Skip => PlannedAction::Skip {
+                    reason: SkipReason::TargetCollision,
+                },
+            }
+        };
+
+        planned.push(PlanItem {
+            source: item.source.clone(),
+            action,
+        });
+    }
+
+    planned
+}
+
+/// Whether an existing file other than `item`'s own source sits at its
+/// target with the same content.
+fn occupied_by_twin(
+    item: &PlanInput,
+    existing: &BTreeMap<String, Option<String>>,
+    exempt: Option<&str>,
+) -> bool {
+    let target_key = item.target.to_lowercase();
+    existing.iter().any(|(path, hash)| {
+        let path_key = path.to_lowercase();
+        path_key == target_key
+            && Some(path_key.as_str()) != exempt
+            && hash.as_deref() == Some(item.content_hash.as_str())
+    })
+}
+
+/// Whether `candidate_key` (an already-lowercased path) is unclaimed,
+/// counting the planning item's own slot as free.
+fn is_free(candidate_key: &str, claimed: &BTreeSet<String>, exempt: Option<&str>) -> bool {
+    !claimed.contains(candidate_key) || exempt == Some(candidate_key)
+}
+
+/// Insert `suffix` before `path`'s extension — the last dot of the final
+/// `/`-separated component, ignoring a leading dot. A component without
+/// one takes the suffix at its end.
+fn with_suffix(path: &str, suffix: &str) -> String {
+    let component = path.rfind('/').map_or(0, |slash| slash + 1);
+    let split = path[component..]
+        .rfind('.')
+        .filter(|dot| *dot > 0)
+        .map_or(path.len(), |dot| component + dot);
+    format!("{}{}{}", &path[..split], suffix, &path[split..])
 }

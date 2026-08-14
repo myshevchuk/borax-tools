@@ -40,20 +40,20 @@ the implementation, then refactor with the suite green.
 
 ## 4. Rename planning (borax-core)
 
-- [ ] 4.1 Tests + implementation: rename planner producing old→new
+- [x] 4.1 Tests + implementation: rename planner producing old→new
       mappings with collision detection (batch-internal, existing files,
       case-insensitive) and suffix/skip policies
-- [ ] 4.2 Tests + implementation: identical-content targets reported as
+- [x] 4.2 Tests + implementation: identical-content targets reported as
       already-named
 
 ## 5. Bib output (borax-core)
 
-- [ ] 5.1 Tests + implementation: master-`.bib` merge with
+- [x] 5.1 Tests + implementation: master-`.bib` merge with
       identifier-based dedup, skip/update policy, byte-preservation of
       untouched content
-- [ ] 5.2 Tests + implementation: citation-key uniqueness with
+- [x] 5.2 Tests + implementation: citation-key uniqueness with
       deterministic letter suffixes
-- [ ] 5.3 Tests + implementation: sidecar content (BibTeX + full JSON
+- [x] 5.3 Tests + implementation: sidecar content (BibTeX + full JSON
       record)
 
 ## 6. PDF extraction (borax-pdf)
