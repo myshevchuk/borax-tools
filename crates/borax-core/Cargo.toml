@@ -1,0 +1,12 @@
+[package]
+name = "borax-core"
+description = "Pure bibliographic logic: record model, template engine, rename planning, bib output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "borax"
+description = "Fast, error-free bibliography fetch-and-rename CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "borax"
+path = "src/main.rs"
+
+[dependencies]
+borax-core = { path = "../borax-core" }
+borax-sources = { path = "../borax-sources" }
+borax-pdf = { path = "../borax-pdf" }
+
+[lints]
+workspace = true

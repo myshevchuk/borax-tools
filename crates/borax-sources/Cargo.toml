@@ -1,0 +1,13 @@
+[package]
+name = "borax-sources"
+description = "Online bibliographic source adapters: Crossref, OpenAlex, arXiv; caching and rate limiting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+borax-core = { path = "../borax-core" }
+
+[lints]
+workspace = true

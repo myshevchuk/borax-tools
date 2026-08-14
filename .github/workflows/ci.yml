@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "change/**"]
+  pull_request:
+  schedule:
+    # Weekly live contract tests against the real APIs (see job below).
+    - cron: "17 5 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  live-contract:
+    # Scheduled-only: replays contract tests against the live Crossref/
+    # OpenAlex/arXiv APIs to catch upstream drift. Stub until the cassette
+    # test harness exists (task 9.3 of add-core-pipeline).
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "live contract tests not yet implemented (add-core-pipeline task 9.3)"
