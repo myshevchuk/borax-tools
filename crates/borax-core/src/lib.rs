@@ -5,3 +5,5 @@
 pub mod bibtex;
 pub mod identifier;
 pub mod record;
+pub mod sanitize;
+pub mod template;
