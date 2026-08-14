@@ -5,12 +5,12 @@ the implementation, then refactor with the suite green.
 
 ## 1. Workspace scaffolding
 
-- [ ] 1.1 Create the Cargo workspace with crates `borax-core`,
+- [x] 1.1 Create the Cargo workspace with crates `borax-core`,
       `borax-sources`, `borax-pdf`, `borax` (empty lib/bin targets,
       shared workspace lints and metadata)
-- [ ] 1.2 Add `CHANGELOG.md` (Keep a Changelog, empty `[Unreleased]`),
+- [x] 1.2 Add `CHANGELOG.md` (Keep a Changelog, empty `[Unreleased]`),
       dual MIT/Apache-2.0 license files, and a `README.md` stub
-- [ ] 1.3 Add CI workflow: fmt + clippy + test on Linux, macOS, Windows;
+- [x] 1.3 Add CI workflow: fmt + clippy + test on Linux, macOS, Windows;
       stub the scheduled live contract-test job
 
 ## 2. Record model (borax-core)
@@ -27,14 +27,14 @@ the implementation, then refactor with the suite green.
 
 ## 3. Template engine (borax-core)
 
-- [ ] 3.1 Tests + implementation: bracket-syntax parser with load-time
+- [x] 3.1 Tests + implementation: bracket-syntax parser with load-time
       failure on unknown fields/filters and syntax errors
-- [ ] 3.2 Tests + implementation: filter set (`lower`, `upper`,
+- [x] 3.2 Tests + implementation: filter set (`lower`, `upper`,
       `capitalize`, `titlecase`, `slug`, `abbr`, `truncN`,
       `transliterate`, `regex`) with left-to-right chaining
-- [ ] 3.3 Tests + implementation: `||` alternatives and per-entry-type
+- [x] 3.3 Tests + implementation: `||` alternatives and per-entry-type
       template tables with `default` fallback
-- [ ] 3.4 Tests + implementation: mandatory sanitization pass (invalid
+- [x] 3.4 Tests + implementation: mandatory sanitization pass (invalid
       chars, Windows reserved names, length limits, `/` as directory
       separator)
 

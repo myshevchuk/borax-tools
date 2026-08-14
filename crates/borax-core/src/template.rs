@@ -84,7 +84,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::record::{EntryType, Record};
+use regex::Regex;
+
+use crate::record::{EntryType, Name, Record};
 
 /// Why a template source failed to compile. Every variant names the
 /// offending token so a configuration layer can report "template X,
@@ -136,6 +138,7 @@ pub struct RenderInput<'a> {
 #[derive(Debug)]
 pub struct Template {
     source: String,
+    segments: Vec<Segment>,
 }
 
 impl Template {
@@ -144,8 +147,10 @@ impl Template {
     /// regex patterns. Fail-fast contract: any error a template can
     /// produce is produced here, never at render time.
     pub fn compile(source: &str) -> Result<Template, TemplateError> {
-        let _ = source;
-        todo!("parse and validate the template")
+        Ok(Template {
+            source: source.to_string(),
+            segments: Parser::new(source).parse()?,
+        })
     }
 
     /// The source text this template was compiled from.
@@ -157,9 +162,507 @@ impl Template {
     /// right and the first non-empty result (after its filters) wins;
     /// a token whose chains all render empty contributes nothing.
     pub fn render(&self, input: &RenderInput<'_>) -> String {
-        let _ = input;
-        todo!("render the compiled template")
+        let mut rendered = String::new();
+        for segment in &self.segments {
+            match segment {
+                Segment::Literal(text) => rendered.push_str(text),
+                Segment::Token(chains) => {
+                    for chain in chains {
+                        let value = chain.render(input);
+                        if !value.is_empty() {
+                            rendered.push_str(&value);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        rendered
     }
+}
+
+// ---------------------------------------------------------------------
+// Compiled representation
+// ---------------------------------------------------------------------
+
+#[derive(Debug)]
+enum Segment {
+    Literal(String),
+    Token(Vec<Chain>),
+}
+
+#[derive(Debug)]
+struct Chain {
+    field: Field,
+    filters: Vec<Filter>,
+}
+
+impl Chain {
+    fn render(&self, input: &RenderInput<'_>) -> String {
+        let mut value = self.field.render(input);
+        for filter in &self.filters {
+            value = filter.apply(&value);
+        }
+        value
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Field {
+    Auth,
+    /// `None` keeps every author; `Some(n)` keeps the first `n` and
+    /// marks the remainder with `-etal`.
+    Authors(Option<usize>),
+    Year,
+    Title,
+    ShortTitle(usize),
+    Journal,
+    Doi,
+    Arxiv,
+    Sha1,
+    EntryType,
+}
+
+#[derive(Debug)]
+enum Filter {
+    Lower,
+    Upper,
+    Capitalize,
+    TitleCase,
+    Camel,
+    Slug,
+    Abbr,
+    Transliterate,
+    Trunc(usize),
+    Regex { regex: Regex, replacement: String },
+}
+
+/// How many words `shorttitle` keeps when no count is given.
+const DEFAULT_SHORT_TITLE_WORDS: usize = 3;
+
+/// Words `shorttitle` skips, compared case-insensitively.
+const FUNCTION_WORDS: [&str; 16] = [
+    "a", "an", "the", "of", "on", "in", "for", "and", "or", "to", "with", "at", "by", "from",
+    "into", "upon",
+];
+
+// ---------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------
+
+struct Parser<'a> {
+    source: &'a str,
+    position: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(source: &'a str) -> Parser<'a> {
+        Parser {
+            source,
+            position: 0,
+        }
+    }
+
+    fn rest(&self) -> &'a str {
+        &self.source[self.position..]
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.rest().chars().next()
+    }
+
+    fn bump(&mut self, c: char) {
+        self.position += c.len_utf8();
+    }
+
+    fn syntax<T>(&self, message: &str) -> Result<T, TemplateError> {
+        Err(TemplateError::Syntax {
+            position: self.position,
+            message: message.to_string(),
+        })
+    }
+
+    fn skip_whitespace(&mut self) {
+        while let Some(c) = self.peek() {
+            if !c.is_whitespace() {
+                break;
+            }
+            self.bump(c);
+        }
+    }
+
+    fn parse(&mut self) -> Result<Vec<Segment>, TemplateError> {
+        let mut segments = Vec::new();
+        let mut literal = String::new();
+        while let Some(c) = self.peek() {
+            self.bump(c);
+            if c == '[' {
+                if !literal.is_empty() {
+                    segments.push(Segment::Literal(std::mem::take(&mut literal)));
+                }
+                segments.push(Segment::Token(self.parse_token()?));
+            } else {
+                literal.push(c);
+            }
+        }
+        if !literal.is_empty() {
+            segments.push(Segment::Literal(literal));
+        }
+        Ok(segments)
+    }
+
+    /// Parse the chains of a token whose `[` has been consumed, through
+    /// the closing `]`.
+    fn parse_token(&mut self) -> Result<Vec<Chain>, TemplateError> {
+        let mut chains = Vec::new();
+        loop {
+            self.skip_whitespace();
+            chains.push(self.parse_chain()?);
+            self.skip_whitespace();
+            if self.rest().starts_with("||") {
+                self.position += 2;
+            } else if self.rest().starts_with(']') {
+                self.position += 1;
+                return Ok(chains);
+            } else if self.rest().is_empty() {
+                return self.syntax("unclosed '['");
+            } else {
+                return self.syntax("expected '||' or ']'");
+            }
+        }
+    }
+
+    fn parse_chain(&mut self) -> Result<Chain, TemplateError> {
+        let field = self.parse_field()?;
+        let mut filters = Vec::new();
+        while self.peek() == Some(':') {
+            self.bump(':');
+            filters.push(self.parse_filter()?);
+        }
+        Ok(Chain { field, filters })
+    }
+
+    /// Consume a run of ASCII letters followed by a run of ASCII digits.
+    /// Both fields and filters use this shape, so `sha1` and `trunc8`
+    /// are single names rather than a name and a stray suffix.
+    fn parse_name(&mut self) -> &'a str {
+        let source = self.source;
+        let start = self.position;
+        while matches!(self.peek(), Some(c) if c.is_ascii_alphabetic()) {
+            self.position += 1;
+        }
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+            self.position += 1;
+        }
+        &source[start..self.position]
+    }
+
+    fn parse_field(&mut self) -> Result<Field, TemplateError> {
+        let name = self.parse_name();
+        if name.is_empty() {
+            return self.syntax("expected a field name");
+        }
+        match name {
+            "auth" => Ok(Field::Auth),
+            "authors" => Ok(Field::Authors(None)),
+            "year" => Ok(Field::Year),
+            "title" => Ok(Field::Title),
+            "shorttitle" => Ok(Field::ShortTitle(DEFAULT_SHORT_TITLE_WORDS)),
+            "journal" => Ok(Field::Journal),
+            "doi" => Ok(Field::Doi),
+            "arxiv" => Ok(Field::Arxiv),
+            "sha1" => Ok(Field::Sha1),
+            "entrytype" => Ok(Field::EntryType),
+            _ => match (
+                counted_name(name, "authors"),
+                counted_name(name, "shorttitle"),
+            ) {
+                (Some(Some(count)), _) => Ok(Field::Authors(Some(count))),
+                (_, Some(Some(count))) => Ok(Field::ShortTitle(count)),
+                (Some(None), _) | (_, Some(None)) => {
+                    self.syntax("a field count must be a positive integer")
+                }
+                (None, None) => Err(TemplateError::UnknownField {
+                    token: name.to_string(),
+                }),
+            },
+        }
+    }
+
+    fn parse_filter(&mut self) -> Result<Filter, TemplateError> {
+        if self.rest().starts_with("regex(") {
+            self.position += "regex(".len();
+            return self.parse_regex();
+        }
+        let name = self.parse_name();
+        if name.is_empty() {
+            return self.syntax("expected a filter name");
+        }
+        match name {
+            "lower" => Ok(Filter::Lower),
+            "upper" => Ok(Filter::Upper),
+            "capitalize" => Ok(Filter::Capitalize),
+            "titlecase" => Ok(Filter::TitleCase),
+            "camel" => Ok(Filter::Camel),
+            "slug" => Ok(Filter::Slug),
+            "abbr" => Ok(Filter::Abbr),
+            "transliterate" => Ok(Filter::Transliterate),
+            _ => match counted_name(name, "trunc") {
+                Some(Some(count)) => Ok(Filter::Trunc(count)),
+                Some(None) => self.syntax("truncN needs a positive count"),
+                None => Err(TemplateError::UnknownFilter {
+                    token: name.to_string(),
+                }),
+            },
+        }
+    }
+
+    /// Parse the two quoted arguments of a `regex(` whose opening
+    /// parenthesis has been consumed, and compile the pattern.
+    fn parse_regex(&mut self) -> Result<Filter, TemplateError> {
+        let pattern = self.parse_quoted()?;
+        if self.peek() != Some(',') {
+            return self.syntax("expected ',' between the regex arguments");
+        }
+        self.bump(',');
+        let replacement = self.parse_quoted()?;
+        if self.peek() != Some(')') {
+            return self.syntax("expected ')' closing regex(...)");
+        }
+        self.bump(')');
+
+        match Regex::new(&pattern) {
+            Ok(regex) => Ok(Filter::Regex { regex, replacement }),
+            Err(error) => Err(TemplateError::BadRegex {
+                pattern,
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    fn parse_quoted(&mut self) -> Result<String, TemplateError> {
+        if self.peek() != Some('"') {
+            return self.syntax("expected a double-quoted argument");
+        }
+        self.bump('"');
+
+        let mut value = String::new();
+        loop {
+            let Some(c) = self.peek() else {
+                return self.syntax("unterminated quoted argument");
+            };
+            self.bump(c);
+            match c {
+                '"' => return Ok(value),
+                '\\' => {
+                    let Some(escaped) = self.peek() else {
+                        return self.syntax("unterminated quoted argument");
+                    };
+                    self.bump(escaped);
+                    // Only \" and \\ are escapes; every other backslash
+                    // reaches the regex engine as written, so patterns
+                    // such as \d need no doubling.
+                    if escaped != '"' && escaped != '\\' {
+                        value.push('\\');
+                    }
+                    value.push(escaped);
+                }
+                _ => value.push(c),
+            }
+        }
+    }
+}
+
+/// Split `name` into `prefix` plus a decimal count. `None` when `name`
+/// is not `prefix` followed by digits; `Some(None)` when the digits are
+/// present but are not a positive integer without a leading zero.
+fn counted_name(name: &str, prefix: &str) -> Option<Option<usize>> {
+    let digits = name.strip_prefix(prefix)?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        // "trunc" alone, or a name that merely starts with the prefix.
+        return if digits.is_empty() { Some(None) } else { None };
+    }
+    Some(digits.parse().ok().filter(|count| *count > 0))
+}
+
+// ---------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------
+
+impl Field {
+    fn render(self, input: &RenderInput<'_>) -> String {
+        let record = input.record;
+        match self {
+            Field::Auth => record
+                .authors
+                .first()
+                .map(|author| author.family.clone())
+                .unwrap_or_default(),
+            Field::Authors(limit) => render_authors(&record.authors, limit),
+            Field::Year => record
+                .issued
+                .map(|issued| issued.year.to_string())
+                .unwrap_or_default(),
+            Field::Title => record.title.clone().unwrap_or_default(),
+            Field::ShortTitle(words) => {
+                short_title(record.title.as_deref().unwrap_or_default(), words)
+            }
+            Field::Journal => record.container_title.clone().unwrap_or_default(),
+            Field::Doi => record
+                .doi
+                .as_ref()
+                .map(|doi| doi.as_str().to_string())
+                .unwrap_or_default(),
+            Field::Arxiv => record
+                .borax
+                .arxiv
+                .as_ref()
+                .map(|arxiv| arxiv.id().to_string())
+                .unwrap_or_default(),
+            Field::Sha1 => input.sha1.unwrap_or_default().to_string(),
+            Field::EntryType => record.entry_type.csl().to_string(),
+        }
+    }
+}
+
+fn render_authors(authors: &[Name], limit: Option<usize>) -> String {
+    let kept = limit.unwrap_or(authors.len()).min(authors.len());
+    let mut families: Vec<&str> = authors[..kept]
+        .iter()
+        .map(|author| author.family.as_str())
+        .collect();
+    if kept < authors.len() {
+        families.push("etal");
+    }
+    families.join("-")
+}
+
+fn short_title(title: &str, words: usize) -> String {
+    title
+        .split_ascii_whitespace()
+        .filter(|word| {
+            !FUNCTION_WORDS
+                .iter()
+                .any(|function| word.eq_ignore_ascii_case(function))
+        })
+        .take(words)
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
+
+impl Filter {
+    fn apply(&self, value: &str) -> String {
+        match self {
+            Filter::Lower => value.to_lowercase(),
+            Filter::Upper => value.to_uppercase(),
+            Filter::Capitalize => capitalize(value),
+            Filter::TitleCase => title_case(value),
+            Filter::Camel => title_case(value).split_ascii_whitespace().collect(),
+            Filter::Slug => slug(value),
+            Filter::Abbr => value
+                .split_ascii_whitespace()
+                .filter_map(|word| word.chars().next())
+                .collect(),
+            Filter::Transliterate => transliterate(value),
+            Filter::Trunc(count) => value.chars().take(*count).collect(),
+            Filter::Regex { regex, replacement } => {
+                regex.replace_all(value, replacement.as_str()).into_owned()
+            }
+        }
+    }
+}
+
+fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first
+            .to_uppercase()
+            .chain(chars.flat_map(char::to_lowercase))
+            .collect(),
+        None => String::new(),
+    }
+}
+
+fn title_case(value: &str) -> String {
+    let mut cased = String::with_capacity(value.len());
+    let mut at_word_start = true;
+    for c in value.chars() {
+        if c.is_ascii_whitespace() {
+            cased.push(c);
+            at_word_start = true;
+        } else if at_word_start {
+            cased.extend(c.to_uppercase());
+            at_word_start = false;
+        } else {
+            cased.extend(c.to_lowercase());
+        }
+    }
+    cased
+}
+
+fn slug(value: &str) -> String {
+    let folded = transliterate(value).to_lowercase();
+    let mut slug = String::with_capacity(folded.len());
+    for c in folded.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            slug.push(c);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn transliterate(value: &str) -> String {
+    let mut folded = String::with_capacity(value.len());
+    for c in value.chars() {
+        match fold(c) {
+            Some(ascii) => folded.push_str(ascii),
+            None => folded.push(c),
+        }
+    }
+    folded
+}
+
+/// The ASCII folding of `c`, or `None` when the character passes
+/// through unchanged.
+fn fold(c: char) -> Option<&'static str> {
+    Some(match c {
+        'ä' => "ae",
+        'Ä' => "Ae",
+        'ö' => "oe",
+        'Ö' => "Oe",
+        'ü' => "ue",
+        'Ü' => "Ue",
+        'ß' => "ss",
+        'æ' => "ae",
+        'Æ' => "Ae",
+        'ø' => "o",
+        'Ø' => "O",
+        'å' => "a",
+        'Å' => "A",
+        'đ' => "d",
+        'Đ' => "D",
+        'ł' => "l",
+        'Ł' => "L",
+        'ñ' => "n",
+        'Ñ' => "N",
+        'ç' => "c",
+        'Ç' => "C",
+        'à' | 'á' | 'â' | 'ã' => "a",
+        'À' | 'Á' | 'Â' | 'Ã' => "A",
+        'è' | 'é' | 'ê' | 'ë' => "e",
+        'È' | 'É' | 'Ê' | 'Ë' => "E",
+        'ì' | 'í' | 'î' | 'ï' => "i",
+        'Ì' | 'Í' | 'Î' | 'Ï' => "I",
+        'ò' | 'ó' | 'ô' | 'õ' => "o",
+        'Ò' | 'Ó' | 'Ô' | 'Õ' => "O",
+        'ù' | 'ú' | 'û' => "u",
+        'Ù' | 'Ú' | 'Û' => "U",
+        'ý' => "y",
+        'Ý' => "Y",
+        _ => return None,
+    })
 }
 
 /// Per-entry-type templates with a required default.
