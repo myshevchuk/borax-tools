@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use borax_core::identifier::{ArxivId, IdentifierError, Isbn, Pmid, Doi};
+use borax_core::identifier::{ArxivId, Doi, IdentifierError, Isbn, Pmid};
 
 // ---------------------------------------------------------------------
 // Doi

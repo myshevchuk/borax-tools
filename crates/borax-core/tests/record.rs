@@ -232,7 +232,10 @@ fn provenance_survives_round_trip() {
     let record = maximal_record();
     let json = serde_json::to_string(&record).unwrap();
     let parsed: Record = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.borax.provenance.get("title"), Some(&Source::Crossref));
+    assert_eq!(
+        parsed.borax.provenance.get("title"),
+        Some(&Source::Crossref)
+    );
     assert_eq!(
         parsed.borax.provenance.get("DOI"),
         Some(&Source::Extraction)
@@ -285,7 +288,11 @@ fn entry_type_csl_strings_are_pairwise_distinct() {
     let strings: Vec<&'static str> = variants.iter().map(|v| v.csl()).collect();
     for i in 0..strings.len() {
         for j in (i + 1)..strings.len() {
-            assert_ne!(strings[i], strings[j], "{:?} vs {:?}", strings[i], strings[j]);
+            assert_ne!(
+                strings[i], strings[j],
+                "{:?} vs {:?}",
+                strings[i], strings[j]
+            );
         }
     }
 }

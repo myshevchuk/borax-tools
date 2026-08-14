@@ -33,6 +33,14 @@ impl fmt::Display for IdentifierError {
 
 impl std::error::Error for IdentifierError {}
 
+/// Strip `prefix` from the front of `s`, comparing ASCII-case-insensitively.
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    match s.get(..prefix.len()) {
+        Some(head) if head.eq_ignore_ascii_case(prefix) => s.get(prefix.len()..),
+        _ => None,
+    }
+}
+
 /// A DOI in normalized form: lowercase, no resolver prefix, no
 /// surrounding punctuation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,8 +57,39 @@ impl Doi {
     /// The stored form is lowercase (DOIs are case-insensitive) and must
     /// match `10.<4-9 digits>/<suffix>`.
     pub fn parse(input: &str) -> Result<Doi, IdentifierError> {
-        let _ = input;
-        todo!("normalize and validate a DOI")
+        let invalid = || IdentifierError::Invalid {
+            kind: "DOI",
+            input: input.to_string(),
+        };
+
+        let mut body = input.trim();
+        for prefix in [
+            "https://doi.org/",
+            "http://doi.org/",
+            "https://dx.doi.org/",
+            "http://dx.doi.org/",
+            "doi:",
+        ] {
+            if let Some(rest) = strip_prefix_ci(body, prefix) {
+                body = rest;
+                break;
+            }
+        }
+        let normalized = body
+            .trim()
+            .trim_end_matches(['.', ',', ';', ':', ')', ']', '}', '"', '\''])
+            .to_ascii_lowercase();
+
+        let registrant_and_suffix = normalized.strip_prefix("10.").ok_or_else(invalid)?;
+        let (registrant, suffix) = registrant_and_suffix.split_once('/').ok_or_else(invalid)?;
+        if !(4..=9).contains(&registrant.len())
+            || !registrant.chars().all(|c| c.is_ascii_digit())
+            || suffix.is_empty()
+        {
+            return Err(invalid());
+        }
+
+        Ok(Doi(normalized))
     }
 
     /// The normalized DOI, e.g. `10.1021/jacs.4c01234`.
@@ -78,6 +117,48 @@ impl From<Doi> for String {
     }
 }
 
+/// Split a trailing `vN` off `s`, yielding the base and the version.
+/// Returns `None` when `s` has no such suffix.
+fn split_version(s: &str) -> Option<(&str, u32)> {
+    let marker = s.rfind(['v', 'V'])?;
+    let (base, rest) = s.split_at(marker);
+    let digits = rest.get(1..)?;
+    if base.is_empty() || digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().map(|version| (base, version))
+}
+
+fn is_arxiv_id(s: &str) -> bool {
+    is_new_style_arxiv_id(s) || is_old_style_arxiv_id(s)
+}
+
+fn is_new_style_arxiv_id(s: &str) -> bool {
+    let Some((yymm, number)) = s.split_once('.') else {
+        return false;
+    };
+    yymm.len() == 4
+        && yymm.chars().all(|c| c.is_ascii_digit())
+        && (4..=5).contains(&number.len())
+        && number.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_old_style_arxiv_id(s: &str) -> bool {
+    let Some((archive, number)) = s.split_once('/') else {
+        return false;
+    };
+    if number.len() != 7 || !number.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let (main, subject) = match archive.split_once('.') {
+        Some((main, subject)) => (main, Some(subject)),
+        None => (archive, None),
+    };
+    !main.is_empty()
+        && main.chars().all(|c| c.is_ascii_alphabetic() || c == '-')
+        && subject.is_none_or(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
 /// An arXiv identifier: the bare id plus, separately, the version the
 /// input carried (if any).
 ///
@@ -97,8 +178,31 @@ impl ArxivId {
     /// Parse an arXiv identifier, with or without an `arXiv:` prefix
     /// (case-insensitive) and with or without a trailing `vN` version.
     pub fn parse(input: &str) -> Result<ArxivId, IdentifierError> {
-        let _ = input;
-        todo!("parse an arXiv identifier")
+        let invalid = || IdentifierError::Invalid {
+            kind: "arXiv id",
+            input: input.to_string(),
+        };
+
+        let mut body = input.trim();
+        if let Some(rest) = strip_prefix_ci(body, "arxiv:") {
+            body = rest.trim_start();
+        }
+
+        if is_arxiv_id(body) {
+            return Ok(ArxivId {
+                id: body.to_string(),
+                version: None,
+            });
+        }
+
+        let (id, version) = split_version(body).ok_or_else(invalid)?;
+        if !is_arxiv_id(id) {
+            return Err(invalid());
+        }
+        Ok(ArxivId {
+            id: id.to_string(),
+            version: Some(version),
+        })
     }
 
     /// The identifier without its version, e.g. `2401.12345` or
@@ -147,8 +251,23 @@ impl Pmid {
     /// Parse a PMID, with or without a `PMID:` prefix (case-insensitive,
     /// optional whitespace after the colon). Zero is invalid.
     pub fn parse(input: &str) -> Result<Pmid, IdentifierError> {
-        let _ = input;
-        todo!("parse a PMID")
+        let invalid = || IdentifierError::Invalid {
+            kind: "PMID",
+            input: input.to_string(),
+        };
+
+        let mut body = input.trim();
+        if let Some(rest) = strip_prefix_ci(body, "pmid:") {
+            body = rest.trim_start();
+        }
+        if body.is_empty() || !body.chars().all(|c| c.is_ascii_digit()) {
+            return Err(invalid());
+        }
+
+        match body.parse::<u64>() {
+            Ok(0) | Err(_) => Err(invalid()),
+            Ok(value) => Ok(Pmid(value)),
+        }
     }
 
     /// The numeric value.
@@ -176,6 +295,45 @@ impl From<Pmid> for String {
     }
 }
 
+/// Whether `digits` is a 10-character ISBN body: nine digits followed by
+/// a digit or `X`.
+fn isbn10_is_well_formed(digits: &[char]) -> bool {
+    digits.len() == 10
+        && digits[..9].iter().all(char::is_ascii_digit)
+        && (digits[9].is_ascii_digit() || digits[9] == 'X')
+}
+
+fn isbn10_check_digit_holds(digits: &[char]) -> bool {
+    let mut sum = 0u32;
+    for (index, c) in digits.iter().enumerate() {
+        let value = match c {
+            'X' => 10,
+            _ => match c.to_digit(10) {
+                Some(value) => value,
+                None => return false,
+            },
+        };
+        sum += value * (10 - index as u32);
+    }
+    sum % 11 == 0
+}
+
+/// Whether `digits` is a 13-character ISBN body: thirteen digits.
+fn isbn13_is_well_formed(digits: &[char]) -> bool {
+    digits.len() == 13 && digits.iter().all(char::is_ascii_digit)
+}
+
+fn isbn13_check_digit_holds(digits: &[char]) -> bool {
+    let mut sum = 0u32;
+    for (index, c) in digits.iter().enumerate() {
+        let Some(value) = c.to_digit(10) else {
+            return false;
+        };
+        sum += value * if index % 2 == 0 { 1 } else { 3 };
+    }
+    sum % 10 == 0
+}
+
 /// An ISBN in compact form: separators stripped, 10 or 13 characters,
 /// check digit verified. A trailing check character `x` is stored
 /// uppercase.
@@ -190,8 +348,49 @@ impl Isbn {
     /// well-formed input that fails it. The stored form preserves the
     /// input's length (a 10 is not converted to a 13).
     pub fn parse(input: &str) -> Result<Isbn, IdentifierError> {
-        let _ = input;
-        todo!("parse and verify an ISBN")
+        let invalid = || IdentifierError::Invalid {
+            kind: "ISBN",
+            input: input.to_string(),
+        };
+        let checksum = || IdentifierError::Checksum {
+            kind: "ISBN",
+            input: input.to_string(),
+        };
+
+        let mut body = input.trim();
+        for prefix in ["isbn-13:", "isbn-10:", "isbn:"] {
+            if let Some(rest) = strip_prefix_ci(body, prefix) {
+                body = rest;
+                break;
+            }
+        }
+        let digits: Vec<char> = body
+            .chars()
+            .filter(|c| *c != '-' && !c.is_whitespace())
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        match digits.len() {
+            10 => {
+                if !isbn10_is_well_formed(&digits) {
+                    return Err(invalid());
+                }
+                if !isbn10_check_digit_holds(&digits) {
+                    return Err(checksum());
+                }
+            }
+            13 => {
+                if !isbn13_is_well_formed(&digits) {
+                    return Err(invalid());
+                }
+                if !isbn13_check_digit_holds(&digits) {
+                    return Err(checksum());
+                }
+            }
+            _ => return Err(invalid()),
+        }
+
+        Ok(Isbn(digits.into_iter().collect()))
     }
 
     /// The compact normalized form, e.g. `9781593278281` or

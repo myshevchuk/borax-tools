@@ -48,7 +48,10 @@ fn escape_backslash() {
 
 #[test]
 fn escape_keeps_non_ascii_unchanged_while_escaping_percent() {
-    assert_eq!(escape("Gr\u{fc}\u{df}e 100% caf\u{e9}"), "Gr\u{fc}\u{df}e 100\\% caf\u{e9}");
+    assert_eq!(
+        escape("Gr\u{fc}\u{df}e 100% caf\u{e9}"),
+        "Gr\u{fc}\u{df}e 100\\% caf\u{e9}"
+    );
 }
 
 #[test]
@@ -107,17 +110,19 @@ fn emit_article_matches_golden_output_exactly() {
     let record = article_golden_record();
     let output = emit(&record, "smith2024");
 
-    let expected = "@article{smith2024,\n\
-  author = {Smith, Jane and Doe, John},\n\
-  title = {Borax \\& Friends: A 100\\% Study},\n\
-  journal = {J. Chem. Ed.},\n\
-  year = {2024},\n\
-  month = {5},\n\
-  volume = {12},\n\
-  number = {3},\n\
-  pages = {100-110},\n\
-  doi = {10.1021/jacs.4c01234},\n\
-}\n";
+    let expected = concat!(
+        "@article{smith2024,\n",
+        "  author = {Smith, Jane and Doe, John},\n",
+        "  title = {Borax \\& Friends: A 100\\% Study},\n",
+        "  journal = {J. Chem. Ed.},\n",
+        "  year = {2024},\n",
+        "  month = {5},\n",
+        "  volume = {12},\n",
+        "  number = {3},\n",
+        "  pages = {100-110},\n",
+        "  doi = {10.1021/jacs.4c01234},\n",
+        "}\n",
+    );
 
     assert_eq!(output, expected);
 }

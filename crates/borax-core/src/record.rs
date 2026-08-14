@@ -9,8 +9,8 @@
 
 use std::collections::BTreeMap;
 
-use serde::de::Deserializer;
-use serde::ser::Serializer;
+use serde::de::{self, Deserializer};
+use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 
 use crate::identifier::{ArxivId, Doi, Isbn, Pmid};
@@ -95,15 +95,64 @@ pub struct DateParts {
 
 impl Serialize for DateParts {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let _ = serializer;
-        todo!("serialize as CSL {{\"date-parts\": [[y, m, d]]}}")
+        let mut parts = vec![i64::from(self.year)];
+        if let Some(month) = self.month {
+            parts.push(i64::from(month));
+            if let Some(day) = self.day {
+                parts.push(i64::from(day));
+            }
+        }
+
+        let mut date = serializer.serialize_struct("DateParts", 1)?;
+        date.serialize_field("date-parts", &[parts])?;
+        date.end()
     }
 }
 
 impl<'de> Deserialize<'de> for DateParts {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let _ = deserializer;
-        todo!("parse the CSL date-parts shape; a day without a month is invalid")
+        #[derive(Deserialize)]
+        struct Csl {
+            #[serde(rename = "date-parts")]
+            date_parts: Vec<Vec<i64>>,
+        }
+
+        fn year<E: de::Error>(value: i64) -> Result<i32, E> {
+            i32::try_from(value)
+                .map_err(|_| de::Error::custom(format!("year out of range: {value}")))
+        }
+
+        fn part<E: de::Error>(value: i64) -> Result<u8, E> {
+            u8::try_from(value)
+                .map_err(|_| de::Error::custom(format!("date part out of range: {value}")))
+        }
+
+        let csl = Csl::deserialize(deserializer)?;
+        let parts = csl
+            .date_parts
+            .first()
+            .ok_or_else(|| de::Error::custom("date-parts is empty"))?;
+
+        match parts.as_slice() {
+            [y] => Ok(DateParts {
+                year: year(*y)?,
+                month: None,
+                day: None,
+            }),
+            [y, m] => Ok(DateParts {
+                year: year(*y)?,
+                month: Some(part(*m)?),
+                day: None,
+            }),
+            [y, m, d] => Ok(DateParts {
+                year: year(*y)?,
+                month: Some(part(*m)?),
+                day: Some(part(*d)?),
+            }),
+            _ => Err(de::Error::custom(
+                "a date-parts entry must hold 1 to 3 elements",
+            )),
+        }
     }
 }
 

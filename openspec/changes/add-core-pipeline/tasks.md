@@ -15,14 +15,14 @@ the implementation, then refactor with the suite green.
 
 ## 2. Record model (borax-core)
 
-- [ ] 2.1 Tests + implementation: CSL-JSON superset record with
+- [x] 2.1 Tests + implementation: CSL-JSON superset record with
       identifier set, per-field provenance, confidence; lossless JSON
       round-trip
-- [ ] 2.2 Tests + implementation: identifier normalization (DOI, arXiv ID
+- [x] 2.2 Tests + implementation: identifier normalization (DOI, arXiv ID
       old/new formats, PMID, ISBN)
-- [ ] 2.3 Tests + implementation: entry-type mapping for article,
+- [x] 2.3 Tests + implementation: entry-type mapping for article,
       preprint, book, chapter, thesis, report, patent, standard
-- [ ] 2.4 Tests + implementation: deterministic BibTeX/BibLaTeX emission
+- [x] 2.4 Tests + implementation: deterministic BibTeX/BibLaTeX emission
       with escaping
 
 ## 3. Template engine (borax-core)
