@@ -1,6 +1,6 @@
 [package]
 name = "borax-pdf"
-description = "PDF metadata and text extraction behind an Extractor trait (pdfium backend)"
+description = "PDF metadata and text extraction behind a PdfSource trait, with a pure-Rust backend"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,11 @@ license.workspace = true
 
 [dependencies]
 borax-core = { path = "../borax-core" }
+lopdf.workspace = true
+pdf-extract.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

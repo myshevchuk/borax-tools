@@ -14,6 +14,10 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+# Kept at the major/minor pdf-extract itself depends on, so both see one
+# lopdf and its `Document` crosses between them.
+lopdf = "0.42"
+pdf-extract = "0.12"
 quick-xml = "0.41"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
