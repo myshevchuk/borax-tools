@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "borax"
+path = "src/lib.rs"
+
 [[bin]]
 name = "borax"
 path = "src/main.rs"
@@ -14,6 +18,8 @@ path = "src/main.rs"
 borax-core = { path = "../borax-core" }
 borax-sources = { path = "../borax-sources" }
 borax-pdf = { path = "../borax-pdf" }
+serde.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

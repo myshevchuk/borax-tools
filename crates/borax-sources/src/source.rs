@@ -32,6 +32,27 @@ impl SourceName {
             SourceName::PubMed => "pubmed",
         }
     }
+
+    /// The source `name` denotes, matching [`as_str`] exactly.
+    ///
+    /// The match is case-sensitive and admits no aliases, so a
+    /// configuration file naming `Crossref` or `arXiv` is a typo the
+    /// caller reports rather than a spelling borax quietly accepts.
+    ///
+    /// [`as_str`]: SourceName::as_str
+    pub fn parse(name: &str) -> Option<SourceName> {
+        let _ = name;
+        todo!("match the name against the known sources")
+    }
+
+    /// Every source, in declaration order.
+    pub const ALL: [SourceName; 5] = [
+        SourceName::Crossref,
+        SourceName::OpenAlex,
+        SourceName::Arxiv,
+        SourceName::DataCite,
+        SourceName::PubMed,
+    ];
 }
 
 impl fmt::Display for SourceName {
