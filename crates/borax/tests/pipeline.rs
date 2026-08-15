@@ -723,6 +723,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_source_tier_an
         source: Some(SourceName::Crossref),
         tier: Some(Tier::EmbeddedMetadata),
         cached: false,
+        hash: Some(hash_for("paper")),
     });
 
     let event = event_for(&path, &outcome);
@@ -747,6 +748,7 @@ fn a_content_index_hit_reports_its_source_as_cache() {
         source: None,
         tier: None,
         cached: true,
+        hash: Some(hash_for("paper")),
     });
 
     let event = event_for(&path, &outcome);

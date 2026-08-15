@@ -268,7 +268,9 @@ impl<T: Transport> crate::source::Source for OpenAlexClient<T> {
         matches!(identifier, Identifier::Doi(_) | Identifier::Pmid(_))
     }
 
-    /// As [`crate::crossref::CrossrefClient::fetch`], with [`parse`].
+    /// As [`crate::source::Source::fetch`] on
+    /// [`crate::crossref::CrossrefClient`], with
+    /// [`parse`].
     /// An unsupported identifier sends no request and reports
     /// [`SourceError::Unavailable`], as there.
     fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {

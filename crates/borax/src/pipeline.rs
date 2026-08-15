@@ -60,6 +60,10 @@ pub struct FileRecord {
     /// [`Source`] is invisible from here, so a record served by
     /// [`borax_sources::cache::Cached`] still reports `false`.
     pub cached: bool,
+    /// The file's content hash, or `None` when it could not be
+    /// computed. Carried because renaming needs it — the planner
+    /// recognises an already-named file by content, not by path.
+    pub hash: Option<ContentHash>,
 }
 
 /// What a run decided about one file.
@@ -142,6 +146,7 @@ pub fn resolve_file<C: Cache>(
                 source: None,
                 tier: None,
                 cached: true,
+                hash,
             });
         }
     }
@@ -174,6 +179,7 @@ pub fn resolve_file<C: Cache>(
         source: Some(resolved.source),
         tier: Some(tier),
         cached: false,
+        hash,
     })
 }
 

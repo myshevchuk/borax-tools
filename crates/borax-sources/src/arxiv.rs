@@ -258,7 +258,9 @@ impl<T: Transport> crate::source::Source for ArxivClient<T> {
         matches!(identifier, Identifier::Arxiv(_))
     }
 
-    /// As [`crate::crossref::CrossrefClient::fetch`], with [`parse`].
+    /// As [`crate::source::Source::fetch`] on
+    /// [`crate::crossref::CrossrefClient`], with
+    /// [`parse`].
     /// An unsupported identifier sends no request and reports
     /// [`SourceError::Unavailable`], as there.
     /// Note that arXiv reports an unknown identifier as an entry-less

@@ -96,6 +96,11 @@ pub enum SkipReason {
     AlreadyNamed,
     /// The file could not be read as a PDF at all.
     Unreadable { message: String },
+    /// The record resolved, but the template rendered an empty name
+    /// from it — the record is too sparse to name a file.
+    Unnameable,
+    /// The rename itself failed, after the plan said it would not.
+    RenameFailed { message: String },
 }
 
 /// One source's answer during resolution.
@@ -247,6 +252,8 @@ fn skipped_because(reason: &SkipReason) -> String {
         SkipReason::TargetTaken { target } => format!("{} is taken", target.display()),
         SkipReason::AlreadyNamed => "already carries that name".to_string(),
         SkipReason::Unreadable { message } => format!("unreadable ({message})"),
+        SkipReason::Unnameable => "the record renders an empty name".to_string(),
+        SkipReason::RenameFailed { message } => format!("rename failed ({message})"),
     }
 }
 
