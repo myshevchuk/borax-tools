@@ -9,10 +9,12 @@
 //! `tests/cassettes/`, so the whole layer is verified offline.
 
 pub mod arxiv;
+pub mod cache;
 pub mod conflict;
 pub mod crossref;
 pub mod dispatch;
 pub mod http;
 pub mod openalex;
+pub mod pace;
 pub mod source;
 pub mod transport;
