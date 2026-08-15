@@ -46,6 +46,7 @@ dependencies = [
  "borax-pdf",
  "borax-sources",
  "serde",
+ "serde_json",
  "toml",
 ]
 

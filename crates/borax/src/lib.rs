@@ -6,3 +6,4 @@
 //! does is reachable from integration tests without spawning a process.
 
 pub mod config;
+pub mod event;

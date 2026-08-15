@@ -1,0 +1,588 @@
+#![allow(clippy::unwrap_used)]
+
+use std::path::PathBuf;
+
+use borax::event::{
+    Attempt, Counts, Diagnostic, Event, Format, Level, SCHEMA, SkipReason, human_line, json_line,
+    render,
+};
+use serde_json::Value;
+
+// --- event constructors ---
+
+fn run_started() -> Event {
+    Event::RunStarted {
+        command: "rename".to_string(),
+        version: "0.1.0".to_string(),
+        applying: true,
+    }
+}
+
+fn resolved() -> Event {
+    Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "10.1000/xyz123".to_string(),
+        source: "crossref".to_string(),
+        tier: Some("first-page".to_string()),
+        cached: false,
+    }
+}
+
+fn planned() -> Event {
+    Event::Planned {
+        path: PathBuf::from("paper.pdf"),
+        target: PathBuf::from("smith2024_borax.pdf"),
+    }
+}
+
+fn renamed() -> Event {
+    Event::Renamed {
+        path: PathBuf::from("paper.pdf"),
+        target: PathBuf::from("smith2024_borax.pdf"),
+    }
+}
+
+fn skipped(reason: SkipReason) -> Event {
+    Event::Skipped {
+        path: PathBuf::from("mystery.pdf"),
+        reason,
+    }
+}
+
+fn bib_entry() -> Event {
+    Event::BibEntry {
+        path: PathBuf::from("paper.pdf"),
+        key: "smith2024".to_string(),
+        outcome: "added".to_string(),
+    }
+}
+
+fn run_finished() -> Event {
+    Event::RunFinished {
+        counts: Counts {
+            resolved: 3,
+            renamed: 2,
+            skipped: 1,
+        },
+    }
+}
+
+/// Every `Event` variant, so coverage-oriented tests can iterate once.
+fn all_events() -> Vec<Event> {
+    vec![
+        run_started(),
+        resolved(),
+        planned(),
+        renamed(),
+        skipped(SkipReason::NoIdentifier),
+        skipped(SkipReason::Unresolvable {
+            attempts: vec![Attempt {
+                source: "crossref".to_string(),
+                error: "not found".to_string(),
+            }],
+        }),
+        skipped(SkipReason::Conflict {
+            field: "year".to_string(),
+            extracted: "2023".to_string(),
+            resolved: "2024".to_string(),
+        }),
+        skipped(SkipReason::TargetTaken {
+            target: PathBuf::from("smith2024_borax.pdf"),
+        }),
+        skipped(SkipReason::AlreadyNamed),
+        skipped(SkipReason::Unreadable {
+            message: "not a PDF".to_string(),
+        }),
+        bib_entry(),
+        run_finished(),
+    ]
+}
+
+/// Every `SkipReason` variant, so nesting tests can iterate once.
+fn all_skip_reasons() -> Vec<SkipReason> {
+    vec![
+        SkipReason::NoIdentifier,
+        SkipReason::Unresolvable {
+            attempts: vec![
+                Attempt {
+                    source: "crossref".to_string(),
+                    error: "not found".to_string(),
+                },
+                Attempt {
+                    source: "arxiv".to_string(),
+                    error: "timed out".to_string(),
+                },
+            ],
+        },
+        SkipReason::Conflict {
+            field: "year".to_string(),
+            extracted: "2023".to_string(),
+            resolved: "2024".to_string(),
+        },
+        SkipReason::TargetTaken {
+            target: PathBuf::from("smith2024_borax.pdf"),
+        },
+        SkipReason::AlreadyNamed,
+        SkipReason::Unreadable {
+            message: "not a PDF".to_string(),
+        },
+    ]
+}
+
+// --- json_line() renders every variant as one well-formed JSON object ---
+
+#[test]
+fn json_line_of_every_event_is_a_single_line_with_no_embedded_newline() {
+    for event in all_events() {
+        let line = json_line(&event);
+        assert!(!line.contains('\n'), "event {event:?} produced {line:?}");
+    }
+}
+
+#[test]
+fn json_line_of_every_event_parses_as_a_json_object_carrying_schema_and_event_tag() {
+    for event in all_events() {
+        let line = json_line(&event);
+        let value: Value = serde_json::from_str(&line).unwrap();
+        let object = value
+            .as_object()
+            .unwrap_or_else(|| panic!("event {event:?} did not render as a JSON object: {line}"));
+
+        assert_eq!(object["schema"], Value::from(SCHEMA));
+        assert!(object["event"].is_string(), "event {event:?}: {line}");
+    }
+}
+
+#[test]
+fn json_line_event_tag_is_the_variant_name_in_kebab_case() {
+    let cases: Vec<(Event, &str)> = vec![
+        (run_started(), "run-started"),
+        (resolved(), "resolved"),
+        (planned(), "planned"),
+        (renamed(), "renamed"),
+        (skipped(SkipReason::NoIdentifier), "skipped"),
+        (bib_entry(), "bib-entry"),
+        (run_finished(), "run-finished"),
+    ];
+
+    for (event, expected_tag) in cases {
+        let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+        assert_eq!(value["event"], Value::from(expected_tag));
+    }
+}
+
+#[test]
+fn json_line_of_resolved_has_exactly_the_documented_field_set() {
+    let value: Value = serde_json::from_str(&json_line(&resolved())).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "cached",
+            "event",
+            "identifier",
+            "path",
+            "schema",
+            "source",
+            "tier"
+        ]
+    );
+
+    assert_eq!(object["path"], Value::from("paper.pdf"));
+    assert_eq!(object["identifier"], Value::from("10.1000/xyz123"));
+    assert_eq!(object["source"], Value::from("crossref"));
+    assert_eq!(object["tier"], Value::from("first-page"));
+    assert_eq!(object["cached"], Value::from(false));
+}
+
+#[test]
+fn json_line_of_skipped_has_exactly_the_documented_field_set() {
+    let value: Value =
+        serde_json::from_str(&json_line(&skipped(SkipReason::NoIdentifier))).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["event", "path", "reason", "schema"]);
+
+    assert_eq!(object["path"], Value::from("mystery.pdf"));
+    assert!(object["reason"].is_object());
+}
+
+#[test]
+fn json_line_of_run_finished_has_exactly_the_documented_field_set() {
+    let value: Value = serde_json::from_str(&json_line(&run_finished())).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["counts", "event", "schema"]);
+
+    assert_eq!(
+        object["counts"],
+        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1})
+    );
+}
+
+// --- SkipReason nesting under Skipped.reason, tagged by kind ---
+
+#[test]
+fn skipped_nests_the_reason_under_reason_with_a_kebab_case_kind_tag() {
+    let cases: Vec<(SkipReason, &str)> = vec![
+        (SkipReason::NoIdentifier, "no-identifier"),
+        (
+            SkipReason::Unresolvable {
+                attempts: Vec::new(),
+            },
+            "unresolvable",
+        ),
+        (
+            SkipReason::Conflict {
+                field: "year".to_string(),
+                extracted: "2023".to_string(),
+                resolved: "2024".to_string(),
+            },
+            "conflict",
+        ),
+        (
+            SkipReason::TargetTaken {
+                target: PathBuf::from("x.pdf"),
+            },
+            "target-taken",
+        ),
+        (SkipReason::AlreadyNamed, "already-named"),
+        (
+            SkipReason::Unreadable {
+                message: "bad".to_string(),
+            },
+            "unreadable",
+        ),
+    ];
+
+    for (reason, expected_kind) in cases {
+        let value: Value = serde_json::from_str(&json_line(&skipped(reason))).unwrap();
+        assert_eq!(value["reason"]["kind"], Value::from(expected_kind));
+    }
+}
+
+#[test]
+fn no_identifier_reason_carries_nothing_but_its_kind() {
+    let value: Value =
+        serde_json::from_str(&json_line(&skipped(SkipReason::NoIdentifier))).unwrap();
+    let reason = value["reason"].as_object().unwrap();
+    assert_eq!(reason.keys().collect::<Vec<_>>(), vec!["kind"]);
+}
+
+#[test]
+fn already_named_reason_carries_nothing_but_its_kind() {
+    let value: Value =
+        serde_json::from_str(&json_line(&skipped(SkipReason::AlreadyNamed))).unwrap();
+    let reason = value["reason"].as_object().unwrap();
+    assert_eq!(reason.keys().collect::<Vec<_>>(), vec!["kind"]);
+}
+
+#[test]
+fn unresolvable_reason_carries_an_attempts_array_of_source_and_error_objects() {
+    let reason = SkipReason::Unresolvable {
+        attempts: vec![
+            Attempt {
+                source: "crossref".to_string(),
+                error: "not found".to_string(),
+            },
+            Attempt {
+                source: "arxiv".to_string(),
+                error: "timed out".to_string(),
+            },
+        ],
+    };
+    let value: Value = serde_json::from_str(&json_line(&skipped(reason))).unwrap();
+    let attempts = value["reason"]["attempts"].as_array().unwrap();
+
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["source"], Value::from("crossref"));
+    assert_eq!(attempts[0]["error"], Value::from("not found"));
+    assert_eq!(attempts[1]["source"], Value::from("arxiv"));
+    assert_eq!(attempts[1]["error"], Value::from("timed out"));
+
+    let mut keys: Vec<&str> = value["reason"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["attempts", "kind"]);
+}
+
+// --- round-trip through Event's own (de)serialization ---
+//
+// `json_line` adds an extra top-level `schema` field alongside the
+// event's own fields. `Event`'s derive has no `deny_unknown_fields`, so
+// parsing `json_line`'s own output back into `Event` still round-trips;
+// this is asserted directly rather than routing around it.
+
+#[test]
+fn every_event_round_trips_through_json_line_and_back() {
+    for event in all_events() {
+        let line = json_line(&event);
+        let parsed: Event = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed, event);
+    }
+}
+
+#[test]
+fn every_event_round_trips_through_plain_serde_json_to_string() {
+    for event in all_events() {
+        let text = serde_json::to_string(&event).unwrap();
+        let parsed: Event = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, event);
+    }
+}
+
+// --- render() dispatches to the right renderer ---
+
+#[test]
+fn render_json_equals_json_line_for_every_event() {
+    for event in all_events() {
+        assert_eq!(render(Format::Json, &event), Some(json_line(&event)));
+    }
+}
+
+#[test]
+fn render_human_equals_human_line_for_every_event() {
+    for event in all_events() {
+        assert_eq!(render(Format::Human, &event), human_line(&event));
+    }
+}
+
+// --- Json is never silent ---
+
+#[test]
+fn render_json_is_some_for_every_event_including_run_started_and_planned() {
+    for event in all_events() {
+        assert!(
+            render(Format::Json, &event).is_some(),
+            "event {event:?} rendered as None under --json"
+        );
+    }
+}
+
+// --- Human rendering ---
+
+#[test]
+fn human_line_of_run_started_is_silent() {
+    assert_eq!(human_line(&run_started()), None);
+}
+
+#[test]
+fn human_line_of_resolved_mentions_the_path_and_is_a_single_line() {
+    let line = human_line(&resolved()).unwrap();
+    assert!(!line.contains('\n'));
+    assert!(line.contains("paper.pdf"));
+}
+
+#[test]
+fn human_line_of_renamed_mentions_the_path_and_the_target() {
+    let line = human_line(&renamed()).unwrap();
+    assert!(!line.contains('\n'));
+    assert!(line.contains("paper.pdf"));
+    assert!(line.contains("smith2024_borax.pdf"));
+}
+
+#[test]
+fn human_line_of_bib_entry_mentions_the_path_and_the_key() {
+    let line = human_line(&bib_entry()).unwrap();
+    assert!(!line.contains('\n'));
+    assert!(line.contains("paper.pdf"));
+    assert!(line.contains("smith2024"));
+}
+
+#[test]
+fn human_line_of_run_finished_is_not_silent() {
+    assert!(human_line(&run_finished()).is_some());
+}
+
+#[test]
+fn human_line_of_skipped_mentions_the_path_for_every_reason() {
+    for reason in all_skip_reasons() {
+        let line = human_line(&skipped(reason.clone())).unwrap();
+        assert!(!line.contains('\n'));
+        assert!(
+            line.contains("mystery.pdf"),
+            "reason {reason:?} produced line without the path: {line}"
+        );
+    }
+}
+
+#[test]
+fn human_line_of_skipped_makes_the_reason_legible_for_every_variant() {
+    let cases: Vec<(SkipReason, &str)> = vec![
+        (SkipReason::NoIdentifier, "identifier"),
+        (
+            SkipReason::Unresolvable {
+                attempts: vec![Attempt {
+                    source: "crossref".to_string(),
+                    error: "not found".to_string(),
+                }],
+            },
+            "crossref",
+        ),
+        (
+            SkipReason::Conflict {
+                field: "year".to_string(),
+                extracted: "2023".to_string(),
+                resolved: "2024".to_string(),
+            },
+            "year",
+        ),
+        (
+            SkipReason::TargetTaken {
+                target: PathBuf::from("smith2024_borax.pdf"),
+            },
+            "smith2024_borax.pdf",
+        ),
+        (SkipReason::AlreadyNamed, "mystery.pdf"),
+        (
+            SkipReason::Unreadable {
+                message: "not a PDF".to_string(),
+            },
+            "not a PDF",
+        ),
+    ];
+
+    for (reason, must_contain) in cases {
+        let line = human_line(&skipped(reason.clone())).unwrap();
+        assert!(
+            line.contains(must_contain),
+            "reason {reason:?} produced line missing {must_contain:?}: {line}"
+        );
+    }
+}
+
+// --- Planned: what a preview run shows ---
+
+/// Preview is the default for `borax rename`, so a silent `Planned`
+/// would make the default invocation print nothing at all.
+#[test]
+fn human_line_of_planned_shows_both_names() {
+    let line = human_line(&planned()).unwrap();
+
+    assert!(!line.contains('\n'));
+    assert!(line.contains("paper.pdf"));
+    assert!(line.contains("smith2024_borax.pdf"));
+}
+
+// --- Counts ---
+
+#[test]
+fn counts_default_is_all_zeroes() {
+    assert_eq!(
+        Counts::default(),
+        Counts {
+            resolved: 0,
+            renamed: 0,
+            skipped: 0,
+        }
+    );
+}
+
+#[test]
+fn counts_serializes_with_all_three_fields() {
+    let counts = Counts {
+        resolved: 1,
+        renamed: 2,
+        skipped: 3,
+    };
+    let value: Value = serde_json::to_value(counts).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3})
+    );
+}
+
+// --- Diagnostic Display and Level ordering ---
+
+#[test]
+fn diagnostic_display_of_a_warning_is_prefixed_with_warning() {
+    let diagnostic = Diagnostic {
+        level: Level::Warning,
+        message: "cache directory is unwritable".to_string(),
+    };
+    assert_eq!(
+        diagnostic.to_string(),
+        "warning: cache directory is unwritable"
+    );
+}
+
+#[test]
+fn diagnostic_display_of_an_error_is_prefixed_with_error() {
+    let diagnostic = Diagnostic {
+        level: Level::Error,
+        message: "config file is malformed".to_string(),
+    };
+    assert_eq!(diagnostic.to_string(), "error: config file is malformed");
+}
+
+#[test]
+fn level_warning_orders_below_error() {
+    assert!(Level::Warning < Level::Error);
+}
+
+// --- spec scenario: "Machine-readable run" ---
+//
+// `borax rename --json` on a batch: stdout is only well-formed JSON
+// Lines (per-file events plus a summary event); this pins that a
+// plausible run's JSON rendering, joined with newlines, is exactly that.
+
+#[test]
+fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
+    let run: Vec<Event> = vec![
+        run_started(),
+        Event::Resolved {
+            path: PathBuf::from("a.pdf"),
+            identifier: "10.1000/aaa".to_string(),
+            source: "crossref".to_string(),
+            tier: Some("first-page".to_string()),
+            cached: false,
+        },
+        Event::Resolved {
+            path: PathBuf::from("b.pdf"),
+            identifier: "10.1000/bbb".to_string(),
+            source: "arxiv".to_string(),
+            tier: None,
+            cached: true,
+        },
+        Event::Renamed {
+            path: PathBuf::from("a.pdf"),
+            target: PathBuf::from("smith2024_a.pdf"),
+        },
+        Event::Skipped {
+            path: PathBuf::from("c.pdf"),
+            reason: SkipReason::NoIdentifier,
+        },
+        Event::RunFinished {
+            counts: Counts {
+                resolved: 2,
+                renamed: 1,
+                skipped: 1,
+            },
+        },
+    ];
+
+    let lines: Vec<String> = run
+        .iter()
+        .map(|event| render(Format::Json, event).unwrap())
+        .collect();
+    let stdout = lines.join("\n");
+
+    for line in stdout.lines() {
+        let value: Value = serde_json::from_str(line).unwrap();
+        assert!(value.is_object(), "not a JSON object: {line}");
+    }
+
+    let last: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!(last["event"], Value::from("run-finished"));
+}

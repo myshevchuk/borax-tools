@@ -19,6 +19,7 @@ borax-core = { path = "../borax-core" }
 borax-sources = { path = "../borax-sources" }
 borax-pdf = { path = "../borax-pdf" }
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 
 [lints]
