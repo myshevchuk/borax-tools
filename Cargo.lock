@@ -47,6 +47,7 @@ dependencies = [
  "borax-sources",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
 ]
 

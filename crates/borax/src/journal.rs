@@ -157,6 +157,11 @@ impl Journal for FileJournal {
 /// entry in the journal. Timestamps are a human convenience and a clock
 /// that went backwards must not decide what `undo` reverts.
 ///
+/// Selection is by run identifier, not by position alone: every entry
+/// carrying the last entry's run is returned, in journal order, even if
+/// another run's entries sit between them. A run is undone whole or not
+/// at all.
+///
 /// Empty when the journal is empty.
 pub fn last_run(entries: &[Entry]) -> Vec<Entry> {
     let _ = entries;
@@ -179,9 +184,17 @@ pub enum Unrevertible {
 /// What `undo` did about one entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UndoOutcome {
-    /// The file was moved back to `to`.
+    /// The file moved from `from` — the path the run had put it at —
+    /// back to `to`, the path it started from. The two are the entry's
+    /// `to` and `from` respectively: an undo runs the move backwards,
+    /// so its own from/to are the entry's, swapped.
     Reverted { from: PathBuf, to: PathBuf },
     /// The entry was left alone, for the stated reason.
+    ///
+    /// `path` is always the entry's journaled new path, whatever the
+    /// reason — including [`Unrevertible::OriginalTaken`], which is
+    /// about the other end of the move. It is the one path that
+    /// identifies which journaled move is being reported.
     Left { path: PathBuf, reason: Unrevertible },
 }
 
@@ -193,7 +206,9 @@ pub enum UndoOutcome {
 ///
 /// Each entry is verified before it is touched: the file must still be
 /// at the journaled new path, hash to the journaled content, and its
-/// original path must be free. An entry failing any of those is
+/// original path must be free — occupancy read from
+/// [`Filesystem::existing`] over the original's own directory, the same
+/// namespace planning uses. An entry failing any of those is
 /// reported as [`UndoOutcome::Left`] and skipped — the run continues,
 /// because one file moved away since the rename says nothing about the
 /// others.
