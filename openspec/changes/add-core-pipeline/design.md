@@ -54,14 +54,14 @@ crates/borax-core/    # PURE: record model, template engine, filename
                       #   merge/dedup, rename planning. No I/O.
 crates/borax-sources/ # HTTP adapters: Source trait, Crossref/OpenAlex/
                       #   arXiv clients, rate limiting, response cache.
-crates/borax-pdf/     # Extraction adapter: Extractor trait + pdfium
-                      #   backend (statically linked).
+crates/borax-pdf/     # Extraction adapter: PdfSource trait + the
+                      #   pure-Rust backend (lopdf + pdf-extract).
 crates/borax/         # CLI binary: clap subcommands, JSONL emitter,
                       #   config resolution, undo journal.
 ```
 
 `borax-core` is fully unit-testable offline; adapters hide behind traits
-so pipeline logic tests need neither network nor the native PDF library.
+so pipeline logic tests need neither network nor a PDF engine.
 
 ### Pipeline shape
 
@@ -188,10 +188,11 @@ convention: every pure behaviour lands red-test-first in `borax-core`.
 
 ## Risks / Trade-offs
 
-- [pdfium static linking is heavy and complicates cross-compilation,
-  especially Windows] → isolate behind the `Extractor` trait; use
-  prebuilt pdfium binaries in CI; a pure-Rust fallback extractor can be
-  added as a feature flag without touching pipeline logic.
+- [The pure-Rust engine reads malformed publisher PDFs less faithfully
+  than pdfium, and panics on some of them] → every call into it runs
+  behind a panic guard, so a bad file is one typed per-file failure
+  rather than a dead batch; pdfium remains available behind a cargo
+  feature for anyone who needs the fidelity.
 - [Crossref/OpenAlex schema drift breaks parsing silently] → scheduled
   live contract tests diff real responses against the cassettes; parsers
   are tolerant readers (unknown fields ignored, missing fields typed as
@@ -209,7 +210,8 @@ convention: every pure behaviour lands red-test-first in `borax-core`.
 ## Open Questions
 
 - Exact pdfium binding/crate choice and prebuilt-binary sourcing for the
-  three platforms (resolve during implementation of `extraction`).
+  three platforms — deferred with the optional backend itself, and only
+  worth answering if the pure-Rust engine proves insufficient.
 - Whether the cache and journal share one on-disk store (single SQLite
   file) or stay separate flat files (decide when implementing `rename`
   and `resolution`; spec constrains behaviour, not storage).

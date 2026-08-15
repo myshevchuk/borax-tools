@@ -67,9 +67,9 @@ identifier systems.
 
 - New Cargo workspace: `crates/borax-core` (pure logic),
   `crates/borax-sources` (HTTP adapters), `crates/borax-pdf` (extraction
-  adapter over a bundled pdfium), `crates/borax` (CLI binary).
-- New external dependencies: pdfium (statically linked), HTTP client,
-  clap, serde; recorded-cassette test infrastructure.
+  adapter over a pure-Rust PDF engine), `crates/borax` (CLI binary).
+- New external dependencies: lopdf and pdf-extract, HTTP client, clap,
+  serde; recorded-cassette test infrastructure. No native toolchain.
 - Network use: Crossref, OpenAlex, and arXiv public APIs, identified via
   polite-pool headers; responses cached locally under the XDG cache
   directory.

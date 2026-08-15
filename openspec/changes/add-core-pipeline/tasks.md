@@ -70,7 +70,7 @@ build feature, never a mandatory dependency.
       page range and DOI/arXiv normalization
 - [x] 6.4 Tests + implementation: tiered orchestration (stop at first
       hit) and typed failure modes
-- [ ] 6.5 Implement the default pure-Rust `PdfSource` backend (no native
+- [x] 6.5 Implement the default pure-Rust `PdfSource` backend (no native
       toolchain, works on every platform out of the box)
 - [ ] 6.6 Build the real-PDF fixture corpus (publisher PDFs, arXiv PDFs,
       encrypted, no-text-layer, malformed); ghostscript generates them
