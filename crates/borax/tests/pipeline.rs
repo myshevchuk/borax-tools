@@ -731,7 +731,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_source_tier_an
         event,
         Event::Resolved {
             path: path.clone(),
-            identifier: "10.1000/xyz".to_string(),
+            identifier: "doi:10.1000/xyz".to_string(),
             source: "crossref".to_string(),
             tier: Some(tier_str(Tier::EmbeddedMetadata).to_string()),
             cached: false,

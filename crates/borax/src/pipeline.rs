@@ -53,7 +53,12 @@ pub struct FileRecord {
     /// Which extraction pass found the identifier, or `None` when
     /// extraction never ran because the content index answered.
     pub tier: Option<Tier>,
-    /// Whether the answer came from a cache rather than the network.
+    /// Whether the content index answered, making both extraction and
+    /// resolution unnecessary.
+    ///
+    /// Narrower than "came from a cache": a response cache hit behind a
+    /// [`Source`] is invisible from here, so a record served by
+    /// [`borax_sources::cache::Cached`] still reports `false`.
     pub cached: bool,
 }
 
@@ -241,16 +246,27 @@ pub fn event_for(path: &Path, outcome: &FileOutcome) -> Event {
 }
 
 /// The identifier a record is reported under: its DOI, else its arXiv
-/// id, else its PMID, else its ISBN, each in the normalized form its own
-/// type renders, and empty when the record carries none.
+/// id, else its PMID, else its ISBN, and empty when the record carries
+/// none.
+///
+/// Rendered through [`Identifier`]'s own `Display`, so the value
+/// carries its kind (`doi:10.1000/xyz`) rather than leaving a consumer
+/// to guess which of four kinds a bare string is.
 fn identifier_of(record: &Record) -> String {
     record
         .doi
         .as_ref()
-        .map(ToString::to_string)
-        .or_else(|| record.borax.arxiv.as_ref().map(ToString::to_string))
-        .or_else(|| record.pmid.as_ref().map(ToString::to_string))
-        .or_else(|| record.isbn.as_ref().map(ToString::to_string))
+        .map(|id| Identifier::Doi(id.clone()))
+        .or_else(|| {
+            record
+                .borax
+                .arxiv
+                .as_ref()
+                .map(|id| Identifier::Arxiv(id.clone()))
+        })
+        .or_else(|| record.pmid.as_ref().map(|id| Identifier::Pmid(*id)))
+        .or_else(|| record.isbn.as_ref().map(|id| Identifier::Isbn(id.clone())))
+        .map(|identifier| identifier.to_string())
         .unwrap_or_default()
 }
 

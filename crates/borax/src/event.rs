@@ -46,8 +46,9 @@ pub enum Event {
         /// Which extraction pass supplied the identifier, or `None`
         /// when the caller named it rather than a file carrying it.
         tier: Option<String>,
-        /// Whether the record came from the cache rather than a
-        /// service.
+        /// Whether the content index answered, so the file was neither
+        /// opened nor looked up. A response cache hit behind a source
+        /// is not visible here and reports `false`.
         cached: bool,
     },
     /// A rename that would happen. Emitted by a preview run only; an
