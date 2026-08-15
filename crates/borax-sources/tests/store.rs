@@ -75,7 +75,9 @@ fn full_record() -> Record {
 
 // --- cache_root() ---
 
-#[cfg(unix)]
+/// A `lookup` that answers from `entries` and knows nothing else, so a
+/// test states the whole environment it depends on.
+#[cfg(any(unix, windows))]
 fn env(entries: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
     move |name| {
         entries
@@ -188,16 +190,6 @@ fn cache_root_is_none_for_an_empty_home_with_no_xdg_cache_home_on_unix() {
 #[test]
 fn cache_root_is_none_for_a_relative_home_with_no_xdg_cache_home_on_unix() {
     assert_eq!(cache_root(env(&[("HOME", "relative")])), None);
-}
-
-#[cfg(windows)]
-fn env(entries: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
-    move |name| {
-        entries
-            .iter()
-            .find(|(key, _)| *key == name)
-            .map(|(_, value)| OsString::from(*value))
-    }
 }
 
 #[cfg(windows)]
