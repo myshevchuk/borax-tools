@@ -11,13 +11,14 @@
 //! left alone, because a wrong guess here overwrites a user's work.
 
 use std::ffi::OsString;
-use std::io;
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use serde::{Deserialize, Serialize};
 
-use crate::event::Event;
+use crate::event::{Event, SkipReason};
 use crate::pipeline::Library;
 use crate::renaming::Filesystem;
 
@@ -98,9 +99,33 @@ pub trait Journal {
 /// qualifies, which is the signal to run without a journal — and so
 /// without `--apply`, since an unjournaled rename is not reversible.
 pub fn state_root(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let _ = lookup;
-    todo!("resolve the XDG (or Windows) state directory")
+    let mut root = CANDIDATES.iter().find_map(|(name, suffix)| {
+        let base = PathBuf::from(lookup(name)?);
+        if !base.is_absolute() {
+            return None;
+        }
+
+        Some(match suffix {
+            Some(suffix) => base.join(suffix),
+            None => base,
+        })
+    })?;
+
+    root.push("borax");
+    root.push(FORMAT_VERSION);
+    Some(root)
 }
+
+/// The variables that may name a state directory, in the order they are
+/// tried, each with what to append to its value.
+#[cfg(not(windows))]
+const CANDIDATES: &[(&str, Option<&str>)] =
+    &[("XDG_STATE_HOME", None), ("HOME", Some(".local/state"))];
+
+/// The variables that may name a state directory, in the order they are
+/// tried, each with what to append to its value.
+#[cfg(windows)]
+const CANDIDATES: &[(&str, Option<&str>)] = &[("LOCALAPPDATA", None), ("XDG_STATE_HOME", None)];
 
 /// [`state_root`] applied to this process's environment.
 pub fn default_state_root() -> Option<PathBuf> {
@@ -139,14 +164,42 @@ impl Journal for FileJournal {
     /// malformed, since a journal that does not parse is worse than one
     /// missing an entry: the first breaks `undo` for the whole run.
     fn append(&self, entries: &[Entry]) -> io::Result<()> {
-        let _ = entries;
-        todo!("append the entries as JSON lines")
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut batch = String::new();
+        for entry in entries {
+            if let Ok(line) = serde_json::to_string(entry) {
+                batch.push_str(&line);
+                batch.push('\n');
+            }
+        }
+
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // One open, one write: the batch reaches the file whole, so a
+        // reader between two appends never sees part of a run.
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?
+            .write_all(batch.as_bytes())
     }
 
     /// Lines that do not parse are skipped, so one corrupt entry costs
     /// its own reversal and not the rest of the journal.
     fn read(&self) -> Vec<Entry> {
-        todo!("read and parse the journal")
+        let Ok(contents) = fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+
+        contents
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
     }
 }
 
@@ -164,8 +217,15 @@ impl Journal for FileJournal {
 ///
 /// Empty when the journal is empty.
 pub fn last_run(entries: &[Entry]) -> Vec<Entry> {
-    let _ = entries;
-    todo!("take the entries of the final run")
+    let Some(last) = entries.last() else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter(|entry| entry.run == last.run)
+        .cloned()
+        .collect()
 }
 
 /// Why an entry could not be reverted.
@@ -220,8 +280,54 @@ pub fn undo_last(
     library: &dyn Library,
     filesystem: &dyn Filesystem,
 ) -> Vec<UndoOutcome> {
-    let _ = (journal, library, filesystem);
-    todo!("verify and revert the last run")
+    last_run(&journal.read())
+        .iter()
+        .rev()
+        .map(|entry| revert(entry, library, filesystem))
+        .collect()
+}
+
+/// Verify `entry` and move its file back, or report why not.
+fn revert(entry: &Entry, library: &dyn Library, filesystem: &dyn Filesystem) -> UndoOutcome {
+    let left = |reason| UndoOutcome::Left {
+        path: entry.to.clone(),
+        reason,
+    };
+
+    let Ok(hash) = library.hash(&entry.to) else {
+        return left(Unrevertible::Missing);
+    };
+    if hash != entry.hash {
+        return left(Unrevertible::ContentChanged);
+    }
+    if original_taken(entry, filesystem) {
+        return left(Unrevertible::OriginalTaken);
+    }
+
+    match filesystem.rename(&entry.to, &entry.from) {
+        Ok(()) => UndoOutcome::Reverted {
+            from: entry.to.clone(),
+            to: entry.from.clone(),
+        },
+        Err(error) => left(Unrevertible::Failed {
+            message: error.message,
+        }),
+    }
+}
+
+/// Whether anything holds the name `entry` would move its file back to.
+///
+/// An original naming no directory or no file is reported as occupied:
+/// freedom cannot be established for it, and `undo` moves nothing it
+/// cannot verify.
+fn original_taken(entry: &Entry, filesystem: &dyn Filesystem) -> bool {
+    let (Some(directory), Some(name)) = (entry.from.parent(), entry.from.file_name()) else {
+        return true;
+    };
+
+    filesystem
+        .existing(directory)
+        .contains_key(name.to_string_lossy().as_ref())
 }
 
 /// The event reporting `outcome`.
@@ -229,6 +335,21 @@ pub fn undo_last(
 /// A reverted file is an [`Event::Reverted`]; one left alone is an
 /// [`Event::Skipped`] carrying the matching reason.
 pub fn event_for(outcome: &UndoOutcome) -> Event {
-    let _ = outcome;
-    todo!("render the outcome as an event")
+    match outcome {
+        UndoOutcome::Reverted { from, to } => Event::Reverted {
+            path: from.clone(),
+            target: to.clone(),
+        },
+        UndoOutcome::Left { path, reason } => Event::Skipped {
+            path: path.clone(),
+            reason: match reason {
+                Unrevertible::Missing => SkipReason::Missing,
+                Unrevertible::ContentChanged => SkipReason::ContentChanged,
+                Unrevertible::OriginalTaken => SkipReason::OriginalTaken,
+                Unrevertible::Failed { message } => SkipReason::RenameFailed {
+                    message: message.clone(),
+                },
+            },
+        },
+    }
 }

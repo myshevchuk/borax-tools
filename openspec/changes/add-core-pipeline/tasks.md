@@ -120,7 +120,7 @@ a socket, and only the file-backed cache (7.8) touches a disk.
 - [x] 8.3 Tests + implementation: `borax resolve`
 - [x] 8.4 Tests + implementation: `borax rename` (preview default,
       `--apply`), wiring planner + journal
-- [ ] 8.5 Tests + implementation: append-only journal in XDG state dir
+- [x] 8.5 Tests + implementation: append-only journal in XDG state dir
       and `borax undo` with per-entry verification
 - [ ] 8.6 Tests + implementation: `borax bib`, `borax config`,
       `borax cache`
