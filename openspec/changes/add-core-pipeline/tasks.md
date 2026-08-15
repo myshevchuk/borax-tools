@@ -118,7 +118,7 @@ a socket, and only the file-backed cache (7.8) touches a disk.
 - [x] 8.2 Tests + implementation: JSONL event schema (typed, versioned)
       and the dual human/JSON renderer; diagnostics to stderr
 - [x] 8.3 Tests + implementation: `borax resolve`
-- [ ] 8.4 Tests + implementation: `borax rename` (preview default,
+- [x] 8.4 Tests + implementation: `borax rename` (preview default,
       `--apply`), wiring planner + journal
 - [ ] 8.5 Tests + implementation: append-only journal in XDG state dir
       and `borax undo` with per-entry verification

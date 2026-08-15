@@ -16,10 +16,11 @@ use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use borax_core::record::Record;
-use borax_core::rename::CollisionPolicy;
-use borax_core::template::TemplateTable;
+use borax_core::rename::{CollisionPolicy, PlanInput, PlannedAction, plan};
+use borax_core::sanitize::sanitize;
+use borax_core::template::{RenderInput, TemplateTable};
 
-use crate::event::{Counts, Event};
+use crate::event::{Counts, Event, SkipReason};
 use crate::pipeline::FileRecord;
 
 /// Moving files, and seeing what is already there.
@@ -83,11 +84,17 @@ impl PlannedRename {
 
 /// The name `record` implies for the file at `path`.
 ///
-/// The template its entry type selects is rendered, the result passed
-/// through [`borax_core::sanitize::sanitize`], and `path`'s own
+/// The template its entry type selects is rendered, `path`'s own
 /// extension appended — a rename changes what a file is called, never
-/// what it is. `hash` supplies the `sha1` field templates may use, and
-/// its absence renders that field empty.
+/// what it is — and the whole name passed through
+/// [`borax_core::sanitize::sanitize`]. The extension goes on before
+/// sanitizing rather than after, because sanitizing is what enforces
+/// the length limit, and it truncates a component's stem precisely so
+/// that its extension survives. Appending afterwards would push a
+/// maximal name back over the limit it had just been cut to fit.
+///
+/// `hash` supplies the `sha1` field templates may use, and its absence
+/// renders that field empty.
 ///
 /// Returns `None` when the template renders an empty string, which is
 /// a record too sparse to name a file from. The check is on the
@@ -100,8 +107,33 @@ pub fn target_name(
     hash: Option<&ContentHash>,
     templates: &TemplateTable,
 ) -> Option<String> {
-    let _ = (path, record, hash, templates);
-    todo!("render, sanitize, and re-attach the extension")
+    let rendered = templates.render(&RenderInput {
+        record,
+        sha1: hash.map(ContentHash::as_str),
+    });
+    if rendered.is_empty() {
+        return None;
+    }
+
+    let named = match path.extension() {
+        Some(extension) => format!("{rendered}.{}", extension.to_string_lossy()),
+        None => rendered,
+    };
+    Some(sanitize(&named))
+}
+
+/// What the planner needs to know about one resolved file, or `None`
+/// when the file has no name to plan from.
+fn plan_input(path: &Path, file: &FileRecord, templates: &TemplateTable) -> Option<PlanInput> {
+    Some(PlanInput {
+        source: path.file_name()?.to_string_lossy().into_owned(),
+        target: target_name(path, &file.record, file.hash.as_ref(), templates)?,
+        content_hash: file
+            .hash
+            .as_ref()
+            .map_or("", ContentHash::as_str)
+            .to_string(),
+    })
 }
 
 /// Plan the renames for a batch of resolved files.
@@ -128,8 +160,49 @@ pub fn plan_renames(
     policy: CollisionPolicy,
     filesystem: &dyn Filesystem,
 ) -> Vec<PlannedRename> {
-    let _ = (resolved, templates, policy, filesystem);
-    todo!("group by directory and plan each group")
+    let mut groups: BTreeMap<&Path, Vec<usize>> = BTreeMap::new();
+    for (index, (path, _)) in resolved.iter().enumerate() {
+        let directory = path.parent().unwrap_or(Path::new(""));
+        groups.entry(directory).or_default().push(index);
+    }
+
+    // Decisions are parked at their input position, so grouping — which
+    // visits directories in sorted order — cannot reorder the result.
+    let mut decisions: Vec<Option<PlannedRename>> = vec![None; resolved.len()];
+    for (directory, members) in groups {
+        let mut inputs = Vec::with_capacity(members.len());
+        let mut planned_indices = Vec::with_capacity(members.len());
+        for index in members {
+            let (path, file) = &resolved[index];
+            match plan_input(path, file, templates) {
+                Some(input) => {
+                    inputs.push(input);
+                    planned_indices.push(index);
+                }
+                None => {
+                    decisions[index] = Some(PlannedRename::Unnameable { path: path.clone() });
+                }
+            }
+        }
+
+        let items = plan(&inputs, &filesystem.existing(directory), policy);
+        for ((item, input), index) in items.into_iter().zip(&inputs).zip(planned_indices) {
+            let path = resolved[index].0.clone();
+            decisions[index] = Some(match item.action {
+                PlannedAction::Rename { to } => PlannedRename::Rename {
+                    path,
+                    target: directory.join(to),
+                },
+                PlannedAction::AlreadyNamed => PlannedRename::AlreadyNamed { path },
+                PlannedAction::Skip { .. } => PlannedRename::TargetTaken {
+                    path,
+                    target: directory.join(&input.target),
+                },
+            });
+        }
+    }
+
+    decisions.into_iter().flatten().collect()
 }
 
 /// Carry out `plan`, or report what it would do.
@@ -149,8 +222,42 @@ pub fn apply_renames(
     filesystem: &dyn Filesystem,
     apply: bool,
 ) -> Vec<Event> {
-    let _ = (plan, filesystem, apply);
-    todo!("walk the plan, moving files when applying")
+    plan.iter()
+        .map(|decision| match decision {
+            PlannedRename::Rename { path, target } if apply => {
+                match filesystem.rename(path, target) {
+                    Ok(()) => Event::Renamed {
+                        path: path.clone(),
+                        target: target.clone(),
+                    },
+                    Err(error) => Event::Skipped {
+                        path: path.clone(),
+                        reason: SkipReason::RenameFailed {
+                            message: error.message,
+                        },
+                    },
+                }
+            }
+            PlannedRename::Rename { path, target } => Event::Planned {
+                path: path.clone(),
+                target: target.clone(),
+            },
+            PlannedRename::AlreadyNamed { path } => Event::Skipped {
+                path: path.clone(),
+                reason: SkipReason::AlreadyNamed,
+            },
+            PlannedRename::TargetTaken { path, target } => Event::Skipped {
+                path: path.clone(),
+                reason: SkipReason::TargetTaken {
+                    target: target.clone(),
+                },
+            },
+            PlannedRename::Unnameable { path } => Event::Skipped {
+                path: path.clone(),
+                reason: SkipReason::Unnameable,
+            },
+        })
+        .collect()
 }
 
 /// The totals `events` add up to.
@@ -159,6 +266,14 @@ pub fn apply_renames(
 /// nothing and reports `renamed` as zero however many moves it
 /// described.
 pub fn counts_for(events: &[Event]) -> Counts {
-    let _ = events;
-    todo!("total the events")
+    let mut counts = Counts::default();
+    for event in events {
+        match event {
+            Event::Resolved { .. } => counts.resolved += 1,
+            Event::Renamed { .. } => counts.renamed += 1,
+            Event::Skipped { .. } => counts.skipped += 1,
+            _ => {}
+        }
+    }
+    counts
 }
