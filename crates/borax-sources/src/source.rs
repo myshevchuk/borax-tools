@@ -56,6 +56,23 @@ impl SourceName {
     ];
 }
 
+// `parse` reads `ALL`, and an array cannot be checked against the enum
+// it lists: a sixth variant would compile, be missing from `ALL`, and
+// silently stop parsing. This match is exhaustive, so adding a variant
+// fails to compile here — next to the array that needs it.
+const _: () = {
+    #[allow(dead_code)]
+    fn all_lists_every_variant(source: SourceName) {
+        match source {
+            SourceName::Crossref
+            | SourceName::OpenAlex
+            | SourceName::Arxiv
+            | SourceName::DataCite
+            | SourceName::PubMed => {}
+        }
+    }
+};
+
 impl fmt::Display for SourceName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use borax_core::identifier::Doi;
+use borax_core::identifier::{ArxivId, Doi, Identifier};
 use borax_pdf::scan::{FoundIdentifier, scan_info, scan_text, scan_xmp};
 use borax_pdf::source::InfoMetadata;
 
@@ -334,4 +334,24 @@ fn scan_info_finds_arxiv_id_in_a_field() {
         panic!("expected an arXiv identifier");
     };
     assert_eq!(id.id(), "2401.12345");
+}
+
+// ---------------------------------------------------------------------
+// From<FoundIdentifier> for Identifier
+// ---------------------------------------------------------------------
+
+#[test]
+fn doi_found_identifier_widens_to_a_doi_identifier_carrying_the_same_value() {
+    let doi = Doi::parse("10.1021/jacs.4c01234").unwrap();
+    let widened: Identifier = FoundIdentifier::Doi(doi.clone()).into();
+
+    assert_eq!(widened, Identifier::Doi(doi));
+}
+
+#[test]
+fn arxiv_found_identifier_widens_to_an_arxiv_identifier_carrying_the_same_value() {
+    let id = ArxivId::parse("2401.12345v2").unwrap();
+    let widened: Identifier = FoundIdentifier::Arxiv(id.clone()).into();
+
+    assert_eq!(widened, Identifier::Arxiv(id));
 }

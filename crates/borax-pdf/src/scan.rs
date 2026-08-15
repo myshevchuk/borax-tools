@@ -5,15 +5,27 @@
 //! these functions return is already normalized: a scan can report a
 //! DOI only if that DOI is well-formed.
 
-use borax_core::identifier::{ArxivId, Doi};
+use borax_core::identifier::{ArxivId, Doi, Identifier};
 
 use crate::source::InfoMetadata;
 
 /// An identifier found by a scan.
+///
+/// Narrower than [`Identifier`] on purpose: a page scan can yield a DOI
+/// or an arXiv identifier and nothing else, so the two kinds a scan
+/// cannot produce are not representable here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FoundIdentifier {
     Doi(Doi),
     Arxiv(ArxivId),
+}
+
+impl From<FoundIdentifier> for Identifier {
+    /// Widen a scan result to the identifier kind resolution speaks.
+    fn from(found: FoundIdentifier) -> Identifier {
+        let _ = found;
+        todo!("widen the found identifier")
+    }
 }
 
 /// Scan free text for the first usable identifier.
