@@ -31,7 +31,10 @@ fn rendered_form_has_the_sha256_prefix_and_64_lowercase_hex_digits() {
         .expect("rendered hash should start with sha256-");
 
     assert_eq!(hex.len(), 64);
-    assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(
+        hex.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    );
 }
 
 #[test]

@@ -89,25 +89,29 @@ fn env(entries: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Opt
 #[test]
 fn cache_root_honors_xdg_cache_home_on_unix() {
     let root = cache_root(env(&[
-        ("XDG_CACHE_HOME", "/home/user/.cache"),
-        ("HOME", "/home/user"),
+        ("XDG_CACHE_HOME", "/base/home/.cache"),
+        ("HOME", "/base/home"),
     ]));
 
     assert_eq!(
         root,
-        Some(PathBuf::from("/home/user/.cache").join("borax").join(FORMAT_VERSION))
+        Some(
+            PathBuf::from("/base/home/.cache")
+                .join("borax")
+                .join(FORMAT_VERSION)
+        )
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn cache_root_falls_back_to_home_dot_cache_on_unix() {
-    let root = cache_root(env(&[("HOME", "/home/user")]));
+    let root = cache_root(env(&[("HOME", "/base/home")]));
 
     assert_eq!(
         root,
         Some(
-            PathBuf::from("/home/user")
+            PathBuf::from("/base/home")
                 .join(".cache")
                 .join("borax")
                 .join(FORMAT_VERSION)
@@ -120,24 +124,28 @@ fn cache_root_falls_back_to_home_dot_cache_on_unix() {
 fn cache_root_prefers_xdg_cache_home_over_home_on_unix() {
     let root = cache_root(env(&[
         ("XDG_CACHE_HOME", "/xdg/cache"),
-        ("HOME", "/home/user"),
+        ("HOME", "/base/home"),
     ]));
 
     assert_eq!(
         root,
-        Some(PathBuf::from("/xdg/cache").join("borax").join(FORMAT_VERSION))
+        Some(
+            PathBuf::from("/xdg/cache")
+                .join("borax")
+                .join(FORMAT_VERSION)
+        )
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn cache_root_skips_an_empty_xdg_cache_home_on_unix() {
-    let root = cache_root(env(&[("XDG_CACHE_HOME", ""), ("HOME", "/home/user")]));
+    let root = cache_root(env(&[("XDG_CACHE_HOME", ""), ("HOME", "/base/home")]));
 
     assert_eq!(
         root,
         Some(
-            PathBuf::from("/home/user")
+            PathBuf::from("/base/home")
                 .join(".cache")
                 .join("borax")
                 .join(FORMAT_VERSION)
@@ -150,13 +158,13 @@ fn cache_root_skips_an_empty_xdg_cache_home_on_unix() {
 fn cache_root_skips_a_relative_xdg_cache_home_on_unix() {
     let root = cache_root(env(&[
         ("XDG_CACHE_HOME", "relative/cache"),
-        ("HOME", "/home/user"),
+        ("HOME", "/base/home"),
     ]));
 
     assert_eq!(
         root,
         Some(
-            PathBuf::from("/home/user")
+            PathBuf::from("/base/home")
                 .join(".cache")
                 .join("borax")
                 .join(FORMAT_VERSION)
@@ -195,10 +203,7 @@ fn env(entries: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Opt
 #[cfg(windows)]
 #[test]
 fn cache_root_honors_localappdata_on_windows() {
-    let root = cache_root(env(&[(
-        "LOCALAPPDATA",
-        r"C:\Users\test\AppData\Local",
-    )]));
+    let root = cache_root(env(&[("LOCALAPPDATA", r"C:\Users\test\AppData\Local")]));
 
     assert_eq!(
         root,

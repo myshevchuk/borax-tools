@@ -35,8 +35,17 @@ impl fmt::Display for ContentHash {
 
 /// The [`ContentHash`] of `bytes`.
 pub fn hash_bytes(bytes: &[u8]) -> ContentHash {
-    let _ = bytes;
-    todo!("hash the bytes")
+    let mut hasher = Hasher::new();
+    hasher.update(bytes);
+    hasher.finish()
+}
+
+/// The lowercase hex digit for the low four bits of `nibble`.
+fn hex_digit(nibble: u8) -> char {
+    char::from(match nibble & 0x0f {
+        digit @ 0..=9 => b'0' + digit,
+        digit => b'a' + digit - 10,
+    })
 }
 
 /// A hash being computed over a stream of chunks.
@@ -57,12 +66,18 @@ impl Hasher {
 
     /// Append `chunk` to the stream being hashed.
     pub fn update(&mut self, chunk: &[u8]) {
-        let _ = chunk;
-        todo!("feed the chunk to the digest")
+        self.digest.update(chunk);
     }
 
     /// Consume the hasher and produce the hash of everything fed to it.
     pub fn finish(self) -> ContentHash {
-        todo!("render the digest as sha256-<hex>")
+        let mut rendered = String::with_capacity("sha256-".len() + 64);
+        rendered.push_str("sha256-");
+        for byte in self.digest.finalize() {
+            rendered.push(hex_digit(byte >> 4));
+            rendered.push(hex_digit(byte));
+        }
+
+        ContentHash(rendered)
     }
 }

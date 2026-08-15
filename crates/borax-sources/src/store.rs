@@ -7,10 +7,12 @@
 //! full, or half-written costs round-trips and never a run.
 
 use std::ffi::OsString;
-use std::io;
+use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use borax_core::content::ContentHash;
+use borax_core::content::{ContentHash, Hasher};
 use borax_core::record::Record;
 
 use crate::cache::Cache;
@@ -38,9 +40,32 @@ pub const FORMAT_VERSION: &str = "v1";
 /// Returns `None` when no candidate qualifies, which is the signal to
 /// run without persistence rather than to fail.
 pub fn cache_root(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let _ = lookup;
-    todo!("resolve the XDG (or Windows) cache directory")
+    let mut root = CANDIDATES.iter().find_map(|(name, suffix)| {
+        let base = PathBuf::from(lookup(name)?);
+        if !base.is_absolute() {
+            return None;
+        }
+
+        Some(match suffix {
+            Some(suffix) => base.join(suffix),
+            None => base,
+        })
+    })?;
+
+    root.push("borax");
+    root.push(FORMAT_VERSION);
+    Some(root)
 }
+
+/// The variables that may name a cache directory, in the order they are
+/// tried, each with what to append to its value.
+#[cfg(not(windows))]
+const CANDIDATES: &[(&str, Option<&str>)] = &[("XDG_CACHE_HOME", None), ("HOME", Some(".cache"))];
+
+/// The variables that may name a cache directory, in the order they are
+/// tried, each with what to append to its value.
+#[cfg(windows)]
+const CANDIDATES: &[(&str, Option<&str>)] = &[("LOCALAPPDATA", None), ("XDG_CACHE_HOME", None)];
 
 /// [`cache_root`] applied to this process's environment.
 pub fn default_cache_root() -> Option<PathBuf> {
@@ -59,8 +84,30 @@ pub fn default_cache_root() -> Option<PathBuf> {
 /// backslash, or any other character. A key therefore cannot address a
 /// file outside `root`, whatever produced it.
 pub fn entry_path(root: &Path, key: &str) -> Option<PathBuf> {
-    let _ = (root, key);
-    todo!("validate the key and join it onto the root")
+    let mut path = root.to_path_buf();
+    let mut segments = key.split('/').peekable();
+
+    while let Some(segment) = segments.next() {
+        if !is_safe_segment(segment) {
+            return None;
+        }
+
+        match segments.peek() {
+            Some(_) => path.push(segment),
+            None => path.push(format!("{segment}.json")),
+        }
+    }
+
+    Some(path)
+}
+
+/// Whether `segment` names one directory or file below the root and
+/// nothing else.
+fn is_safe_segment(segment: &str) -> bool {
+    !matches!(segment, "" | "." | "..")
+        && segment
+            .chars()
+            .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '.' | '-' | '_'))
 }
 
 /// The key a record resolved from a file with hash `hash` is stored
@@ -70,8 +117,7 @@ pub fn entry_path(root: &Path, key: &str) -> Option<PathBuf> {
 /// identifier-keyed entries without colliding: no source is named
 /// `content`.
 pub fn content_key(hash: &ContentHash) -> String {
-    let _ = hash;
-    todo!("format the content-index key")
+    format!("content/{hash}")
 }
 
 /// A [`Cache`] backed by a directory of JSON files.
@@ -107,7 +153,10 @@ impl FileCache {
     /// returned rather than swallowed: a `borax cache clear` that could
     /// not clear anything has to say so.
     pub fn clear(&self) -> io::Result<()> {
-        todo!("remove the root directory if it exists")
+        match fs::remove_dir_all(&self.root) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
     }
 }
 
@@ -116,8 +165,8 @@ impl Cache for FileCache {
     /// absent, unreadable, holds a key that is not a valid path, or
     /// does not parse as a record.
     fn get(&self, key: &str) -> Option<Record> {
-        let _ = key;
-        todo!("read and parse the entry")
+        let bytes = fs::read(entry_path(&self.root, key)?).ok()?;
+        serde_json::from_slice(&bytes).ok()
     }
 
     /// Store `record` under `key`, creating the parent directories.
@@ -128,9 +177,41 @@ impl Cache for FileCache {
     /// partial file. Every failure — an invalid key, a directory that
     /// cannot be created, a full disk — leaves the cache as it was.
     fn put(&self, key: &str, record: &Record) {
-        let _ = (key, record);
-        todo!("serialize the record and write it atomically")
+        let Some(path) = entry_path(&self.root, key) else {
+            return;
+        };
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Ok(json) = serde_json::to_vec(record) else {
+            return;
+        };
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+
+        let temporary = parent.join(temporary_name());
+        if fs::write(&temporary, &json).is_ok() && fs::rename(&temporary, &path).is_ok() {
+            return;
+        }
+
+        // A temporary that never reached its final name is litter, and
+        // nothing else will come looking for it.
+        let _ = fs::remove_file(&temporary);
     }
+}
+
+/// How many temporary entry files this process has named so far.
+static TEMPORARIES: AtomicU64 = AtomicU64::new(0);
+
+/// A file name no concurrent writer will choose: another process
+/// differs in its id, another thread in its draw from the counter.
+fn temporary_name() -> String {
+    format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        TEMPORARIES.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Records indexed by the content hash of the file they were resolved
@@ -154,14 +235,12 @@ impl<C: Cache> ContentIndex<C> {
 
     /// The record indexed for `hash`, if any.
     pub fn get(&self, hash: &ContentHash) -> Option<Record> {
-        let _ = hash;
-        todo!("look the content key up")
+        self.cache.get(&content_key(hash))
     }
 
     /// Index `record` as the answer for any file hashing to `hash`.
     pub fn put(&self, hash: &ContentHash, record: &Record) {
-        let _ = (hash, record);
-        todo!("store under the content key")
+        self.cache.put(&content_key(hash), record);
     }
 }
 
@@ -171,6 +250,14 @@ impl<C: Cache> ContentIndex<C> {
 /// whatever its size. Returns the underlying [`io::Error`] when the
 /// file cannot be opened or read.
 pub fn hash_file(path: &Path) -> io::Result<ContentHash> {
-    let _ = path;
-    todo!("stream the file through a Hasher")
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Hasher::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+
+    loop {
+        match file.read(&mut buffer)? {
+            0 => return Ok(hasher.finish()),
+            read => hasher.update(&buffer[..read]),
+        }
+    }
 }

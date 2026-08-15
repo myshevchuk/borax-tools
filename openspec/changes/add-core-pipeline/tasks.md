@@ -102,7 +102,7 @@ a socket, and only the file-backed cache (7.8) touches a disk.
 - [x] 7.7 Tests + implementation: the cache seam — key derivation, the
       `Cache` trait, `MemoryCache`, and the `Cached` decorator that
       never stores a failure
-- [ ] 7.8 Implement the file-backed `Cache` under the XDG cache
+- [x] 7.8 Implement the file-backed `Cache` under the XDG cache
       directory, plus the content-hash index that lets an already-seen
       file skip extraction entirely (the `--no-cache` bypass is a CLI
       flag, task 8)
