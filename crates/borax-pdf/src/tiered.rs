@@ -17,7 +17,10 @@ impl Tier {
     /// The name as it appears in output, in the kebab-case the event
     /// schema uses throughout.
     pub fn as_str(&self) -> &'static str {
-        todo!("name the tier")
+        match self {
+            Tier::EmbeddedMetadata => "embedded-metadata",
+            Tier::TextLayer => "text-layer",
+        }
     }
 }
 

@@ -14,14 +14,17 @@
 use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
+use borax_core::identifier::Identifier;
 use borax_core::record::Record;
 use borax_pdf::source::{ExtractionError, PdfSource};
-use borax_pdf::tiered::{ExtractionConfig, Tier};
+use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier, extract};
 use borax_sources::cache::Cache;
+use borax_sources::conflict::check_title;
+use borax_sources::dispatch::{Unresolved, resolve};
 use borax_sources::source::{Source, SourceName};
 use borax_sources::store::ContentIndex;
 
-use crate::event::{Counts, Event, SkipReason};
+use crate::event::{Attempt, Counts, Event, SkipReason};
 
 /// The files a run works on, as something that can be read.
 ///
@@ -125,8 +128,93 @@ pub fn resolve_file<C: Cache>(
     index: &ContentIndex<C>,
     config: &ResolveConfig,
 ) -> FileOutcome {
-    let _ = (path, library, sources, index, config);
-    todo!("run the passes in order")
+    let hash = library.hash(path).ok();
+
+    if config.cache {
+        if let Some(record) = hash.as_ref().and_then(|hash| index.get(hash)) {
+            return FileOutcome::Resolved(FileRecord {
+                record,
+                source: None,
+                tier: None,
+                cached: true,
+            });
+        }
+    }
+
+    let (extracted, extracted_title) = match extract_from(path, library, &config.extraction) {
+        Ok(found) => found,
+        Err(error) => return FileOutcome::Skipped(skipped_for(&error)),
+    };
+    let Extracted { identifier, tier } = extracted;
+
+    let resolved = match resolve(sources, &Identifier::from(identifier)) {
+        Ok(resolved) => resolved,
+        Err(unresolved) => return FileOutcome::Skipped(unresolvable(&unresolved)),
+    };
+
+    if let Some(conflict) = check_title(extracted_title.as_deref(), &resolved.record) {
+        return FileOutcome::Skipped(SkipReason::Conflict {
+            field: conflict.field.to_string(),
+            extracted: conflict.extracted,
+            resolved: conflict.resolved,
+        });
+    }
+
+    if let Some(hash) = hash.as_ref() {
+        index.put(hash, &resolved.record);
+    }
+
+    FileOutcome::Resolved(FileRecord {
+        record: resolved.record,
+        source: Some(resolved.source),
+        tier: Some(tier),
+        cached: false,
+    })
+}
+
+/// Extract from the file at `path`, along with the title its own
+/// metadata claims.
+///
+/// The title is taken while the document is open, since the conflict
+/// check runs after it has been dropped.
+fn extract_from(
+    path: &Path,
+    library: &dyn Library,
+    config: &ExtractionConfig,
+) -> Result<(Extracted, Option<String>), ExtractionError> {
+    let pdf = library.open(path)?;
+    let extracted = extract(pdf.as_ref(), config)?;
+    Ok((extracted, pdf.info_metadata().title.clone()))
+}
+
+/// The skip an extraction failure reports.
+fn skipped_for(error: &ExtractionError) -> SkipReason {
+    match error {
+        ExtractionError::Unreadable { message } => SkipReason::Unreadable {
+            message: message.clone(),
+        },
+        ExtractionError::Encrypted => SkipReason::Unreadable {
+            message: error.to_string(),
+        },
+        ExtractionError::NoTextLayer | ExtractionError::NoIdentifierFound => {
+            SkipReason::NoIdentifier
+        }
+    }
+}
+
+/// The skip a failed resolution reports, keeping the attempts in the
+/// order the sources were asked.
+fn unresolvable(unresolved: &Unresolved) -> SkipReason {
+    SkipReason::Unresolvable {
+        attempts: unresolved
+            .attempts
+            .iter()
+            .map(|(source, error)| Attempt {
+                source: source.to_string(),
+                error: error.to_string(),
+            })
+            .collect(),
+    }
 }
 
 /// The event that reports `outcome` for `path`.
@@ -134,8 +222,36 @@ pub fn resolve_file<C: Cache>(
 /// A resolved file whose source is unknown — the content index
 /// answered — reports its source as `cache`.
 pub fn event_for(path: &Path, outcome: &FileOutcome) -> Event {
-    let _ = (path, outcome);
-    todo!("render the outcome as an event")
+    match outcome {
+        FileOutcome::Resolved(file) => Event::Resolved {
+            path: path.to_path_buf(),
+            identifier: identifier_of(&file.record),
+            source: file
+                .source
+                .map_or("cache", |source| source.as_str())
+                .to_string(),
+            tier: file.tier.map(|tier| tier.as_str().to_string()),
+            cached: file.cached,
+        },
+        FileOutcome::Skipped(reason) => Event::Skipped {
+            path: path.to_path_buf(),
+            reason: reason.clone(),
+        },
+    }
+}
+
+/// The identifier a record is reported under: its DOI, else its arXiv
+/// id, else its PMID, else its ISBN, each in the normalized form its own
+/// type renders, and empty when the record carries none.
+fn identifier_of(record: &Record) -> String {
+    record
+        .doi
+        .as_ref()
+        .map(ToString::to_string)
+        .or_else(|| record.borax.arxiv.as_ref().map(ToString::to_string))
+        .or_else(|| record.pmid.as_ref().map(ToString::to_string))
+        .or_else(|| record.isbn.as_ref().map(ToString::to_string))
+        .unwrap_or_default()
 }
 
 /// Everything a run produced.
@@ -166,6 +282,18 @@ pub fn resolve_batch<C: Cache>(
     index: &ContentIndex<C>,
     config: &ResolveConfig,
 ) -> Run {
-    let _ = (paths, library, sources, index, config);
-    todo!("resolve each file and total the outcomes")
+    let mut events = Vec::with_capacity(paths.len() + 1);
+    let mut counts = Counts::default();
+
+    for path in paths {
+        let outcome = resolve_file(path, library, sources, index, config);
+        match outcome {
+            FileOutcome::Resolved(_) => counts.resolved += 1,
+            FileOutcome::Skipped(_) => counts.skipped += 1,
+        }
+        events.push(event_for(path, &outcome));
+    }
+
+    events.push(Event::RunFinished { counts });
+    Run { events, counts }
 }

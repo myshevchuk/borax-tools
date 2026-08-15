@@ -997,7 +997,11 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
     assert_eq!(second.counts, first.counts);
     assert_eq!(library.open_calls(), opens_after_first_run);
     assert_eq!(calls.get(), 2);
-    for (first_event, second_event) in first.events.iter().zip(second.events.iter()) {
+    // Both runs end with the summary event; the per-file events are
+    // everything before it.
+    let first_files = &first.events[..first.events.len() - 1];
+    let second_files = &second.events[..second.events.len() - 1];
+    for (first_event, second_event) in first_files.iter().zip(second_files.iter()) {
         let (
             Event::Resolved {
                 identifier: first_identifier,

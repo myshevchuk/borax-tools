@@ -23,8 +23,10 @@ pub enum FoundIdentifier {
 impl From<FoundIdentifier> for Identifier {
     /// Widen a scan result to the identifier kind resolution speaks.
     fn from(found: FoundIdentifier) -> Identifier {
-        let _ = found;
-        todo!("widen the found identifier")
+        match found {
+            FoundIdentifier::Doi(doi) => Identifier::Doi(doi),
+            FoundIdentifier::Arxiv(id) => Identifier::Arxiv(id),
+        }
     }
 }
 
