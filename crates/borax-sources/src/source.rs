@@ -41,8 +41,9 @@ impl SourceName {
     ///
     /// [`as_str`]: SourceName::as_str
     pub fn parse(name: &str) -> Option<SourceName> {
-        let _ = name;
-        todo!("match the name against the known sources")
+        SourceName::ALL
+            .into_iter()
+            .find(|source| source.as_str() == name)
     }
 
     /// Every source, in declaration order.

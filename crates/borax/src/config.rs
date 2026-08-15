@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use borax_core::bib_output::DuplicatePolicy;
 use borax_core::rename::CollisionPolicy;
+use borax_pdf::tiered::DEFAULT_PAGE_LIMIT;
+use borax_sources::pace::{DEFAULT_CONCURRENCY, DEFAULT_MIN_INTERVAL};
 use borax_sources::source::SourceName;
 use serde::Deserialize;
 
@@ -80,7 +82,22 @@ impl Default for Config {
     /// [`borax_pdf::tiered::DEFAULT_PAGE_LIMIT`], collisions are
     /// suffixed, duplicate entries skipped, and the cache is on.
     fn default() -> Config {
-        todo!("the built-in defaults")
+        Config {
+            templates: BTreeMap::from([(
+                "default".to_string(),
+                "[auth:lower][year]_[shorttitle3:camel]".to_string(),
+            )]),
+            sources: SourceName::ALL.to_vec(),
+            mailto: None,
+            concurrency: DEFAULT_CONCURRENCY,
+            min_interval_ms: DEFAULT_MIN_INTERVAL.as_millis() as u64,
+            page_limit: DEFAULT_PAGE_LIMIT,
+            collision: CollisionPolicy::Suffix,
+            bib_path: None,
+            duplicates: DuplicatePolicy::Skip,
+            sidecars: false,
+            cache: true,
+        }
     }
 }
 
@@ -175,8 +192,13 @@ impl fmt::Display for Origin {
     /// BORAX_<NAME>`, or `flag --<name>` — the origin column of
     /// `borax config`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!("render the origin for display")
+        match self {
+            Origin::Default => f.write_str("defaults"),
+            Origin::GlobalFile(path) => write!(f, "global {}", path.display()),
+            Origin::DirectoryFile(path) => write!(f, "override {}", path.display()),
+            Origin::Env(name) => write!(f, "env {ENV_PREFIX}{name}"),
+            Origin::Flag(name) => write!(f, "flag --{name}"),
+        }
     }
 }
 
@@ -220,7 +242,21 @@ impl Effective {
     /// answers "what is borax running on", and "nothing" is an answer
     /// about `mailto` that a user needs to see.
     pub fn entries(&self) -> Vec<(Key, String, Origin)> {
-        todo!("render every setting with its origin")
+        let mut rendered: BTreeMap<Key, String> = SETTINGS
+            .iter()
+            .map(|setting| (setting.key.to_string(), (setting.render)(&self.config)))
+            .collect();
+        for (entry_type, template) in &self.config.templates {
+            rendered.insert(format!("templates.{entry_type}"), quote(template));
+        }
+
+        rendered
+            .into_iter()
+            .map(|(key, value)| {
+                let origin = self.origins.get(&key).cloned().unwrap_or(Origin::Default);
+                (key, value, origin)
+            })
+            .collect()
     }
 }
 
@@ -245,12 +281,213 @@ pub enum ConfigError {
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!("render the error")
+        match self {
+            ConfigError::Unreadable { path, message } => {
+                write!(f, "{}: {message}", path.display())
+            }
+            ConfigError::Invalid {
+                key,
+                origin,
+                message,
+            } => write!(f, "{key} ({origin}): {message}"),
+            ConfigError::UnknownEnv { name } => {
+                write!(f, "{ENV_PREFIX}{name} names no setting")
+            }
+        }
     }
 }
 
 impl std::error::Error for ConfigError {}
+
+/// One setting that holds a single value: the name it is addressed by,
+/// where a [`Layer`] carries it, and how its effective value is written
+/// out.
+struct Setting {
+    key: &'static str,
+    slot: fn(&mut Layer) -> Slot<'_>,
+    render: fn(&Config) -> String,
+}
+
+/// Every single-valued setting, in key order.
+///
+/// `templates` is absent because its keys are open-ended: it is merged
+/// and rendered per entry type instead, and cannot be addressed by one
+/// environment variable.
+const SETTINGS: &[Setting] = &[
+    Setting {
+        key: "bib.duplicates",
+        slot: |layer| Slot::Text(&mut layer.bib.get_or_insert_default().duplicates),
+        render: |config| quote(duplicates_name(config.duplicates)),
+    },
+    Setting {
+        key: "bib.path",
+        slot: |layer| Slot::Path(&mut layer.bib.get_or_insert_default().path),
+        render: |config| match &config.bib_path {
+            Some(path) => quote(&path.to_string_lossy()),
+            None => String::new(),
+        },
+    },
+    Setting {
+        key: "bib.sidecars",
+        slot: |layer| Slot::Flag(&mut layer.bib.get_or_insert_default().sidecars),
+        render: |config| config.sidecars.to_string(),
+    },
+    Setting {
+        key: "extraction.page-limit",
+        slot: |layer| Slot::Count(&mut layer.extraction.get_or_insert_default().page_limit),
+        render: |config| config.page_limit.to_string(),
+    },
+    Setting {
+        key: "mailto",
+        slot: |layer| Slot::Text(&mut layer.mailto),
+        render: |config| match &config.mailto {
+            Some(mailto) => quote(mailto),
+            None => String::new(),
+        },
+    },
+    Setting {
+        key: "network.cache",
+        slot: |layer| Slot::Flag(&mut layer.network.get_or_insert_default().cache),
+        render: |config| config.cache.to_string(),
+    },
+    Setting {
+        key: "network.concurrency",
+        slot: |layer| Slot::Count(&mut layer.network.get_or_insert_default().concurrency),
+        render: |config| config.concurrency.to_string(),
+    },
+    Setting {
+        key: "network.min-interval-ms",
+        slot: |layer| Slot::Millis(&mut layer.network.get_or_insert_default().min_interval_ms),
+        render: |config| config.min_interval_ms.to_string(),
+    },
+    Setting {
+        key: "rename.collision",
+        slot: |layer| Slot::Text(&mut layer.rename.get_or_insert_default().collision),
+        render: |config| quote(collision_name(config.collision)),
+    },
+    Setting {
+        key: "sources",
+        slot: |layer| Slot::List(&mut layer.sources),
+        render: |config| {
+            let names: Vec<String> = config
+                .sources
+                .iter()
+                .map(|source| quote(source.as_str()))
+                .collect();
+            format!("[{}]", names.join(", "))
+        },
+    },
+];
+
+/// A mutable handle on one setting's place in a [`Layer`], carrying the
+/// type that setting's values take.
+enum Slot<'a> {
+    Text(&'a mut Option<String>),
+    Path(&'a mut Option<PathBuf>),
+    Count(&'a mut Option<usize>),
+    Millis(&'a mut Option<u64>),
+    Flag(&'a mut Option<bool>),
+    List(&'a mut Option<Vec<String>>),
+}
+
+/// Move whatever `from` holds into `to`, and report whether it held
+/// anything.
+fn transfer(from: Slot<'_>, to: Slot<'_>) -> bool {
+    match (from, to) {
+        (Slot::Text(from), Slot::Text(to)) => move_value(from, to),
+        (Slot::Path(from), Slot::Path(to)) => move_value(from, to),
+        (Slot::Count(from), Slot::Count(to)) => move_value(from, to),
+        (Slot::Millis(from), Slot::Millis(to)) => move_value(from, to),
+        (Slot::Flag(from), Slot::Flag(to)) => move_value(from, to),
+        (Slot::List(from), Slot::List(to)) => move_value(from, to),
+        // Both slots are opened by the same accessor, so their variants
+        // always agree.
+        _ => false,
+    }
+}
+
+fn move_value<T>(from: &mut Option<T>, to: &mut Option<T>) -> bool {
+    match from.take() {
+        Some(value) => {
+            *to = Some(value);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Read `text` as the type `slot` takes and store it there.
+///
+/// The error is the message an [`ConfigError::Invalid`] carries.
+fn store(slot: Slot<'_>, text: &str) -> Result<(), String> {
+    match slot {
+        Slot::Text(value) => *value = Some(text.to_string()),
+        Slot::Path(value) => *value = Some(PathBuf::from(text)),
+        Slot::Count(value) => *value = Some(number(text)?),
+        Slot::Millis(value) => *value = Some(number(text)?),
+        Slot::Flag(value) => {
+            *value = Some(match text {
+                "true" => true,
+                "false" => false,
+                _ => return Err(format!("expected true or false, got {text:?}")),
+            });
+        }
+        Slot::List(value) => {
+            *value = Some(
+                text.split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn number<T: std::str::FromStr>(text: &str) -> Result<T, String> {
+    text.parse()
+        .map_err(|_| format!("expected a whole number, got {text:?}"))
+}
+
+/// The environment variable, without its [`ENV_PREFIX`], that addresses
+/// the setting named `key`.
+fn env_name(key: &str) -> String {
+    key.to_uppercase().replace(['.', '-'], "_")
+}
+
+/// `value` as a TOML basic string.
+fn quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn collision_name(policy: CollisionPolicy) -> &'static str {
+    match policy {
+        CollisionPolicy::Suffix => "suffix",
+        CollisionPolicy::Skip => "skip",
+    }
+}
+
+fn parse_collision(value: &str) -> Option<CollisionPolicy> {
+    match value {
+        "suffix" => Some(CollisionPolicy::Suffix),
+        "skip" => Some(CollisionPolicy::Skip),
+        _ => None,
+    }
+}
+
+fn duplicates_name(policy: DuplicatePolicy) -> &'static str {
+    match policy {
+        DuplicatePolicy::Skip => "skip",
+        DuplicatePolicy::Update => "update",
+    }
+}
+
+fn parse_duplicates(value: &str) -> Option<DuplicatePolicy> {
+    match value {
+        "skip" => Some(DuplicatePolicy::Skip),
+        "update" => Some(DuplicatePolicy::Update),
+        _ => None,
+    }
+}
 
 /// Read a layer from the TOML in `text`.
 ///
@@ -259,8 +496,10 @@ impl std::error::Error for ConfigError {}
 /// know — a misspelled setting is a configuration error, never a
 /// silently ignored one.
 pub fn layer_from_toml(text: &str, path: &Path) -> Result<Layer, ConfigError> {
-    let _ = (text, path);
-    todo!("parse the TOML into a layer")
+    toml::from_str(text).map_err(|error| ConfigError::Unreadable {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
 }
 
 /// Read a layer from environment variables.
@@ -281,8 +520,31 @@ where
     N: AsRef<str>,
     V: AsRef<str>,
 {
-    let _ = vars;
-    todo!("read the prefixed variables into a layer")
+    let mut layer = Layer::default();
+
+    for (name, value) in vars {
+        let Some(suffix) = name.as_ref().strip_prefix(ENV_PREFIX) else {
+            continue;
+        };
+        let Some(setting) = SETTINGS
+            .iter()
+            .find(|setting| env_name(setting.key) == suffix)
+        else {
+            return Err(ConfigError::UnknownEnv {
+                name: suffix.to_string(),
+            });
+        };
+
+        store((setting.slot)(&mut layer), value.as_ref()).map_err(|message| {
+            ConfigError::Invalid {
+                key: setting.key.to_string(),
+                origin: Origin::Env(suffix.to_string()),
+                message,
+            }
+        })?;
+    }
+
+    Ok(layer)
 }
 
 /// Merge `layers` into the effective configuration.
@@ -297,8 +559,94 @@ where
 /// The `templates` table merges per entry type for the same reason —
 /// an override file defining `thesis` keeps the global `default`.
 pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
-    let _ = layers;
-    todo!("merge the layers, keeping origins")
+    let mut config = Config::default();
+    let mut origins: BTreeMap<Key, Origin> = SETTINGS
+        .iter()
+        .map(|setting| (setting.key.to_string(), Origin::Default))
+        .chain(
+            config
+                .templates
+                .keys()
+                .map(|entry_type| (format!("templates.{entry_type}"), Origin::Default)),
+        )
+        .collect();
+
+    let mut winning = Layer::default();
+    for (origin, mut layer) in layers {
+        for setting in SETTINGS {
+            if transfer((setting.slot)(&mut layer), (setting.slot)(&mut winning)) {
+                origins.insert(setting.key.to_string(), origin.clone());
+            }
+        }
+
+        for (entry_type, template) in layer.templates.take().unwrap_or_default() {
+            origins.insert(format!("templates.{entry_type}"), origin.clone());
+            config.templates.insert(entry_type, template);
+        }
+    }
+
+    let origin_of = |key: &str| origins.get(key).cloned().unwrap_or(Origin::Default);
+    let invalid = |key: &str, message: String| ConfigError::Invalid {
+        key: key.to_string(),
+        origin: origin_of(key),
+        message,
+    };
+
+    if let Some(mailto) = winning.mailto {
+        config.mailto = Some(mailto);
+    }
+    if let Some(names) = winning.sources {
+        let mut sources = Vec::with_capacity(names.len());
+        for name in names {
+            match SourceName::parse(&name) {
+                Some(source) => sources.push(source),
+                None => return Err(invalid("sources", format!("unknown source {name:?}"))),
+            }
+        }
+        config.sources = sources;
+    }
+
+    if let Some(collision) = winning.rename.unwrap_or_default().collision {
+        config.collision = parse_collision(&collision).ok_or_else(|| {
+            invalid(
+                "rename.collision",
+                format!("expected suffix or skip, got {collision:?}"),
+            )
+        })?;
+    }
+
+    let bib = winning.bib.unwrap_or_default();
+    if let Some(path) = bib.path {
+        config.bib_path = Some(path);
+    }
+    if let Some(duplicates) = bib.duplicates {
+        config.duplicates = parse_duplicates(&duplicates).ok_or_else(|| {
+            invalid(
+                "bib.duplicates",
+                format!("expected skip or update, got {duplicates:?}"),
+            )
+        })?;
+    }
+    if let Some(sidecars) = bib.sidecars {
+        config.sidecars = sidecars;
+    }
+
+    if let Some(page_limit) = winning.extraction.unwrap_or_default().page_limit {
+        config.page_limit = page_limit;
+    }
+
+    let network = winning.network.unwrap_or_default();
+    if let Some(concurrency) = network.concurrency {
+        config.concurrency = concurrency;
+    }
+    if let Some(min_interval_ms) = network.min_interval_ms {
+        config.min_interval_ms = min_interval_ms;
+    }
+    if let Some(cache) = network.cache {
+        config.cache = cache;
+    }
+
+    Ok(Effective { config, origins })
 }
 
 /// The nearest [`OVERRIDE_FILE`] at or above `start`.
@@ -309,8 +657,10 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
 /// file applies to any file. `exists` answers whether a path is a
 /// readable file, so the walk is testable without a filesystem.
 pub fn nearest_override(start: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    let _ = (start, exists);
-    todo!("walk upward looking for the override file")
+    start
+        .ancestors()
+        .map(|directory| directory.join(OVERRIDE_FILE))
+        .find(|candidate| exists(candidate))
 }
 
 /// The global configuration file implied by `lookup`, which answers the
@@ -324,6 +674,29 @@ pub fn nearest_override(start: &Path, exists: impl Fn(&Path) -> bool) -> Option<
 ///
 /// Returns `None` when no candidate qualifies.
 pub fn global_config_path(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let _ = lookup;
-    todo!("resolve the XDG (or Windows) config file path")
+    let mut path = CANDIDATES.iter().find_map(|(name, suffix)| {
+        let base = PathBuf::from(lookup(name)?);
+        if !base.is_absolute() {
+            return None;
+        }
+
+        Some(match suffix {
+            Some(suffix) => base.join(suffix),
+            None => base,
+        })
+    })?;
+
+    path.push("borax");
+    path.push("config.toml");
+    Some(path)
 }
+
+/// The variables that may name a configuration directory, in the order
+/// they are tried, each with what to append to its value.
+#[cfg(not(windows))]
+const CANDIDATES: &[(&str, Option<&str>)] = &[("XDG_CONFIG_HOME", None), ("HOME", Some(".config"))];
+
+/// The variables that may name a configuration directory, in the order
+/// they are tried, each with what to append to its value.
+#[cfg(windows)]
+const CANDIDATES: &[(&str, Option<&str>)] = &[("APPDATA", None), ("XDG_CONFIG_HOME", None)];
