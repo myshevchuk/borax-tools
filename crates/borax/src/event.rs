@@ -128,8 +128,10 @@ pub enum Format {
 /// every event, because a consumer that has to reconstruct a run cannot
 /// do it from a stream with holes in it.
 pub fn render(format: Format, event: &Event) -> Option<String> {
-    let _ = (format, event);
-    todo!("dispatch to the format's renderer")
+    match format {
+        Format::Human => human_line(event),
+        Format::Json => Some(json_line(event)),
+    }
 }
 
 /// `event` as a single line of JSON.
@@ -138,8 +140,42 @@ pub fn render(format: Format, event: &Event) -> Option<String> {
 /// own fields, and contains no newline, so a consumer may split the
 /// stream on `\n` before parsing.
 pub fn json_line(event: &Event) -> String {
-    let _ = event;
-    todo!("serialize the event with its schema version")
+    serde_json::to_string(&Line {
+        schema: SCHEMA,
+        event,
+    })
+    .unwrap_or_else(|error| unrenderable(&error.to_string()))
+}
+
+/// One line of the JSON stream: the schema version, then the event's own
+/// fields hoisted to the same level.
+#[derive(Serialize)]
+struct Line<'a> {
+    schema: u32,
+    #[serde(flatten)]
+    event: &'a Event,
+}
+
+/// The stand-in line for an event that would not serialize.
+///
+/// A caller writing the stream has nowhere to put an error — losing the
+/// line entirely would leave a consumer silently short one event, so the
+/// failure is reported in the stream's own shape, under an `event` tag
+/// no real event uses.
+#[derive(Serialize)]
+struct Unrenderable<'a> {
+    schema: u32,
+    event: &'static str,
+    message: &'a str,
+}
+
+fn unrenderable(message: &str) -> String {
+    serde_json::to_string(&Unrenderable {
+        schema: SCHEMA,
+        event: "unrenderable",
+        message,
+    })
+    .unwrap_or_else(|_| format!(r#"{{"schema":{SCHEMA},"event":"unrenderable"}}"#))
 }
 
 /// `event` as a line of prose, or `None` when the event is not worth
@@ -149,8 +185,68 @@ pub fn json_line(event: &Event) -> String {
 /// rename wants the renames, not a restatement of the command they
 /// just typed. The JSON stream keeps it regardless.
 pub fn human_line(event: &Event) -> Option<String> {
-    let _ = event;
-    todo!("render the event as prose")
+    match event {
+        Event::RunStarted { .. } => None,
+        Event::Resolved {
+            path,
+            identifier,
+            source,
+            cached,
+            ..
+        } => Some(format!(
+            "{}: resolved {identifier} via {source}{}",
+            path.display(),
+            if *cached { " (cached)" } else { "" }
+        )),
+        Event::Planned { path, target } => Some(format!(
+            "{}: would rename to {}",
+            path.display(),
+            target.display()
+        )),
+        Event::Renamed { path, target } => Some(format!(
+            "{}: renamed to {}",
+            path.display(),
+            target.display()
+        )),
+        Event::Skipped { path, reason } => Some(format!(
+            "{}: skipped, {}",
+            path.display(),
+            skipped_because(reason)
+        )),
+        Event::BibEntry { path, key, outcome } => Some(format!(
+            "{}: bibliography entry {key} {outcome}",
+            path.display()
+        )),
+        Event::RunFinished { counts } => Some(format!(
+            "{} resolved, {} renamed, {} skipped",
+            counts.resolved, counts.renamed, counts.skipped
+        )),
+    }
+}
+
+/// The clause following `skipped,` in a human line.
+fn skipped_because(reason: &SkipReason) -> String {
+    match reason {
+        SkipReason::NoIdentifier => "no identifier found".to_string(),
+        SkipReason::Unresolvable { attempts } => {
+            let said: Vec<String> = attempts
+                .iter()
+                .map(|attempt| format!("{}: {}", attempt.source, attempt.error))
+                .collect();
+            match said.is_empty() {
+                true => "no source had a record".to_string(),
+                false => format!("no source had a record ({})", said.join("; ")),
+            }
+        }
+        SkipReason::Conflict {
+            field,
+            extracted,
+            resolved,
+        } => format!("{field} disagrees (file says {extracted}, record says {resolved})"),
+        SkipReason::TargetTaken { target } => format!("{} is taken", target.display()),
+        SkipReason::AlreadyNamed => "already carries that name".to_string(),
+        SkipReason::Unreadable { message } => format!("unreadable ({message})"),
+    }
 }
 
 /// How much a diagnostic matters.
@@ -174,7 +270,9 @@ pub struct Diagnostic {
 impl fmt::Display for Diagnostic {
     /// `warning: <message>` or `error: <message>`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!("render the diagnostic")
+        match self.level {
+            Level::Warning => write!(f, "warning: {}", self.message),
+            Level::Error => write!(f, "error: {}", self.message),
+        }
     }
 }

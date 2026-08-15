@@ -115,7 +115,7 @@ a socket, and only the file-backed cache (7.8) touches a disk.
 
 - [x] 8.1 Tests + implementation: TOML config model and resolution order
       (flags > env > nearest `.borax.toml` > XDG global > defaults)
-- [ ] 8.2 Tests + implementation: JSONL event schema (typed, versioned)
+- [x] 8.2 Tests + implementation: JSONL event schema (typed, versioned)
       and the dual human/JSON renderer; diagnostics to stderr
 - [ ] 8.3 Tests + implementation: `borax resolve`
 - [ ] 8.4 Tests + implementation: `borax rename` (preview default,
