@@ -134,6 +134,70 @@ fn build_blank_pdf() -> Vec<u8> {
     bytes
 }
 
+/// A single-page PDF whose only font is a Type0 (composite) font
+/// declaring `/Encoding /UCS-2` — a name `pdf-extract` 0.12 does not
+/// implement (it only handles `Identity-H`/`Identity-V` by name, or an
+/// embedded CMap stream). Resolving this font panics inside the
+/// third-party parser rather than returning an error, which is exactly
+/// the case `PurePdf`'s panic guard exists for: one malformed file
+/// must not unwind past its own extraction and abort a whole batch.
+fn build_pdf_with_unsupported_type0_encoding() -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+
+    let descendant_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType0",
+        "BaseFont" => "Broken",
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0,
+        },
+    });
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => "Broken",
+        "Encoding" => "UCS-2",
+        "DescendantFonts" => vec![Object::Reference(descendant_id)],
+    });
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    let content = Content {
+        operations: vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 12.into()]),
+            Operation::new("Td", vec![72.into(), 720.into()]),
+            Operation::new("Tj", vec![Object::string_literal("hi")]),
+            Operation::new("ET", vec![]),
+        ],
+    };
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Resources" => resources_id,
+        "Contents" => content_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+    });
+
+    let pages = dictionary! {
+        "Type" => "Pages",
+        "Kids" => vec![page_id.into()],
+        "Count" => 1,
+    };
+    doc.objects.insert(pages_id, Object::Dictionary(pages));
+    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog_id);
+
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    bytes
+}
+
 /// An Info-dictionary string value encoded the way PDF text strings
 /// carrying non-Latin1 text are: a UTF-16BE byte-order mark followed by
 /// UTF-16BE code units.
@@ -469,4 +533,18 @@ fn tiered_extract_reports_no_text_layer_for_a_blank_pure_pdf() {
     let result = extract(&pdf, &ExtractionConfig::default());
 
     assert_eq!(result, Err(ExtractionError::NoTextLayer));
+}
+
+// ---------------------------------------------------------------------
+// Panic containment
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_font_the_text_extractor_panics_on_is_reported_unreadable_not_a_process_abort() {
+    let bytes = build_pdf_with_unsupported_type0_encoding();
+    let pdf = PurePdf::from_bytes(&bytes).unwrap();
+
+    let result = pdf.page_text(0);
+
+    assert!(matches!(result, Err(ExtractionError::Unreadable { .. })));
 }
