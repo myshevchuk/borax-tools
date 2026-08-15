@@ -17,4 +17,5 @@ pub mod http;
 pub mod openalex;
 pub mod pace;
 pub mod source;
+pub mod store;
 pub mod transport;

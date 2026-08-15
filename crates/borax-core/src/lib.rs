@@ -4,6 +4,7 @@
 
 pub mod bib_output;
 pub mod bibtex;
+pub mod content;
 pub mod identifier;
 pub mod record;
 pub mod rename;
