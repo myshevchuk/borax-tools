@@ -1,10 +1,11 @@
 //! Reading OpenAlex work responses.
 
-use borax_core::identifier::Doi;
+use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record, Source};
 use serde_json::Value;
 
-use crate::source::{ParseError, attribute};
+use crate::http::{HttpRequest, Politeness, Transport};
+use crate::source::{ParseError, SourceError, SourceName, attribute};
 
 /// Map an OpenAlex `type` to the record model.
 ///
@@ -193,4 +194,57 @@ pub fn parse(body: &str) -> Result<Record, ParseError> {
 
     attribute(&mut record, Source::OpenAlex);
     Ok(record)
+}
+
+/// The OpenAlex API, over a [`Transport`].
+#[derive(Debug, Clone)]
+pub struct OpenAlexClient<T> {
+    transport: T,
+    politeness: Politeness,
+}
+
+impl<T> OpenAlexClient<T> {
+    /// A client that queries OpenAlex through `transport`, identifying
+    /// itself with `politeness`.
+    pub fn new(transport: T, politeness: Politeness) -> OpenAlexClient<T> {
+        OpenAlexClient {
+            transport,
+            politeness,
+        }
+    }
+
+    /// The request that would ask OpenAlex about `identifier`, or
+    /// `None` when OpenAlex cannot be asked about it.
+    ///
+    /// OpenAlex's `/works/{id}` accepts a namespaced identifier, so a
+    /// DOI becomes `https://api.openalex.org/works/doi:<doi>` and a
+    /// PMID `.../works/pmid:<number>`. arXiv ids and ISBNs have no such
+    /// form and yield `None`.
+    ///
+    /// When a contact address is configured it is appended as a
+    /// `?mailto=` query parameter — OpenAlex's documented polite-pool
+    /// mechanism — percent-encoding `+` as `%2B` and `@` as `%40` so an
+    /// address with a tag survives. `User-Agent` is sent as well.
+    pub fn request(&self, identifier: &Identifier) -> Option<HttpRequest> {
+        let _ = (identifier, &self.politeness);
+        todo!("build an OpenAlex request")
+    }
+}
+
+impl<T: Transport> crate::source::Source for OpenAlexClient<T> {
+    fn name(&self) -> SourceName {
+        SourceName::OpenAlex
+    }
+
+    fn supports(&self, identifier: &Identifier) -> bool {
+        matches!(identifier, Identifier::Doi(_) | Identifier::Pmid(_))
+    }
+
+    /// As [`crate::crossref::CrossrefClient::fetch`], with [`parse`].
+    /// An unsupported identifier sends no request and reports
+    /// [`SourceError::Unavailable`], as there.
+    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+        let _ = (identifier, &self.transport);
+        todo!("fetch from OpenAlex")
+    }
 }

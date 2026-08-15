@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use borax_core::identifier::{ArxivId, Doi};
+use borax_core::identifier::{ArxivId, Doi, Identifier};
 use borax_core::record::{EntryType, Name, Record, Source};
 use quick_xml::escape::unescape;
 use quick_xml::events::{BytesStart, Event};
@@ -10,8 +10,9 @@ use quick_xml::name::QName;
 use quick_xml::{Reader, XmlVersion};
 use serde_json::Value;
 
+use crate::http::{HttpRequest, Politeness, Transport};
 use crate::openalex::{split_display_name, ymd_date};
-use crate::source::{ParseError, attribute};
+use crate::source::{ParseError, SourceError, SourceName, attribute};
 
 /// What the feed's first `entry` element said, before any of it is
 /// interpreted.
@@ -208,4 +209,58 @@ pub fn parse(body: &str) -> Result<Record, ParseError> {
 
     attribute(&mut record, Source::Arxiv);
     Ok(record)
+}
+
+/// The arXiv API, over a [`Transport`].
+#[derive(Debug, Clone)]
+pub struct ArxivClient<T> {
+    transport: T,
+    politeness: Politeness,
+}
+
+impl<T> ArxivClient<T> {
+    /// A client that queries arXiv through `transport`, identifying
+    /// itself with `politeness`.
+    pub fn new(transport: T, politeness: Politeness) -> ArxivClient<T> {
+        ArxivClient {
+            transport,
+            politeness,
+        }
+    }
+
+    /// The request that would ask arXiv about `identifier`, or `None`
+    /// for anything that is not an arXiv id.
+    ///
+    /// The URL is
+    /// `https://export.arxiv.org/api/query?id_list=<id>`, built from
+    /// the bare identifier without its version, so the query returns
+    /// whatever version is current rather than the one a file happened
+    /// to carry. Only `User-Agent` is sent: arXiv runs no polite pool,
+    /// so a contact address would be data sent for no purpose.
+    pub fn request(&self, identifier: &Identifier) -> Option<HttpRequest> {
+        let _ = (identifier, &self.politeness);
+        todo!("build an arXiv request")
+    }
+}
+
+impl<T: Transport> crate::source::Source for ArxivClient<T> {
+    fn name(&self) -> SourceName {
+        SourceName::Arxiv
+    }
+
+    fn supports(&self, identifier: &Identifier) -> bool {
+        matches!(identifier, Identifier::Arxiv(_))
+    }
+
+    /// As [`crate::crossref::CrossrefClient::fetch`], with [`parse`].
+    /// An unsupported identifier sends no request and reports
+    /// [`SourceError::Unavailable`], as there.
+    /// Note that arXiv reports an unknown identifier as an entry-less
+    /// feed at `200`, which [`parse`] turns into
+    /// [`crate::source::ParseError::NotFound`] and this maps to
+    /// [`SourceError::NotFound`].
+    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+        let _ = (identifier, &self.transport);
+        todo!("fetch from arXiv")
+    }
 }

@@ -1,10 +1,11 @@
 //! Reading Crossref work responses.
 
-use borax_core::identifier::{Doi, Isbn};
+use borax_core::identifier::{Doi, Identifier, Isbn};
 use borax_core::record::{DateParts, EntryType, Name, Record, Source};
 use serde_json::Value;
 
-use crate::source::{ParseError, attribute};
+use crate::http::{HttpRequest, Politeness, Transport};
+use crate::source::{ParseError, SourceError, SourceName, attribute};
 
 /// Map a Crossref `type` to the record model.
 ///
@@ -169,4 +170,59 @@ pub fn parse(body: &str) -> Result<Record, ParseError> {
 
     attribute(&mut record, Source::Crossref);
     Ok(record)
+}
+
+/// The Crossref REST API, over a [`Transport`].
+#[derive(Debug, Clone)]
+pub struct CrossrefClient<T> {
+    transport: T,
+    politeness: Politeness,
+}
+
+impl<T> CrossrefClient<T> {
+    /// A client that queries Crossref through `transport`, identifying
+    /// itself with `politeness`.
+    pub fn new(transport: T, politeness: Politeness) -> CrossrefClient<T> {
+        CrossrefClient {
+            transport,
+            politeness,
+        }
+    }
+
+    /// The request that would ask Crossref about `identifier`, or
+    /// `None` when Crossref cannot be asked about it.
+    ///
+    /// Crossref answers about DOIs only. The URL is
+    /// `https://api.crossref.org/works/<doi>` with the DOI appended in
+    /// its normalized form and not percent-encoded — Crossref matches
+    /// on the raw suffix, slashes included. Headers: `User-Agent` from
+    /// [`Politeness::user_agent`], and `Accept: application/json`.
+    pub fn request(&self, identifier: &Identifier) -> Option<HttpRequest> {
+        let _ = (identifier, &self.politeness);
+        todo!("build a Crossref request")
+    }
+}
+
+impl<T: Transport> crate::source::Source for CrossrefClient<T> {
+    fn name(&self) -> SourceName {
+        SourceName::Crossref
+    }
+
+    fn supports(&self, identifier: &Identifier) -> bool {
+        matches!(identifier, Identifier::Doi(_))
+    }
+
+    /// Perform the request, read the status with
+    /// [`crate::http::classify`], and parse the body with [`parse`].
+    /// A transport failure is [`SourceError::Unavailable`]; a body that
+    /// will not parse is [`SourceError::Malformed`].
+    ///
+    /// An identifier this source does not support sends no request and
+    /// reports [`SourceError::Unavailable`]: the question was never
+    /// asked, so the answer is unknown — reporting `NotFound` would
+    /// claim knowledge the source never had.
+    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+        let _ = (identifier, &self.transport);
+        todo!("fetch from Crossref")
+    }
 }
