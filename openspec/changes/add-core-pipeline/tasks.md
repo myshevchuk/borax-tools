@@ -81,9 +81,10 @@ build feature, never a mandatory dependency.
 
 ## 7. Sources (borax-sources)
 
-Response reading is separated from HTTP: the readers are pure and
-tested against real recorded responses, so only 7.6 needs a network
-stack at all.
+Response reading is separated from HTTP, and caching is a decorator
+rather than a client feature, so everything here is tested offline
+against real recorded responses. Only the ureq transport (7.6) touches
+a socket, and only the file-backed cache (7.8) touches a disk.
 
 - [x] 7.1 Define the `Source` trait and typed failure model; set up the
       recorded-cassette test harness
@@ -94,13 +95,20 @@ stack at all.
       including the entry-less feed that means "not found"
 - [x] 7.5 Tests + implementation: priority/fallback dispatch by
       identifier type
-- [ ] 7.6 Tests + implementation: the HTTP clients implementing
+- [x] 7.6 Tests + implementation: the HTTP clients implementing
       `Source` — polite-pool identification, timeouts, and the
-      status-to-`SourceError` mapping
-- [ ] 7.7 Tests + implementation: on-disk response cache (identifier key
-      + content-hash index), `--no-cache` bypass, rate limiting, bounded
+      status-to-`SourceError` mapping; the ureq transport, with
+      `tests/live.rs` as its (ignored) contract tests
+- [x] 7.7 Tests + implementation: the cache seam — key derivation, the
+      `Cache` trait, `MemoryCache`, and the `Cached` decorator that
+      never stores a failure
+- [ ] 7.8 Implement the file-backed `Cache` under the XDG cache
+      directory, plus the content-hash index that lets an already-seen
+      file skip extraction entirely (the `--no-cache` bypass is a CLI
+      flag, task 8)
+- [x] 7.9 Tests + implementation: rate-limit pacing and bounded
       concurrency
-- [ ] 7.8 Tests + implementation: conflict detection and the
+- [x] 7.10 Tests + implementation: conflict detection for the
       skip-and-report contract
 
 ## 8. CLI (borax)

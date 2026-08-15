@@ -27,8 +27,30 @@ use crate::source::{Source, SourceError, SourceName};
 /// answer about a DOI is not OpenAlex's, and a cache that conflated
 /// them would make fallback results sticky.
 pub fn key(source: SourceName, identifier: &Identifier) -> String {
-    let _ = (source, identifier);
-    todo!("derive a cache key")
+    let (kind, value) = match identifier {
+        Identifier::Doi(id) => ("doi", id.to_string()),
+        Identifier::Arxiv(id) => ("arxiv", id.to_string()),
+        Identifier::Pmid(id) => ("pmid", id.to_string()),
+        Identifier::Isbn(id) => ("isbn", id.to_string()),
+    };
+
+    format!("{}/{}/{}", source.as_str(), kind, slug(&value))
+}
+
+/// `value` lowercased, with every character outside `a-z`, `0-9`, `.`,
+/// `-` and `_` replaced by `-`.
+///
+/// `.` and `-` survive as themselves, so identifiers differing only in
+/// which of the two they carry keep different slugs.
+fn slug(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .map(|c| match c {
+            'a'..='z' | '0'..='9' | '.' | '-' | '_' => c,
+            _ => '-',
+        })
+        .collect()
 }
 
 /// A store of records that a source previously returned.
@@ -118,7 +140,13 @@ impl<S: Source, C: Cache> Source for Cached<S, C> {
     /// stored; failures are never cached, so a service that was down
     /// is asked again next time rather than remembered as broken.
     fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
-        let _ = (identifier, &self.source, &self.cache);
-        todo!("serve from cache, else fetch and store")
+        let key = key(self.source.name(), identifier);
+        if let Some(record) = self.cache.get(&key) {
+            return Ok(record);
+        }
+
+        let record = self.source.fetch(identifier)?;
+        self.cache.put(&key, &record);
+        Ok(record)
     }
 }
