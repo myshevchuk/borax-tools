@@ -8,6 +8,9 @@ license.workspace = true
 
 [dependencies]
 borax-core = { path = "../borax-core" }
+quick-xml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -86,15 +86,24 @@ Rationale: pdf-renamer's slowness comes from doing everything always. The
 common case (publisher PDF with embedded DOI) must cost milliseconds plus
 one cached HTTP round-trip.
 
-### PDF backend: bundled pdfium behind a trait
+### PDF backend: pure-Rust by default, pdfium as a build option
 
-pdfium (BSD-licensed) is statically linked, giving robust text extraction
-with zero runtime dependencies. Pure-Rust extractors were rejected as
-weakest on the malformed PDFs publishers actually ship; shelling out to
-`pdftotext` was rejected as a runtime dependency plus per-file process
-overhead. MuPDF was rejected on AGPL grounds (project is MIT/Apache-2.0).
-The `Extractor` trait keeps the engine swappable if pdfium's build cost
-becomes a problem.
+The engine sits behind the `PdfSource` trait, and the default build
+uses a pure-Rust extractor: no native toolchain, no downloaded
+binaries, `cargo install borax` works everywhere, and Windows CI stays
+ordinary. pdfium (BSD-licensed) is available as an opt-in cargo
+feature for the fidelity it buys on malformed publisher PDFs, but it is
+not bundled — its cost is a per-platform prebuilt-binary pipeline, paid
+only by those who want it.
+
+This revises the original decision (statically linked pdfium as the
+only backend). Two things changed it: the trait boundary proved that
+every extraction rule is testable without any engine, so fidelity is no
+longer on the critical path; and a mandatory native dependency is a
+poor trade for a tool whose selling point is being fast to install and
+run. MuPDF stays rejected on AGPL grounds (project is MIT/Apache-2.0);
+shelling out to `pdftotext` stays rejected as a runtime dependency plus
+per-file process overhead.
 
 ### Record model: CSL-JSON superset, BibTeX emission
 

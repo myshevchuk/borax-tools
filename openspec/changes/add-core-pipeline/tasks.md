@@ -58,21 +58,26 @@ the implementation, then refactor with the suite green.
 
 ## 6. PDF extraction (borax-pdf)
 
-The pure layer (6.3-6.5) sits above the `PdfSource` trait and is
-complete and tested with fakes; 6.1's native half and 6.2 remain, and
-are the only parts needing a real engine.
+Everything above the `PdfSource` trait (6.1-6.4) is pure and tested
+with fakes. What remains needs a real engine, and per the revised
+backend decision the default one is pure-Rust: pdfium is an opt-in
+build feature, never a mandatory dependency.
 
-- [ ] 6.1 Choose and wire the pdfium binding with static/prebuilt
-      binaries for Linux, macOS, Windows; define the `Extractor` trait
-      (trait done as `source::PdfSource` with its typed failure model;
-      the binding and its CI binary wiring are open)
-- [ ] 6.2 Build the real-PDF fixture corpus (publisher PDFs, arXiv PDFs,
-      encrypted, no-text-layer, malformed)
-- [x] 6.3 Tests + implementation: embedded XMP/Info metadata pass
-- [x] 6.4 Tests + implementation: text-layer identifier pass with bounded
+- [x] 6.1 Define the engine seam: the `PdfSource` trait and its typed
+      failure model
+- [x] 6.2 Tests + implementation: embedded XMP/Info metadata pass
+- [x] 6.3 Tests + implementation: text-layer identifier pass with bounded
       page range and DOI/arXiv normalization
-- [x] 6.5 Tests + implementation: tiered orchestration (stop at first
+- [x] 6.4 Tests + implementation: tiered orchestration (stop at first
       hit) and typed failure modes
+- [ ] 6.5 Implement the default pure-Rust `PdfSource` backend (no native
+      toolchain, works on every platform out of the box)
+- [ ] 6.6 Build the real-PDF fixture corpus (publisher PDFs, arXiv PDFs,
+      encrypted, no-text-layer, malformed); ghostscript generates them
+      locally
+- [ ] 6.7 Optional `pdfium` cargo feature: a second `PdfSource` backend
+      plus its prebuilt-binary pipeline. Deferred until Windows testing
+      shows the default backend is not enough
 
 ## 7. Sources (borax-sources)
 

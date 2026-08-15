@@ -33,6 +33,29 @@ impl fmt::Display for IdentifierError {
 
 impl std::error::Error for IdentifierError {}
 
+/// Any one of the identifiers borax can resolve a record from.
+///
+/// The pipeline carries this between stages: extraction produces one,
+/// the resolver dispatches on its kind, and the record records it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Identifier {
+    Doi(Doi),
+    Arxiv(ArxivId),
+    Pmid(Pmid),
+    Isbn(Isbn),
+}
+
+impl fmt::Display for Identifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Identifier::Doi(id) => write!(f, "doi:{id}"),
+            Identifier::Arxiv(id) => write!(f, "arXiv:{id}"),
+            Identifier::Pmid(id) => write!(f, "pmid:{id}"),
+            Identifier::Isbn(id) => write!(f, "isbn:{id}"),
+        }
+    }
+}
+
 /// Strip `prefix` from the front of `s`, comparing ASCII-case-insensitively.
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     match s.get(..prefix.len()) {
