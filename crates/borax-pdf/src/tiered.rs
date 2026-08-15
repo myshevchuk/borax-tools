@@ -1,0 +1,70 @@
+//! Tiered extraction: cheap passes first, stop at the first hit.
+
+use crate::scan::FoundIdentifier;
+use crate::source::{ExtractionError, PdfSource};
+
+/// Which pass produced an identifier — recorded so the resolved record
+/// can attribute the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// The XMP packet or the Info dictionary.
+    EmbeddedMetadata,
+    /// The page text layer.
+    TextLayer,
+}
+
+/// What extraction found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Extracted {
+    pub identifier: FoundIdentifier,
+    pub tier: Tier,
+}
+
+/// How far the text pass reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtractionConfig {
+    /// Pages the text pass may read, counted from the front. Zero
+    /// disables the text pass entirely.
+    pub page_limit: usize,
+}
+
+/// Three pages: publishers put the DOI on the first page, and a cover
+/// sheet or abstract page rarely pushes it past the third.
+pub const DEFAULT_PAGE_LIMIT: usize = 3;
+
+impl Default for ExtractionConfig {
+    fn default() -> ExtractionConfig {
+        ExtractionConfig {
+            page_limit: DEFAULT_PAGE_LIMIT,
+        }
+    }
+}
+
+/// Run the tiered extraction over `source`.
+///
+/// Passes run in this order and the first identifier found ends the
+/// run — later passes are never executed:
+///
+/// 1. **Embedded metadata**: the XMP packet
+///    ([`crate::scan::scan_xmp`]), then the Info dictionary
+///    ([`crate::scan::scan_info`]). Reports [`Tier::EmbeddedMetadata`].
+/// 2. **Text layer**: pages `0..min(page_count, page_limit)` in order,
+///    each scanned with [`crate::scan::scan_text`]. Reports
+///    [`Tier::TextLayer`].
+///
+/// Failure is reported when no pass produced an identifier:
+/// [`ExtractionError::NoTextLayer`] when every page the text pass read
+/// was blank (only ASCII whitespace) — including when the document has
+/// no pages or the limit is zero — and
+/// [`ExtractionError::NoIdentifierFound`] when text was present but
+/// held nothing usable. A [`PdfSource::page_text`] error propagates
+/// unchanged and ends the run.
+///
+/// Performs no network access and no file I/O of its own.
+pub fn extract(
+    source: &dyn PdfSource,
+    config: &ExtractionConfig,
+) -> Result<Extracted, ExtractionError> {
+    let _ = (source, config);
+    todo!("run the tiered extraction")
+}
