@@ -57,6 +57,12 @@ pub enum Event {
     Planned { path: PathBuf, target: PathBuf },
     /// A rename that did happen.
     Renamed { path: PathBuf, target: PathBuf },
+    /// A rename that was undone: `path` moved back to `target`.
+    ///
+    /// Distinct from [`Event::Renamed`] even though both describe a
+    /// move, because a consumer tracking a library needs to tell a file
+    /// arriving from a rename apart from one returning from an undo.
+    Reverted { path: PathBuf, target: PathBuf },
     /// A file the run declined to act on, and why.
     Skipped { path: PathBuf, reason: SkipReason },
     /// An entry written to the master bibliography.
@@ -101,6 +107,15 @@ pub enum SkipReason {
     Unnameable,
     /// The rename itself failed, after the plan said it would not.
     RenameFailed { message: String },
+    /// Nothing is at the path the journal says a file was moved to, so
+    /// there is nothing to move back.
+    Missing,
+    /// Something is at the journaled path, but not the file that was
+    /// moved there — reverting it would move a stranger.
+    ContentChanged,
+    /// The path a file would be moved back to is occupied, so
+    /// reverting would overwrite whatever now holds it.
+    OriginalTaken,
 }
 
 /// One source's answer during resolution.
@@ -214,6 +229,11 @@ pub fn human_line(event: &Event) -> Option<String> {
             path.display(),
             target.display()
         )),
+        Event::Reverted { path, target } => Some(format!(
+            "{}: moved back to {}",
+            path.display(),
+            target.display()
+        )),
         Event::Skipped { path, reason } => Some(format!(
             "{}: skipped, {}",
             path.display(),
@@ -253,6 +273,9 @@ fn skipped_because(reason: &SkipReason) -> String {
         SkipReason::AlreadyNamed => "already carries that name".to_string(),
         SkipReason::Unreadable { message } => format!("unreadable ({message})"),
         SkipReason::Unnameable => "the record renders an empty name".to_string(),
+        SkipReason::Missing => "nothing is there to move back".to_string(),
+        SkipReason::ContentChanged => "the file there is not the one that was moved".to_string(),
+        SkipReason::OriginalTaken => "its original name is taken".to_string(),
         SkipReason::RenameFailed { message } => format!("rename failed ({message})"),
     }
 }

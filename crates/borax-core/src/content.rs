@@ -17,7 +17,16 @@ use sha2::{Digest, Sha256};
 /// readable if borax ever hashes with something else: entries written
 /// by a different algorithm are distinguishable rather than silently
 /// compared.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Serialized as the bare string, so a stored hash is legible in a
+/// journal or cache entry. Deserialization does not re-validate the
+/// shape: a hash read back from a mangled file simply equals nothing
+/// that was actually hashed, which is the answer callers already
+/// handle.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct ContentHash(String);
 
 impl ContentHash {
