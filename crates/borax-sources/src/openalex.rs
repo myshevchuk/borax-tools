@@ -196,6 +196,20 @@ pub fn parse(body: &str) -> Result<Record, ParseError> {
     Ok(record)
 }
 
+/// `address` with the two characters that a query parameter cannot
+/// carry literally escaped: `+`, which a reader would take for a
+/// space, and `@`.
+fn encode_mailto(address: &str) -> String {
+    address
+        .chars()
+        .map(|character| match character {
+            '+' => "%2B".to_string(),
+            '@' => "%40".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
 /// The OpenAlex API, over a [`Transport`].
 #[derive(Debug, Clone)]
 pub struct OpenAlexClient<T> {
@@ -226,8 +240,22 @@ impl<T> OpenAlexClient<T> {
     /// mechanism — percent-encoding `+` as `%2B` and `@` as `%40` so an
     /// address with a tag survives. `User-Agent` is sent as well.
     pub fn request(&self, identifier: &Identifier) -> Option<HttpRequest> {
-        let _ = (identifier, &self.politeness);
-        todo!("build an OpenAlex request")
+        let namespaced = match identifier {
+            Identifier::Doi(doi) => format!("doi:{}", doi.as_str()),
+            Identifier::Pmid(pmid) => format!("pmid:{}", pmid.value()),
+            Identifier::Arxiv(_) | Identifier::Isbn(_) => return None,
+        };
+
+        let mut url = format!("https://api.openalex.org/works/{namespaced}");
+        if let Some(mailto) = &self.politeness.mailto {
+            url.push_str("?mailto=");
+            url.push_str(&encode_mailto(mailto));
+        }
+
+        Some(HttpRequest {
+            url,
+            headers: vec![("User-Agent".to_string(), self.politeness.user_agent())],
+        })
     }
 }
 
@@ -244,7 +272,11 @@ impl<T: Transport> crate::source::Source for OpenAlexClient<T> {
     /// An unsupported identifier sends no request and reports
     /// [`SourceError::Unavailable`], as there.
     fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
-        let _ = (identifier, &self.transport);
-        todo!("fetch from OpenAlex")
+        crate::http::fetch(
+            &self.transport,
+            self.request(identifier),
+            SourceName::OpenAlex,
+            parse,
+        )
     }
 }

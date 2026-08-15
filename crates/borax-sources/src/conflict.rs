@@ -30,8 +30,15 @@ pub struct Conflict {
 /// quotes, an em dash, a trailing period, LaTeX-ish spacing — do not
 /// read as disagreement.
 pub fn normalize_title(title: &str) -> String {
-    let _ = title;
-    todo!("normalize a title for comparison")
+    let stripped: String = title
+        .chars()
+        .filter(|character| character.is_alphanumeric() || character.is_whitespace())
+        .collect();
+    stripped
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// Compare the title a file claimed with the one the resolved record
@@ -50,6 +57,34 @@ pub fn normalize_title(title: &str) -> String {
 /// given**, not normalized: a person reading the run summary needs to
 /// see the real strings to judge what happened.
 pub fn check_title(extracted: Option<&str>, record: &Record) -> Option<Conflict> {
-    let _ = (extracted, record);
-    todo!("compare the extracted and resolved titles")
+    let extracted = extracted?;
+    let resolved = record.title.as_deref()?;
+
+    let normalized_extracted = normalize_title(extracted);
+    let normalized_resolved = normalize_title(resolved);
+    if normalized_extracted.is_empty() || normalized_resolved.is_empty() {
+        return None;
+    }
+
+    if normalized_extracted == normalized_resolved
+        || extends(&normalized_extracted, &normalized_resolved)
+        || extends(&normalized_resolved, &normalized_extracted)
+    {
+        return None;
+    }
+
+    Some(Conflict {
+        field: "title",
+        extracted: extracted.to_string(),
+        resolved: resolved.to_string(),
+    })
+}
+
+/// Whether `longer` is `shorter` followed by a further word — a
+/// subtitle, rather than a different title that happens to start with
+/// the same letters.
+fn extends(shorter: &str, longer: &str) -> bool {
+    longer
+        .strip_prefix(shorter)
+        .is_some_and(|rest| rest.starts_with(' '))
 }

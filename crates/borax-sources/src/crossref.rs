@@ -198,8 +198,17 @@ impl<T> CrossrefClient<T> {
     /// on the raw suffix, slashes included. Headers: `User-Agent` from
     /// [`Politeness::user_agent`], and `Accept: application/json`.
     pub fn request(&self, identifier: &Identifier) -> Option<HttpRequest> {
-        let _ = (identifier, &self.politeness);
-        todo!("build a Crossref request")
+        let Identifier::Doi(doi) = identifier else {
+            return None;
+        };
+
+        Some(HttpRequest {
+            url: format!("https://api.crossref.org/works/{}", doi.as_str()),
+            headers: vec![
+                ("User-Agent".to_string(), self.politeness.user_agent()),
+                ("Accept".to_string(), "application/json".to_string()),
+            ],
+        })
     }
 }
 
@@ -222,7 +231,11 @@ impl<T: Transport> crate::source::Source for CrossrefClient<T> {
     /// asked, so the answer is unknown — reporting `NotFound` would
     /// claim knowledge the source never had.
     fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
-        let _ = (identifier, &self.transport);
-        todo!("fetch from Crossref")
+        crate::http::fetch(
+            &self.transport,
+            self.request(identifier),
+            SourceName::Crossref,
+            parse,
+        )
     }
 }

@@ -8,7 +8,9 @@
 
 use std::fmt;
 
-use crate::source::SourceError;
+use borax_core::record::Record;
+
+use crate::source::{ParseError, SourceError, SourceName};
 
 /// The version borax identifies itself as.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -84,8 +86,10 @@ impl Politeness {
     /// `borax/<version> (mailto:<address>)` when an address is
     /// configured.
     pub fn user_agent(&self) -> String {
-        let _ = self;
-        todo!("build the User-Agent")
+        match &self.mailto {
+            Some(mailto) => format!("borax/{VERSION} (mailto:{mailto})"),
+            None => format!("borax/{VERSION}"),
+        }
     }
 }
 
@@ -98,6 +102,34 @@ impl Politeness {
 /// too, naming the status — a `400` means borax built a bad request,
 /// which is a defect to surface, not an answer about the record.
 pub fn classify(status: u16) -> Option<SourceError> {
-    let _ = status;
-    todo!("classify a status code")
+    match status {
+        200..=299 => None,
+        404 | 410 => Some(SourceError::NotFound),
+        429 => Some(SourceError::RateLimited),
+        _ => Some(SourceError::Unavailable {
+            message: format!("HTTP status {status}"),
+        }),
+    }
+}
+
+/// Perform `request` and read its body as a record.
+///
+/// The four steps every client's `fetch` shares: a `None` request is a
+/// question that was never asked, the transport's failure is a
+/// non-answer, the status decides whether the body is worth reading,
+/// and `parse` turns the body into a record.
+pub(crate) fn fetch<T: Transport>(
+    transport: &T,
+    request: Option<HttpRequest>,
+    source: SourceName,
+    parse: fn(&str) -> Result<Record, ParseError>,
+) -> Result<Record, SourceError> {
+    let request = request.ok_or_else(|| SourceError::Unavailable {
+        message: format!("{source} cannot be asked about this identifier"),
+    })?;
+    let response = transport.get(&request)?;
+    if let Some(error) = classify(response.status) {
+        return Err(error);
+    }
+    Ok(parse(&response.body)?)
 }

@@ -238,8 +238,14 @@ impl<T> ArxivClient<T> {
     /// to carry. Only `User-Agent` is sent: arXiv runs no polite pool,
     /// so a contact address would be data sent for no purpose.
     pub fn request(&self, identifier: &Identifier) -> Option<HttpRequest> {
-        let _ = (identifier, &self.politeness);
-        todo!("build an arXiv request")
+        let Identifier::Arxiv(arxiv) = identifier else {
+            return None;
+        };
+
+        Some(HttpRequest {
+            url: format!("https://export.arxiv.org/api/query?id_list={}", arxiv.id()),
+            headers: vec![("User-Agent".to_string(), self.politeness.user_agent())],
+        })
     }
 }
 
@@ -260,7 +266,11 @@ impl<T: Transport> crate::source::Source for ArxivClient<T> {
     /// [`crate::source::ParseError::NotFound`] and this maps to
     /// [`SourceError::NotFound`].
     fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
-        let _ = (identifier, &self.transport);
-        todo!("fetch from arXiv")
+        crate::http::fetch(
+            &self.transport,
+            self.request(identifier),
+            SourceName::Arxiv,
+            parse,
+        )
     }
 }
