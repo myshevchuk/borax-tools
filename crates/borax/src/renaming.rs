@@ -62,6 +62,8 @@ pub enum PlannedRename {
     /// byte-identical file already sits there.
     AlreadyNamed { path: PathBuf },
     /// Leave `path` alone: `target` is taken and the policy is to skip.
+    /// `target` is the name the record asked for, never a suffixed
+    /// candidate — under [`CollisionPolicy::Skip`] nothing is suffixed.
     TargetTaken { path: PathBuf, target: PathBuf },
     /// Leave `path` alone: its record renders no usable name.
     Unnameable { path: PathBuf },
@@ -87,8 +89,11 @@ impl PlannedRename {
 /// what it is. `hash` supplies the `sha1` field templates may use, and
 /// its absence renders that field empty.
 ///
-/// Returns `None` when the rendered, sanitized name is empty, which is
-/// a record too sparse to name a file from.
+/// Returns `None` when the template renders an empty string, which is
+/// a record too sparse to name a file from. The check is on the
+/// rendered text, before sanitization: [`borax_core::sanitize::sanitize`]
+/// answers `_` for an empty input, so a name that survives it is never
+/// evidence that there was one to begin with.
 pub fn target_name(
     path: &Path,
     record: &Record,
@@ -110,7 +115,13 @@ pub fn target_name(
 /// Within a group, order follows the input, so the suffix a collision
 /// receives is deterministic. A file whose record renders no usable
 /// name is [`PlannedRename::Unnameable`] and never reaches the
-/// planner.
+/// planner — it claims no name, so it cannot cost a later file its
+/// unsuffixed one.
+///
+/// Paths cross the two namespaces here: the planner is handed bare
+/// file names, matching [`Filesystem::existing`], while every path in
+/// the returned decisions is full — the input path as given, and a
+/// target of its directory joined to the planned name.
 pub fn plan_renames(
     resolved: &[(PathBuf, FileRecord)],
     templates: &TemplateTable,
