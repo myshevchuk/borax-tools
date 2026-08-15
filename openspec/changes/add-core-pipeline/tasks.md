@@ -58,14 +58,20 @@ the implementation, then refactor with the suite green.
 
 ## 6. PDF extraction (borax-pdf)
 
+The pure layer (6.3-6.5) sits above the `PdfSource` trait and is
+complete and tested with fakes; 6.1's native half and 6.2 remain, and
+are the only parts needing a real engine.
+
 - [ ] 6.1 Choose and wire the pdfium binding with static/prebuilt
       binaries for Linux, macOS, Windows; define the `Extractor` trait
+      (trait done as `source::PdfSource` with its typed failure model;
+      the binding and its CI binary wiring are open)
 - [ ] 6.2 Build the real-PDF fixture corpus (publisher PDFs, arXiv PDFs,
       encrypted, no-text-layer, malformed)
-- [ ] 6.3 Tests + implementation: embedded XMP/Info metadata pass
-- [ ] 6.4 Tests + implementation: text-layer identifier pass with bounded
+- [x] 6.3 Tests + implementation: embedded XMP/Info metadata pass
+- [x] 6.4 Tests + implementation: text-layer identifier pass with bounded
       page range and DOI/arXiv normalization
-- [ ] 6.5 Tests + implementation: tiered orchestration (stop at first
+- [x] 6.5 Tests + implementation: tiered orchestration (stop at first
       hit) and typed failure modes
 
 ## 7. Sources (borax-sources)

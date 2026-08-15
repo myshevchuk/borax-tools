@@ -1,6 +1,6 @@
 //! Tiered extraction: cheap passes first, stop at the first hit.
 
-use crate::scan::FoundIdentifier;
+use crate::scan::{FoundIdentifier, scan_info, scan_text, scan_xmp};
 use crate::source::{ExtractionError, PdfSource};
 
 /// Which pass produced an identifier — recorded so the resolved record
@@ -65,6 +65,34 @@ pub fn extract(
     source: &dyn PdfSource,
     config: &ExtractionConfig,
 ) -> Result<Extracted, ExtractionError> {
-    let _ = (source, config);
-    todo!("run the tiered extraction")
+    if let Some(identifier) = source.xmp().and_then(scan_xmp) {
+        return Ok(Extracted {
+            identifier,
+            tier: Tier::EmbeddedMetadata,
+        });
+    }
+    if let Some(identifier) = scan_info(source.info_metadata()) {
+        return Ok(Extracted {
+            identifier,
+            tier: Tier::EmbeddedMetadata,
+        });
+    }
+
+    let mut saw_text = false;
+    for index in 0..source.page_count().min(config.page_limit) {
+        let text = source.page_text(index)?;
+        saw_text |= !text.chars().all(|c| c.is_ascii_whitespace());
+        if let Some(identifier) = scan_text(&text) {
+            return Ok(Extracted {
+                identifier,
+                tier: Tier::TextLayer,
+            });
+        }
+    }
+
+    if saw_text {
+        Err(ExtractionError::NoIdentifierFound)
+    } else {
+        Err(ExtractionError::NoTextLayer)
+    }
 }
