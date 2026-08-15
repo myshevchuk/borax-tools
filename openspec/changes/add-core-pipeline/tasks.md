@@ -81,18 +81,26 @@ build feature, never a mandatory dependency.
 
 ## 7. Sources (borax-sources)
 
-- [ ] 7.1 Define the `Source` trait and typed failure model; set up the
+Response reading is separated from HTTP: the readers are pure and
+tested against real recorded responses, so only 7.6 needs a network
+stack at all.
+
+- [x] 7.1 Define the `Source` trait and typed failure model; set up the
       recorded-cassette test harness
-- [ ] 7.2 Tests (cassettes) + implementation: Crossref client with
-      polite-pool headers and tolerant response parsing
-- [ ] 7.3 Tests (cassettes) + implementation: OpenAlex client
-- [ ] 7.4 Tests (cassettes) + implementation: arXiv client
-- [ ] 7.5 Tests + implementation: priority/fallback dispatch by
+- [x] 7.2 Tests (cassettes) + implementation: tolerant Crossref
+      response reader
+- [x] 7.3 Tests (cassettes) + implementation: OpenAlex response reader
+- [x] 7.4 Tests (cassettes) + implementation: arXiv response reader,
+      including the entry-less feed that means "not found"
+- [x] 7.5 Tests + implementation: priority/fallback dispatch by
       identifier type
-- [ ] 7.6 Tests + implementation: on-disk response cache (identifier key
+- [ ] 7.6 Tests + implementation: the HTTP clients implementing
+      `Source` — polite-pool identification, timeouts, and the
+      status-to-`SourceError` mapping
+- [ ] 7.7 Tests + implementation: on-disk response cache (identifier key
       + content-hash index), `--no-cache` bypass, rate limiting, bounded
       concurrency
-- [ ] 7.7 Tests + implementation: conflict detection and the
+- [ ] 7.8 Tests + implementation: conflict detection and the
       skip-and-report contract
 
 ## 8. CLI (borax)

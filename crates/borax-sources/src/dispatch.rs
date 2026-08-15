@@ -49,8 +49,16 @@ impl Unresolved {
 /// The list is a preference, not a guarantee: [`resolve`] skips names
 /// it was not given.
 pub fn priority(identifier: &Identifier) -> Vec<SourceName> {
-    let _ = identifier;
-    todo!("order the sources for an identifier")
+    match identifier {
+        Identifier::Doi(_) => vec![
+            SourceName::Crossref,
+            SourceName::OpenAlex,
+            SourceName::DataCite,
+        ],
+        Identifier::Arxiv(_) => vec![SourceName::Arxiv, SourceName::OpenAlex],
+        Identifier::Pmid(_) => vec![SourceName::PubMed, SourceName::OpenAlex],
+        Identifier::Isbn(_) => vec![SourceName::OpenAlex],
+    }
 }
 
 /// Ask the available sources for `identifier`, in [`priority`] order,
@@ -66,6 +74,24 @@ pub fn priority(identifier: &Identifier) -> Vec<SourceName> {
 /// Deterministic: the same sources and identifier always produce the
 /// same result and the same attempt list.
 pub fn resolve(sources: &[&dyn Source], identifier: &Identifier) -> Result<Resolved, Unresolved> {
-    let _ = (sources, identifier);
-    todo!("resolve an identifier against the available sources")
+    let mut attempts = Vec::new();
+
+    for name in priority(identifier) {
+        let consulted = sources
+            .iter()
+            .filter(|source| source.name() == name && source.supports(identifier));
+        for source in consulted {
+            match source.fetch(identifier) {
+                Ok(record) => {
+                    return Ok(Resolved {
+                        record,
+                        source: name,
+                    });
+                }
+                Err(error) => attempts.push((name, error)),
+            }
+        }
+    }
+
+    Err(Unresolved { attempts })
 }

@@ -117,6 +117,32 @@ impl From<ParseError> for SourceError {
     }
 }
 
+/// Attribute every field `record` carries to `source`, under the
+/// field's CSL name.
+///
+/// Called by a reader once it has finished building a record, so a
+/// field is attributed exactly when the response supplied it.
+pub(crate) fn attribute(record: &mut Record, source: borax_core::record::Source) {
+    let supplied = [
+        ("title", record.title.is_some()),
+        ("author", !record.authors.is_empty()),
+        ("issued", record.issued.is_some()),
+        ("container-title", record.container_title.is_some()),
+        ("volume", record.volume.is_some()),
+        ("issue", record.issue.is_some()),
+        ("page", record.pages.is_some()),
+        ("publisher", record.publisher.is_some()),
+        ("DOI", record.doi.is_some()),
+        ("ISBN", record.isbn.is_some()),
+    ];
+
+    for (field, present) in supplied {
+        if present {
+            record.borax.provenance.insert(field.to_string(), source);
+        }
+    }
+}
+
 /// A bibliographic service borax can ask about an identifier.
 pub trait Source {
     /// Which service this is.

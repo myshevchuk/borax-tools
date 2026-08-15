@@ -1,8 +1,10 @@
 //! Reading Crossref work responses.
 
-use borax_core::record::{EntryType, Record};
+use borax_core::identifier::{Doi, Isbn};
+use borax_core::record::{DateParts, EntryType, Name, Record, Source};
+use serde_json::Value;
 
-use crate::source::ParseError;
+use crate::source::{ParseError, attribute};
 
 /// Map a Crossref `type` to the record model.
 ///
@@ -16,8 +18,80 @@ use crate::source::ParseError;
 /// time, and treating an unknown work as an article keeps a new one
 /// resolvable instead of failing the file.
 pub fn entry_type(crossref_type: &str) -> EntryType {
-    let _ = crossref_type;
-    todo!("map a Crossref type")
+    match crossref_type {
+        "posted-content" => EntryType::Preprint,
+        "book" | "monograph" | "edited-book" | "reference-book" => EntryType::Book,
+        "book-chapter" | "book-part" | "book-section" => EntryType::Chapter,
+        "dissertation" => EntryType::Thesis,
+        "report" | "report-component" => EntryType::Report,
+        "standard" => EntryType::Standard,
+        _ => EntryType::Article,
+    }
+}
+
+/// `work[key]` when it is a string.
+fn string(work: &Value, key: &str) -> Option<String> {
+    Some(work.get(key)?.as_str()?.to_string())
+}
+
+/// The first string in `work[key]`, which Crossref sends as an array
+/// even for fields that hold at most one value.
+fn first_string(work: &Value, key: &str) -> Option<String> {
+    Some(work.get(key)?.as_array()?.first()?.as_str()?.to_string())
+}
+
+/// The date `work[key]` states, read from the head of its `date-parts`.
+///
+/// Any shape other than `[year]`, `[year, month]`, or
+/// `[year, month, day]` yields no date.
+fn date(work: &Value, key: &str) -> Option<DateParts> {
+    let parts = work
+        .get(key)?
+        .get("date-parts")?
+        .as_array()?
+        .first()?
+        .as_array()?;
+    let part = |index: usize| -> Option<u8> { u8::try_from(parts.get(index)?.as_i64()?).ok() };
+    let year = i32::try_from(parts.first()?.as_i64()?).ok()?;
+
+    match parts.len() {
+        1 => Some(DateParts {
+            year,
+            month: None,
+            day: None,
+        }),
+        2 => Some(DateParts {
+            year,
+            month: Some(part(1)?),
+            day: None,
+        }),
+        3 => Some(DateParts {
+            year,
+            month: Some(part(1)?),
+            day: Some(part(2)?),
+        }),
+        _ => None,
+    }
+}
+
+/// The authors of `work`, dropping the entries with no `family`.
+fn authors(work: &Value) -> Vec<Name> {
+    let Some(entries) = work.get("author").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(|entry| {
+            Some(Name {
+                family: entry.get("family")?.as_str()?.to_string(),
+                given: entry
+                    .get("given")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
 }
 
 /// Parse a Crossref `/works/{doi}` response body into a record.
@@ -36,8 +110,10 @@ pub fn entry_type(crossref_type: &str) -> EntryType {
 /// publisher, `ISBN[0]` → ISBN when it parses (ignored when it does
 /// not — a bad ISBN must not cost the whole record), and `issued`,
 /// else `published`, → the issued date via its `date-parts[0]`
-/// (year, then optional month and day; a malformed shape leaves the
-/// date absent).
+/// (year, then optional month and day). "Else" means whichever first
+/// yields a usable date, so a malformed `issued` falls through to a
+/// sound `published`; when neither yields one the date is absent, and
+/// no date shape ever fails the record.
 ///
 /// Authors come from `author[]`, keeping entries that have `family`
 /// and dropping the rest (Crossref represents consortia with a `name`
@@ -54,6 +130,43 @@ pub fn entry_type(crossref_type: &str) -> EntryType {
 /// of works, and an empty array is not data worth carrying into every
 /// record and sidecar.
 pub fn parse(body: &str) -> Result<Record, ParseError> {
-    let _ = body;
-    todo!("parse a Crossref work")
+    let envelope: Value = serde_json::from_str(body).map_err(|error| ParseError::Malformed {
+        message: error.to_string(),
+    })?;
+    let work = envelope
+        .get("message")
+        .ok_or(ParseError::MissingField { field: "message" })?;
+
+    let doi = string(work, "DOI").ok_or(ParseError::MissingField { field: "DOI" })?;
+    let doi = Doi::parse(&doi).map_err(|error| ParseError::Invalid {
+        field: "DOI",
+        message: error.to_string(),
+    })?;
+    let work_type = string(work, "type").ok_or(ParseError::MissingField { field: "type" })?;
+
+    let mut record = Record::new(entry_type(&work_type));
+    record.doi = Some(doi);
+    record.title = first_string(work, "title");
+    record.authors = authors(work);
+    record.issued = date(work, "issued").or_else(|| date(work, "published"));
+    record.container_title = first_string(work, "container-title");
+    record.volume = string(work, "volume");
+    record.issue = string(work, "issue");
+    record.pages = string(work, "page");
+    record.publisher = string(work, "publisher");
+    record.isbn = first_string(work, "ISBN").and_then(|isbn| Isbn::parse(&isbn).ok());
+
+    let subject = work
+        .get("subject")
+        .and_then(Value::as_array)
+        .filter(|subject| !subject.is_empty());
+    if let Some(subject) = subject {
+        record
+            .borax
+            .source_fields
+            .insert("subject".to_string(), Value::Array(subject.clone()));
+    }
+
+    attribute(&mut record, Source::Crossref);
+    Ok(record)
 }
