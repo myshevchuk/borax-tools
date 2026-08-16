@@ -17,6 +17,7 @@ use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
 use borax_core::record::Record;
 use borax_pdf::pure::PurePdf;
+use borax_pdf::scan::xmp_title;
 use borax_pdf::source::{ExtractionError, PdfSource};
 use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier, extract};
 use borax_sources::cache::Cache;
@@ -152,7 +153,7 @@ pub fn resolve_file<C: Cache>(
         }
     }
 
-    let (extracted, extracted_title) = match extract_from(path, library, &config.extraction) {
+    let (extracted, claimed_titles) = match extract_from(path, library, &config.extraction) {
         Ok(found) => found,
         Err(error) => return FileOutcome::Skipped(skipped_for(&error)),
     };
@@ -163,11 +164,13 @@ pub fn resolve_file<C: Cache>(
         Err(unresolved) => return FileOutcome::Skipped(unresolvable(&unresolved)),
     };
 
-    if let Some(conflict) = check_title(extracted_title.as_deref(), &resolved.record) {
+    let claimed: Vec<&str> = claimed_titles.iter().map(String::as_str).collect();
+    if let Some(conflict) = check_title(&claimed, &resolved.record) {
         return FileOutcome::Skipped(SkipReason::Conflict {
             field: conflict.field.to_string(),
             extracted: conflict.extracted,
             resolved: conflict.resolved,
+            similarity: conflict.similarity,
         });
     }
 
@@ -184,19 +187,32 @@ pub fn resolve_file<C: Cache>(
     })
 }
 
-/// Extract from the file at `path`, along with the title its own
+/// Extract from the file at `path`, along with every title its own
 /// metadata claims.
 ///
-/// The title is taken while the document is open, since the conflict
+/// A document may hold two — the XMP packet's `dc:title` and the Info
+/// dictionary's — and they need not agree with each other or with
+/// anything. Both are collected rather than one preferred, because
+/// which of them is worth believing cannot be known here: a publisher
+/// PDF whose XMP holds a producer's placeholder may carry the real
+/// title in its Info dictionary, and the reverse happens just as often.
+/// [`borax_sources::conflict::check_title`] is what decides which are
+/// evidence.
+///
+/// The titles are taken while the document is open, since the conflict
 /// check runs after it has been dropped.
 fn extract_from(
     path: &Path,
     library: &dyn Library,
     config: &ExtractionConfig,
-) -> Result<(Extracted, Option<String>), ExtractionError> {
+) -> Result<(Extracted, Vec<String>), ExtractionError> {
     let pdf = library.open(path)?;
     let extracted = extract(pdf.as_ref(), config)?;
-    Ok((extracted, pdf.info_metadata().title.clone()))
+    let claimed = [
+        pdf.xmp().and_then(xmp_title),
+        pdf.info_metadata().title.clone(),
+    ];
+    Ok((extracted, claimed.into_iter().flatten().collect()))
 }
 
 /// The skip an extraction failure reports.

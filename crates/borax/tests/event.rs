@@ -116,6 +116,7 @@ fn all_events() -> Vec<Event> {
             field: "year".to_string(),
             extracted: "2023".to_string(),
             resolved: "2024".to_string(),
+            similarity: 0.0,
         }),
         skipped(SkipReason::TargetTaken {
             target: PathBuf::from("smith2024_borax.pdf"),
@@ -157,6 +158,7 @@ fn all_skip_reasons() -> Vec<SkipReason> {
             field: "year".to_string(),
             extracted: "2023".to_string(),
             resolved: "2024".to_string(),
+            similarity: 0.0,
         },
         SkipReason::TargetTaken {
             target: PathBuf::from("smith2024_borax.pdf"),
@@ -346,6 +348,7 @@ fn skipped_nests_the_reason_under_reason_with_a_kebab_case_kind_tag() {
                 field: "year".to_string(),
                 extracted: "2023".to_string(),
                 resolved: "2024".to_string(),
+                similarity: 0.0,
             },
             "conflict",
         ),
@@ -586,6 +589,7 @@ fn human_line_of_skipped_makes_the_reason_legible_for_every_variant() {
                 field: "year".to_string(),
                 extracted: "2023".to_string(),
                 resolved: "2024".to_string(),
+                similarity: 0.0,
             },
             "year",
         ),

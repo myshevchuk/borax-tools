@@ -240,8 +240,13 @@ enum Filter {
 /// How many words `shorttitle` keeps when no count is given.
 const DEFAULT_SHORT_TITLE_WORDS: usize = 3;
 
-/// Words `shorttitle` skips, compared case-insensitively.
-const FUNCTION_WORDS: [&str; 16] = [
+/// Words carrying no subject matter of their own, compared
+/// case-insensitively.
+///
+/// `shorttitle` skips them when choosing the words that name a work.
+/// Callers comparing two renderings of one title drop them for the same
+/// reason: a shared `the` is not evidence that two titles agree.
+pub const FUNCTION_WORDS: [&str; 16] = [
     "a", "an", "the", "of", "on", "in", "for", "and", "or", "to", "with", "at", "by", "from",
     "into", "upon",
 ];
@@ -613,7 +618,16 @@ fn slug(value: &str) -> String {
     slug.trim_matches('-').to_string()
 }
 
-fn transliterate(value: &str) -> String {
+/// Fold the common Latin letters of `value` to ASCII.
+///
+/// The mapping is the one the `transliterate` filter documents: ä→ae,
+/// ö→oe, ü→ue, ß→ss and their uppercase forms; æ→ae, ø→o, å→a, đ→d,
+/// ł→l, ñ→n, ç→c; and the accented vowels lose their accents.
+///
+/// A character with no folding passes through unchanged, so the result
+/// is not guaranteed to be ASCII: only the letters in the table above
+/// are handled, and Greek, Cyrillic, and CJK are left as they were.
+pub fn transliterate(value: &str) -> String {
     let mut folded = String::with_capacity(value.len());
     for c in value.chars() {
         match fold(c) {

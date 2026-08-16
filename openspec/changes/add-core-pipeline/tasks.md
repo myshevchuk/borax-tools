@@ -78,6 +78,10 @@ build feature, never a mandatory dependency.
 - [ ] 6.7 Optional `pdfium` cargo feature: a second `PdfSource` backend
       plus its prebuilt-binary pipeline. Deferred until Windows testing
       shows the default backend is not enough
+- [x] 6.8 Tests + implementation: `scan::xmp_title`, reading `dc:title`
+      (including its `rdf:Alt` language table) so the conflict check
+      sees every title a document claims rather than only the Info
+      dictionary's
 
 ## 7. Sources (borax-sources)
 
@@ -110,6 +114,13 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       concurrency
 - [x] 7.10 Tests + implementation: conflict detection for the
       skip-and-report contract
+- [x] 7.11 Revise conflict detection, which 7.10 built as exact equality
+      after normalization and which therefore skipped correct files over
+      typography their producer chose. Titles compare as content words
+      folded toward the lossiest encoding either side could carry and are
+      judged by similarity; a document's title claims are filtered
+      through a plausibility guard first, and agreement by any one of
+      them clears the file. The skip reports the similarity
 
 ## 8. CLI (borax)
 

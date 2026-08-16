@@ -149,6 +149,77 @@ pub fn scan_xmp(xmp: &str) -> Option<FoundIdentifier> {
     None
 }
 
+/// The title an XMP packet claims, from its `dc:title`.
+///
+/// Tolerant in the same way [`scan_xmp`] is, and not a real XML parse:
+/// the first element whose local name is `title` supplies the value,
+/// and an `rdf:Alt` language table inside it contributes its first
+/// `rdf:li` — the `x-default` entry, by XMP's own ordering rule. Any
+/// remaining markup is stripped, so a value carrying a nested span
+/// yields its text.
+///
+/// The result is trimmed, and a title that is empty once trimmed reads
+/// as absent. Malformed XML yields whatever well-formed fragment it
+/// contains rather than an error.
+///
+/// What comes back is a claim, not a fact: producers write placeholders
+/// here as readily as titles.
+pub fn xmp_title(xmp: &str) -> Option<String> {
+    let mut rest = xmp;
+    while let Some((_, after_open)) = rest.split_once('<') {
+        let (tag, after_tag) = after_open.split_once('>')?;
+        rest = after_tag;
+
+        if tag.starts_with(['/', '!', '?']) {
+            continue;
+        }
+
+        let name = tag
+            .split(|c: char| c.is_ascii_whitespace() || c == '/')
+            .next()
+            .unwrap_or(tag);
+        if !local_name(name).eq_ignore_ascii_case("title")
+            || tag
+                .get(name.len()..)
+                .unwrap_or("")
+                .trim_end()
+                .ends_with('/')
+        {
+            continue;
+        }
+
+        let value = match after_tag.split_once("</dc:title>") {
+            Some((value, _)) => value,
+            // A packet whose title is never closed yields what follows
+            // it, which the element-stripping below reduces to its text.
+            None => after_tag.split_once("</").map_or(after_tag, |(v, _)| v),
+        };
+        return first_text(value);
+    }
+    None
+}
+
+/// The first run of text in `value` that is not inside a tag, trimmed,
+/// or `None` when there is none.
+///
+/// An `rdf:Alt` table therefore yields its first `rdf:li`, and a plain
+/// value yields itself.
+fn first_text(value: &str) -> Option<String> {
+    let mut rest = value;
+    loop {
+        let (text, after) = match rest.split_once('<') {
+            Some((text, after)) => (text, Some(after)),
+            None => (rest, None),
+        };
+        if !text.trim().is_empty() {
+            return Some(text.trim().to_string());
+        }
+
+        // Skip the tag and continue with what follows it.
+        rest = after?.split_once('>').map(|(_, after)| after)?;
+    }
+}
+
 /// The part of an XML name after any `prefix:`.
 fn local_name(name: &str) -> &str {
     match name.rsplit_once(':') {

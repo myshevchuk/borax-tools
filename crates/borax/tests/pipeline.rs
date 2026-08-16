@@ -655,15 +655,83 @@ fn a_title_conflict_is_a_skip_and_the_record_is_not_returned() {
     let outcome = resolve_file(path, &library, &sources, &index, &config(true));
 
     assert!(!matches!(outcome, FileOutcome::Resolved(_)));
-    let reason = skipped_outcome(outcome);
+    let SkipReason::Conflict {
+        field,
+        extracted,
+        resolved,
+        similarity,
+    } = skipped_outcome(outcome)
+    else {
+        panic!("expected a title conflict");
+    };
+
+    assert_eq!(field, "title");
+    assert_eq!(extracted, "Old Title Extracted from the PDF");
     assert_eq!(
-        reason,
-        SkipReason::Conflict {
-            field: "title".to_string(),
-            extracted: "Old Title Extracted from the PDF".to_string(),
-            resolved: "A Completely Different Title About Something Else".to_string(),
-        }
+        resolved,
+        "A Completely Different Title About Something Else"
     );
+    // The two share only `title` out of four and six content words.
+    assert_eq!(similarity, 0.2);
+}
+
+/// The regression this check was rewritten for: `2011ASC(353)575.pdf`,
+/// whose typesetter could not encode the alpha or the hyphens that the
+/// publisher's record keeps. One dropped letter is not a different work.
+#[test]
+fn a_title_the_producer_could_not_encode_is_not_a_conflict() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("lossy-title");
+    let library = FakeLibrary::new().with_file(
+        path,
+        hash,
+        pdf_with_embedded_doi("10.1002/adsc.201000846").with_title(
+            "Synthesis of Diazo Carbonyl Compounds with the ShelfStable Diazo Transfer \
+             Reagent Nonafluorobutanesulfonyl Azide",
+        ),
+    );
+    let (crossref, _) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1002/adsc.201000846",
+            "Synthesis of \u{3b1}\u{2010}Diazo Carbonyl Compounds with the Shelf\u{2010}Stable \
+             Diazo Transfer Reagent Nonafluorobutanesulfonyl Azide",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+
+    assert!(matches!(outcome, FileOutcome::Resolved(_)));
+}
+
+/// The same file's XMP packet says `untitled` while its Info dictionary
+/// carries the real title. One source of evidence agreeing is enough.
+#[test]
+fn a_placeholder_xmp_title_does_not_override_an_agreeing_info_title() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("placeholder-xmp");
+    let library = FakeLibrary::new().with_file(
+        path,
+        hash,
+        pdf_with_text_doi("10.1000/placeholder")
+            .with_title("The Real Title of This Particular Work")
+            .with_xmp("<dc:title><rdf:Alt><rdf:li>untitled</rdf:li></rdf:Alt></dc:title>"),
+    );
+    let (crossref, _) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1000/placeholder",
+            "The Real Title of This Particular Work",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+
+    assert!(matches!(outcome, FileOutcome::Resolved(_)));
 }
 
 // ---------------------------------------------------------------------

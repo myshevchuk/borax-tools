@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use borax_core::identifier::{ArxivId, Doi, Identifier};
-use borax_pdf::scan::{FoundIdentifier, scan_info, scan_text, scan_xmp};
+use borax_pdf::scan::{FoundIdentifier, scan_info, scan_text, scan_xmp, xmp_title};
 use borax_pdf::source::InfoMetadata;
 
 // ---------------------------------------------------------------------
@@ -354,4 +354,65 @@ fn arxiv_found_identifier_widens_to_an_arxiv_identifier_carrying_the_same_value(
     let widened: Identifier = FoundIdentifier::Arxiv(id.clone()).into();
 
     assert_eq!(widened, Identifier::Arxiv(id));
+}
+
+// ================= xmp_title =================
+
+/// The `dc:title` of `2011ASC(353)575.pdf`: a Distiller default, which
+/// is a value the caller has to be able to see in order to dismiss.
+const ASC_XMP: &str = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+   <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+         <dc:format>application/pdf</dc:format>
+         <dc:title>
+            <rdf:Alt>
+               <rdf:li xml:lang="x-default">untitled</rdf:li>
+            </rdf:Alt>
+         </dc:title>
+      </rdf:Description>
+   </rdf:RDF>
+</x:xmpmeta>"#;
+
+#[test]
+fn xmp_title_reads_the_alt_default_of_dc_title() {
+    assert_eq!(xmp_title(ASC_XMP), Some("untitled".to_string()));
+}
+
+#[test]
+fn xmp_title_reads_a_dc_title_holding_text_directly() {
+    let xmp = "<rdf:Description><dc:title>A Real Title</dc:title></rdf:Description>";
+    assert_eq!(xmp_title(xmp), Some("A Real Title".to_string()));
+}
+
+#[test]
+fn xmp_title_takes_the_first_rdf_li_when_several_languages_are_present() {
+    let xmp = r#"<dc:title><rdf:Alt>
+        <rdf:li xml:lang="x-default">Default Title</rdf:li>
+        <rdf:li xml:lang="de">Deutscher Titel</rdf:li>
+    </rdf:Alt></dc:title>"#;
+    assert_eq!(xmp_title(xmp), Some("Default Title".to_string()));
+}
+
+#[test]
+fn xmp_title_ignores_an_element_whose_local_name_is_not_title() {
+    let xmp = "<dc:creator>Someone</dc:creator><dc:format>application/pdf</dc:format>";
+    assert_eq!(xmp_title(xmp), None);
+}
+
+#[test]
+fn xmp_title_none_when_the_packet_holds_no_title() {
+    assert_eq!(xmp_title(""), None);
+}
+
+#[test]
+fn xmp_title_none_when_the_title_is_empty() {
+    assert_eq!(xmp_title("<dc:title></dc:title>"), None);
+}
+
+#[test]
+fn xmp_title_trims_the_surrounding_whitespace() {
+    assert_eq!(
+        xmp_title("<dc:title>\n   Spaced Title \n</dc:title>"),
+        Some("Spaced Title".to_string())
+    );
 }

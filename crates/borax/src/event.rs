@@ -28,7 +28,7 @@ pub const SCHEMA: u32 = 1;
 /// Serialized with an `event` tag naming the variant in kebab-case, so
 /// a consumer dispatches on one field and can ignore variants it does
 /// not know.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {
     /// The run is starting. `applying` distinguishes a preview from a
@@ -106,7 +106,7 @@ pub enum Event {
 /// Every variant is a decision borax made deliberately; nothing here is
 /// a crash. Serialized with a `kind` tag, nested under the event's
 /// `reason` field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum SkipReason {
     /// Neither extraction pass found an identifier in the file.
@@ -116,10 +116,18 @@ pub enum SkipReason {
     Unresolvable { attempts: Vec<Attempt> },
     /// The file's own metadata disagrees with the resolved record, so
     /// the record is probably about a different work.
+    ///
+    /// `similarity` is how close the two were, from 0.0 to 1.0, and is
+    /// always below the threshold that would have cleared them. It is
+    /// reported so the skip can be judged: a value near the threshold
+    /// says the identifier is probably right and the metadata merely
+    /// differs, while one near zero says the file and the record are
+    /// about different works.
     Conflict {
         field: String,
         extracted: String,
         resolved: String,
+        similarity: f64,
     },
     /// The name the template produced is taken, and the collision
     /// policy is to skip.
@@ -321,7 +329,11 @@ fn skipped_because(reason: &SkipReason) -> String {
             field,
             extracted,
             resolved,
-        } => format!("{field} disagrees (file says {extracted}, record says {resolved})"),
+            similarity,
+        } => format!(
+            "{field} disagrees {}% (file says {extracted}, record says {resolved})",
+            (similarity * 100.0).round()
+        ),
         SkipReason::TargetTaken { target } => format!("{} is taken", target.display()),
         SkipReason::AlreadyNamed => "already carries that name".to_string(),
         SkipReason::Unreadable { message } => format!("unreadable ({message})"),

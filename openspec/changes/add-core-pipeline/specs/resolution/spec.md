@@ -56,11 +56,42 @@ Resolution SHALL divert files with conflicting or low-confidence results
 beyond a normalization tolerance) untouched to the skip queue with a
 stated reason. Batch mode SHALL NOT auto-accept a low-confidence match.
 
+The tolerance SHALL be a similarity threshold, not equality. Titles SHALL
+be compared as content words after folding both sides toward the lossiest
+encoding either could carry — Latin letters transliterated to ASCII,
+every other non-alphanumeric character (punctuation, dashes, and letters
+with no transliteration) treated as a separator, function words dropped —
+and SHALL be taken to name the same work when either is a prefix of the
+other, when they differ only in where words were split, or when their
+similarity reaches the threshold. The skip event SHALL report the
+similarity, so a near miss is distinguishable from two unrelated works.
+
+A document may claim several titles (an XMP `dc:title` and an Info
+dictionary title, which need not agree). Every claim SHALL be considered,
+and agreement by any one of them SHALL clear the file. A claim that does
+not plausibly name a work — a placeholder, a filename, a bare identifier,
+or a short value sharing nothing with the record — SHALL NOT count as
+evidence of disagreement, since a producer's leftover contradicts every
+record and would otherwise make a resolvable file permanently unskippable.
+
 #### Scenario: Metadata conflict
 - **WHEN** a file's embedded title and the Crossref record's title
   disagree materially
-- **THEN** the file is skipped with reason "metadata conflict" and no
-  rename is planned for it
+- **THEN** the file is skipped with reason "metadata conflict", the
+  reported similarity is below the threshold, and no rename is planned
+  for it
+
+#### Scenario: A character the producer could not encode
+- **WHEN** a file's embedded title is the record's title with a Greek
+  letter and its hyphens dropped, as a typesetter that cannot encode them
+  writes it
+- **THEN** the titles agree and the file resolves
+
+#### Scenario: Placeholder alongside a real title
+- **WHEN** a file's XMP `dc:title` is a producer's placeholder and its
+  Info dictionary carries the real title
+- **THEN** the placeholder is not treated as evidence, the real title
+  agrees, and the file resolves
 
 ### Requirement: The run summary reports the skip queue
 Every run SHALL end with a summary listing each skipped file with its
