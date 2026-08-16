@@ -126,7 +126,7 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       `borax cache`
 - [x] 8.7 Tests + implementation: exit codes (success / partial /
       fatal) and never-prompt behavior when stdin is not a TTY
-- [ ] 8.8 The binary itself: argument parsing and subcommand dispatch,
+- [x] 8.8 The binary itself: argument parsing and subcommand dispatch,
       the real `Library` and `Filesystem` adapters, input-path walking,
       and a `main` thin enough that everything it does stays reachable
       from an in-process test. Tasks 8.1-8.7 build the library the
@@ -143,3 +143,14 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       APIs
 - [ ] 9.4 Release scaffolding: static binary builds attached to tagged
       GitHub releases; tag/version consistency check
+- [ ] 9.5 Report a rename that moved but could not be journaled. The
+      files have already moved when the append fails, so the run cannot
+      be refused and cannot be called clean either: it silently costs
+      `borax undo` the run it was meant to be able to revert. Needs a
+      way for a per-file failure to reach stderr from inside
+      `run::events_for`, which currently has only its return value
+- [ ] 9.6 Resolve configuration per input directory rather than once
+      per run. `.borax.toml` is specified as discovered upward from
+      each input file's directory, but a run climbs from the first
+      input path only, so one invocation spanning two trees applies the
+      first tree's overrides to both
