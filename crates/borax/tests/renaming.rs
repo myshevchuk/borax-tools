@@ -437,6 +437,137 @@ fn an_existing_file_occupying_the_target_is_target_taken_under_the_skip_policy()
 }
 
 // ---------------------------------------------------------------------
+// plan_renames: nested subdirectory targets
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_template_with_a_slash_plans_a_rename_into_a_subdirectory() {
+    let resolved = [resolved("/lib/a.pdf", record_by("Smith", 2024), None)];
+    let templates = table("sub/[auth][year]");
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+
+    assert_eq!(plan, vec![rename("/lib/a.pdf", "/lib/sub/Smith2024.pdf")]);
+}
+
+#[test]
+fn a_file_occupying_the_target_subdirectory_is_suffixed_under_the_suffix_policy() {
+    let resolved = [resolved("/lib/a.pdf", record_by("Smith", 2024), None)];
+    let templates = table("sub/[auth][year]");
+    let filesystem =
+        FakeFilesystem::new().with_existing("/lib/sub", [("Smith2024.pdf", Some("other-hash"))]);
+
+    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+
+    assert_eq!(plan, vec![rename("/lib/a.pdf", "/lib/sub/Smith2024a.pdf")]);
+}
+
+#[test]
+fn a_file_occupying_the_target_subdirectory_is_target_taken_under_the_skip_policy() {
+    let resolved = [resolved("/lib/a.pdf", record_by("Smith", 2024), None)];
+    let templates = table("sub/[auth][year]");
+    let filesystem =
+        FakeFilesystem::new().with_existing("/lib/sub", [("Smith2024.pdf", Some("other-hash"))]);
+
+    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Skip, &filesystem);
+
+    assert_eq!(
+        plan,
+        vec![target_taken("/lib/a.pdf", "/lib/sub/Smith2024.pdf")]
+    );
+}
+
+#[test]
+fn two_files_in_one_directory_targeting_the_same_subdirectory_collide() {
+    let resolved = [
+        resolved("/lib/a.pdf", record_by("Smith", 2024), None),
+        resolved("/lib/b.pdf", record_by("Smith", 2024), None),
+    ];
+    let templates = table("sub/[auth][year]");
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+
+    assert_eq!(
+        plan,
+        vec![
+            rename("/lib/a.pdf", "/lib/sub/Smith2024.pdf"),
+            rename("/lib/b.pdf", "/lib/sub/Smith2024a.pdf"),
+        ]
+    );
+}
+
+#[test]
+fn files_targeting_the_same_name_in_different_subdirectories_do_not_collide() {
+    let mut second = record_by("Smith", 2024);
+    second.entry_type = EntryType::Book;
+    let resolved = [
+        resolved("/lib/a.pdf", record_by("Smith", 2024), None),
+        resolved("/lib/b.pdf", second, None),
+    ];
+    // The default template files under "x", the Book template under "y",
+    // so the two files want the same stem in different subdirectories.
+    let templates = table_with("x/[auth][year]", EntryType::Book, "y/[auth][year]");
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+
+    assert_eq!(
+        plan,
+        vec![
+            rename("/lib/a.pdf", "/lib/x/Smith2024.pdf"),
+            rename("/lib/b.pdf", "/lib/y/Smith2024.pdf"),
+        ]
+    );
+}
+
+#[test]
+fn an_absent_target_subdirectory_plans_normally() {
+    let resolved = [resolved("/lib/a.pdf", record_by("Smith", 2024), None)];
+    let templates = table("sub/[auth][year]");
+    // No `with_existing` call at all for "/lib/sub": the directory is
+    // absent, not merely empty.
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+
+    assert_eq!(plan, vec![rename("/lib/a.pdf", "/lib/sub/Smith2024.pdf")]);
+}
+
+#[test]
+fn a_target_subdirectory_explicitly_seeded_as_empty_plans_normally() {
+    let resolved = [resolved("/lib/a.pdf", record_by("Smith", 2024), None)];
+    let templates = table("sub/[auth][year]");
+    let filesystem = FakeFilesystem::new().with_existing("/lib/sub", []);
+
+    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+
+    assert_eq!(plan, vec![rename("/lib/a.pdf", "/lib/sub/Smith2024.pdf")]);
+}
+
+#[test]
+fn a_relative_escape_in_the_template_sanitizes_to_a_literal_underscore_directory() {
+    // `sanitize` trims a component of nothing but dots down to "" and
+    // then substitutes "_", so "../" becomes a literal subdirectory
+    // named "_" rather than a step out of the file's own directory.
+    let resolved = [resolved(
+        "/lib/original.pdf",
+        record_by("Smith", 2024),
+        None,
+    )];
+    let templates = table("../[auth][year]");
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+
+    assert_eq!(
+        plan,
+        vec![rename("/lib/original.pdf", "/lib/_/Smith2024.pdf")]
+    );
+}
+
+// ---------------------------------------------------------------------
 // plan_renames: unnameable records
 // ---------------------------------------------------------------------
 
@@ -860,6 +991,43 @@ fn rename_refuses_to_overwrite_an_existing_destination() {
     let dir = tempdir().unwrap();
     let from = dir.path().join("original.pdf");
     let to = dir.path().join("Smith2024.pdf");
+    fs::write(&from, b"new bytes").unwrap();
+    fs::write(&to, b"bytes already there").unwrap();
+    let filesystem = RealFilesystem;
+
+    let result = filesystem.rename(&from, &to);
+
+    assert!(matches!(result, Err(RenameError { .. })), "got {result:?}");
+    assert_eq!(
+        fs::read(&to).unwrap(),
+        b"bytes already there",
+        "the destination must keep its own bytes"
+    );
+    assert!(from.exists(), "the source must still be there");
+    assert_eq!(fs::read(&from).unwrap(), b"new bytes");
+}
+
+#[test]
+fn rename_into_a_missing_subdirectory_creates_it_and_the_bytes_survive_the_move() {
+    let dir = tempdir().unwrap();
+    let from = dir.path().join("original.pdf");
+    let to = dir.path().join("sub").join("Smith2024.pdf");
+    fs::write(&from, b"the original bytes").unwrap();
+    let filesystem = RealFilesystem;
+
+    filesystem.rename(&from, &to).unwrap();
+
+    assert!(!from.exists(), "the old path must be gone");
+    assert_eq!(fs::read(&to).unwrap(), b"the original bytes");
+}
+
+#[test]
+fn rename_into_a_new_subdirectory_still_refuses_to_overwrite_an_existing_destination() {
+    let dir = tempdir().unwrap();
+    let from = dir.path().join("original.pdf");
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    let to = sub.join("Smith2024.pdf");
     fs::write(&from, b"new bytes").unwrap();
     fs::write(&to, b"bytes already there").unwrap();
     let filesystem = RealFilesystem;

@@ -256,23 +256,12 @@ either badly costs more than leaving it undone.
       one interval per service, so no service is asked faster however
       many threads are running
 
-- [ ] 11.2 Nested rename destinations. The templates spec makes `/` a
-      directory separator and `sanitize` honours it, but a subdirectory
-      target currently fails every file: `RealFilesystem::rename` never
-      creates the target's parent, and `Filesystem::existing` lists the
-      source's directory rather than the target's, so collisions inside
-      a subdirectory are invisible to the planner.
-      The fix is not to add a `create_dir_all`. `borax_core::rename::plan`
-      is a single-directory planner by contract — one flat, case-folded
-      namespace — and that contract is what makes deterministic suffixing
-      and case-insensitive collision detection work. Supporting nesting
-      means grouping by *target* directory in `plan_renames` rather than
-      by source directory, which in turn changes what "already named"
-      means for a file whose source and target directories differ: the
-      source is no longer a member of the namespace being planned, so
-      the `exempt` rule the planner uses cannot apply unchanged.
-      Adding the `create_dir_all` alone would be worse than the current
-      failure: files would move, but two files claiming one nested name
-      would collide at the filesystem instead of being suffixed, losing
-      the deterministic-collision guarantee that is the point of the
-      planner. Needs its own change and its own spec delta
+- [x] 11.2 Nested rename destinations. Smaller than the deferral note
+      claimed: `borax_core::rename::plan` was already a path namespace,
+      not a single-directory one — its `existing` is documented as the
+      *target* namespace and `with_suffix` finds the last `/` and
+      suffixes within the final component. Only `renaming.rs` narrowed
+      it. So the fix is to assemble the namespace from every directory
+      the batch's targets reach, keyed by path relative to the file's
+      own, and to create the target's parent when applying. Suffixing,
+      case-insensitive collisions and undo all work through it unchanged

@@ -11,7 +11,7 @@
 //! is what a later `--apply` does — not a separate code path that hopes
 //! to agree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -35,18 +35,26 @@ pub trait Filesystem {
     /// The names already present in `directory`, each with its content
     /// hash where that is known and `None` where it is not.
     ///
-    /// Keys are file names, not full paths, matching the namespace
-    /// [`borax_core::rename::plan`] works in. An unreadable directory
-    /// reports as empty: the planner then believes every name is free,
-    /// and the rename itself fails safely if it is not.
+    /// Keys are file names, not full paths: this answers about one
+    /// directory, and the caller is what assembles the namespace
+    /// [`borax_core::rename::plan`] compares in — a batch whose targets
+    /// reach into subdirectories asks about each of them.
+    ///
+    /// A directory that is unreadable, or that is not there at all,
+    /// reports as empty: the planner then believes every name in it is
+    /// free, and the rename itself fails safely if it is not.
     fn existing(&self, directory: &Path) -> BTreeMap<String, Option<String>>;
 
     /// Move `from` to `to`.
     ///
-    /// Both paths lie in the same directory. Fails rather than
-    /// overwrites when `to` exists — the planner is expected to have
-    /// prevented that, and a race that gets past it must not cost a
-    /// file.
+    /// `to` lies in `from`'s directory or in a subdirectory of it — a
+    /// template renders `/` as a directory separator — and any part of
+    /// that subdirectory which does not exist is the implementation's
+    /// to create.
+    ///
+    /// Fails rather than overwrites when `to` exists: the planner is
+    /// expected to have prevented that, and a race that gets past it
+    /// must not cost a file.
     fn rename(&self, from: &Path, to: &Path) -> Result<(), RenameError>;
 }
 
@@ -162,6 +170,49 @@ pub fn target_name(
     Some(sanitize(&named))
 }
 
+/// What is already occupying the namespace `inputs` are planned in,
+/// keyed by path relative to `directory`.
+///
+/// A template may render a name containing `/`, which
+/// [`borax_core::sanitize::sanitize`] keeps as a directory separator, so
+/// a batch's targets can land in subdirectories of `directory` as well
+/// as in `directory` itself. Every one of those subdirectories has to be
+/// looked at: a name is free only if nothing holds it *where the file is
+/// going*, and asking only about `directory` would let a rename be
+/// planned onto a file the planner never saw.
+///
+/// Keys are relative paths — `Name.pdf` for `directory` itself,
+/// `sub/Name.pdf` for a subdirectory — which is the namespace
+/// [`borax_core::rename::plan`] compares in and suffixes within.
+///
+/// A subdirectory that does not exist reports as empty, so a target
+/// heading somewhere not yet created simply finds nothing in its way.
+fn occupied(
+    directory: &Path,
+    inputs: &[PlanInput],
+    filesystem: &dyn Filesystem,
+) -> BTreeMap<String, Option<String>> {
+    let mut occupied: BTreeMap<String, Option<String>> = filesystem.existing(directory);
+
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for input in inputs {
+        let Some((subdirectory, _)) = input.target.rsplit_once('/') else {
+            continue;
+        };
+        if !seen.insert(subdirectory) {
+            continue;
+        }
+        occupied.extend(
+            filesystem
+                .existing(&directory.join(subdirectory))
+                .into_iter()
+                .map(|(name, hash)| (format!("{subdirectory}/{name}"), hash)),
+        );
+    }
+
+    occupied
+}
+
 /// What the planner needs to know about one resolved file, or `None`
 /// when the file has no name to plan from.
 fn plan_input(path: &Path, file: &FileRecord, templates: &TemplateTable) -> Option<PlanInput> {
@@ -225,7 +276,7 @@ pub fn plan_renames(
             }
         }
 
-        let items = plan(&inputs, &filesystem.existing(directory), policy);
+        let items = plan(&inputs, &occupied(directory, &inputs, filesystem), policy);
         for ((item, input), index) in items.into_iter().zip(&inputs).zip(planned_indices) {
             let path = resolved[index].0.clone();
             decisions[index] = Some(match item.action {
@@ -417,6 +468,16 @@ impl Filesystem for RealFilesystem {
         let failed = |error: std::io::Error| RenameError {
             message: error.to_string(),
         };
+
+        // A template may put a file in a subdirectory of the one it is
+        // in, and the subdirectory is borax's to create: a name is not
+        // a place until there is somewhere to put it. Creating it is
+        // additive — an existing directory is left as it is, and no file
+        // is touched — so it is safe to do before the link that is the
+        // step which must not overwrite anything.
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).map_err(failed)?;
+        }
 
         fs::hard_link(from, to).map_err(failed)?;
         // An unlink that fails leaves the file under both names rather

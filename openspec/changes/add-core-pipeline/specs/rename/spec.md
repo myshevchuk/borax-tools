@@ -32,6 +32,27 @@ reported as already-named rather than treated as a collision.
   case
 - **THEN** the planner treats it as a collision on all platforms
 
+### Requirement: A template may file a document into a subdirectory
+A rendered name containing `/` SHALL be treated as a path relative to
+the file's own directory, and any part of it that does not exist SHALL
+be created when the rename is applied. Sanitization prevents such a
+target from leaving the file's directory.
+
+Collisions SHALL be detected where the file is going, not where it came
+from: a name already taken in the target subdirectory blocks or suffixes
+exactly as one in the file's own directory does, and two files heading
+for the same name in different subdirectories do not collide.
+
+#### Scenario: Filing by journal
+- **WHEN** a template renders `nature/smith2024` for a file in `~/lib`
+- **THEN** the file is moved to `~/lib/nature/smith2024.pdf`, creating
+  `~/lib/nature` if it is not there
+
+#### Scenario: The nested name is taken
+- **WHEN** a different file already sits at the nested target
+- **THEN** it is suffixed or skipped by the collision policy, exactly as
+  it would be in the file's own directory
+
 ### Requirement: Applied renames are journaled
 Every applied rename SHALL append a journal entry (original path, new
 path, file content hash, timestamp, run identifier) to an append-only

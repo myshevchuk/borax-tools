@@ -73,6 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paced per service, so more threads do not mean a faster rate of
   asking.
 
+- A template containing `/` files a document into a subdirectory, which
+  the templates specification always described and which failed for
+  every file: the subdirectory was never created, and a name already
+  taken inside it was invisible to the collision planner.
+
 ### Added
 
 - `borax resolve` now emits the whole canonical record on each
