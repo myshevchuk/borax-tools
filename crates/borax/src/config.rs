@@ -230,6 +230,22 @@ impl Effective {
         self.origins.get(key)
     }
 
+    /// Every setting as an [`Event::ConfigSetting`], in key order.
+    ///
+    /// The event stream `borax config` writes: one line per setting,
+    /// carrying the same key, rendered value, and origin wording that
+    /// [`Effective::entries`] produces.
+    pub fn events(&self) -> Vec<Event> {
+        self.entries()
+            .into_iter()
+            .map(|(key, value, origin)| Event::ConfigSetting {
+                key,
+                value,
+                origin: origin.to_string(),
+            })
+            .collect()
+    }
+
     /// Every setting as `(key, rendered value, origin)`, ordered by
     /// key.
     ///
@@ -240,15 +256,6 @@ impl Effective {
     /// string, which is the one form that is not TOML and so cannot be
     /// mistaken for a value.
     ///
-    /// Every setting as an [`Event::ConfigSetting`], in key order.
-    ///
-    /// The event stream `borax config` writes: one line per setting,
-    /// carrying the same key, rendered value, and origin wording that
-    /// [`Effective::entries`] produces.
-    pub fn events(&self) -> Vec<Event> {
-        todo!("render each entry as an event")
-    }
-
     /// Unset settings are listed rather than omitted: `borax config`
     /// answers "what is borax running on", and "nothing" is an answer
     /// about `mailto` that a user needs to see.

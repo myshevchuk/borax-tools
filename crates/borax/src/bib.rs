@@ -14,15 +14,16 @@
 //! [`borax_core::bib_output`]. What lives here is which files are
 //! written, under which key, and what the run says about it.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use borax_core::bib_output::DuplicatePolicy;
+use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge, sidecar};
 use borax_core::content::ContentHash;
 use borax_core::record::Record;
-use borax_core::template::TemplateTable;
+use borax_core::template::{RenderInput, TemplateTable};
 
-use crate::event::Event;
+use crate::event::{Event, SkipReason};
 use crate::pipeline::FileRecord;
 
 /// The extension a sidecar carries.
@@ -57,12 +58,17 @@ pub trait BibFiles {
     fn write(&self, path: &Path, content: &str) -> io::Result<()>;
 }
 
+/// Characters a citation key cannot carry: they end the key, open or
+/// close a group, or start a comment where BibTeX reads one.
+const FORBIDDEN_IN_KEY: [char; 4] = [',', '{', '}', '%'];
+
 /// The citation key `record` is cited under.
 ///
 /// Rendered from `templates` exactly as a filename is, then stripped of
-/// the characters a BibTeX key cannot carry, so a work is cited under
-/// the same name its file is stored under. `hash` supplies the `sha1`
-/// field a template may use.
+/// the characters a BibTeX key cannot carry — whitespace and
+/// [`FORBIDDEN_IN_KEY`] — so a work is cited under the same name its
+/// file is stored under. `hash` supplies the `sha1` field a template
+/// may use.
 ///
 /// Returns `None` when the template renders nothing, or nothing that
 /// survives the stripping — a record too sparse to cite.
@@ -71,13 +77,25 @@ pub fn citation_key(
     hash: Option<&ContentHash>,
     templates: &TemplateTable,
 ) -> Option<String> {
-    todo!("render the template and restrict it to key characters")
+    let key: String = templates
+        .render(&RenderInput {
+            record,
+            sha1: hash.map(ContentHash::as_str),
+        })
+        .chars()
+        .filter(|character| !character.is_whitespace() && !FORBIDDEN_IN_KEY.contains(character))
+        .collect();
+
+    match key.is_empty() {
+        true => None,
+        false => Some(key),
+    }
 }
 
 /// The sidecar path for the file at `path`: the same path with its
 /// extension replaced by [`SIDECAR_EXTENSION`].
 pub fn sidecar_path(path: &Path) -> PathBuf {
-    todo!("swap the extension")
+    path.with_extension(SIDECAR_EXTENSION)
 }
 
 /// Write bibliography output for `resolved`.
@@ -113,7 +131,124 @@ pub fn write_bib(
     config: &BibConfig,
     files: &dyn BibFiles,
 ) -> Vec<Event> {
-    todo!("key each record, write sidecars, merge the master file")
+    let mut events = Vec::new();
+    let mut keyed = Vec::new();
+
+    for (path, file) in resolved {
+        let Some(key) = citation_key(&file.record, file.hash.as_ref(), templates) else {
+            events.push(Event::Skipped {
+                path: path.clone(),
+                reason: SkipReason::Unciteable,
+            });
+            continue;
+        };
+
+        if config.sidecars {
+            let target = sidecar_path(path);
+            events.push(match files.write(&target, &sidecar(&file.record, &key)) {
+                Ok(()) => Event::Sidecar {
+                    path: path.clone(),
+                    target,
+                },
+                // The two destinations are independent, so a file whose
+                // sidecar failed still goes to the master file.
+                Err(error) => {
+                    bib_failed(path, format!("writing \"{}\": {error}", target.display()))
+                }
+            });
+        }
+
+        keyed.push(Keyed {
+            path,
+            record: &file.record,
+            key,
+        });
+    }
+
+    let Some(master) = &config.path else {
+        return events;
+    };
+    // A run with nothing to merge leaves the master file as it is,
+    // rather than reading and rewriting it byte for byte.
+    if keyed.is_empty() {
+        return events;
+    }
+
+    let existing = match files.read(master) {
+        Ok(existing) => existing,
+        Err(error) => {
+            events.extend(keyed.iter().map(|entry| {
+                bib_failed(
+                    entry.path,
+                    format!("reading \"{}\": {error}", master.display()),
+                )
+            }));
+            return events;
+        }
+    };
+
+    let additions: Vec<(&str, &Record)> = keyed
+        .iter()
+        .map(|entry| (entry.key.as_str(), entry.record))
+        .collect();
+    let merged = merge(&existing, &additions, config.duplicates);
+
+    events.extend(match files.write(master, &merged.content) {
+        Ok(()) => keyed
+            .iter()
+            .zip(&merged.outcomes)
+            .map(|(entry, outcome)| entry_event(entry.path, outcome))
+            .collect::<Vec<Event>>(),
+        Err(error) => keyed
+            .iter()
+            .map(|entry| {
+                bib_failed(
+                    entry.path,
+                    format!("writing \"{}\": {error}", master.display()),
+                )
+            })
+            .collect(),
+    });
+    events
+}
+
+/// One resolved file that has a citation key, and so a place in both
+/// destinations.
+struct Keyed<'a> {
+    path: &'a Path,
+    record: &'a Record,
+    key: String,
+}
+
+/// The [`Event::BibEntry`] reporting what the master-file merge did with
+/// one addition.
+///
+/// The key named is the one the entry ends up cited under: the requested
+/// key as the merge issued it for an addition or an update, and the
+/// pre-existing entry's key for a duplicate the merge left alone.
+fn entry_event(path: &Path, outcome: &MergeOutcome) -> Event {
+    let (key, name) = match outcome {
+        MergeOutcome::Added { key } => (key, "added"),
+        MergeOutcome::AlreadyPresent { existing_key } => (existing_key, "already-present"),
+        MergeOutcome::Updated { key } => (key, "updated"),
+    };
+    Event::BibEntry {
+        path: path.to_path_buf(),
+        key: key.clone(),
+        outcome: name.to_string(),
+    }
+}
+
+/// [`SkipReason::BibWriteFailed`] for `path`, carrying `message`.
+///
+/// `message` names the file that could not be read or written: a
+/// record's bibliography output has two destinations, and the message is
+/// what tells a reader which of them was lost.
+fn bib_failed(path: &Path, message: String) -> Event {
+    Event::Skipped {
+        path: path.to_path_buf(),
+        reason: SkipReason::BibWriteFailed { message },
+    }
 }
 
 /// A [`BibFiles`] backed by the real filesystem.
@@ -122,10 +257,16 @@ pub struct RealBibFiles;
 
 impl BibFiles for RealBibFiles {
     fn read(&self, path: &Path) -> io::Result<String> {
-        todo!("read, mapping a missing file to empty content")
+        match fs::read_to_string(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            result => result,
+        }
     }
 
     fn write(&self, path: &Path, content: &str) -> io::Result<()> {
-        todo!("create the parent directories and write")
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, content)
     }
 }

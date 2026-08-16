@@ -8,8 +8,11 @@
 //! Storage belongs to [`borax_sources::store`]; what lives here is the
 //! counting and the events.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use borax_sources::store::FileCache;
 
 use crate::event::Event;
 
@@ -36,7 +39,42 @@ pub struct CacheStats {
 /// are returned, because a `borax cache` that could not read the cache
 /// must not report it as empty.
 pub fn inspect(root: &Path) -> io::Result<CacheStats> {
-    todo!("walk the tree and total the regular files")
+    let mut stats = CacheStats {
+        root: root.to_path_buf(),
+        entries: 0,
+        bytes: 0,
+    };
+    count(root, &mut stats)?;
+    Ok(stats)
+}
+
+/// Add every regular file below `directory` to `stats`.
+///
+/// A directory that is not there is counted as empty, which is what
+/// makes a missing root zero rather than a failure, and what keeps a
+/// subdirectory removed while the walk runs from ending it.
+///
+/// Metadata is read without following symlinks, so a link is neither a
+/// file nor a directory here: it is not a stored entry, and it cannot
+/// send the walk round a loop.
+fn count(directory: &Path, stats: &mut CacheStats) -> io::Result<()> {
+    let listing = match fs::read_dir(directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    for entry in listing {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            count(&entry.path(), stats)?;
+        } else if metadata.is_file() {
+            stats.entries += 1;
+            stats.bytes += metadata.len();
+        }
+    }
+    Ok(())
 }
 
 /// Remove everything under `root`.
@@ -45,15 +83,25 @@ pub fn inspect(root: &Path) -> io::Result<CacheStats> {
 /// report what clearing cost. A `root` that does not exist clears
 /// successfully and reports zero.
 pub fn clear(root: &Path) -> io::Result<CacheStats> {
-    todo!("count, then remove the tree")
+    let stats = inspect(root)?;
+    FileCache::new(root).clear()?;
+    Ok(stats)
 }
 
 /// The event reporting `stats` as the cache's current contents.
 pub fn status_event(stats: &CacheStats) -> Event {
-    todo!("render as CacheStatus")
+    Event::CacheStatus {
+        root: stats.root.clone(),
+        entries: stats.entries,
+        bytes: stats.bytes,
+    }
 }
 
 /// The event reporting `stats` as what clearing removed.
 pub fn cleared_event(stats: &CacheStats) -> Event {
-    todo!("render as CacheCleared")
+    Event::CacheCleared {
+        root: stats.root.clone(),
+        entries: stats.entries,
+        bytes: stats.bytes,
+    }
 }
