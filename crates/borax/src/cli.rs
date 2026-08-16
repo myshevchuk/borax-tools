@@ -10,6 +10,7 @@
 //! invocation. A person who has learned a flag once should not have to
 //! learn where it goes.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -139,7 +140,10 @@ pub struct Settings {
 impl Cli {
     /// Which rendering of the event stream this invocation asked for.
     pub fn format(&self) -> Format {
-        todo!("json or human")
+        match self.json {
+            true => Format::Json,
+            false => Format::Human,
+        }
     }
 }
 
@@ -147,13 +151,25 @@ impl Command {
     /// The subcommand's name, as [`crate::event::Event::RunStarted`]
     /// reports it and as the user typed it.
     pub fn name(&self) -> &'static str {
-        todo!("name each variant")
+        match self {
+            Command::Resolve { .. } => "resolve",
+            Command::Rename { .. } => "rename",
+            Command::Bib { .. } => "bib",
+            Command::Undo => "undo",
+            Command::Config => "config",
+            Command::Cache { .. } => "cache",
+        }
     }
 
     /// The files and directories the subcommand works on, empty for the
     /// subcommands that take none.
     pub fn paths(&self) -> &[PathBuf] {
-        todo!("the paths of the variants that have them")
+        match self {
+            Command::Resolve { paths } | Command::Rename { paths, .. } | Command::Bib { paths } => {
+                paths
+            }
+            Command::Undo | Command::Config | Command::Cache { .. } => &[],
+        }
     }
 }
 
@@ -170,5 +186,146 @@ impl Command {
 /// override another. Callers append the whole run to the end of the
 /// layer list, since flags outrank every other layer.
 pub fn flag_layers(settings: &Settings) -> Vec<(Origin, Layer)> {
-    todo!("one single-setting layer per flag given")
+    let mut layers = Vec::new();
+    let mut push = |name: &str, layer: Layer| layers.push((Origin::Flag(name.to_string()), layer));
+
+    if let Some(template) = &settings.template {
+        push(
+            "template",
+            Layer {
+                templates: Some(BTreeMap::from([("default".to_string(), template.clone())])),
+                ..Layer::default()
+            },
+        );
+    }
+    if let Some(sources) = &settings.sources {
+        push(
+            "sources",
+            Layer {
+                sources: Some(sources.clone()),
+                ..Layer::default()
+            },
+        );
+    }
+    if let Some(mailto) = &settings.mailto {
+        push(
+            "mailto",
+            Layer {
+                mailto: Some(mailto.clone()),
+                ..Layer::default()
+            },
+        );
+    }
+    if let Some(collision) = &settings.collision {
+        push(
+            "collision",
+            Layer {
+                rename: Some(RenameLayer {
+                    collision: Some(collision.clone()),
+                }),
+                ..Layer::default()
+            },
+        );
+    }
+    if let Some(path) = &settings.bib {
+        push(
+            "bib",
+            bib_layer(BibLayer {
+                path: Some(path.clone()),
+                ..BibLayer::default()
+            }),
+        );
+    }
+    if let Some(duplicates) = &settings.duplicates {
+        push(
+            "duplicates",
+            bib_layer(BibLayer {
+                duplicates: Some(duplicates.clone()),
+                ..BibLayer::default()
+            }),
+        );
+    }
+    if settings.sidecars {
+        push(
+            "sidecars",
+            bib_layer(BibLayer {
+                sidecars: Some(true),
+                ..BibLayer::default()
+            }),
+        );
+    }
+    if settings.no_sidecars {
+        push(
+            "no-sidecars",
+            bib_layer(BibLayer {
+                sidecars: Some(false),
+                ..BibLayer::default()
+            }),
+        );
+    }
+    if let Some(page_limit) = settings.page_limit {
+        push(
+            "page-limit",
+            Layer {
+                extraction: Some(ExtractionLayer {
+                    page_limit: Some(page_limit),
+                }),
+                ..Layer::default()
+            },
+        );
+    }
+    if let Some(concurrency) = settings.concurrency {
+        push(
+            "concurrency",
+            network_layer(NetworkLayer {
+                concurrency: Some(concurrency),
+                ..NetworkLayer::default()
+            }),
+        );
+    }
+    if let Some(min_interval_ms) = settings.min_interval_ms {
+        push(
+            "min-interval-ms",
+            network_layer(NetworkLayer {
+                min_interval_ms: Some(min_interval_ms),
+                ..NetworkLayer::default()
+            }),
+        );
+    }
+    if settings.cache {
+        push(
+            "cache",
+            network_layer(NetworkLayer {
+                cache: Some(true),
+                ..NetworkLayer::default()
+            }),
+        );
+    }
+    if settings.no_cache {
+        push(
+            "no-cache",
+            network_layer(NetworkLayer {
+                cache: Some(false),
+                ..NetworkLayer::default()
+            }),
+        );
+    }
+
+    layers
+}
+
+/// A layer carrying `bib` and nothing else.
+fn bib_layer(bib: BibLayer) -> Layer {
+    Layer {
+        bib: Some(bib),
+        ..Layer::default()
+    }
+}
+
+/// A layer carrying `network` and nothing else.
+fn network_layer(network: NetworkLayer) -> Layer {
+    Layer {
+        network: Some(network),
+        ..Layer::default()
+    }
 }
