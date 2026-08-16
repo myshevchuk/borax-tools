@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::slice;
 
 use borax::config::{ConfigError, Layer, Origin, resolve};
-use borax::run::{config_for, inputs};
+use borax::run::{config_for, inputs, start_directory};
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
@@ -385,4 +385,72 @@ fn an_override_file_that_cannot_be_read_ends_the_run() {
         failure.contains(".borax.toml"),
         "the error must name the file it could not read, got {failure:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// start_directory
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_path_that_names_a_directory_is_itself_the_starting_point() {
+    let paths = vec![PathBuf::from("/library")];
+    let working = Path::new("/elsewhere");
+
+    let start = start_directory(&paths, &|path| path == Path::new("/library"), working);
+
+    assert_eq!(start, PathBuf::from("/library"), "got {start:?}");
+}
+
+#[test]
+fn a_path_that_names_a_file_starts_at_its_parent_directory() {
+    let paths = vec![PathBuf::from("/library/paper.pdf")];
+    let working = Path::new("/elsewhere");
+
+    let start = start_directory(&paths, &|_| false, working);
+
+    assert_eq!(start, PathBuf::from("/library"), "got {start:?}");
+}
+
+#[test]
+fn only_the_first_path_is_consulted_when_several_are_given() {
+    let paths = vec![PathBuf::from("/first"), PathBuf::from("/second/paper.pdf")];
+    let working = Path::new("/elsewhere");
+
+    let start = start_directory(&paths, &|path| path == Path::new("/first"), working);
+
+    assert_eq!(start, PathBuf::from("/first"), "got {start:?}");
+}
+
+#[test]
+fn no_paths_at_all_starts_at_the_working_directory() {
+    let working = Path::new("/elsewhere");
+
+    let start = start_directory(&[], &|_| false, working);
+
+    assert_eq!(start, working, "got {start:?}");
+}
+
+#[test]
+fn a_bare_relative_filename_with_no_directory_component_starts_at_the_working_directory() {
+    let paths = vec![PathBuf::from("paper.pdf")];
+    let working = Path::new("/elsewhere");
+
+    let start = start_directory(&paths, &|_| false, working);
+
+    assert_eq!(start, working, "got {start:?}");
+}
+
+// A typo'd path is neither an existing file nor an existing directory,
+// so `is_directory` answers false for it the same as it would for a
+// real file. It starts at its parent rather than falling back to
+// `working`, so a mistyped name does not silently change where
+// configuration comes from.
+#[test]
+fn a_path_that_is_neither_an_existing_file_nor_directory_is_treated_as_a_file() {
+    let paths = vec![PathBuf::from("/library/typo.pdf")];
+    let working = Path::new("/elsewhere");
+
+    let start = start_directory(&paths, &|_| false, working);
+
+    assert_eq!(start, PathBuf::from("/library"), "got {start:?}");
 }

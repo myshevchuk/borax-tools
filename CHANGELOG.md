@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `borax rename <dir>` finds `<dir>/.borax.toml` again. The override
+  search took the parent of whatever path it was given, which is right
+  for a file and one level too high for a directory, so naming a
+  directory silently ran on the configuration above it while naming a
+  file inside it did not.
+
 - Title-conflict detection no longer skips a file over typographic
   differences it cannot control. Titles are compared as content words
   with both sides folded toward the lossiest encoding either could

@@ -698,14 +698,16 @@ fn applying(command: &Command) -> bool {
 /// [`Outcome::Fatal`] before an adapter is built: a run on settings
 /// borax could not read is a run on settings nobody chose.
 pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
-    let effective =
-        match config_from_environment(&start_directory(&cli.command), flag_layers(&cli.settings)) {
-            Ok(effective) => effective,
-            Err(failure) => {
-                let _ = writeln!(streams.err, "{}", error(failure.to_string()));
-                return Outcome::Fatal;
-            }
-        };
+    let effective = match config_from_environment(
+        &start_directory_for(&cli.command),
+        flag_layers(&cli.settings),
+    ) {
+        Ok(effective) => effective,
+        Err(failure) => {
+            let _ = writeln!(streams.err, "{}", error(failure.to_string()));
+            return Outcome::Fatal;
+        }
+    };
 
     let transport = UreqTransport::default();
     let politeness = Politeness {
@@ -786,14 +788,44 @@ fn response_cache() -> ResponseCache {
     }
 }
 
-/// The directory the configuration search climbs from: the directory
-/// holding the first path `command` was given, or the working directory
-/// when it was given none — or one that names no directory of its own.
-fn start_directory(command: &Command) -> PathBuf {
-    match command.paths().first().and_then(|path| path.parent()) {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => std::env::current_dir().unwrap_or_default(),
+/// The directory the configuration search climbs from.
+///
+/// A path that names a directory is the starting point itself; anything
+/// else starts at its parent. The distinction is the whole point:
+/// `borax rename <dir>` and `borax rename <dir>/paper.pdf` have to find
+/// the same `<dir>/.borax.toml`, and taking the parent of both climbs
+/// one level too high for the first — past the override file, to
+/// whatever sits above it.
+///
+/// `paths` is the paths as the user typed them, before a directory is
+/// expanded into the files it holds, because that is where the question
+/// "did they name a directory?" can still be asked. `is_directory`
+/// answers it, and `working` is where a run given no usable path starts.
+///
+/// A path that is neither an existing file nor an existing directory
+/// starts at its parent, since `is_directory` simply answers `false`
+/// for it: a name that is not there is still a name in a directory.
+pub fn start_directory(
+    paths: &[PathBuf],
+    is_directory: &dyn Fn(&Path) -> bool,
+    working: &Path,
+) -> PathBuf {
+    let Some(first) = paths.first() else {
+        return working.to_path_buf();
+    };
+    if is_directory(first) {
+        return first.clone();
     }
+    match first.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => working.to_path_buf(),
+    }
+}
+
+/// [`start_directory`] over the real filesystem and working directory.
+fn start_directory_for(command: &Command) -> PathBuf {
+    let working = std::env::current_dir().unwrap_or_default();
+    start_directory(command.paths(), &|path| path.is_dir(), &working)
 }
 
 /// `command` with each path it was given replaced by the files that path

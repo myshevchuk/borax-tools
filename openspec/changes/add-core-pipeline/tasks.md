@@ -193,7 +193,7 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       input path only, so one invocation spanning two trees applies the
       first tree's overrides to both — and which tree wins depends on
       the order the paths were typed
-- [ ] 9.7 Start the override search from the directory a path names,
+- [x] 9.7 Start the override search from the directory a path names,
       not from its parent. `start_directory` calls `.parent()` on the
       argument unconditionally, which is right for a file and one level
       too high for a directory, so `borax rename ~/library` silently
