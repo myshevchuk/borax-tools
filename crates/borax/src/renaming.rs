@@ -277,3 +277,43 @@ pub fn counts_for(events: &[Event]) -> Counts {
     }
     counts
 }
+
+/// A [`Filesystem`] backed by the real filesystem.
+///
+/// Reads a directory to see what is in it, and moves files with
+/// [`std::fs`].
+#[derive(Debug, Clone, Copy)]
+pub struct RealFilesystem;
+
+impl Filesystem for RealFilesystem {
+    /// Every regular file in `directory`, each under its content hash.
+    ///
+    /// Hashing the whole directory costs one pass over its files, which
+    /// is the same order as the run itself: a batch already hashes every
+    /// file it was given. What it buys is the identical-content case —
+    /// a file whose target name is taken by a byte-identical file is
+    /// already named rather than blocked.
+    ///
+    /// A directory that cannot be read reports empty, and a file whose
+    /// hash cannot be taken reports `None` for it, so neither failure
+    /// ends the run.
+    fn existing(&self, directory: &Path) -> BTreeMap<String, Option<String>> {
+        todo!("list the directory and hash what is in it")
+    }
+
+    /// Move `from` to `to` without ever overwriting `to`.
+    ///
+    /// Done as a link followed by an unlink rather than as a rename:
+    /// [`std::fs::rename`] replaces an existing destination silently on
+    /// Unix, and the one thing this must not do is lose the file that
+    /// was already there. [`std::fs::hard_link`] fails when `to` exists,
+    /// and it fails in the kernel rather than after a check, so nothing
+    /// can slip in between.
+    ///
+    /// The cost is that the two names both exist for an instant, and a
+    /// process killed in that instant leaves the file under both. That
+    /// is recoverable; an overwrite is not.
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), RenameError> {
+        todo!("link, then unlink the old name")
+    }
+}

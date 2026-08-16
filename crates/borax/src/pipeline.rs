@@ -319,3 +319,25 @@ pub fn resolve_batch<C: Cache>(
     events.push(Event::RunFinished { counts });
     Run { events, counts }
 }
+
+/// A [`Library`] backed by the real filesystem and the pure-Rust PDF
+/// engine.
+#[derive(Debug, Clone, Copy)]
+pub struct RealLibrary;
+
+impl Library for RealLibrary {
+    /// The file's content hash, read in chunks so a large PDF is never
+    /// held in memory whole.
+    ///
+    /// A file that cannot be read reports
+    /// [`ExtractionError::Unreadable`] carrying the I/O error, which is
+    /// what [`resolve_file`] treats as a content-index miss rather than
+    /// as a verdict.
+    fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
+        todo!("hash the file, mapping the I/O error")
+    }
+
+    fn open(&self, path: &Path) -> Result<Box<dyn PdfSource>, ExtractionError> {
+        todo!("open with the pure-Rust engine")
+    }
+}
