@@ -72,7 +72,7 @@ build feature, never a mandatory dependency.
       hit) and typed failure modes
 - [x] 6.5 Implement the default pure-Rust `PdfSource` backend (no native
       toolchain, works on every platform out of the box)
-- [ ] 6.6 Build the real-PDF fixture corpus (publisher PDFs, arXiv PDFs,
+- [x] 6.6 Build the real-PDF fixture corpus (publisher PDFs, arXiv PDFs,
       encrypted, no-text-layer, malformed); ghostscript generates them
       locally
 - [ ] 6.7 Optional `pdfium` cargo feature: a second `PdfSource` backend
