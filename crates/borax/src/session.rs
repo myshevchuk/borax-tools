@@ -47,7 +47,11 @@ pub const PARTIAL: i32 = 2;
 impl Outcome {
     /// The process exit code this outcome leaves behind.
     pub fn code(self) -> i32 {
-        todo!("map each outcome to its code")
+        match self {
+            Outcome::Success => SUCCESS,
+            Outcome::Partial => PARTIAL,
+            Outcome::Fatal => FATAL,
+        }
     }
 }
 
@@ -58,7 +62,10 @@ impl Outcome {
 /// nothing it failed to do. [`Outcome::Fatal`] is not reachable from
 /// totals — a run that produced totals is a run that happened.
 pub fn outcome_for(counts: &Counts) -> Outcome {
-    todo!("partial when anything was skipped")
+    match counts.skipped {
+        0 => Outcome::Success,
+        _ => Outcome::Partial,
+    }
 }
 
 /// Whether this invocation may ask the person running it a question.
@@ -78,7 +85,10 @@ pub enum Interaction {
 /// says a program is driving the run. Either one absent forbids the
 /// question rather than deferring it.
 pub fn interaction(stdin_is_terminal: bool, format: Format) -> Interaction {
-    todo!("allow only a human-format run on a terminal")
+    match stdin_is_terminal && format == Format::Human {
+        true => Interaction::Allowed,
+        false => Interaction::Forbidden,
+    }
 }
 
 /// The answer to a yes/no question under `interaction`.
@@ -91,7 +101,10 @@ pub fn interaction(stdin_is_terminal: bool, format: Format) -> Interaction {
 /// branch has to be the one that leaves the file alone — that is what
 /// makes a piped run fall back to skipping rather than to acting.
 pub fn confirm(interaction: Interaction, ask: impl FnOnce() -> bool) -> bool {
-    todo!("ask only when allowed")
+    match interaction {
+        Interaction::Allowed => ask(),
+        Interaction::Forbidden => false,
+    }
 }
 
 /// Whether this process's standard input is a terminal.
