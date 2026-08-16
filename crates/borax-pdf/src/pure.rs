@@ -11,13 +11,15 @@
 //! panic is caught and reported as [`ExtractionError::Unreadable`]
 //! rather than taking the process down.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
-use lopdf::{Dictionary, Document, decode_text_string};
+use lopdf::content::{Content, Operation};
+use lopdf::{Dictionary, Document, Object, ObjectId, decode_text_string};
 use pdf_extract::{PlainTextOutput, output_doc_page};
 
 use crate::source::{ExtractionError, InfoMetadata, PdfSource};
@@ -27,13 +29,17 @@ use crate::source::{ExtractionError, InfoMetadata, PdfSource};
 /// Metadata is read once at open time; page text is extracted on
 /// demand, so a document whose identifier sits in its Info dictionary
 /// costs no text extraction at all.
+///
+/// Reading a page's text rewrites that page's content stream in the
+/// in-memory document, which is why the document sits behind a
+/// [`RefCell`]. Nothing is written back to the file.
 pub struct PurePdf {
-    document: Document,
-    /// Page numbers in document order, as `lopdf` numbers them. The
-    /// index a caller passes addresses this list, not the numbering:
-    /// a document whose page tree skips numbers still has pages
-    /// `0..page_count`.
-    page_numbers: Vec<u32>,
+    document: RefCell<Document>,
+    /// The document's pages in order, each as the number `lopdf` gives
+    /// it paired with the object holding it. The index a caller passes
+    /// addresses this list, not the numbering: a document whose page
+    /// tree skips numbers still has pages `0..page_count`.
+    pages: Vec<(u32, ObjectId)>,
     info: InfoMetadata,
     xmp: Option<String>,
 }
@@ -63,10 +69,10 @@ impl PurePdf {
                     .map_err(|_| ExtractionError::Encrypted)?;
             }
             Ok(PurePdf {
-                page_numbers: document.get_pages().into_keys().collect(),
+                pages: document.get_pages().into_iter().collect(),
                 info: read_info(&document),
                 xmp: read_xmp(&document),
-                document,
+                document: RefCell::new(document),
             })
         })
     }
@@ -74,7 +80,7 @@ impl PurePdf {
 
 impl PdfSource for PurePdf {
     fn page_count(&self) -> usize {
-        self.page_numbers.len()
+        self.pages.len()
     }
 
     fn info_metadata(&self) -> &InfoMetadata {
@@ -86,15 +92,69 @@ impl PdfSource for PurePdf {
     }
 
     fn page_text(&self, index: usize) -> Result<String, ExtractionError> {
-        let Some(&number) = self.page_numbers.get(index) else {
+        let Some(&(number, page)) = self.pages.get(index) else {
             return Ok(String::new());
         };
         guard_panic(|| {
+            // The text extractor implements neither `'` nor `"`, so a
+            // page is rewritten into the operators it does implement
+            // first. Doing it here rather than at open time keeps the
+            // cost off documents whose text is never read.
+            expand_text_showing_shorthands(&mut self.document.borrow_mut(), page);
             let mut text = String::new();
             let mut output = PlainTextOutput::new(&mut text);
-            output_doc_page(&self.document, &mut output, number).map_err(unreadable)?;
+            output_doc_page(&self.document.borrow(), &mut output, number).map_err(unreadable)?;
             Ok(text)
         })
+    }
+}
+
+/// Rewrite the `'` and `"` text-showing operators on page `page` of
+/// `document` into the sequences the PDF specification defines them as:
+///
+/// - `string '` becomes `T*` then `string Tj`
+/// - `aw ac string "` becomes `aw Tw`, `ac Tc`, `T*`, then `string Tj`
+///
+/// The rewrite is confined to the in-memory document, and repeating it
+/// over the same page yields the same content stream.
+///
+/// A page whose content stream cannot be decoded, re-encoded or written
+/// back is left as it stands, as is a `"` carrying other than the three
+/// operands the specification gives it.
+fn expand_text_showing_shorthands(document: &mut Document, page: ObjectId) {
+    let Ok(content) = document.get_and_decode_page_content(page) else {
+        return;
+    };
+    if !content
+        .operations
+        .iter()
+        .any(|operation| matches!(operation.operator.as_str(), "'" | "\""))
+    {
+        return;
+    }
+
+    let mut operations = Vec::with_capacity(content.operations.len());
+    for operation in content.operations {
+        match operation.operator.as_str() {
+            "'" => {
+                operations.push(Operation::new("T*", Vec::new()));
+                operations.push(Operation::new("Tj", operation.operands));
+            }
+            "\"" => match <[Object; 3]>::try_from(operation.operands) {
+                Ok([word_spacing, character_spacing, string]) => {
+                    operations.push(Operation::new("Tw", vec![word_spacing]));
+                    operations.push(Operation::new("Tc", vec![character_spacing]));
+                    operations.push(Operation::new("T*", Vec::new()));
+                    operations.push(Operation::new("Tj", vec![string]));
+                }
+                Err(operands) => operations.push(Operation::new("\"", operands)),
+            },
+            _ => operations.push(operation),
+        }
+    }
+
+    if let Ok(encoded) = (Content { operations }).encode() {
+        let _ = document.change_page_content(page, encoded);
     }
 }
 
