@@ -187,12 +187,19 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       cannot be journaled is not made, and every abandoned move is an
       ordinary `Unjournalable` skip in the event stream. The stderr
       seam this task asked for is no longer needed for this case
-- [ ] 9.6 Resolve configuration per input directory rather than once
+- [x] 9.6 Resolve configuration per input directory rather than once
       per run. `.borax.toml` is specified as discovered upward from
       each input file's directory, but a run climbs from the first
       input path only, so one invocation spanning two trees applies the
       first tree's overrides to both — and which tree wins depends on
-      the order the paths were typed
+      the order the paths were typed.
+      Done as `Configs`, which resolves each directory once and answers
+      per path. Renaming and bibliography output work a directory at a
+      time, which they nearly did already — collisions are a property of
+      a directory — so a run over one directory produces exactly the
+      stream it did before. Network settings stay run-level, and the
+      spec now says so: the clients are built once, before any file is
+      read
 - [x] 9.7 Start the override search from the directory a path names,
       not from its parent. `start_directory` calls `.parent()` on the
       argument unconditionally, which is right for a file and one level

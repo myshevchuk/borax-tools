@@ -1,12 +1,14 @@
 #![allow(clippy::unwrap_used)]
 
+use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::slice;
 
 use borax::config::{ConfigError, Layer, Origin, resolve};
-use borax::run::{config_for, inputs, start_directory};
+use borax::run::{Configs, config_for, inputs, start_directory};
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
@@ -453,4 +455,380 @@ fn a_path_that_is_neither_an_existing_file_nor_directory_is_treated_as_a_file() 
     let start = start_directory(&paths, &|_| false, working);
 
     assert_eq!(start, PathBuf::from("/library"), "got {start:?}");
+}
+
+// ---------------------------------------------------------------------
+// Configs::resolve: each file's own directory, not the run's
+// ---------------------------------------------------------------------
+
+/// The defect `Configs` exists to fix: resolving once for the whole run
+/// from the first path made the answer depend on argument order. Both
+/// orders here must reach the same pair of configurations.
+#[test]
+fn two_files_in_different_trees_each_use_their_own_override_whichever_order_they_are_given() {
+    let alpha = PathBuf::from("/library/alpha/paper.pdf");
+    let beta = PathBuf::from("/library/beta/paper.pdf");
+    let working = Path::new("/library");
+    let read = fake_read(&[
+        (
+            "/library/alpha/.borax.toml",
+            "mailto = \"alpha@example.org\"",
+        ),
+        ("/library/beta/.borax.toml", "mailto = \"beta@example.org\""),
+    ]);
+
+    let forward = Configs::resolve(
+        &[alpha.clone(), beta.clone()],
+        working,
+        vec![],
+        &env_vars(&[]),
+        &read,
+    )
+    .unwrap();
+    let reversed = Configs::resolve(
+        &[beta.clone(), alpha.clone()],
+        working,
+        vec![],
+        &env_vars(&[]),
+        &read,
+    )
+    .unwrap();
+
+    for configs in [&forward, &reversed] {
+        assert_eq!(
+            configs.for_path(&alpha).config().mailto.as_deref(),
+            Some("alpha@example.org")
+        );
+        assert_eq!(
+            configs.for_path(&beta).config().mailto.as_deref(),
+            Some("beta@example.org")
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Configs::resolve: files sharing a directory share its configuration
+// ---------------------------------------------------------------------
+
+#[test]
+fn two_files_in_the_same_directory_get_the_same_configuration_from_its_override() {
+    let x = PathBuf::from("/library/alpha/x.pdf");
+    let y = PathBuf::from("/library/alpha/y.pdf");
+    let working = Path::new("/elsewhere");
+    let dir_path = PathBuf::from("/library/alpha/.borax.toml");
+    let read = fake_read(&[(
+        "/library/alpha/.borax.toml",
+        "[templates]\ndefault = \"[year]-[auth]\"",
+    )]);
+
+    let configs = Configs::resolve(
+        &[x.clone(), y.clone()],
+        working,
+        vec![],
+        &env_vars(&[]),
+        &read,
+    )
+    .unwrap();
+
+    assert_eq!(configs.for_path(&x), configs.for_path(&y));
+    assert_eq!(
+        configs.for_path(&x).origin("templates.default"),
+        Some(&Origin::DirectoryFile(dir_path))
+    );
+}
+
+// ---------------------------------------------------------------------
+// Configs::resolve: no override in a file's own directory climbs upward
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_file_in_a_directory_with_no_override_uses_the_nearest_ancestors_override() {
+    let path = PathBuf::from("/library/a/b/paper.pdf");
+    let working = Path::new("/elsewhere");
+    let ancestor_path = PathBuf::from("/library/a/.borax.toml");
+    let read = fake_read(&[("/library/a/.borax.toml", "mailto = \"a@example.org\"")]);
+
+    let configs = Configs::resolve(
+        slice::from_ref(&path),
+        working,
+        vec![],
+        &env_vars(&[]),
+        &read,
+    )
+    .unwrap();
+
+    assert_eq!(
+        configs.for_path(&path).config().mailto.as_deref(),
+        Some("a@example.org")
+    );
+    assert_eq!(
+        configs.for_path(&path).origin("mailto"),
+        Some(&Origin::DirectoryFile(ancestor_path))
+    );
+}
+
+// ---------------------------------------------------------------------
+// Configs::for_path: a path the resolver never saw falls back to run()
+// ---------------------------------------------------------------------
+
+#[test]
+fn for_path_on_a_path_the_resolver_never_saw_returns_the_same_as_run() {
+    let seen = PathBuf::from("/library/alpha/paper.pdf");
+    let working = Path::new("/elsewhere");
+    // `/library/gamma` has an override too, so a resolver that lazily
+    // climbed from an unseen path would answer differently from `run()`
+    // here — this is what proves the fallback does not do that.
+    let read = fake_read(&[
+        (
+            "/library/alpha/.borax.toml",
+            "mailto = \"alpha@example.org\"",
+        ),
+        (
+            "/library/gamma/.borax.toml",
+            "mailto = \"gamma@example.org\"",
+        ),
+    ]);
+
+    let configs = Configs::resolve(
+        slice::from_ref(&seen),
+        working,
+        vec![],
+        &env_vars(&[]),
+        &read,
+    )
+    .unwrap();
+
+    let unseen = Path::new("/library/gamma/other.pdf");
+    assert_eq!(configs.for_path(unseen), configs.run());
+    assert_ne!(
+        configs.for_path(unseen).config().mailto.as_deref(),
+        Some("gamma@example.org")
+    );
+}
+
+// ---------------------------------------------------------------------
+// Configs::run: resolved from the working directory, not an input path
+// ---------------------------------------------------------------------
+
+#[test]
+fn run_is_resolved_from_working_not_from_any_input_path() {
+    let input = PathBuf::from("/library/alpha/paper.pdf");
+    let working = Path::new("/elsewhere");
+    let read = fake_read(&[
+        (
+            "/library/alpha/.borax.toml",
+            "mailto = \"alpha@example.org\"",
+        ),
+        ("/elsewhere/.borax.toml", "mailto = \"working@example.org\""),
+    ]);
+
+    let configs = Configs::resolve(
+        slice::from_ref(&input),
+        working,
+        vec![],
+        &env_vars(&[]),
+        &read,
+    )
+    .unwrap();
+
+    assert_eq!(
+        configs.run().config().mailto.as_deref(),
+        Some("working@example.org")
+    );
+    assert_eq!(
+        configs.for_path(&input).config().mailto.as_deref(),
+        Some("alpha@example.org")
+    );
+}
+
+// ---------------------------------------------------------------------
+// Configs::resolve: higher layers still outrank a directory override
+// ---------------------------------------------------------------------
+
+#[test]
+fn an_environment_variable_beats_a_directory_override_in_configs_resolve() {
+    let input = PathBuf::from("/library/alpha/paper.pdf");
+    let working = Path::new("/elsewhere");
+    let environment = env_vars(&[("BORAX_MAILTO", "env@example.org")]);
+    let read = fake_read(&[(
+        "/library/alpha/.borax.toml",
+        "mailto = \"alpha@example.org\"",
+    )]);
+
+    let configs = Configs::resolve(
+        slice::from_ref(&input),
+        working,
+        vec![],
+        &environment,
+        &read,
+    )
+    .unwrap();
+
+    assert_eq!(
+        configs.for_path(&input).config().mailto.as_deref(),
+        Some("env@example.org")
+    );
+    assert_eq!(
+        configs.for_path(&input).origin("mailto"),
+        Some(&Origin::Env("MAILTO".to_string()))
+    );
+}
+
+#[test]
+fn a_flag_beats_a_directory_override_in_configs_resolve() {
+    let input = PathBuf::from("/library/alpha/paper.pdf");
+    let working = Path::new("/elsewhere");
+    let flags = vec![(
+        Origin::Flag("mailto".to_string()),
+        Layer {
+            mailto: Some("flag@example.org".to_string()),
+            ..Layer::default()
+        },
+    )];
+    let read = fake_read(&[(
+        "/library/alpha/.borax.toml",
+        "mailto = \"alpha@example.org\"",
+    )]);
+
+    let configs = Configs::resolve(
+        slice::from_ref(&input),
+        working,
+        flags,
+        &env_vars(&[]),
+        &read,
+    )
+    .unwrap();
+
+    assert_eq!(
+        configs.for_path(&input).config().mailto.as_deref(),
+        Some("flag@example.org")
+    );
+    assert_eq!(
+        configs.for_path(&input).origin("mailto"),
+        Some(&Origin::Flag("mailto".to_string()))
+    );
+}
+
+// ---------------------------------------------------------------------
+// Configs::uniform
+// ---------------------------------------------------------------------
+
+#[test]
+fn uniform_returns_the_same_effective_for_every_path_and_for_run() {
+    let effective =
+        config_for(Path::new("/proj"), vec![], &env_vars(&[]), &fake_read(&[])).unwrap();
+
+    let configs = Configs::uniform(effective.clone());
+
+    assert_eq!(
+        configs.for_path(Path::new("/anywhere/at/all.pdf")),
+        &effective
+    );
+    assert_eq!(configs.run(), &effective);
+}
+
+// ---------------------------------------------------------------------
+// Configs::resolve: one bad override file ends the whole run
+// ---------------------------------------------------------------------
+
+// The broken file sits in the second directory reached, not the first —
+// proving the run stops on any of them, not only the one it looks at
+// soonest.
+#[test]
+fn a_directory_override_that_will_not_parse_fails_the_whole_resolve() {
+    let good = PathBuf::from("/library/alpha/a.pdf");
+    let bad = PathBuf::from("/library/beta/b.pdf");
+    let working = Path::new("/elsewhere");
+    let broken_path = PathBuf::from("/library/beta/.borax.toml");
+    let read = fake_read(&[
+        (
+            "/library/alpha/.borax.toml",
+            "mailto = \"alpha@example.org\"",
+        ),
+        ("/library/beta/.borax.toml", "not valid toml {{{"),
+    ]);
+
+    let result = Configs::resolve(&[good, bad], working, vec![], &env_vars(&[]), &read);
+
+    match result {
+        Err(ConfigError::Unreadable { path, .. }) => assert_eq!(path, broken_path),
+        other => panic!("expected Unreadable naming {broken_path:?}, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Configs::resolve: a directory shared by many files is read once
+// ---------------------------------------------------------------------
+
+/// A `read` fake identical to [`fake_read`], but recording every path it
+/// is asked about in `calls`, so a test can count how many times a given
+/// file was read.
+fn counting_read(
+    entries: &'static [(&'static str, &'static str)],
+    calls: Rc<RefCell<Vec<PathBuf>>>,
+) -> impl Fn(&Path) -> io::Result<String> {
+    move |path| {
+        calls.borrow_mut().push(path.to_path_buf());
+        entries
+            .iter()
+            .find(|(candidate, _)| Path::new(candidate) == path)
+            .map(|(_, content)| content.to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
+    }
+}
+
+#[test]
+fn a_directory_shared_by_many_files_is_read_once_not_once_per_file() {
+    let override_path = "/library/alpha/.borax.toml";
+    let paths: Vec<PathBuf> = (0..100)
+        .map(|n| PathBuf::from(format!("/library/alpha/file{n}.pdf")))
+        .collect();
+    let working = Path::new("/elsewhere");
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    // The literal is inlined rather than named, so the slice is
+    // promoted to `'static` as `fake_read`'s callers do it.
+    let read = counting_read(
+        &[(
+            "/library/alpha/.borax.toml",
+            "mailto = \"alpha@example.org\"",
+        )],
+        calls.clone(),
+    );
+
+    let configs = Configs::resolve(&paths, working, vec![], &env_vars(&[]), &read).unwrap();
+
+    assert_eq!(
+        configs.for_path(&paths[0]).config().mailto.as_deref(),
+        Some("alpha@example.org")
+    );
+
+    // The same run over a single file in that directory, to compare
+    // against. The invariant is that resolving costs the same whether a
+    // directory holds one file or a hundred — not that it costs exactly
+    // one read, which `config_for` does not promise: it probes for the
+    // override file and then reads it.
+    let one = Rc::new(RefCell::new(Vec::new()));
+    let read_one = counting_read(
+        &[(
+            "/library/alpha/.borax.toml",
+            "mailto = \"alpha@example.org\"",
+        )],
+        one.clone(),
+    );
+    Configs::resolve(&paths[..1], working, vec![], &env_vars(&[]), &read_one).unwrap();
+
+    let reads = |calls: &Rc<RefCell<Vec<PathBuf>>>| {
+        calls
+            .borrow()
+            .iter()
+            .filter(|path| **path == Path::new(override_path))
+            .count()
+    };
+    assert_eq!(
+        reads(&calls),
+        reads(&one),
+        "a hundred files in one directory cost {} reads of {override_path}, one file cost {}",
+        reads(&calls),
+        reads(&one),
+    );
 }

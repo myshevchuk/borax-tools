@@ -27,7 +27,7 @@ use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
 use borax::journal::{FileJournal, Journal};
 use borax::pipeline::RealLibrary;
 use borax::renaming::RealFilesystem;
-use borax::run::{Adapters, Streams, dispatch};
+use borax::run::{Adapters, Configs, Streams, dispatch};
 use borax::session::Outcome;
 use borax_sources::arxiv::ArxivClient;
 use borax_sources::cache::MemoryCache;
@@ -246,7 +246,7 @@ fn run_the_batch() -> Ran {
     let mut err: Vec<u8> = Vec::new();
     let outcome = dispatch(
         &cli,
-        &effective,
+        &Configs::uniform(effective),
         &Adapters {
             library: &RealLibrary,
             sources: &sources,

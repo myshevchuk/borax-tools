@@ -311,6 +311,10 @@ pub struct Run {
 /// the same lines, which is what makes `--json` output diffable between
 /// runs.
 ///
+/// `config` is asked per file rather than fixed for the batch, because
+/// the settings a file runs under come from its own directory: one
+/// invocation can span two trees that configure extraction differently.
+///
 /// The run is sequential. Bounded concurrency
 /// ([`borax_sources::pace::map_bounded`]) belongs here but arrives with
 /// the real transport, and because that helper restores input order it
@@ -320,13 +324,13 @@ pub fn resolve_batch<C: Cache>(
     library: &dyn Library,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
-    config: &ResolveConfig,
+    config: &dyn Fn(&Path) -> ResolveConfig,
 ) -> Run {
     let mut events = Vec::with_capacity(paths.len() + 1);
     let mut counts = Counts::default();
 
     for path in paths {
-        let outcome = resolve_file(path, library, sources, index, config);
+        let outcome = resolve_file(path, library, sources, index, &config(path));
         match outcome {
             FileOutcome::Resolved(_) => counts.resolved += 1,
             FileOutcome::Skipped(_) => counts.skipped += 1,

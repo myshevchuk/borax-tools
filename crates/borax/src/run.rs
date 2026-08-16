@@ -9,7 +9,7 @@
 //! filesystem as arguments, and one supplying the real ones. The first
 //! is what tests use; the second is what the binary calls.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -187,6 +187,110 @@ pub fn config_for(
     resolve(layers)
 }
 
+/// The configuration each input runs under.
+///
+/// `.borax.toml` is discovered upward from each input file's own
+/// directory, so an invocation spanning two trees applies each tree's
+/// overrides to its own files. Resolving once for the whole run instead
+/// would make the answer depend on which path the user typed first.
+///
+/// Every layer except the override file is the same throughout: the
+/// defaults, the global file, the environment and the flags do not
+/// change with where a file sits.
+///
+/// # What a per-directory override cannot reach
+///
+/// The settings that decide which services a run talks to and how it
+/// identifies itself — `sources`, `mailto`, and the `network` table —
+/// are taken from [`Configs::run`] alone. The clients are built once,
+/// before any file is looked at, so there is no per-file moment at
+/// which a different set of them could be chosen. Everything a file's
+/// own directory can change — its template, its collision policy, its
+/// bibliography destination, how far extraction reads — is what
+/// [`Configs::for_path`] carries.
+#[derive(Debug)]
+pub struct Configs {
+    by_directory: BTreeMap<PathBuf, Effective>,
+    run: Effective,
+}
+
+impl Configs {
+    /// Resolve the configuration for every directory `paths` touches,
+    /// and the run's own by climbing from `working`.
+    ///
+    /// `paths` are the input files after directory expansion, so the
+    /// directory a file belongs to is its parent. Each distinct
+    /// directory is resolved once however many files share it.
+    ///
+    /// The remaining arguments are [`config_for`]'s, and the layers
+    /// stack exactly as they do there. An override file that will not
+    /// parse — in any of the directories — is a [`ConfigError`] and
+    /// ends the run, since a file the user wrote and borax ignored is
+    /// worse than a run that stops and says so.
+    pub fn resolve(
+        paths: &[PathBuf],
+        working: &Path,
+        flags: Vec<(Origin, Layer)>,
+        environment: &[(String, String)],
+        read: &dyn Fn(&Path) -> io::Result<String>,
+    ) -> Result<Configs, ConfigError> {
+        let mut by_directory: BTreeMap<PathBuf, Effective> = BTreeMap::new();
+        for directory in paths.iter().filter_map(|path| path.parent()) {
+            if by_directory.contains_key(directory) {
+                continue;
+            }
+            let effective = config_for(directory, flags.clone(), environment, read)?;
+            by_directory.insert(directory.to_path_buf(), effective);
+        }
+
+        Ok(Configs {
+            by_directory,
+            run: config_for(working, flags, environment, read)?,
+        })
+    }
+
+    /// One configuration for every path.
+    ///
+    /// What a caller with nothing to discover uses — a run whose inputs
+    /// are already known to share a configuration, and the tests that
+    /// are not about discovery.
+    pub fn uniform(effective: Effective) -> Configs {
+        Configs {
+            by_directory: BTreeMap::new(),
+            run: effective,
+        }
+    }
+
+    /// The configuration the file at `path` runs under.
+    ///
+    /// A path whose directory was never resolved falls back to
+    /// [`Configs::run`]: the run's own configuration is the right
+    /// answer for a file nothing more specific was worked out for.
+    pub fn for_path(&self, path: &Path) -> &Effective {
+        match path.parent() {
+            Some(directory) => self.for_directory(directory),
+            None => &self.run,
+        }
+    }
+
+    /// The configuration files in `directory` run under.
+    ///
+    /// A directory that was never resolved falls back to
+    /// [`Configs::run`], as [`Configs::for_path`] does.
+    pub fn for_directory(&self, directory: &Path) -> &Effective {
+        self.by_directory.get(directory).unwrap_or(&self.run)
+    }
+
+    /// The configuration for the run as a whole, resolved from the
+    /// working directory.
+    ///
+    /// What `borax config` prints and what a subcommand taking no paths
+    /// uses.
+    pub fn run(&self) -> &Effective {
+        &self.run
+    }
+}
+
 /// The layer the configuration file at `path` holds, or `None` when
 /// there is no file there to read.
 ///
@@ -218,6 +322,20 @@ fn file_layer(
 /// past it.
 fn present(path: &Path, read: &dyn Fn(&Path) -> io::Result<String>) -> bool {
     !matches!(read(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
+}
+
+/// [`Configs::resolve`] over the real environment and filesystem.
+fn configs_from_environment(
+    paths: &[PathBuf],
+    working: &Path,
+    flags: Vec<(Origin, Layer)>,
+) -> Result<Configs, ConfigError> {
+    let environment: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(name, value)| Some((into_string(name)?, into_string(value)?)))
+        .collect();
+    Configs::resolve(paths, working, flags, &environment, &|path| {
+        std::fs::read_to_string(path)
+    })
 }
 
 /// [`config_for`] over the real environment and filesystem.
@@ -366,15 +484,15 @@ fn error(message: String) -> Diagnostic {
 ///   would answer a question that was never asked.
 pub fn events_for<C: Cache>(
     command: &Command,
-    effective: &Effective,
+    configs: &Configs,
     adapters: &Adapters<C>,
 ) -> Result<Vec<Event>, Diagnostic> {
     match command {
-        Command::Config => Ok(effective.events()),
+        Command::Config => Ok(configs.run().events()),
         Command::Cache { clear } => cache_events(*clear, adapters.cache_root.as_deref()),
-        Command::Resolve { paths } => Ok(resolve_events(paths, effective, adapters)),
-        Command::Rename { paths, apply } => rename_events(paths, *apply, effective, adapters),
-        Command::Bib { paths } => bib_events(paths, effective, adapters),
+        Command::Resolve { paths } => Ok(resolve_events(paths, configs, adapters)),
+        Command::Rename { paths, apply } => rename_events(paths, *apply, configs, adapters),
+        Command::Bib { paths } => bib_events(paths, configs, adapters),
         Command::Undo => Ok(undo_events(adapters)),
     }
 }
@@ -397,9 +515,12 @@ fn cache_events(clear: bool, root: Option<&Path>) -> Result<Vec<Event>, Diagnost
 }
 
 /// The events `borax resolve` produces for `paths`.
+///
+/// One event per file, in the order given, each resolved under the
+/// configuration its own directory implies.
 fn resolve_events<C: Cache>(
     paths: &[PathBuf],
-    effective: &Effective,
+    configs: &Configs,
     adapters: &Adapters<C>,
 ) -> Vec<Event> {
     let mut run = resolve_batch(
@@ -407,7 +528,7 @@ fn resolve_events<C: Cache>(
         adapters.library,
         adapters.sources,
         adapters.index,
-        &resolving(effective.config()),
+        &|path| resolving(configs.for_path(path).config()),
     );
     // A batch closes its own stream; the one framing a whole invocation
     // is `dispatch`'s to open and close.
@@ -434,7 +555,7 @@ fn resolving(config: &Config) -> ResolveConfig {
 fn rename_events<C: Cache>(
     paths: &[PathBuf],
     apply: bool,
-    effective: &Effective,
+    configs: &Configs,
     adapters: &Adapters<C>,
 ) -> Result<Vec<Event>, Diagnostic> {
     let journal = match (apply, adapters.journal) {
@@ -448,33 +569,72 @@ fn rename_events<C: Cache>(
         (true, journal) => journal,
         (false, _) => None,
     };
-    let templates = templates(effective.config())?;
 
-    let (mut events, resolved) = resolved_records(paths, effective, adapters);
-    let log = journal.map(|journal| JournalLog {
-        journal,
-        resolved: &resolved,
-        at: (adapters.now)(),
-    });
-    let applied = apply_renames(
-        &plan_renames(
-            &resolved,
-            &templates,
-            effective.config().collision,
+    // Every template is compiled before any file is touched, so a
+    // template that will not compile — in any of the directories the run
+    // spans — ends it before a single move.
+    let groups = by_directory(paths);
+    let compiled: Vec<TemplateTable> = groups
+        .iter()
+        .map(|(directory, _)| templates(configs.for_directory(directory).config()))
+        .collect::<Result<_, _>>()?;
+
+    let at = (adapters.now)();
+    let mut events = Vec::with_capacity(paths.len());
+    for ((directory, group), templates) in groups.iter().zip(&compiled) {
+        let effective = configs.for_directory(directory);
+        let (resolved_events, resolved) = resolved_records(group, effective, adapters);
+        events.extend(resolved_events);
+
+        let log = journal.map(|journal| JournalLog {
+            journal,
+            resolved: &resolved,
+            at: at.clone(),
+        });
+        let applied = apply_renames(
+            &plan_renames(
+                &resolved,
+                templates,
+                effective.config().collision,
+                adapters.filesystem,
+            ),
             adapters.filesystem,
-        ),
-        adapters.filesystem,
-        apply,
-        log.as_ref().map(|log| log as &dyn MoveLog),
-    );
+            apply,
+            log.as_ref().map(|log| log as &dyn MoveLog),
+        );
 
-    // A halt needs no separate report: every move it abandoned is
-    // already an `Unjournalable` skip carrying the reason, so the run
-    // says what happened through the same stream as everything else.
-    let resolved = at_current_paths(resolved, &applied.events);
-    events.extend(applied.events);
-    events.extend(bib_output(&resolved, &templates, effective, adapters));
+        // A halt needs no separate report: every move it abandoned is
+        // already an `Unjournalable` skip carrying the reason, so the run
+        // says what happened through the same stream as everything else.
+        let resolved = at_current_paths(resolved, &applied.events);
+        events.extend(applied.events);
+        events.extend(bib_output(&resolved, templates, effective, adapters));
+    }
     Ok(events)
+}
+
+/// `paths` grouped by the directory holding them, in the order those
+/// directories are first reached.
+///
+/// A run spanning two trees is a run under two configurations, and
+/// nearly everything renaming does is per directory already: collisions
+/// are a property of a directory, and so are the template and the
+/// bibliography destination a file's own `.borax.toml` chooses. Working
+/// a group at a time is what lets each group use its own.
+///
+/// A run over one directory — which is nearly every run — yields a
+/// single group, and its event stream is exactly what it was before
+/// there was any grouping at all.
+fn by_directory(paths: &[PathBuf]) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let mut groups: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+    for path in paths {
+        let directory = path.parent().unwrap_or(Path::new("")).to_path_buf();
+        match groups.iter_mut().find(|(known, _)| *known == directory) {
+            Some((_, group)) => group.push(path.clone()),
+            None => groups.push((directory, vec![path.clone()])),
+        }
+    }
+    groups
 }
 
 /// The [`MoveLog`] backed by the run's journal.
@@ -597,18 +757,27 @@ fn bib_output<C: Cache>(
 /// what it resolved.
 fn bib_events<C: Cache>(
     paths: &[PathBuf],
-    effective: &Effective,
+    configs: &Configs,
     adapters: &Adapters<C>,
 ) -> Result<Vec<Event>, Diagnostic> {
-    let templates = templates(effective.config())?;
-    let (mut events, resolved) = resolved_records(paths, effective, adapters);
+    let groups = by_directory(paths);
+    let compiled: Vec<TemplateTable> = groups
+        .iter()
+        .map(|(directory, _)| templates(configs.for_directory(directory).config()))
+        .collect::<Result<_, _>>()?;
 
-    events.extend(write_bib(
-        &resolved,
-        &templates,
-        &bib_config(effective.config()),
-        adapters.bib_files,
-    ));
+    let mut events = Vec::with_capacity(paths.len());
+    for ((directory, group), templates) in groups.iter().zip(&compiled) {
+        let effective = configs.for_directory(directory);
+        let (resolved_events, resolved) = resolved_records(group, effective, adapters);
+        events.extend(resolved_events);
+        events.extend(write_bib(
+            &resolved,
+            templates,
+            &bib_config(effective.config()),
+            adapters.bib_files,
+        ));
+    }
     Ok(events)
 }
 
@@ -648,11 +817,11 @@ fn undo_events<C: Cache>(adapters: &Adapters<C>) -> Vec<Event> {
 /// event stream to close.
 pub fn dispatch<C: Cache>(
     cli: &Cli,
-    effective: &Effective,
+    configs: &Configs,
     adapters: &Adapters<C>,
     streams: &mut Streams,
 ) -> Outcome {
-    let body = match events_for(&cli.command, effective, adapters) {
+    let body = match events_for(&cli.command, configs, adapters) {
         Ok(body) => body,
         Err(diagnostic) => {
             let _ = writeln!(streams.err, "{diagnostic}");
@@ -698,16 +867,23 @@ fn applying(command: &Command) -> bool {
 /// [`Outcome::Fatal`] before an adapter is built: a run on settings
 /// borax could not read is a run on settings nobody chose.
 pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
-    let effective = match config_from_environment(
-        &start_directory_for(&cli.command),
-        flag_layers(&cli.settings),
-    ) {
-        Ok(effective) => effective,
-        Err(failure) => {
-            let _ = writeln!(streams.err, "{}", error(failure.to_string()));
-            return Outcome::Fatal;
-        }
-    };
+    // Expansion first: which directory a file belongs to is the question
+    // configuration is resolved by, and that cannot be asked of an
+    // argument that is still a directory standing for the files under it.
+    let command = expanded(&cli.command);
+    // The run's own configuration climbs from the arguments as the user
+    // typed them, not from the files they expanded to: `borax rename
+    // <dir>` is a run in `<dir>`, whatever depth its files sit at.
+    let working = start_directory_for(&cli.command);
+    let configs =
+        match configs_from_environment(command.paths(), &working, flag_layers(&cli.settings)) {
+            Ok(configs) => configs,
+            Err(failure) => {
+                let _ = writeln!(streams.err, "{}", error(failure.to_string()));
+                return Outcome::Fatal;
+            }
+        };
+    let effective = configs.run();
 
     let transport = UreqTransport::default();
     let politeness = Politeness {
@@ -737,11 +913,11 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
 
     dispatch(
         &Cli {
-            command: expanded(&cli.command),
+            command,
             settings: cli.settings.clone(),
             json: cli.json,
         },
-        &effective,
+        &configs,
         &Adapters {
             library: &RealLibrary,
             sources: &sources,

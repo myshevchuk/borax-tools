@@ -13,7 +13,7 @@ use borax::event::{Diagnostic, Event, Level, SkipReason};
 use borax::journal::{Entry, Journal, RunId};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError, counts_for};
-use borax::run::{Adapters, Streams, dispatch, entry_type, events_for, templates};
+use borax::run::{Adapters, Configs, Streams, dispatch, entry_type, events_for, templates};
 use borax::session::Outcome;
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
@@ -558,7 +558,12 @@ fn config_emits_one_config_setting_event_per_setting_matching_effective_events()
         now: fixed_now,
     };
 
-    let events = events_for(&Command::Config, &effective, &adapters).unwrap();
+    let events = events_for(
+        &Command::Config,
+        &Configs::uniform(effective.clone()),
+        &adapters,
+    )
+    .unwrap();
 
     assert_eq!(events, effective.events(), "got {events:?}");
 }
@@ -592,7 +597,12 @@ fn cache_status_without_clear_emits_a_single_cache_status_event() {
         now: fixed_now,
     };
 
-    let events = events_for(&Command::Cache { clear: false }, &effective, &adapters).unwrap();
+    let events = events_for(
+        &Command::Cache { clear: false },
+        &Configs::uniform(effective.clone()),
+        &adapters,
+    )
+    .unwrap();
 
     assert_eq!(events, vec![status_event(&stats_before)], "got {events:?}");
     assert!(root.exists(), "a status check must not remove anything");
@@ -623,7 +633,12 @@ fn cache_clear_emits_a_single_cache_cleared_event_and_empties_the_directory() {
         now: fixed_now,
     };
 
-    let events = events_for(&Command::Cache { clear: true }, &effective, &adapters).unwrap();
+    let events = events_for(
+        &Command::Cache { clear: true },
+        &Configs::uniform(effective.clone()),
+        &adapters,
+    )
+    .unwrap();
 
     assert_eq!(events, vec![cleared_event(&stats_before)], "got {events:?}");
     assert!(!root.exists(), "clearing must empty the cache directory");
@@ -654,7 +669,12 @@ fn cache_with_no_cache_root_is_a_diagnostic() {
         now: fixed_now,
     };
 
-    let error = events_for(&Command::Cache { clear: false }, &effective, &adapters).unwrap_err();
+    let error = events_for(
+        &Command::Cache { clear: false },
+        &Configs::uniform(effective.clone()),
+        &adapters,
+    )
+    .unwrap_err();
 
     assert_eq!(error.level, Level::Error);
 }
@@ -702,7 +722,7 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
         &Command::Resolve {
             paths: vec![good.clone(), bad.clone()],
         },
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
     )
     .unwrap();
@@ -765,7 +785,7 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
             paths: vec![path.clone()],
             apply: false,
         },
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
     )
     .unwrap();
@@ -831,7 +851,7 @@ fn rename_preview_with_no_journal_succeeds() {
             paths: vec![path.clone()],
             apply: false,
         },
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
     )
     .unwrap();
@@ -892,7 +912,7 @@ fn rename_apply_emits_renamed_moves_the_file_and_journals_an_entry() {
             paths: vec![path.clone()],
             apply: true,
         },
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
     )
     .unwrap();
@@ -974,7 +994,7 @@ fn rename_apply_with_no_journal_is_an_error_and_moves_nothing() {
             paths: vec![path],
             apply: true,
         },
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
     )
     .unwrap_err();
@@ -1030,7 +1050,7 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
         &Command::Bib {
             paths: vec![path.clone()],
         },
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
     )
     .unwrap();
@@ -1099,7 +1119,12 @@ fn undo_emits_reverted_for_a_journaled_entry_whose_file_verifies() {
         now: fixed_now,
     };
 
-    let events = events_for(&Command::Undo, &effective, &adapters).unwrap();
+    let events = events_for(
+        &Command::Undo,
+        &Configs::uniform(effective.clone()),
+        &adapters,
+    )
+    .unwrap();
 
     assert_eq!(
         events,
@@ -1150,7 +1175,7 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
             paths: vec![path],
             apply: false,
         },
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
     )
     .unwrap_err();
@@ -1186,7 +1211,12 @@ fn bib_with_an_uncompilable_template_propagates_the_diagnostic() {
         now: fixed_now,
     };
 
-    let error = events_for(&Command::Bib { paths: vec![path] }, &effective, &adapters).unwrap_err();
+    let error = events_for(
+        &Command::Bib { paths: vec![path] },
+        &Configs::uniform(effective.clone()),
+        &adapters,
+    )
+    .unwrap_err();
 
     assert_eq!(error.level, Level::Error);
 }
@@ -1222,7 +1252,7 @@ fn json_format_opens_with_run_started_and_closes_with_run_finished_and_every_lin
 
     dispatch(
         &cli(Command::Config, true),
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
     );
@@ -1303,7 +1333,7 @@ fn json_stdout_is_entirely_well_formed_json_lines_and_nothing_else() {
             },
             true,
         ),
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
     );
@@ -1365,7 +1395,7 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
             },
             false,
         ),
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
     );
@@ -1433,7 +1463,7 @@ fn run_finished_counts_match_counts_for_over_the_body_events() {
             },
             true,
         ),
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
     );
@@ -1491,7 +1521,7 @@ fn a_clean_run_returns_success() {
 
     let outcome = dispatch(
         &cli(Command::Resolve { paths: vec![path] }, true),
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
     );
@@ -1547,7 +1577,7 @@ fn a_run_with_a_skip_returns_partial() {
             },
             true,
         ),
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
     );
@@ -1590,7 +1620,8 @@ fn a_diagnostic_from_events_for_returns_fatal_writes_to_err_and_nothing_to_stdou
         paths: vec![path],
         apply: true,
     };
-    let expected: Diagnostic = events_for(&command, &effective, &adapters).unwrap_err();
+    let expected: Diagnostic =
+        events_for(&command, &Configs::uniform(effective.clone()), &adapters).unwrap_err();
 
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -1599,7 +1630,12 @@ fn a_diagnostic_from_events_for_returns_fatal_writes_to_err_and_nothing_to_stdou
         err: &mut err,
     };
 
-    let outcome = dispatch(&cli(command, false), &effective, &adapters, &mut streams);
+    let outcome = dispatch(
+        &cli(command, false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut streams,
+    );
 
     assert_eq!(outcome, Outcome::Fatal, "got {outcome:?}");
     assert!(
@@ -1643,7 +1679,7 @@ fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() 
 
     let outcome = dispatch(
         &cli(Command::Bib { paths: vec![path] }, true),
-        &effective,
+        &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
     );

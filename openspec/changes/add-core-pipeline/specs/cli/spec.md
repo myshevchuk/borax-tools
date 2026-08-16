@@ -81,6 +81,16 @@ directory), the XDG global configuration file, built-in defaults.
 `borax config` SHALL print the effective configuration with the origin of
 each value.
 
+The override file SHALL be discovered per input file, so one invocation
+spanning two directory trees applies each tree's overrides to its own
+files and the result does not depend on the order the paths were given.
+
+The settings deciding which services a run queries and how it identifies
+itself — `sources`, `mailto`, and the `network` table — SHALL be taken
+from the run's own configuration rather than per file, since the clients
+are built once before any file is read. `borax config`, which takes no
+paths, SHALL print the run's configuration.
+
 #### Scenario: Per-directory template override
 - **WHEN** a directory tree contains a `.borax.toml` defining a filename
   template different from the global configuration

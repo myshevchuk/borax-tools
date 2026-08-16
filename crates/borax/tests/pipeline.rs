@@ -879,7 +879,7 @@ fn events_come_in_input_order_ending_with_run_finished_and_nothing_after() {
         &library,
         &sources,
         &index,
-        &config(true),
+        &|_: &Path| config(true),
     );
 
     assert_eq!(run.events.len(), 4);
@@ -919,7 +919,9 @@ fn counts_reflect_the_outcomes_and_renamed_is_always_zero() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let run = resolve_batch(&[p1, p2, p3], &library, &sources, &index, &config(true));
+    let run = resolve_batch(&[p1, p2, p3], &library, &sources, &index, &|_: &Path| {
+        config(true)
+    });
 
     assert_eq!(
         run.counts,
@@ -939,7 +941,7 @@ fn the_final_event_carries_the_same_counts_as_run_counts() {
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let run = resolve_batch(&[p1], &library, &sources, &index, &config(true));
+    let run = resolve_batch(&[p1], &library, &sources, &index, &|_: &Path| config(true));
 
     match run.events.last() {
         Some(Event::RunFinished { counts }) => assert_eq!(*counts, run.counts),
@@ -981,7 +983,7 @@ fn a_mixed_batch_completes_and_an_unreadable_file_does_not_curtail_it() {
         &library,
         &sources,
         &index,
-        &config(true),
+        &|_: &Path| config(true),
     );
 
     assert_eq!(run.events.len(), 5);
@@ -1009,7 +1011,7 @@ fn an_empty_batch_produces_just_the_finishing_event_with_zero_counts() {
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let run = resolve_batch(&[], &library, &sources, &index, &config(true));
+    let run = resolve_batch(&[], &library, &sources, &index, &|_: &Path| config(true));
 
     assert_eq!(
         run.events,
@@ -1049,7 +1051,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
         &library,
         &live_sources,
         &index,
-        &conf,
+        &|_: &Path| conf,
     );
     assert_eq!(
         first.counts,
@@ -1067,7 +1069,9 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
     };
     let panic_sources: Vec<&dyn Source> = vec![&panic_crossref];
 
-    let second = resolve_batch(&[p1, p2], &library, &panic_sources, &index, &conf);
+    let second = resolve_batch(&[p1, p2], &library, &panic_sources, &index, &|_: &Path| {
+        conf
+    });
 
     assert_eq!(second.counts, first.counts);
     assert_eq!(library.open_calls(), opens_after_first_run);
@@ -1131,7 +1135,7 @@ fn a_renamed_file_with_identical_content_is_served_from_the_index_without_openin
         &library,
         &sources,
         &index,
-        &config(true),
+        &|_: &Path| config(true),
     );
 
     assert_eq!(library.open_calls(), 1);
