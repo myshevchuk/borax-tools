@@ -2,12 +2,14 @@
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use borax::event::{Attempt, Counts, Event, SkipReason};
 use borax::pipeline::{
-    FileOutcome, FileRecord, Library, ResolveConfig, event_for, resolve_batch, resolve_file,
+    FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, event_for, resolve_batch,
+    resolve_file,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -16,7 +18,8 @@ use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_pdf::tiered::{ExtractionConfig, Tier};
 use borax_sources::cache::MemoryCache;
 use borax_sources::source::{Source, SourceError, SourceName};
-use borax_sources::store::ContentIndex;
+use borax_sources::store::{ContentIndex, hash_file};
+use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
 // Fakes
@@ -1076,4 +1079,81 @@ fn a_renamed_file_with_identical_content_is_served_from_the_index_without_openin
         }
         other => panic!("expected Resolved for the renamed file, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// RealLibrary
+// ---------------------------------------------------------------------
+
+/// The path to a fixture in `borax-pdf`'s corpus, resolved from this
+/// crate's manifest directory so the suite runs the same way regardless
+/// of where `cargo test` is invoked from.
+fn corpus_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../borax-pdf/tests/corpus")
+        .join(name)
+}
+
+#[test]
+fn hash_of_a_real_file_matches_hashing_its_bytes_directly() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("document.pdf");
+    fs::write(&path, b"some file contents").unwrap();
+    let library = RealLibrary;
+
+    let hash = library.hash(&path).unwrap();
+
+    assert_eq!(hash, hash_for("some file contents"), "got {hash:?}");
+    assert_eq!(hash, hash_file(&path).unwrap());
+}
+
+#[test]
+fn hash_of_a_missing_path_is_unreadable() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("does-not-exist.pdf");
+    let library = RealLibrary;
+
+    let result = library.hash(&path);
+
+    assert!(
+        matches!(result, Err(ExtractionError::Unreadable { .. })),
+        "got {result:?}"
+    );
+}
+
+#[test]
+fn open_of_a_file_that_is_not_a_pdf_is_unreadable() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("not-a-pdf.pdf");
+    fs::write(&path, b"this is plain text, not a PDF").unwrap();
+    let library = RealLibrary;
+
+    match library.open(&path) {
+        Err(ExtractionError::Unreadable { .. }) => {}
+        Err(other) => panic!("expected Unreadable, got Err({other:?})"),
+        Ok(_) => panic!("expected opening a non-PDF file to fail"),
+    }
+}
+
+#[test]
+fn open_of_a_missing_path_is_an_error() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("does-not-exist.pdf");
+    let library = RealLibrary;
+
+    match library.open(&path) {
+        Err(_) => {}
+        Ok(_) => panic!("expected opening a missing path to fail"),
+    }
+}
+
+#[test]
+fn open_of_a_real_pdf_fixture_succeeds_with_a_nonzero_page_count() {
+    let library = RealLibrary;
+
+    let pdf = library
+        .open(&corpus_fixture("publisher-info-doi.pdf"))
+        .unwrap();
+
+    assert!(pdf.page_count() > 0, "got {}", pdf.page_count());
 }

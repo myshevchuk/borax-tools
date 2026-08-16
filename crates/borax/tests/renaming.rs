@@ -2,17 +2,20 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use borax::event::{Counts, Event, SkipReason};
 use borax::pipeline::FileRecord;
 use borax::renaming::{
-    Filesystem, PlannedRename, RenameError, apply_renames, counts_for, plan_renames, target_name,
+    Filesystem, PlannedRename, RealFilesystem, RenameError, apply_renames, counts_for,
+    plan_renames, target_name,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::record::{DateParts, EntryType, Name, Record};
 use borax_core::rename::CollisionPolicy;
 use borax_core::template::{Template, TemplateTable};
+use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
 // Fakes
@@ -773,4 +776,93 @@ fn a_preview_runs_counts_report_zero_renamed_however_many_moves_were_planned() {
             skipped: 0,
         }
     );
+}
+
+// ---------------------------------------------------------------------
+// RealFilesystem
+// ---------------------------------------------------------------------
+
+#[test]
+fn existing_maps_each_bare_file_name_to_the_hash_of_its_bytes() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a.pdf"), b"contents of a").unwrap();
+    fs::write(dir.path().join("b.pdf"), b"contents of b").unwrap();
+    let filesystem = RealFilesystem;
+
+    let found = filesystem.existing(dir.path());
+
+    assert_eq!(
+        found,
+        BTreeMap::from([
+            (
+                "a.pdf".to_string(),
+                Some(hash_of("contents of a").as_str().to_string())
+            ),
+            (
+                "b.pdf".to_string(),
+                Some(hash_of("contents of b").as_str().to_string())
+            ),
+        ]),
+        "got {found:?}"
+    );
+}
+
+#[test]
+fn existing_on_a_directory_that_does_not_exist_is_empty() {
+    let dir = tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist");
+    let filesystem = RealFilesystem;
+
+    let found = filesystem.existing(&missing);
+
+    assert!(found.is_empty(), "got {found:?}");
+}
+
+#[test]
+fn existing_does_not_include_subdirectory_names() {
+    let dir = tempdir().unwrap();
+    fs::create_dir(dir.path().join("sub")).unwrap();
+    fs::write(dir.path().join("file.pdf"), b"contents").unwrap();
+    let filesystem = RealFilesystem;
+
+    let found = filesystem.existing(dir.path());
+
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert!(found.contains_key("file.pdf"), "got {found:?}");
+    assert!(!found.contains_key("sub"), "got {found:?}");
+}
+
+#[test]
+fn rename_moves_the_file_leaving_the_old_path_gone_and_the_new_path_holding_the_bytes() {
+    let dir = tempdir().unwrap();
+    let from = dir.path().join("original.pdf");
+    let to = dir.path().join("Smith2024.pdf");
+    fs::write(&from, b"the original bytes").unwrap();
+    let filesystem = RealFilesystem;
+
+    filesystem.rename(&from, &to).unwrap();
+
+    assert!(!from.exists(), "the old path must be gone");
+    assert_eq!(fs::read(&to).unwrap(), b"the original bytes");
+}
+
+#[test]
+fn rename_refuses_to_overwrite_an_existing_destination() {
+    let dir = tempdir().unwrap();
+    let from = dir.path().join("original.pdf");
+    let to = dir.path().join("Smith2024.pdf");
+    fs::write(&from, b"new bytes").unwrap();
+    fs::write(&to, b"bytes already there").unwrap();
+    let filesystem = RealFilesystem;
+
+    let result = filesystem.rename(&from, &to);
+
+    assert!(matches!(result, Err(RenameError { .. })), "got {result:?}");
+    assert_eq!(
+        fs::read(&to).unwrap(),
+        b"bytes already there",
+        "the destination must keep its own bytes"
+    );
+    assert!(from.exists(), "the source must still be there");
+    assert_eq!(fs::read(&from).unwrap(), b"new bytes");
 }
