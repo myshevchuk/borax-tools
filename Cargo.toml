@@ -14,6 +14,7 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
 # Kept at the major/minor pdf-extract itself depends on, so both see one
 # lopdf and its `Document` crosses between them.
 lopdf = "0.42"
