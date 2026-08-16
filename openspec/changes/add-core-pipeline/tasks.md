@@ -164,10 +164,23 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       recorded cassette is a new-style id, so no unit test reached it
 - [ ] 9.2 Windows CI green, including sanitization and case-insensitive
       collision tests
-- [ ] 9.3 Wire the scheduled live contract-test job against the real
-      APIs
-- [ ] 9.4 Release scaffolding: static binary builds attached to tagged
-      GitHub releases; tag/version consistency check
+- [x] 9.3 Wire the scheduled live contract-test job against the real
+      APIs, and widen what it covers. The parse-level tests said nothing
+      about whether a client's own URL still lands on the service, so
+      the clients are now exercised through `Source::fetch` over a real
+      transport, including a pre-2007 arXiv identifier (the case 9.1a
+      fixed) and dispatch across two live sources. The job is also
+      startable by hand, which is what you want while changing a reader,
+      and identifies itself with `BORAX_MAILTO` when the repository sets
+      one. All eleven pass against the live services
+- [x] 9.4 Release scaffolding: static binary builds attached to tagged
+      GitHub releases; tag/version consistency check. Four targets —
+      Linux is musl, so the binary runs wherever the kernel does rather
+      than only where the runner's glibc is matched. Building and
+      publishing are separate jobs because four matrix jobs racing to
+      create one release is a race: they upload artifacts, and a single
+      job afterwards makes the release. Both are gated on the tests and
+      on the tag matching the workspace version
 - [x] 9.5 Report a rename that moved but could not be journaled.
       Resolved by inverting the order rather than by reaching stderr:
       the entry is appended before the file moves, so a move that

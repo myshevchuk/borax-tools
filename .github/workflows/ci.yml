@@ -3,17 +3,24 @@ name: CI
 on:
   push:
     branches: [main, "change/**"]
+    tags: ["v*"]
   pull_request:
   schedule:
     # Weekly live contract tests against the real APIs (see job below).
     - cron: "17 5 * * 1"
+  # Lets the live contract tests be started by hand, which is what you
+  # want while changing a response reader.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   test:
-    if: github.event_name != 'schedule'
+    # Everything except the two network-touching triggers: a manual run
+    # is how the live contract tests are started, and it should not
+    # re-run the offline suite a push already ran.
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -30,11 +37,130 @@ jobs:
       - run: cargo test --workspace
 
   live-contract:
-    # Scheduled-only: replays contract tests against the live Crossref/
-    # OpenAlex/arXiv APIs to catch upstream drift. Stub until the cassette
-    # test harness exists (task 9.3 of add-core-pipeline).
-    if: github.event_name == 'schedule'
+    # Runs the `#[ignore]`d tests in borax-sources against the real
+    # Crossref, OpenAlex and arXiv APIs, to notice when a service's
+    # responses drift away from the recorded cassettes the offline suite
+    # trusts. Nothing else in CI touches a socket.
+    #
+    # Scheduled weekly, and startable by hand from the Actions tab when a
+    # reader is being changed and the question is what the service
+    # actually sends today.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: echo "live contract tests not yet implemented (add-core-pipeline task 9.3)"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The polite pools want a contact address, and asking for the
+      # faster service without saying who is asking is the thing borax
+      # tells its own users not to do. The address is a repository
+      # variable so a fork's scheduled run does not send this one.
+      - name: Run the live contract tests
+        env:
+          BORAX_MAILTO: ${{ vars.BORAX_MAILTO }}
+        run: cargo test -p borax-sources --test live -- --ignored --test-threads 1
+
+  # A tag must point at a tree whose in-repo version matches it, so a
+  # release cannot be cut from a commit that forgot the version bump.
+  tag-version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag against the workspace version
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          in_repo="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "tag $tagged, Cargo.toml $in_repo"
+          test "$tagged" = "$in_repo" || {
+            echo "::error::tag v$tagged does not match the workspace version $in_repo"
+            exit 1
+          }
+
+  # One binary per platform. Building and publishing are separate jobs
+  # on purpose: four matrix jobs racing to create the same release is a
+  # race, so they only upload artifacts, and one job afterwards makes
+  # the release from all four.
+  #
+  # Gated on the tests and the version check, so nothing is published
+  # from a tree that does not build or whose tag disagrees with its
+  # version.
+  build-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, tag-version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl rather than glibc: a static binary runs on any Linux,
+          # rather than only on distributions whose glibc is new enough
+          # to match the runner's.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install the musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p borax --target ${{ matrix.target }}
+
+      # The archive is named after the target, so the four of them can
+      # sit in one release without colliding.
+      - name: Package the binary
+        shell: bash
+        run: |
+          name="borax-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          staged="$(mktemp -d)/$name"
+          mkdir -p "$staged"
+          binary="target/${{ matrix.target }}/release/borax"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$binary.exe" "$staged/"
+          else
+            cp "$binary" "$staged/"
+          fi
+          cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "$staged/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            (cd "$(dirname "$staged")" && 7z a "$name.zip" "$name" >/dev/null)
+            mv "$(dirname "$staged")/$name.zip" .
+          else
+            tar -czf "$name.tar.gz" -C "$(dirname "$staged")" "$name"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: borax-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.zip
+          if-no-files-found: error
+
+  # One job, after every build, so the release is created exactly once.
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Attach every binary to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: true
