@@ -169,7 +169,18 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       per run. `.borax.toml` is specified as discovered upward from
       each input file's directory, but a run climbs from the first
       input path only, so one invocation spanning two trees applies the
-      first tree's overrides to both
+      first tree's overrides to both — and which tree wins depends on
+      the order the paths were typed
+- [ ] 9.7 Start the override search from the directory a path names,
+      not from its parent. `start_directory` calls `.parent()` on the
+      argument unconditionally, which is right for a file and one level
+      too high for a directory, so `borax rename ~/library` silently
+      ignores `~/library/.borax.toml` while
+      `borax rename ~/library/paper.pdf` honours it. It also runs on
+      the raw arguments, before `expanded` turns directories into
+      files, which is why the two forms disagree. Separate from 9.6:
+      that one picks the wrong tree among several, this one misses the
+      only tree there is
 
 ## 10. Write safety
 
