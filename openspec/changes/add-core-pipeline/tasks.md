@@ -150,9 +150,18 @@ a socket, and only the file-backed cache (7.8) touches a disk.
 
 ## 9. Hardening and release readiness
 
-- [ ] 9.1 End-to-end test: mixed real-PDF batch through
+- [x] 9.1 End-to-end test: mixed real-PDF batch through
       `borax rename --json` against cassettes, asserting events, renames,
-      journal, master `.bib`, and sidecars
+      journal, master `.bib`, and sidecars. Every adapter is the real
+      one but `Transport`; the batch covers both extraction tiers, both
+      identifier kinds, and three ways of failing. It found 9.1a on its
+      first run
+- [x] 9.1a Fix the arXiv reader's identifier extraction, which took the
+      abstract URL's last path segment. An identifier issued before
+      April 2007 is `archive.subject/YYMMNNN` and the `/` is part of
+      it, so `.../abs/math.GT/0309136v1` parsed as the bare number
+      `0309136v1` and every pre-2007 preprint failed to resolve. The
+      recorded cassette is a new-style id, so no unit test reached it
 - [ ] 9.2 Windows CI green, including sanitization and case-insensitive
       collision tests
 - [ ] 9.3 Wire the scheduled live contract-test job against the real

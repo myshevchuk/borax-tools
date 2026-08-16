@@ -117,11 +117,20 @@ fn read_entry(reader: &mut Reader<&[u8]>) -> Result<Entry, ParseError> {
     }
 }
 
-/// The arXiv identifier an abstract URL names, in its last path
-/// segment.
+/// The arXiv identifier an abstract URL names: everything after
+/// `/abs/`.
+///
+/// Not the last path segment. An identifier issued before April 2007 is
+/// `archive.subject/YYMMNNN`, and the `/` in it belongs to the
+/// identifier — `http://arxiv.org/abs/math.GT/0309136v1` names
+/// `math.GT/0309136`, where the last segment alone is a bare number
+/// that is not an arXiv identifier at all.
+///
+/// A value carrying no `/abs/` is parsed whole, so a feed that gives
+/// the identifier plainly is read rather than refused.
 fn arxiv_id(id: &str) -> Result<ArxivId, ParseError> {
-    let segment = id.rsplit('/').next().unwrap_or(id);
-    ArxivId::parse(segment).map_err(|error| ParseError::Invalid {
+    let identifier = id.rsplit_once("/abs/").map_or(id, |(_, rest)| rest);
+    ArxivId::parse(identifier).map_err(|error| ParseError::Invalid {
         field: "id",
         message: error.to_string(),
     })
@@ -144,7 +153,7 @@ fn collapse_whitespace(text: &str) -> String {
 /// The resulting record is always [`borax_core::record::EntryType::Preprint`].
 ///
 /// Required: well-formed XML ([`ParseError::Malformed`] otherwise) and
-/// `entry/id`, which holds an abstract URL whose last path segment is
+/// `entry/id`, which holds an abstract URL whose part after `/abs/` is
 /// the arXiv identifier (missing → [`ParseError::MissingField`],
 /// unparsable → [`ParseError::Invalid`]; both name the field `id`,
 /// after the element). The identifier keeps the

@@ -198,3 +198,66 @@ fn parse_uses_first_entry_when_feed_has_several() {
     assert_eq!(record.title.as_deref(), Some("First"));
     assert_eq!(record.borax.arxiv.unwrap().id(), "2401.00003");
 }
+
+// ================= old-style identifiers =================
+
+// An identifier from before April 2007 is `archive.subject/YYMMNNN`,
+// and the `/` in it is part of the identifier. Reading the abstract
+// URL's last path segment drops the archive and leaves a bare number
+// that is not an arXiv identifier at all.
+#[test]
+fn parse_reads_an_old_style_identifier_whose_archive_contains_a_slash() {
+    let feed = feed_with_entry(
+        "<entry>\
+           <id>http://arxiv.org/abs/math.GT/0309136v1</id>\
+           <title>An Older Submission</title>\
+           <published>2003-09-08T00:00:00Z</published>\
+           <author><name>Petra Nowak</name></author>\
+         </entry>",
+    );
+
+    let record = parse(&feed).unwrap();
+
+    let arxiv = record.borax.arxiv.unwrap();
+    assert_eq!(
+        arxiv.id(),
+        "math.GT/0309136",
+        "the archive is part of the identifier"
+    );
+    assert_eq!(arxiv.version(), Some(1));
+}
+
+#[test]
+fn parse_still_reads_a_new_style_identifier_from_its_abstract_url() {
+    let feed = feed_with_entry(
+        "<entry>\
+           <id>http://arxiv.org/abs/2401.12345v2</id>\
+           <title>Preprints and Their Stamps</title>\
+           <published>2024-01-03T00:00:00Z</published>\
+         </entry>",
+    );
+
+    let record = parse(&feed).unwrap();
+
+    let arxiv = record.borax.arxiv.unwrap();
+    assert_eq!(arxiv.id(), "2401.12345");
+    assert_eq!(arxiv.version(), Some(2));
+}
+
+// A bare identifier where an abstract URL was expected is still read,
+// so a feed that omits the URL form is not a parse failure.
+#[test]
+fn parse_reads_an_identifier_that_is_not_an_abstract_url() {
+    let feed = feed_with_entry(
+        "<entry>\
+           <id>2401.12345v2</id>\
+           <title>Preprints and Their Stamps</title>\
+         </entry>",
+    );
+
+    let record = parse(&feed).unwrap();
+
+    let arxiv = record.borax.arxiv.unwrap();
+    assert_eq!(arxiv.id(), "2401.12345");
+    assert_eq!(arxiv.version(), Some(2));
+}

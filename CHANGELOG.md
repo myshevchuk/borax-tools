@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content-hash index. Two different files carrying the same DOI, or a
   re-run after the index is cleared, no longer re-query the service.
 
+- arXiv identifiers issued before April 2007 (`math.GT/0309136`)
+  resolve again. The reader took the abstract URL's last path segment,
+  which drops the archive that is part of such an identifier, so every
+  pre-2007 preprint failed with a malformed-response error.
+
 ### Added
 
 - `borax resolve` now emits the whole canonical record on each

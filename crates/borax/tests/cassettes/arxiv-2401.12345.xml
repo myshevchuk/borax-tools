@@ -1,0 +1,16 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <title>arXiv Query: search_query=&amp;id_list=2401.12345&amp;start=0&amp;max_results=10</title>
+  <entry>
+    <id>http://arxiv.org/abs/2401.12345v2</id>
+    <title>Preprints and Their Stamps</title>
+    <published>2024-01-03T00:00:00Z</published>
+    <summary>A synthetic abstract for the borax fixture corpus.</summary>
+    <author>
+      <name>Junia Castellan</name>
+    </author>
+    <link href="https://arxiv.org/abs/2401.12345v2" rel="alternate" type="text/html"/>
+    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="cs.DL"/>
+    <category term="cs.DL" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+</feed>

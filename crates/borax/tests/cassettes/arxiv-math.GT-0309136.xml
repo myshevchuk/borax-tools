@@ -1,0 +1,16 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <title>arXiv Query: search_query=&amp;id_list=math.GT/0309136&amp;start=0&amp;max_results=10</title>
+  <entry>
+    <id>http://arxiv.org/abs/math.GT/0309136v1</id>
+    <title>An Older Submission</title>
+    <published>2003-01-03T00:00:00Z</published>
+    <summary>A synthetic abstract for the borax fixture corpus.</summary>
+    <author>
+      <name>Petra Nowak</name>
+    </author>
+    <link href="https://arxiv.org/abs/math.GT/0309136v1" rel="alternate" type="text/html"/>
+    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="math.GT"/>
+    <category term="math.GT" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+</feed>
