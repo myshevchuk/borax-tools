@@ -124,8 +124,13 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       and `borax undo` with per-entry verification
 - [x] 8.6 Tests + implementation: `borax bib`, `borax config`,
       `borax cache`
-- [ ] 8.7 Tests + implementation: exit codes (success / partial /
+- [x] 8.7 Tests + implementation: exit codes (success / partial /
       fatal) and never-prompt behavior when stdin is not a TTY
+- [ ] 8.8 The binary itself: argument parsing and subcommand dispatch,
+      the real `Library` and `Filesystem` adapters, input-path walking,
+      and a `main` thin enough that everything it does stays reachable
+      from an in-process test. Tasks 8.1-8.7 build the library the
+      binary is a shell over; 8.8 is the shell
 
 ## 9. Hardening and release readiness
 
