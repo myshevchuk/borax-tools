@@ -836,8 +836,19 @@ fn origin_display_matches_the_documented_forms() {
 
 // --- nearest_override() ---
 
+/// Reports whether a candidate is one of PATHS, which are written with
+/// `/` whatever the platform.
+///
+/// The comparison is by component rather than by string: the candidates
+/// come from [`Path::join`], which separates with `\` on Windows, and
+/// `"/proj/.borax.toml" == "/proj\\.borax.toml"` is false even though
+/// both name the same file.
 fn exists_at(paths: &'static [&'static str]) -> impl Fn(&Path) -> bool {
-    move |path| paths.contains(&path.to_str().unwrap())
+    move |path| {
+        paths
+            .iter()
+            .any(|expected| Path::new(expected).components().eq(path.components()))
+    }
 }
 
 #[test]
