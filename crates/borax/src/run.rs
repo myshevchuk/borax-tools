@@ -14,24 +14,33 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use borax_core::record::EntryType;
-use borax_core::template::TemplateTable;
-use borax_sources::cache::Cache;
-use borax_sources::source::Source;
-use borax_sources::store::ContentIndex;
+use borax_core::record::{EntryType, Record};
+use borax_core::template::{Template, TemplateTable};
+use borax_pdf::tiered::ExtractionConfig;
+use borax_sources::arxiv::ArxivClient;
+use borax_sources::cache::{Cache, MemoryCache};
+use borax_sources::crossref::CrossrefClient;
+use borax_sources::http::Politeness;
+use borax_sources::openalex::OpenAlexClient;
+use borax_sources::source::{Source, SourceName};
+use borax_sources::store::{ContentIndex, FileCache, default_cache_root};
+use borax_sources::transport::UreqTransport;
 
-use crate::bib::BibFiles;
-use crate::cli::{Cli, Command};
+use crate::bib::{BibConfig, BibFiles, RealBibFiles, write_bib};
+use crate::cli::{Cli, Command, flag_layers};
 use crate::config::{
     Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
     layer_from_toml, nearest_override, resolve,
 };
-use crate::event::{Diagnostic, Event};
-use crate::journal::Journal;
-use crate::pipeline::Library;
-use crate::renaming::Filesystem;
-use crate::session::Outcome;
+use crate::event::{Diagnostic, Event, Level, render};
+use crate::journal::{Entry, FileJournal, Journal, RunId, undo_last};
+use crate::pipeline::{
+    FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
+};
+use crate::renaming::{Filesystem, RealFilesystem, apply_renames, counts_for, plan_renames};
+use crate::session::{Outcome, outcome_for};
 
 /// The extension a file needs to be picked up from a directory.
 pub const PDF_EXTENSION: &str = "pdf";
@@ -256,7 +265,17 @@ pub struct Adapters<'a, C: Cache> {
 /// written by a person, and `[templates.article]` has to mean what a
 /// person means by it.
 pub fn entry_type(name: &str) -> Option<EntryType> {
-    todo!("match the variant names")
+    match name {
+        "article" => Some(EntryType::Article),
+        "preprint" => Some(EntryType::Preprint),
+        "book" => Some(EntryType::Book),
+        "chapter" => Some(EntryType::Chapter),
+        "thesis" => Some(EntryType::Thesis),
+        "report" => Some(EntryType::Report),
+        "patent" => Some(EntryType::Patent),
+        "standard" => Some(EntryType::Standard),
+        _ => None,
+    }
 }
 
 /// The templates `config` describes, compiled.
@@ -270,7 +289,38 @@ pub fn entry_type(name: &str) -> Option<EntryType> {
 /// configuration, so a broken one is wrong for every file in the batch
 /// and there is nothing to be gained by finding that out once per file.
 pub fn templates(config: &Config) -> Result<TemplateTable, Diagnostic> {
-    todo!("compile the default, then each entry type's override")
+    let compile = |key: &str, source: &str| {
+        Template::compile(source).map_err(|failure| error(format!("templates.{key}: {failure}")))
+    };
+
+    let Some(default) = config.templates.get(DEFAULT_TEMPLATE) else {
+        return Err(error(format!("templates.{DEFAULT_TEMPLATE} is unset")));
+    };
+    let mut table = TemplateTable::new(compile(DEFAULT_TEMPLATE, default)?);
+
+    for (name, source) in &config.templates {
+        if name == DEFAULT_TEMPLATE {
+            continue;
+        }
+        let Some(entry_type) = entry_type(name) else {
+            return Err(error(format!("templates.{name} names no entry type")));
+        };
+        table.insert(entry_type, compile(name, source)?);
+    }
+
+    Ok(table)
+}
+
+/// The key of the template every entry type without one of its own
+/// falls back to.
+const DEFAULT_TEMPLATE: &str = "default";
+
+/// An error [`Diagnostic`] carrying `message`.
+fn error(message: String) -> Diagnostic {
+    Diagnostic {
+        level: Level::Error,
+        message,
+    }
 }
 
 /// The events `command` produces, between the run's first and last.
@@ -296,7 +346,260 @@ pub fn events_for<C: Cache>(
     effective: &Effective,
     adapters: &Adapters<C>,
 ) -> Result<Vec<Event>, Diagnostic> {
-    todo!("dispatch on the subcommand")
+    match command {
+        Command::Config => Ok(effective.events()),
+        Command::Cache { clear } => cache_events(*clear, adapters.cache_root.as_deref()),
+        Command::Resolve { paths } => Ok(resolve_events(paths, effective, adapters)),
+        Command::Rename { paths, apply } => rename_events(paths, *apply, effective, adapters),
+        Command::Bib { paths } => bib_events(paths, effective, adapters),
+        Command::Undo => Ok(undo_events(adapters)),
+    }
+}
+
+/// The events `borax cache` produces over the cache at `root`.
+///
+/// One event either way: what the cache holds, or what emptying it
+/// removed. A cache that cannot be read is a [`Diagnostic`] rather than
+/// a count of zero, since an unreadable cache is not an empty one.
+fn cache_events(clear: bool, root: Option<&Path>) -> Result<Vec<Event>, Diagnostic> {
+    let Some(root) = root else {
+        return Err(error("this system names no cache directory".to_string()));
+    };
+
+    match clear {
+        true => crate::cache::clear(root).map(|stats| vec![crate::cache::cleared_event(&stats)]),
+        false => crate::cache::inspect(root).map(|stats| vec![crate::cache::status_event(&stats)]),
+    }
+    .map_err(|failure| error(format!("\"{}\": {failure}", root.display())))
+}
+
+/// The events `borax resolve` produces for `paths`.
+fn resolve_events<C: Cache>(
+    paths: &[PathBuf],
+    effective: &Effective,
+    adapters: &Adapters<C>,
+) -> Vec<Event> {
+    let mut run = resolve_batch(
+        paths,
+        adapters.library,
+        adapters.sources,
+        adapters.index,
+        &resolving(effective.config()),
+    );
+    // A batch closes its own stream; the one framing a whole invocation
+    // is `dispatch`'s to open and close.
+    run.events.pop();
+    run.events
+}
+
+/// What a run may do while resolving, from `config`.
+fn resolving(config: &Config) -> ResolveConfig {
+    ResolveConfig {
+        extraction: ExtractionConfig {
+            page_limit: config.page_limit,
+        },
+        cache: config.cache,
+    }
+}
+
+/// The events `borax rename` produces for `paths`, moving the files
+/// when `apply` is set.
+///
+/// The journal is required before anything is resolved rather than
+/// after the moves are planned, so a run that could not have been undone
+/// costs no network and touches no file.
+fn rename_events<C: Cache>(
+    paths: &[PathBuf],
+    apply: bool,
+    effective: &Effective,
+    adapters: &Adapters<C>,
+) -> Result<Vec<Event>, Diagnostic> {
+    let journal = match (apply, adapters.journal) {
+        (true, None) => {
+            return Err(error(
+                "--apply needs a journal to record the moves in, and this system names no state \
+                 directory"
+                    .to_string(),
+            ));
+        }
+        (true, journal) => journal,
+        (false, _) => None,
+    };
+    let templates = templates(effective.config())?;
+
+    let (mut events, resolved) = resolved_records(paths, effective, adapters);
+    let moves = apply_renames(
+        &plan_renames(
+            &resolved,
+            &templates,
+            effective.config().collision,
+            adapters.filesystem,
+        ),
+        adapters.filesystem,
+        apply,
+    );
+
+    if let Some(journal) = journal {
+        // The moves have already happened, so a journal that will not
+        // take them costs `undo` and not the run: reporting the moves is
+        // worth more than a failure that would hide them.
+        let _ = journal.append(&journaled(&moves, &resolved, (adapters.now)()));
+    }
+
+    let resolved = at_current_paths(resolved, &moves);
+    events.extend(moves);
+    events.extend(bib_output(&resolved, &templates, effective, adapters));
+    Ok(events)
+}
+
+/// Resolve `paths`, keeping the records alongside the events.
+///
+/// Renaming and bibliography output both work from the records rather
+/// than from the events, so the pair is what they need;
+/// [`crate::pipeline::resolve_batch`] reports the same events and keeps
+/// nothing. Only resolved files appear in the records, each paired with
+/// the path it was resolved from.
+fn resolved_records<C: Cache>(
+    paths: &[PathBuf],
+    effective: &Effective,
+    adapters: &Adapters<C>,
+) -> (Vec<Event>, Vec<(PathBuf, FileRecord)>) {
+    let mut events = Vec::with_capacity(paths.len());
+    let mut resolved = Vec::new();
+
+    for path in paths {
+        let outcome = resolve_file(
+            path,
+            adapters.library,
+            adapters.sources,
+            adapters.index,
+            &resolving(effective.config()),
+        );
+        events.push(crate::pipeline::event_for(path, &outcome));
+        if let FileOutcome::Resolved(file) = outcome {
+            resolved.push((path.clone(), file));
+        }
+    }
+
+    (events, resolved)
+}
+
+/// The journal entries recording the moves `events` reports, all
+/// stamped `at` and so all one run.
+///
+/// One entry per [`Event::Renamed`], carrying the file's content hash as
+/// `resolved` holds it. A file whose hash is unknown is not journaled:
+/// `undo` verifies by hash, so an entry without one names a move nothing
+/// could ever reverse.
+fn journaled(events: &[Event], resolved: &[(PathBuf, FileRecord)], at: String) -> Vec<Entry> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let Event::Renamed { path, target } = event else {
+                return None;
+            };
+            let hash = resolved
+                .iter()
+                .find(|(candidate, _)| candidate == path)?
+                .1
+                .hash
+                .clone()?;
+
+            Some(Entry {
+                run: RunId::new(at.clone()),
+                from: path.clone(),
+                to: target.clone(),
+                hash,
+                at: at.clone(),
+            })
+        })
+        .collect()
+}
+
+/// `resolved` with every path `events` reports a move for replaced by
+/// where it moved, so a sidecar lands beside the name a file now carries
+/// rather than beside the one it has just lost.
+fn at_current_paths(
+    resolved: Vec<(PathBuf, FileRecord)>,
+    events: &[Event],
+) -> Vec<(PathBuf, FileRecord)> {
+    resolved
+        .into_iter()
+        .map(|(path, file)| {
+            let moved = events.iter().find_map(|event| match event {
+                Event::Renamed { path: from, target } if *from == path => Some(target.clone()),
+                _ => None,
+            });
+            (moved.unwrap_or(path), file)
+        })
+        .collect()
+}
+
+/// The bibliography events a run that was not asked for bibliography
+/// output still produces, which is none unless a destination is
+/// configured.
+///
+/// A run with neither a master file nor sidecars has nowhere to write,
+/// and asking [`crate::bib::write_bib`] anyway would report records too
+/// sparse to cite as skipped in a run that was never going to cite them.
+fn bib_output<C: Cache>(
+    resolved: &[(PathBuf, FileRecord)],
+    templates: &TemplateTable,
+    effective: &Effective,
+    adapters: &Adapters<C>,
+) -> Vec<Event> {
+    let config = bib_config(effective.config());
+    match config.path.is_some() || config.sidecars {
+        true => write_bib(resolved, templates, &config, adapters.bib_files),
+        false => Vec::new(),
+    }
+}
+
+/// The events `borax bib` produces for `paths`.
+///
+/// Unlike the bibliography output a rename run produces on the side,
+/// this one is what was asked for, so it runs whether or not a
+/// destination is configured — a run that writes nowhere still reports
+/// what it resolved.
+fn bib_events<C: Cache>(
+    paths: &[PathBuf],
+    effective: &Effective,
+    adapters: &Adapters<C>,
+) -> Result<Vec<Event>, Diagnostic> {
+    let templates = templates(effective.config())?;
+    let (mut events, resolved) = resolved_records(paths, effective, adapters);
+
+    events.extend(write_bib(
+        &resolved,
+        &templates,
+        &bib_config(effective.config()),
+        adapters.bib_files,
+    ));
+    Ok(events)
+}
+
+/// Where bibliography output goes, from `config`.
+fn bib_config(config: &Config) -> BibConfig {
+    BibConfig {
+        path: config.bib_path.clone(),
+        duplicates: config.duplicates,
+        sidecars: config.sidecars,
+    }
+}
+
+/// The events `borax undo` produces.
+///
+/// A run with no journal reverts nothing and reports nothing, which is
+/// what an absent journal means: there is no move on record to undo.
+fn undo_events<C: Cache>(adapters: &Adapters<C>) -> Vec<Event> {
+    let Some(journal) = adapters.journal else {
+        return Vec::new();
+    };
+
+    undo_last(journal, adapters.library, adapters.filesystem)
+        .iter()
+        .map(crate::journal::event_for)
+        .collect()
 }
 
 /// Carry out `cli` against `adapters`, writing to `streams`.
@@ -315,7 +618,42 @@ pub fn dispatch<C: Cache>(
     adapters: &Adapters<C>,
     streams: &mut Streams,
 ) -> Outcome {
-    todo!("frame the events, render them, and read the outcome")
+    let body = match events_for(&cli.command, effective, adapters) {
+        Ok(body) => body,
+        Err(diagnostic) => {
+            let _ = writeln!(streams.err, "{diagnostic}");
+            return Outcome::Fatal;
+        }
+    };
+
+    let counts = counts_for(&body);
+    let mut events = Vec::with_capacity(body.len() + 2);
+    events.push(Event::RunStarted {
+        command: cli.command.name().to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        applying: applying(&cli.command),
+    });
+    events.extend(body);
+    events.push(Event::RunFinished { counts });
+
+    for event in &events {
+        if let Some(line) = render(cli.format(), event) {
+            let _ = writeln!(streams.out, "{line}");
+        }
+    }
+
+    outcome_for(&counts)
+}
+
+/// Whether `command` will change what is on disk rather than only
+/// report on it.
+fn applying(command: &Command) -> bool {
+    match command {
+        Command::Rename { apply, .. } => *apply,
+        Command::Cache { clear } => *clear,
+        Command::Bib { .. } | Command::Undo => true,
+        Command::Resolve { .. } | Command::Config => false,
+    }
 }
 
 /// Carry out `cli` against the real world.
@@ -326,5 +664,129 @@ pub fn dispatch<C: Cache>(
 /// [`Outcome::Fatal`] before an adapter is built: a run on settings
 /// borax could not read is a run on settings nobody chose.
 pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
-    todo!("build the real adapters and dispatch")
+    let effective =
+        match config_from_environment(&start_directory(&cli.command), flag_layers(&cli.settings)) {
+            Ok(effective) => effective,
+            Err(failure) => {
+                let _ = writeln!(streams.err, "{}", error(failure.to_string()));
+                return Outcome::Fatal;
+            }
+        };
+
+    let transport = UreqTransport::default();
+    let politeness = Politeness {
+        mailto: effective.config().mailto.clone(),
+    };
+    let crossref = CrossrefClient::new(transport.clone(), politeness.clone());
+    let openalex = OpenAlexClient::new(transport.clone(), politeness.clone());
+    let arxiv = ArxivClient::new(transport, politeness);
+    let sources: Vec<&dyn Source> = [
+        (SourceName::Crossref, &crossref as &dyn Source),
+        (SourceName::OpenAlex, &openalex as &dyn Source),
+        (SourceName::Arxiv, &arxiv as &dyn Source),
+    ]
+    .into_iter()
+    .filter(|(name, _)| effective.config().sources.contains(name))
+    .map(|(_, source)| source)
+    .collect();
+
+    let index = ContentIndex::new(match FileCache::open_default() {
+        Some(cache) => ResponseCache::File(cache),
+        None => ResponseCache::Memory(MemoryCache::new()),
+    });
+    let journal = FileJournal::open_default();
+
+    dispatch(
+        &Cli {
+            command: expanded(&cli.command),
+            settings: cli.settings.clone(),
+            json: cli.json,
+        },
+        &effective,
+        &Adapters {
+            library: &RealLibrary,
+            sources: &sources,
+            index: &index,
+            filesystem: &RealFilesystem,
+            journal: journal.as_ref().map(|journal| journal as &dyn Journal),
+            bib_files: &RealBibFiles,
+            cache_root: default_cache_root(),
+            now: timestamp,
+        },
+        streams,
+    )
+}
+
+/// The directory the configuration search climbs from: the directory
+/// holding the first path `command` was given, or the working directory
+/// when it was given none — or one that names no directory of its own.
+fn start_directory(command: &Command) -> PathBuf {
+    match command.paths().first().and_then(|path| path.parent()) {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::env::current_dir().unwrap_or_default(),
+    }
+}
+
+/// `command` with each path it was given replaced by the files that path
+/// names ([`inputs`]).
+///
+/// Expansion happens here rather than in [`events_for`], because which
+/// files a directory holds is a question for the filesystem: a
+/// subcommand's paths reach [`events_for`] as the files to work on,
+/// whoever decided which those are.
+fn expanded(command: &Command) -> Command {
+    match command {
+        Command::Resolve { paths } => Command::Resolve {
+            paths: inputs(paths),
+        },
+        Command::Rename { paths, apply } => Command::Rename {
+            paths: inputs(paths),
+            apply: *apply,
+        },
+        Command::Bib { paths } => Command::Bib {
+            paths: inputs(paths),
+        },
+        Command::Undo | Command::Config | Command::Cache { .. } => command.clone(),
+    }
+}
+
+/// The time a real run records for the moves it journals: milliseconds
+/// since the Unix epoch, in decimal.
+///
+/// Two runs of the same binary a millisecond apart read differently,
+/// which is what [`Adapters::now`] needs of the value to make one run's
+/// entries tell themselves from another's. A clock reading before the
+/// epoch reports zero rather than ending the run.
+fn timestamp() -> String {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(since) => since.as_millis().to_string(),
+        Err(_) => "0".to_string(),
+    }
+}
+
+/// The response cache a real run reads and writes.
+///
+/// A system naming a cache directory gets a [`FileCache`] there, and one
+/// naming none gets an in-memory cache: the run still avoids asking
+/// twice about a file it has already seen, and forgets it when the
+/// process ends.
+enum ResponseCache {
+    File(FileCache),
+    Memory(MemoryCache),
+}
+
+impl Cache for ResponseCache {
+    fn get(&self, key: &str) -> Option<Record> {
+        match self {
+            ResponseCache::File(cache) => cache.get(key),
+            ResponseCache::Memory(cache) => cache.get(key),
+        }
+    }
+
+    fn put(&self, key: &str, record: &Record) {
+        match self {
+            ResponseCache::File(cache) => cache.put(key, record),
+            ResponseCache::Memory(cache) => cache.put(key, record),
+        }
+    }
 }
