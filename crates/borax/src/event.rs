@@ -71,6 +71,32 @@ pub enum Event {
         key: String,
         outcome: String,
     },
+    /// A sidecar written beside a resolved file.
+    Sidecar { path: PathBuf, target: PathBuf },
+    /// One setting of the effective configuration, with the layer that
+    /// supplied it. Emitted by `borax config`, one per setting.
+    ///
+    /// `value` is rendered in TOML value syntax and `origin` in the
+    /// wording [`crate::config::Origin`] displays, so a consumer reads
+    /// the same two strings a person does.
+    ConfigSetting {
+        key: String,
+        value: String,
+        origin: String,
+    },
+    /// What the response cache holds. `bytes` is the size on disk of
+    /// the entries counted.
+    CacheStatus {
+        root: PathBuf,
+        entries: usize,
+        bytes: u64,
+    },
+    /// What clearing the response cache removed.
+    CacheCleared {
+        root: PathBuf,
+        entries: usize,
+        bytes: u64,
+    },
     /// The run is over. Always the last event.
     RunFinished { counts: Counts },
 }
@@ -107,6 +133,11 @@ pub enum SkipReason {
     Unnameable,
     /// The rename itself failed, after the plan said it would not.
     RenameFailed { message: String },
+    /// Bibliography output for the file could not be written.
+    BibWriteFailed { message: String },
+    /// The record resolved, but the template rendered nothing a
+    /// citation key can be made of.
+    Unciteable,
     /// Nothing is at the path the journal says a file was moved to, so
     /// there is nothing to move back.
     Missing,
@@ -243,6 +274,28 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: bibliography entry {key} {outcome}",
             path.display()
         )),
+        Event::Sidecar { path, target } => Some(format!(
+            "{}: sidecar written to {}",
+            path.display(),
+            target.display()
+        )),
+        Event::ConfigSetting { key, value, origin } => Some(format!("{key} = {value}  # {origin}")),
+        Event::CacheStatus {
+            root,
+            entries,
+            bytes,
+        } => Some(format!(
+            "{}: {entries} entries, {bytes} bytes",
+            root.display()
+        )),
+        Event::CacheCleared {
+            root,
+            entries,
+            bytes,
+        } => Some(format!(
+            "{}: cleared {entries} entries, {bytes} bytes",
+            root.display()
+        )),
         Event::RunFinished { counts } => Some(format!(
             "{} resolved, {} renamed, {} skipped",
             counts.resolved, counts.renamed, counts.skipped
@@ -277,6 +330,10 @@ fn skipped_because(reason: &SkipReason) -> String {
         SkipReason::ContentChanged => "the file there is not the one that was moved".to_string(),
         SkipReason::OriginalTaken => "its original name is taken".to_string(),
         SkipReason::RenameFailed { message } => format!("rename failed ({message})"),
+        SkipReason::BibWriteFailed { message } => {
+            format!("bibliography output failed ({message})")
+        }
+        SkipReason::Unciteable => "the record renders an empty citation key".to_string(),
     }
 }
 

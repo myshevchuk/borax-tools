@@ -5,6 +5,8 @@
 //! The binary is a thin shell over this library so that everything it
 //! does is reachable from integration tests without spawning a process.
 
+pub mod bib;
+pub mod cache;
 pub mod config;
 pub mod event;
 pub mod journal;
