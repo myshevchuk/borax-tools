@@ -12,3 +12,4 @@ pub mod event;
 pub mod journal;
 pub mod pipeline;
 pub mod renaming;
+pub mod session;
