@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-17
+
+The first release. Nothing was published before it, so the "Changed"
+and "Fixed" entries below record work done during development rather
+than changes to a version anyone could have installed; "Added" opens
+with the capability set as a whole and then lists what arrived late in
+that development.
+
+### Added
+
+- The `borax` binary, with `resolve` (report what each file resolves
+  to), `rename` (rename each file after its record), `bib` (write
+  bibliography output and rename nothing), `undo` (move back everything
+  the last applied run moved), `config` (print every setting and the
+  layer it came from), and `cache` (report or clear the response
+  cache).
+- Renaming previews by default and moves only under `--apply`, never
+  overwrites a file it did not plan for, and journals each move before
+  making it so `borax undo` can reverse an interrupted run.
+- Metadata resolution against Crossref, OpenAlex and arXiv, on a
+  bounded thread pool, paced per service and cached on disk.
+  Identifiers are extracted from the PDF in tiers — embedded metadata
+  first, then a bounded scan of the text layer — and the pure-Rust
+  extractor needs no native toolchain on any platform.
+- A template language for filenames: bracket tokens over a record's
+  fields, chained filters, `||` alternatives, `/` to file into
+  subdirectories, and per-entry-type templates. Rendered names go
+  through a sanitization pass that cannot be disabled, so a name is
+  valid on Linux, macOS and Windows at once. The README documents the
+  language.
+- BibTeX output, either merged into one master `.bib` or written as a
+  sidecar beside each file.
+- Configuration in layers — built-in defaults, a global `config.toml`,
+  a per-directory `.borax.toml`, environment variables, then flags —
+  with `borax config` reporting the origin of every effective value.
+- A JSON Lines event stream behind `--json` on every subcommand, as the
+  integration contract for editor and watcher tooling.
+- `borax resolve` emits the whole canonical record on each `resolved`
+  event, not just the identifier it looked up — the JSON stream is the
+  composable interface, and a caller should not have to go back to the
+  network for what borax already resolved.
+- Skip events for a metadata conflict report how similar the two titles
+  were, so a near miss can be told from two unrelated works.
+
+### Changed
+
+- Files are resolved on a bounded pool of threads rather than one at a
+  time, so a directory of PDFs is processed several times faster.
+  `network.concurrency` sets the width. The event stream is unaffected:
+  results are written back at their input position, so the JSON output
+  is identical to a sequential run's and stays diffable. Requests stay
+  paced per service, so more threads do not mean a faster rate of
+  asking.
+
+- A template containing `/` files a document into a subdirectory, which
+  the templates specification always described and which failed for
+  every file: the subdirectory was never created, and a name already
+  taken inside it was invisible to the collision planner.
+
 ### Fixed
 
 - A run spanning two directory trees applies each tree's own
@@ -63,26 +122,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which drops the archive that is part of such an identifier, so every
   pre-2007 preprint failed with a malformed-response error.
 
-### Changed
-
-- Files are resolved on a bounded pool of threads rather than one at a
-  time, so a directory of PDFs is processed several times faster.
-  `network.concurrency` sets the width. The event stream is unaffected:
-  results are written back at their input position, so the JSON output
-  is identical to a sequential run's and stays diffable. Requests stay
-  paced per service, so more threads do not mean a faster rate of
-  asking.
-
-- A template containing `/` files a document into a subdirectory, which
-  the templates specification always described and which failed for
-  every file: the subdirectory was never created, and a name already
-  taken inside it was invisible to the collision planner.
-
-### Added
-
-- `borax resolve` now emits the whole canonical record on each
-  `resolved` event, not just the identifier it looked up — the JSON
-  stream is the composable interface, and a caller should not have to
-  go back to the network for what borax already resolved.
-- Skip events for a metadata conflict now report how similar the two
-  titles were, so a near miss can be told from two unrelated works.
+[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/myshevchuk/borax-tools/releases/tag/v0.1.0
