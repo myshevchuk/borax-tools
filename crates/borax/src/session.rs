@@ -28,13 +28,13 @@ pub enum Outcome {
 }
 
 /// The exit code of a run that completed with nothing skipped.
-pub const SUCCESS: i32 = 0;
+pub const SUCCESS: u8 = 0;
 
 /// The exit code of a run that never started.
 ///
 /// The code a shell treats as ordinary failure, because an invocation
 /// that could not be understood is the ordinary failure.
-pub const FATAL: i32 = 1;
+pub const FATAL: u8 = 1;
 
 /// The exit code of a completed run that skipped at least one file.
 ///
@@ -42,11 +42,11 @@ pub const FATAL: i32 = 1;
 /// with skips as a failure, while a script that wants to tell "some
 /// files need attention" from "borax could not run" reads the two codes
 /// apart.
-pub const PARTIAL: i32 = 2;
+pub const PARTIAL: u8 = 2;
 
 impl Outcome {
     /// The process exit code this outcome leaves behind.
-    pub fn code(self) -> i32 {
+    pub fn code(self) -> u8 {
         match self {
             Outcome::Success => SUCCESS,
             Outcome::Partial => PARTIAL,

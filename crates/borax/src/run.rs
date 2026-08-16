@@ -12,13 +12,26 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use borax_core::record::EntryType;
+use borax_core::template::TemplateTable;
+use borax_sources::cache::Cache;
+use borax_sources::source::Source;
+use borax_sources::store::ContentIndex;
+
+use crate::bib::BibFiles;
+use crate::cli::{Cli, Command};
 use crate::config::{
-    ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
+    Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
     layer_from_toml, nearest_override, resolve,
 };
+use crate::event::{Diagnostic, Event};
+use crate::journal::Journal;
+use crate::pipeline::Library;
+use crate::renaming::Filesystem;
+use crate::session::Outcome;
 
 /// The extension a file needs to be picked up from a directory.
 pub const PDF_EXTENSION: &str = "pdf";
@@ -194,4 +207,113 @@ pub fn config_from_environment(
 /// read: every name it looks for is ASCII.
 fn into_string(value: OsString) -> Option<String> {
     value.into_string().ok()
+}
+
+/// Where an invocation writes.
+///
+/// The event stream goes to `out` and diagnostics to `err`. Keeping the
+/// two apart is what lets a `--json` consumer parse stdout line by line
+/// however much the run has to complain about.
+pub struct Streams<'a> {
+    pub out: &'a mut dyn Write,
+    pub err: &'a mut dyn Write,
+}
+
+/// Everything a run reaches the outside world through.
+///
+/// Every field is a seam already tested against a fake, so a whole
+/// invocation runs in a test with neither a network, a PDF engine, nor
+/// a disk.
+pub struct Adapters<'a, C: Cache> {
+    pub library: &'a dyn Library,
+    pub sources: &'a [&'a dyn Source],
+    pub index: &'a ContentIndex<C>,
+    pub filesystem: &'a dyn Filesystem,
+    /// Where applied renames are recorded, or `None` when there is
+    /// nowhere to record them — no state directory, on a system that
+    /// names none.
+    pub journal: Option<&'a dyn Journal>,
+    pub bib_files: &'a dyn BibFiles,
+    /// The response cache's directory, or `None` when the system names
+    /// no cache directory.
+    pub cache_root: Option<PathBuf>,
+    /// What an applied rename records as the time it happened, and what
+    /// identifies the run in the journal.
+    pub now: fn() -> String,
+}
+
+/// `name` as an entry type, or `None` when no entry type goes by it.
+///
+/// The names are the variants' own — `article`, `preprint`, `book`,
+/// `chapter`, `thesis`, `report`, `patent`, `standard` — and not the
+/// CSL-JSON strings they serialize to, where `article` names a preprint
+/// and a journal article is `article-journal`. A configuration file is
+/// written by a person, and `[templates.article]` has to mean what a
+/// person means by it.
+pub fn entry_type(name: &str) -> Option<EntryType> {
+    todo!("match the variant names")
+}
+
+/// The templates `config` describes, compiled.
+///
+/// `templates.default` is the table's fallback and is always present:
+/// the built-in defaults supply it and merging removes no key. Every
+/// other key names an entry type and overrides the default for it.
+///
+/// A key naming no entry type, and a template that will not compile,
+/// are both [`Diagnostic`]s rather than skips: a template is
+/// configuration, so a broken one is wrong for every file in the batch
+/// and there is nothing to be gained by finding that out once per file.
+pub fn templates(config: &Config) -> Result<TemplateTable, Diagnostic> {
+    todo!("compile the default, then each entry type's override")
+}
+
+/// The events `command` produces, between the run's first and last.
+///
+/// One function per subcommand would repeat the same three lines of
+/// setup six times; what differs between them is only which of
+/// `adapters` they reach for.
+///
+/// Returns a [`Diagnostic`] for the failures that are about the run
+/// rather than about a file: a template that will not compile, and an
+/// applying rename with no journal to record it in. An unjournaled
+/// rename cannot be undone, and being undoable is the promise that
+/// makes renaming safe to offer, so the run is refused rather than
+/// performed.
+pub fn events_for<C: Cache>(
+    command: &Command,
+    effective: &Effective,
+    adapters: &Adapters<C>,
+) -> Result<Vec<Event>, Diagnostic> {
+    todo!("dispatch on the subcommand")
+}
+
+/// Carry out `cli` against `adapters`, writing to `streams`.
+///
+/// The stream always opens with [`Event::RunStarted`] and closes with
+/// [`Event::RunFinished`], whatever happened in between, so a consumer
+/// can tell a run that produced nothing from a run that was cut off.
+/// Events a format has nothing to say about are simply not written.
+///
+/// A [`Diagnostic`] from [`events_for`] goes to `streams.err` and ends
+/// the run as [`Outcome::Fatal`]: nothing was attempted, so there is no
+/// event stream to close.
+pub fn dispatch<C: Cache>(
+    cli: &Cli,
+    effective: &Effective,
+    adapters: &Adapters<C>,
+    streams: &mut Streams,
+) -> Outcome {
+    todo!("frame the events, render them, and read the outcome")
+}
+
+/// Carry out `cli` against the real world.
+///
+/// Builds every adapter from `cli` and the environment, resolves the
+/// configuration, and hands both to [`dispatch`]. A configuration that
+/// will not resolve is written to `streams.err` and ends the run as
+/// [`Outcome::Fatal`] before an adapter is built: a run on settings
+/// borax could not read is a run on settings nobody chose.
+pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
+    todo!("build the real adapters and dispatch")
 }
