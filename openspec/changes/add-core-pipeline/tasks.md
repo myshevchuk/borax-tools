@@ -122,7 +122,7 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       `--apply`), wiring planner + journal
 - [x] 8.5 Tests + implementation: append-only journal in XDG state dir
       and `borax undo` with per-entry verification
-- [ ] 8.6 Tests + implementation: `borax bib`, `borax config`,
+- [x] 8.6 Tests + implementation: `borax bib`, `borax config`,
       `borax cache`
 - [ ] 8.7 Tests + implementation: exit codes (success / partial /
       fatal) and never-prompt behavior when stdin is not a TTY
