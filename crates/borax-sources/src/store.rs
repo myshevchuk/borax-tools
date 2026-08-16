@@ -180,25 +180,41 @@ impl Cache for FileCache {
         let Some(path) = entry_path(&self.root, key) else {
             return;
         };
-        let Some(parent) = path.parent() else {
-            return;
-        };
         let Ok(json) = serde_json::to_vec(record) else {
             return;
         };
-        if fs::create_dir_all(parent).is_err() {
-            return;
-        }
+        let _ = write_atomically(&path, &json);
+    }
+}
 
-        let temporary = parent.join(temporary_name());
-        if fs::write(&temporary, &json).is_ok() && fs::rename(&temporary, &path).is_ok() {
-            return;
-        }
+/// Write `content` to `path`, replacing whatever was there, without
+/// ever leaving a partial file behind.
+///
+/// The bytes go to a temporary file in `path`'s own directory and are
+/// renamed over it, which on every supported platform replaces the
+/// destination in one step. A reader therefore sees either the previous
+/// content or the new content, and a process killed mid-write leaves
+/// the previous content intact — the guarantee a plain
+/// [`std::fs::write`] does not give, since it truncates first.
+///
+/// Missing parent directories are created. A failure at any stage
+/// removes the temporary and leaves `path` as it was; the error
+/// reported is the one that stopped the write.
+///
+/// The temporary shares a directory with the destination so the rename
+/// stays within one filesystem, where it is atomic.
+pub fn write_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
 
+    let temporary = parent.join(temporary_name());
+    let written = fs::write(&temporary, content).and_then(|()| fs::rename(&temporary, path));
+    if written.is_err() {
         // A temporary that never reached its final name is litter, and
         // nothing else will come looking for it.
         let _ = fs::remove_file(&temporary);
     }
+    written
 }
 
 /// How many temporary entry files this process has named so far.

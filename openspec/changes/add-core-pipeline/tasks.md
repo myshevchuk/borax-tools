@@ -154,14 +154,39 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       APIs
 - [ ] 9.4 Release scaffolding: static binary builds attached to tagged
       GitHub releases; tag/version consistency check
-- [ ] 9.5 Report a rename that moved but could not be journaled. The
-      files have already moved when the append fails, so the run cannot
-      be refused and cannot be called clean either: it silently costs
-      `borax undo` the run it was meant to be able to revert. Needs a
-      way for a per-file failure to reach stderr from inside
-      `run::events_for`, which currently has only its return value
+- [x] 9.5 Report a rename that moved but could not be journaled.
+      Resolved by inverting the order rather than by reaching stderr:
+      the entry is appended before the file moves, so a move that
+      cannot be journaled is not made, and every abandoned move is an
+      ordinary `Unjournalable` skip in the event stream. The stderr
+      seam this task asked for is no longer needed for this case
 - [ ] 9.6 Resolve configuration per input directory rather than once
       per run. `.borax.toml` is specified as discovered upward from
       each input file's directory, but a run climbs from the first
       input path only, so one invocation spanning two trees applies the
       first tree's overrides to both
+
+## 10. Write safety
+
+Fixes to behaviour already specified, found by review after 8.8. Each is
+a case where the implementation could lose data a user had, rather than
+a feature that was missing.
+
+- [x] 10.1 Tests + implementation: `store::write_atomically`, and the
+      master `.bib` written through it. A truncating rewrite put a
+      bibliography the user may have kept for years at the mercy of a
+      full disk for as long as the write took
+- [x] 10.2 Tests + implementation: sidecars named by appending the
+      extension (`paper.pdf.bib`, not `paper.bib`) and never overwriting
+      a file borax did not write. The old name is the one a person
+      keeping notes by hand would have chosen
+- [x] 10.3 Tests + implementation: write-ahead journaling (see 9.5)
+- [x] 10.4 Tests + implementation: a named input path that cannot be
+      reached is kept, so the pipeline reports it. Dropping it let a
+      typo produce an empty batch that exited 0
+- [x] 10.5 Tests + implementation: a configuration file that is present
+      but unreadable ends the run, distinct from one that is absent
+- [x] 10.6 Tests + implementation: `SourceName::SUPPORTED`, the sources
+      a run may be configured to use. `ALL` keeps naming DataCite and
+      PubMed for the dispatch table, but a configuration selecting one
+      resolved nothing and reported every file unresolvable

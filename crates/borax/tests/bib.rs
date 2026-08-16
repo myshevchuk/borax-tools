@@ -296,22 +296,24 @@ fn citation_key_matches_a_direct_template_render_when_nothing_needs_stripping() 
 // sidecar_path
 // ---------------------------------------------------------------------
 
+// The extension is appended rather than replaced, so a sidecar can
+// never land on a name a user's own `.bib` might already hold.
 #[test]
-fn sidecar_path_replaces_the_extension() {
+fn sidecar_path_appends_the_extension() {
     let path = Path::new("dir/paper.pdf");
-    assert_eq!(sidecar_path(path), PathBuf::from("dir/paper.bib"));
+    assert_eq!(sidecar_path(path), PathBuf::from("dir/paper.pdf.bib"));
 }
 
 #[test]
-fn sidecar_path_adds_the_extension_when_the_path_has_none() {
+fn sidecar_path_appends_the_extension_when_the_path_has_none() {
     let path = Path::new("dir/paper");
     assert_eq!(sidecar_path(path), PathBuf::from("dir/paper.bib"));
 }
 
 #[test]
-fn sidecar_path_replaces_only_the_final_extension_when_the_name_has_several_dots() {
+fn sidecar_path_keeps_every_dot_in_the_name() {
     let path = Path::new("dir/my.paper.v2.pdf");
-    assert_eq!(sidecar_path(path), PathBuf::from("dir/my.paper.v2.bib"));
+    assert_eq!(sidecar_path(path), PathBuf::from("dir/my.paper.v2.pdf.bib"));
 }
 
 // ---------------------------------------------------------------------
@@ -373,6 +375,63 @@ fn sidecars_on_emits_one_sidecar_event_per_file_with_the_documented_content() {
             (target1, sidecar(&p1.1.record, "Smith2024")),
             (target2, sidecar(&p2.1.record, "Doe2023")),
         ]
+    );
+}
+
+// A file borax did not write is never overwritten, whatever it holds.
+#[test]
+fn a_sidecar_target_holding_foreign_content_is_left_alone_and_reported() {
+    let p1 = resolved("a.pdf", record("Smith", 2024, Some("10.1000/a")));
+    let resolved = [p1.clone()];
+    let templates = table("[auth][year]");
+    let config = bib_config(None, DuplicatePolicy::Skip, true);
+    let target = sidecar_path(&p1.0);
+    let files = FakeBibFiles::new().with_initial(
+        target.clone(),
+        "@article{mine2020, title = {Notes I keep by hand}}\n",
+    );
+
+    let events = write_bib(&resolved, &templates, &config, &files);
+
+    assert_eq!(
+        events,
+        vec![Event::Skipped {
+            path: p1.0.clone(),
+            reason: SkipReason::SidecarTaken {
+                target: target.clone(),
+            },
+        }]
+    );
+    assert!(
+        files.writes().is_empty(),
+        "a foreign sidecar target must not be written to"
+    );
+}
+
+// A sidecar borax wrote is recognisable by its record marker, and
+// rewriting one is how a re-run keeps it current.
+#[test]
+fn a_sidecar_borax_wrote_before_is_overwritten() {
+    let p1 = resolved("a.pdf", record("Smith", 2024, Some("10.1000/a")));
+    let resolved = [p1.clone()];
+    let templates = table("[auth][year]");
+    let config = bib_config(None, DuplicatePolicy::Skip, true);
+    let target = sidecar_path(&p1.0);
+    let stale = record("Smith", 1999, Some("10.1000/a"));
+    let files = FakeBibFiles::new().with_initial(target.clone(), sidecar(&stale, "Smith1999"));
+
+    let events = write_bib(&resolved, &templates, &config, &files);
+
+    assert_eq!(
+        events,
+        vec![Event::Sidecar {
+            path: p1.0.clone(),
+            target: target.clone(),
+        }]
+    );
+    assert_eq!(
+        files.writes(),
+        vec![(target, sidecar(&p1.1.record, "Smith2024"))]
     );
 }
 

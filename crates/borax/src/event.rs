@@ -146,6 +146,13 @@ pub enum SkipReason {
     /// The record resolved, but the template rendered nothing a
     /// citation key can be made of.
     Unciteable,
+    /// Something borax did not write already sits where the file's
+    /// sidecar would go, so the sidecar was not written.
+    SidecarTaken { target: PathBuf },
+    /// The move could not be recorded in the undo journal, so it was
+    /// not made. A move nothing recorded is one `borax undo` could
+    /// never reverse.
+    Unjournalable { message: String },
     /// Nothing is at the path the journal says a file was moved to, so
     /// there is nothing to move back.
     Missing,
@@ -346,6 +353,12 @@ fn skipped_because(reason: &SkipReason) -> String {
             format!("bibliography output failed ({message})")
         }
         SkipReason::Unciteable => "the record renders an empty citation key".to_string(),
+        SkipReason::SidecarTaken { target } => {
+            format!("{} exists and borax did not write it", target.display())
+        }
+        SkipReason::Unjournalable { message } => {
+            format!("the move could not be recorded, so it was not made ({message})")
+        }
     }
 }
 

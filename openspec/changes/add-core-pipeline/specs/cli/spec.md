@@ -38,6 +38,41 @@ configuration, unusable arguments).
 - **THEN** the exit code is the dedicated partial-success code, distinct
   from both 0 and the fatal-error code
 
+### Requirement: An input that cannot be reached is reported
+The binary SHALL report a path named on the command line that does not
+exist, or cannot be read, as a skipped file rather than letting it
+silently contribute nothing. A run whose inputs were all unreachable
+SHALL NOT exit 0: a mistyped filename must not be indistinguishable from
+a clean run.
+
+A directory that cannot be read still contributes nothing rather than
+ending the run — the files that were readable deserve their run — but a
+path the user typed is always accounted for.
+
+#### Scenario: Mistyped filename
+- **WHEN** `borax resolve does-not-exist.pdf` runs
+- **THEN** the file is reported as skipped and the exit code is the
+  partial-success code, not 0
+
+### Requirement: Configuration errors are never silent
+A configuration file that is present but cannot be read SHALL end the run
+with the fatal exit code, distinct from the file being absent, which
+contributes no layer. Running on settings the user wrote and borax could
+not read is the outcome this rules out.
+
+Configuration SHALL reject a source borax has no client for, naming the
+sources it does support, rather than accepting it and resolving nothing.
+`borax config` SHALL report only sources a run can actually query.
+
+#### Scenario: Unreadable override file
+- **WHEN** a `.borax.toml` exists at or above an input but cannot be read
+- **THEN** the run stops with the fatal exit code and names the file
+
+#### Scenario: Source with no client
+- **WHEN** a configuration names a source borax cannot query
+- **THEN** the run stops with a configuration error listing the supported
+  sources
+
 ### Requirement: Configuration resolution order
 Configuration SHALL be TOML and resolve with this precedence, highest
 first: command-line flags, environment variables, the nearest per-directory

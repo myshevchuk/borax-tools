@@ -10,6 +10,7 @@ use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
 use borax_sources::cache::{Cache, MemoryCache};
 use borax_sources::store::{
     ContentIndex, FORMAT_VERSION, FileCache, cache_root, content_key, entry_path, hash_file,
+    write_atomically,
 };
 use tempfile::tempdir;
 
@@ -618,4 +619,65 @@ fn hash_file_of_a_missing_path_is_an_error() {
     let path = dir.path().join("does-not-exist");
 
     assert!(hash_file(&path).is_err());
+}
+
+// ---------------------------------------------------------------------
+// write_atomically
+// ---------------------------------------------------------------------
+
+#[test]
+fn write_atomically_creates_the_file_and_its_parent_directories() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("deep").join("nested").join("refs.bib");
+
+    write_atomically(&path, b"@article{a,}\n").unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "@article{a,}\n");
+}
+
+#[test]
+fn write_atomically_replaces_the_content_that_was_there() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("refs.bib");
+    std::fs::write(&path, "old content").unwrap();
+
+    write_atomically(&path, b"new content").unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+}
+
+// The temporary the write goes through is never left behind, so a
+// directory holds the file and nothing else.
+#[test]
+fn write_atomically_leaves_no_temporary_behind() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("refs.bib");
+
+    write_atomically(&path, b"content").unwrap();
+
+    let entries: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, ["refs.bib"]);
+}
+
+// A destination that cannot be written reports the failure rather than
+// destroying what was there: the original file survives intact.
+#[test]
+fn write_atomically_leaves_the_original_intact_when_it_cannot_finish() {
+    let root = tempdir().unwrap();
+    // A directory where the file should be: the rename cannot replace
+    // it, so the write fails after the temporary is written.
+    let path = root.path().join("refs.bib");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("sentinel"), "still here").unwrap();
+
+    assert!(write_atomically(&path, b"new content").is_err());
+
+    assert_eq!(
+        std::fs::read_to_string(path.join("sentinel")).unwrap(),
+        "still here"
+    );
 }

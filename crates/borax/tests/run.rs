@@ -134,14 +134,18 @@ fn a_directly_named_file_also_reached_via_a_directory_appears_once_at_first_posi
     );
 }
 
+// A path the user typed is kept even when nothing is there, so the
+// pipeline reports it as unreadable. Dropping it would let a typo
+// produce an empty batch that exits 0, indistinguishable from a clean
+// run over files that were all fine.
 #[test]
-fn a_path_that_does_not_exist_contributes_nothing() {
+fn a_named_path_that_does_not_exist_is_kept_so_the_run_reports_it() {
     let dir = tempdir().unwrap();
     let missing = dir.path().join("does-not-exist.pdf");
 
-    let result = inputs(&[missing]);
+    let result = inputs(slice::from_ref(&missing));
 
-    assert_eq!(result, Vec::<PathBuf>::new(), "got {result:?}");
+    assert_eq!(result, vec![missing], "got {result:?}");
 }
 
 #[cfg(unix)]
@@ -348,4 +352,37 @@ fn a_configuration_file_present_but_not_valid_toml_is_unreadable_naming_that_pat
         Err(ConfigError::Unreadable { path, .. }) => assert_eq!(path, global_path),
         other => panic!("expected Unreadable naming {global_path:?}, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// config_for: a file that is there but unreadable
+// ---------------------------------------------------------------------
+
+/// A reader answering `NotFound` for every path but `denied`, which
+/// fails with a permission error the way an unreadable file does.
+fn read_denying(denied: &'static str) -> impl Fn(&Path) -> io::Result<String> {
+    move |path| match path == Path::new(denied) {
+        true => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "permission denied",
+        )),
+        false => Err(io::Error::new(io::ErrorKind::NotFound, "no such file")),
+    }
+}
+
+// An override file that exists but cannot be read is not the same as no
+// override file: silently running on settings the user wrote and borax
+// could not read is the outcome the module set out to avoid.
+#[test]
+fn an_override_file_that_cannot_be_read_ends_the_run() {
+    let start = Path::new("/lib");
+    let override_path = "/lib/.borax.toml";
+
+    let result = config_for(start, vec![], &env_vars(&[]), &read_denying(override_path));
+
+    let failure = result.unwrap_err().to_string();
+    assert!(
+        failure.contains(".borax.toml"),
+        "the error must name the file it could not read, got {failure:?}"
+    );
 }

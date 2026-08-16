@@ -39,7 +39,9 @@ use crate::journal::{Entry, FileJournal, Journal, RunId, undo_last};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
 };
-use crate::renaming::{Filesystem, RealFilesystem, apply_renames, counts_for, plan_renames};
+use crate::renaming::{
+    Filesystem, LogFailure, MoveLog, RealFilesystem, apply_renames, counts_for, plan_renames,
+};
 use crate::session::{Outcome, outcome_for};
 
 /// The extension a file needs to be picked up from a directory.
@@ -61,21 +63,24 @@ pub const PDF_EXTENSION: &str = "pdf";
 /// A directory that cannot be read contributes nothing rather than
 /// ending the run: a batch is not the place to discover a permissions
 /// problem, and the files that were readable still deserve their run.
+///
+/// A path that cannot be reached at all contributes itself, so the
+/// pipeline opens it and reports why it could not. Dropping it here
+/// would let a mistyped filename produce an empty batch that skips
+/// nothing and exits successfully — a run indistinguishable from one
+/// where every file was fine.
 pub fn inputs(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut collected: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
     for path in paths {
-        let Ok(metadata) = fs::metadata(path) else {
-            continue;
-        };
-
         let mut reached = Vec::new();
-        if metadata.is_dir() {
-            documents(path, &mut reached);
-            reached.sort();
-        } else {
-            reached.push(path.clone());
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => {
+                documents(path, &mut reached);
+                reached.sort();
+            }
+            _ => reached.push(path.clone()),
         }
 
         collected.extend(
@@ -159,7 +164,7 @@ pub fn config_for(
         }
     }
 
-    if let Some(path) = nearest_override(start, |candidate| read(candidate).is_ok()) {
+    if let Some(path) = nearest_override(start, |candidate| present(candidate, read)) {
         if let Some(layer) = file_layer(&path, read)? {
             layers.push((Origin::DirectoryFile(path), layer));
         }
@@ -184,17 +189,34 @@ pub fn config_for(
 /// The layer the configuration file at `path` holds, or `None` when
 /// there is no file there to read.
 ///
-/// A read that fails contributes nothing, which is what lets the layers
-/// below an absent file show through. Text that will not parse is a
-/// [`ConfigError`] naming `path`.
+/// Only an absent file contributes nothing, which is what lets the
+/// layers below it show through. Text that will not parse, and a file
+/// that is there but cannot be read, are both a [`ConfigError`] naming
+/// `path`: a file the user wrote and borax silently ignored is worse
+/// than a run that stops and says so, and "not there" and "not readable"
+/// are different answers.
 fn file_layer(
     path: &Path,
     read: &dyn Fn(&Path) -> io::Result<String>,
 ) -> Result<Option<Layer>, ConfigError> {
     match read(path) {
         Ok(text) => layer_from_toml(&text, path).map(Some),
-        Err(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ConfigError::Unreadable {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        }),
     }
+}
+
+/// Whether `read` finds something at `path` — anything, readable or not.
+///
+/// Only [`io::ErrorKind::NotFound`] counts as absence. A file that is
+/// there and cannot be read has to be found here so that [`file_layer`]
+/// can refuse the run over it; answering "absent" would skip straight
+/// past it.
+fn present(path: &Path, read: &dyn Fn(&Path) -> io::Result<String>) -> bool {
+    !matches!(read(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
 }
 
 /// [`config_for`] over the real environment and filesystem.
@@ -428,7 +450,12 @@ fn rename_events<C: Cache>(
     let templates = templates(effective.config())?;
 
     let (mut events, resolved) = resolved_records(paths, effective, adapters);
-    let moves = apply_renames(
+    let log = journal.map(|journal| JournalLog {
+        journal,
+        resolved: &resolved,
+        at: (adapters.now)(),
+    });
+    let applied = apply_renames(
         &plan_renames(
             &resolved,
             &templates,
@@ -437,19 +464,57 @@ fn rename_events<C: Cache>(
         ),
         adapters.filesystem,
         apply,
+        log.as_ref().map(|log| log as &dyn MoveLog),
     );
 
-    if let Some(journal) = journal {
-        // The moves have already happened, so a journal that will not
-        // take them costs `undo` and not the run: reporting the moves is
-        // worth more than a failure that would hide them.
-        let _ = journal.append(&journaled(&moves, &resolved, (adapters.now)()));
-    }
-
-    let resolved = at_current_paths(resolved, &moves);
-    events.extend(moves);
+    // A halt needs no separate report: every move it abandoned is
+    // already an `Unjournalable` skip carrying the reason, so the run
+    // says what happened through the same stream as everything else.
+    let resolved = at_current_paths(resolved, &applied.events);
+    events.extend(applied.events);
     events.extend(bib_output(&resolved, &templates, effective, adapters));
     Ok(events)
+}
+
+/// The [`MoveLog`] backed by the run's journal.
+///
+/// Every entry a run appends carries the same `at`, which is what makes
+/// them one run for [`crate::journal::undo_last`]. The hash comes from
+/// the record resolved for the file, since `undo` verifies by content
+/// and an entry without a hash names a move nothing could reverse.
+struct JournalLog<'a> {
+    journal: &'a dyn Journal,
+    resolved: &'a [(PathBuf, FileRecord)],
+    at: String,
+}
+
+impl MoveLog for JournalLog<'_> {
+    /// Append one entry for the move of `from` to `to`.
+    ///
+    /// A file whose content hash is unknown is a
+    /// [`LogFailure::Move`]: `undo` verifies by hash, so an entry
+    /// without one could never be acted on, and moving the file anyway
+    /// would put it beyond reach of the command meant to bring it back.
+    /// An append that fails is a [`LogFailure::Journal`], since a
+    /// journal that would not take this entry will not take the next.
+    fn record(&self, from: &Path, to: &Path) -> Result<(), LogFailure> {
+        let hash = self
+            .resolved
+            .iter()
+            .find(|(path, _)| path == from)
+            .and_then(|(_, file)| file.hash.clone())
+            .ok_or_else(|| LogFailure::Move("the file's content hash is unknown".to_string()))?;
+
+        self.journal
+            .append(&[Entry {
+                run: RunId::new(self.at.clone()),
+                from: from.to_path_buf(),
+                to: to.to_path_buf(),
+                hash,
+                at: self.at.clone(),
+            }])
+            .map_err(|error| LogFailure::Journal(error.to_string()))
+    }
 }
 
 /// Resolve `paths`, keeping the records alongside the events.
@@ -482,38 +547,6 @@ fn resolved_records<C: Cache>(
     }
 
     (events, resolved)
-}
-
-/// The journal entries recording the moves `events` reports, all
-/// stamped `at` and so all one run.
-///
-/// One entry per [`Event::Renamed`], carrying the file's content hash as
-/// `resolved` holds it. A file whose hash is unknown is not journaled:
-/// `undo` verifies by hash, so an entry without one names a move nothing
-/// could ever reverse.
-fn journaled(events: &[Event], resolved: &[(PathBuf, FileRecord)], at: String) -> Vec<Entry> {
-    events
-        .iter()
-        .filter_map(|event| {
-            let Event::Renamed { path, target } = event else {
-                return None;
-            };
-            let hash = resolved
-                .iter()
-                .find(|(candidate, _)| candidate == path)?
-                .1
-                .hash
-                .clone()?;
-
-            Some(Entry {
-                run: RunId::new(at.clone()),
-                from: path.clone(),
-                to: target.clone(),
-                hash,
-                at: at.clone(),
-            })
-        })
-        .collect()
 }
 
 /// `resolved` with every path `events` reports a move for replaced by

@@ -28,9 +28,12 @@ fn default_templates_holds_only_the_default_key_with_the_documented_pattern() {
     );
 }
 
+// The default is what borax has clients for, not every service it can
+// name: `SourceName::ALL` also lists the ones the dispatch table routes
+// to but no client exists for yet.
 #[test]
-fn default_sources_is_every_service_in_declaration_order() {
-    assert_eq!(Config::default().sources, SourceName::ALL.to_vec());
+fn default_sources_is_every_supported_service_in_priority_order() {
+    assert_eq!(Config::default().sources, SourceName::SUPPORTED.to_vec());
 }
 
 #[test]
@@ -1107,4 +1110,50 @@ fn global_config_path_is_none_for_a_relative_xdg_config_home_with_no_appdata_on_
         global_config_path(env(&[("XDG_CONFIG_HOME", "relative")])),
         None
     );
+}
+
+// ---------------------------------------------------------------------
+// sources: only what borax can actually query
+// ---------------------------------------------------------------------
+
+// The default set is what borax has clients for. Listing a source it
+// cannot query would make `borax config` advertise a capability that
+// resolves nothing.
+#[test]
+fn the_default_sources_are_the_supported_ones() {
+    let effective = resolve(Vec::new()).unwrap();
+    assert_eq!(effective.config().sources, SourceName::SUPPORTED.to_vec());
+}
+
+// A source with no client is refused rather than accepted and then
+// silently dropped, which would leave a run asking nobody and skipping
+// every file as unresolvable.
+#[test]
+fn a_source_with_no_client_is_a_configuration_error() {
+    for name in ["datacite", "pubmed"] {
+        let layer = Layer {
+            sources: Some(vec![name.to_string()]),
+            ..Layer::default()
+        };
+        let failure = resolve(vec![(Origin::Flag("sources".to_string()), layer)]).unwrap_err();
+        let message = failure.to_string();
+
+        assert!(
+            message.contains(name),
+            "the error must name the unsupported source, got {message:?}"
+        );
+        assert!(
+            message.contains("crossref"),
+            "the error must name the sources that do work, got {message:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_source_name_is_still_a_configuration_error() {
+    let layer = Layer {
+        sources: Some(vec!["nonesuch".to_string()]),
+        ..Layer::default()
+    };
+    assert!(resolve(vec![(Origin::Flag("sources".to_string()), layer)]).is_err());
 }

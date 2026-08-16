@@ -42,13 +42,31 @@ template engine.
 
 ### Requirement: Per-file sidecars carry the full record
 When sidecar output is enabled, each processed file SHALL receive a
-sidecar next to it, named after the file's final name, containing the
-entry in BibTeX form and the full canonical record in JSON (including
-provenance and identifiers), so no information is lost to the BibTeX
-mapping.
+sidecar next to it, named as the file's final name with the sidecar
+extension **appended** (`smith2024_borax.pdf` → `smith2024_borax.pdf.bib`),
+containing the entry in BibTeX form and the full canonical record in JSON
+(including provenance and identifiers), so no information is lost to the
+BibTeX mapping.
+
+The extension is appended rather than substituted so that the sidecar
+namespace cannot collide with the one users already occupy: a person
+keeping notes on `paper.pdf` by hand names them `paper.bib`.
+
+A sidecar SHALL NOT overwrite a file borax did not write. A target that
+holds anything other than a recognisable borax sidecar SHALL be left
+untouched and reported as a skip; a target that cannot be read SHALL be
+treated as occupied.
 
 #### Scenario: Sidecar follows the rename
 - **WHEN** a file is renamed to `smith2024_borax.pdf` with sidecars
   enabled
-- **THEN** its sidecar is created alongside as
-  `smith2024_borax.pdf`-adjacent output named after the final filename
+- **THEN** its sidecar is created alongside as `smith2024_borax.pdf.bib`
+
+#### Scenario: A hand-written file occupies the sidecar name
+- **WHEN** a file borax did not write already sits at the sidecar's path
+- **THEN** it is left byte-for-byte unchanged and the file is reported as
+  skipped
+
+#### Scenario: Re-run refreshes its own sidecar
+- **WHEN** a sidecar borax wrote on an earlier run is at the target path
+- **THEN** it is replaced with the current one

@@ -18,10 +18,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge, sidecar};
+use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge, parse_sidecar_record, sidecar};
 use borax_core::content::ContentHash;
 use borax_core::record::Record;
 use borax_core::template::{RenderInput, TemplateTable};
+use borax_sources::store::write_atomically;
 
 use crate::event::{Event, SkipReason};
 use crate::pipeline::FileRecord;
@@ -93,10 +94,38 @@ pub fn citation_key(
     }
 }
 
-/// The sidecar path for the file at `path`: the same path with its
-/// extension replaced by [`SIDECAR_EXTENSION`].
+/// The sidecar path for the file at `path`: the same path with
+/// [`SIDECAR_EXTENSION`] appended.
+///
+/// Appended rather than substituted, so `paper.pdf` yields
+/// `paper.pdf.bib`. Substituting would put the sidecar at `paper.bib`,
+/// which is exactly the name a person keeping notes on `paper.pdf` by
+/// hand would have chosen, and the sidecar namespace must not collide
+/// with a namespace users already occupy.
+///
+/// A path with no extension gains the only one it has, so `paper`
+/// yields `paper.bib`.
 pub fn sidecar_path(path: &Path) -> PathBuf {
-    path.with_extension(SIDECAR_EXTENSION)
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".");
+    name.push(SIDECAR_EXTENSION);
+    path.with_file_name(name)
+}
+
+/// Whether the sidecar at `target` may be replaced.
+///
+/// True when nothing is there, and when what is there is recognisably a
+/// sidecar borax wrote — one carrying a record under
+/// [`borax_core::bib_output::parse_sidecar_record`]'s marker. A re-run
+/// keeps its own sidecars current; it never touches anything else.
+///
+/// A target that cannot be read is treated as occupied. Not knowing what
+/// is there is not a reason to overwrite it.
+fn sidecar_is_ours(target: &Path, files: &dyn BibFiles) -> bool {
+    match files.read(target) {
+        Ok(existing) => existing.trim().is_empty() || parse_sidecar_record(&existing).is_some(),
+        Err(_) => false,
+    }
 }
 
 /// Write bibliography output for `resolved`.
@@ -146,16 +175,22 @@ pub fn write_bib(
 
         if config.sidecars {
             let target = sidecar_path(path);
-            events.push(match files.write(&target, &sidecar(&file.record, &key)) {
-                Ok(()) => Event::Sidecar {
+            events.push(match sidecar_is_ours(&target, files) {
+                false => Event::Skipped {
                     path: path.clone(),
-                    target,
+                    reason: SkipReason::SidecarTaken { target },
                 },
-                // The two destinations are independent, so a file whose
-                // sidecar failed still goes to the master file.
-                Err(error) => {
-                    bib_failed(path, format!("writing \"{}\": {error}", target.display()))
-                }
+                true => match files.write(&target, &sidecar(&file.record, &key)) {
+                    Ok(()) => Event::Sidecar {
+                        path: path.clone(),
+                        target,
+                    },
+                    // The two destinations are independent, so a file
+                    // whose sidecar failed still goes to the master file.
+                    Err(error) => {
+                        bib_failed(path, format!("writing \"{}\": {error}", target.display()))
+                    }
+                },
             });
         }
 
@@ -264,10 +299,16 @@ impl BibFiles for RealBibFiles {
         }
     }
 
+    /// Replace `path` through a temporary file in its own directory
+    /// ([`borax_sources::store::write_atomically`]).
+    ///
+    /// A master `.bib` is a file the user has been accumulating, quite
+    /// possibly for years, and a merge rewrites the whole of it. A
+    /// truncating write would put every byte of it at the mercy of a
+    /// full disk or a killed process for as long as the write takes;
+    /// replacing it in one step means a run that dies leaves the
+    /// previous bibliography exactly as it was.
     fn write(&self, path: &Path, content: &str) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, content)
+        write_atomically(path, content.as_bytes())
     }
 }

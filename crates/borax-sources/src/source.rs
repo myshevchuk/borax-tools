@@ -47,6 +47,11 @@ impl SourceName {
     }
 
     /// Every source, in declaration order.
+    ///
+    /// Includes the ones borax names in its dispatch table but has no
+    /// client for; [`SUPPORTED`] is the subset a run can actually ask.
+    ///
+    /// [`SUPPORTED`]: SourceName::SUPPORTED
     pub const ALL: [SourceName; 5] = [
         SourceName::Crossref,
         SourceName::OpenAlex,
@@ -54,6 +59,25 @@ impl SourceName {
         SourceName::DataCite,
         SourceName::PubMed,
     ];
+
+    /// The sources borax has a client for, in priority order.
+    ///
+    /// [`ALL`] is what [`crate::dispatch::priority`] routes over, and it
+    /// names services borax knows the right answer to ask even where it
+    /// cannot yet ask them. This is the narrower set: what a run may be
+    /// configured to use, and what it uses when nothing says otherwise.
+    ///
+    /// [`ALL`]: SourceName::ALL
+    pub const SUPPORTED: [SourceName; 3] = [
+        SourceName::Crossref,
+        SourceName::OpenAlex,
+        SourceName::Arxiv,
+    ];
+
+    /// Whether borax can query this source.
+    pub fn is_supported(&self) -> bool {
+        SourceName::SUPPORTED.contains(self)
+    }
 }
 
 // `parse` reads `ALL`, and an array cannot be checked against the enum

@@ -56,6 +56,44 @@ pub struct RenameError {
     pub message: String,
 }
 
+/// Recording a move so it can be reversed.
+///
+/// A rename nothing recorded is a rename `borax undo` cannot see, and
+/// being undoable is the promise that makes renaming safe to offer. So
+/// recording comes first and a move that cannot be recorded is not
+/// made — the opposite order from the obvious one, and the only order
+/// where a process killed mid-run leaves nothing unaccounted for.
+///
+/// The cost is entries for moves that did not happen. That cost is
+/// already paid: [`crate::journal::undo_last`] verifies each entry
+/// against the file it names before touching it, and reports the ones
+/// that do not check out rather than guessing.
+pub trait MoveLog {
+    /// Record that the file at `from` is about to move to `to`.
+    fn record(&self, from: &Path, to: &Path) -> Result<(), LogFailure>;
+}
+
+/// Why a move could not be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogFailure {
+    /// This move cannot be recorded, but the log is fine and later
+    /// moves still can be. The file is left alone and the batch goes on.
+    Move(String),
+    /// The log itself is unusable, so no later move could be recorded
+    /// either. Every remaining move is abandoned.
+    Journal(String),
+}
+
+/// What applying a plan did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Applied {
+    /// One event per decision, in plan order — including for the moves
+    /// abandoned after a halt, which are reported rather than dropped.
+    pub events: Vec<Event>,
+    /// Why the run stopped early, or `None` when it ran to the end.
+    pub halted: Option<String>,
+}
+
 /// What the planner decided for one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannedRename {
@@ -223,21 +261,40 @@ pub fn apply_renames(
     plan: &[PlannedRename],
     filesystem: &dyn Filesystem,
     apply: bool,
-) -> Vec<Event> {
-    plan.iter()
-        .map(|decision| match decision {
+    log: Option<&dyn MoveLog>,
+) -> Applied {
+    let mut events = Vec::with_capacity(plan.len());
+    let mut halted: Option<String> = None;
+
+    for decision in plan {
+        let event = match decision {
             PlannedRename::Rename { path, target } if apply => {
-                match filesystem.rename(path, target) {
-                    Ok(()) => Event::Renamed {
-                        path: path.clone(),
-                        target: target.clone(),
-                    },
-                    Err(error) => Event::Skipped {
-                        path: path.clone(),
-                        reason: SkipReason::RenameFailed {
-                            message: error.message,
+                match record_move(path, target, log, &halted) {
+                    Ok(()) => match filesystem.rename(path, target) {
+                        Ok(()) => Event::Renamed {
+                            path: path.clone(),
+                            target: target.clone(),
+                        },
+                        Err(error) => Event::Skipped {
+                            path: path.clone(),
+                            reason: SkipReason::RenameFailed {
+                                message: error.message,
+                            },
                         },
                     },
+                    Err(failure) => {
+                        let message = match failure {
+                            LogFailure::Move(message) => message,
+                            LogFailure::Journal(message) => {
+                                halted.get_or_insert(message.clone());
+                                message
+                            }
+                        };
+                        Event::Skipped {
+                            path: path.clone(),
+                            reason: SkipReason::Unjournalable { message },
+                        }
+                    }
                 }
             }
             PlannedRename::Rename { path, target } => Event::Planned {
@@ -258,8 +315,34 @@ pub fn apply_renames(
                 path: path.clone(),
                 reason: SkipReason::Unnameable,
             },
-        })
-        .collect()
+        };
+        events.push(event);
+    }
+
+    Applied { events, halted }
+}
+
+/// Record the move of `path` to `target`, or say why it cannot be.
+///
+/// A run already halted records nothing further and reports the failure
+/// that halted it, so every move the halt abandoned carries the reason
+/// the first one did. A run with no log at all records nothing and
+/// succeeds: `--apply` is refused without a journal long before here
+/// ([`crate::run::events_for`]), so the only caller reaching this with
+/// `None` is one that is not moving anything.
+fn record_move(
+    path: &Path,
+    target: &Path,
+    log: Option<&dyn MoveLog>,
+    halted: &Option<String>,
+) -> Result<(), LogFailure> {
+    if let Some(message) = halted {
+        return Err(LogFailure::Journal(message.clone()));
+    }
+    match log {
+        Some(log) => log.record(path, target),
+        None => Ok(()),
+    }
 }
 
 /// The totals `events` add up to.

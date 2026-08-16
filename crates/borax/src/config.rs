@@ -77,7 +77,7 @@ impl Default for Config {
     ///
     /// `templates` holds `default` alone, as
     /// `[auth:lower][year]_[shorttitle3:camel]`; every service borax
-    /// speaks to is enabled ([`SourceName::ALL`]); there is no
+    /// speaks to is enabled ([`SourceName::SUPPORTED`]); there is no
     /// contact address, no master `.bib`, and no sidecars. Concurrency
     /// and pacing take [`borax_sources::pace::DEFAULT_CONCURRENCY`] and
     /// [`borax_sources::pace::DEFAULT_MIN_INTERVAL`], extraction takes
@@ -89,7 +89,7 @@ impl Default for Config {
                 "default".to_string(),
                 "[auth:lower][year]_[shorttitle3:camel]".to_string(),
             )]),
-            sources: SourceName::ALL.to_vec(),
+            sources: SourceName::SUPPORTED.to_vec(),
             mailto: None,
             concurrency: DEFAULT_CONCURRENCY,
             min_interval_ms: DEFAULT_MIN_INTERVAL.as_millis() as u64,
@@ -499,6 +499,16 @@ fn duplicates_name(policy: DuplicatePolicy) -> &'static str {
     }
 }
 
+/// The sources a configuration may name, as a quoted, comma-separated
+/// list for an error message.
+fn supported() -> String {
+    SourceName::SUPPORTED
+        .iter()
+        .map(|source| format!("{:?}", source.as_str()))
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
 fn parse_duplicates(value: &str) -> Option<DuplicatePolicy> {
     match value {
         "skip" => Some(DuplicatePolicy::Skip),
@@ -616,9 +626,19 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
     if let Some(names) = winning.sources {
         let mut sources = Vec::with_capacity(names.len());
         for name in names {
-            match SourceName::parse(&name) {
+            // A source borax names but cannot query is refused rather
+            // than accepted and then dropped when the clients are built:
+            // a run configured to ask only that one would ask nobody and
+            // report every file unresolvable, which looks like the
+            // service having no record.
+            match SourceName::parse(&name).filter(SourceName::is_supported) {
                 Some(source) => sources.push(source),
-                None => return Err(invalid("sources", format!("unknown source {name:?}"))),
+                None => {
+                    return Err(invalid(
+                        "sources",
+                        format!("unknown source {name:?}, expected one of {}", supported()),
+                    ));
+                }
             }
         }
         config.sources = sources;

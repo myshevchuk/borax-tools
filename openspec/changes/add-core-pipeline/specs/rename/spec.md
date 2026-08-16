@@ -35,11 +35,29 @@ reported as already-named rather than treated as a collision.
 ### Requirement: Applied renames are journaled
 Every applied rename SHALL append a journal entry (original path, new
 path, file content hash, timestamp, run identifier) to an append-only
-journal in the XDG state directory before the run reports success.
+journal in the XDG state directory **before the file is moved**, so no
+move can exist that the journal does not describe. A move that cannot be
+appended SHALL NOT be made. A file whose content hash is unknown cannot
+be journaled in a form `undo` could act on, so it SHALL NOT be moved
+either; the batch continues. A failure of the journal itself SHALL
+abandon every remaining move in the run, each reported with its reason.
+
+Entries for moves that did not complete are the accepted cost of this
+order, and are handled by the verification `undo` already performs.
 
 #### Scenario: Journal written on apply
 - **WHEN** a run applies three renames
 - **THEN** the journal gains three entries sharing one run identifier
+
+#### Scenario: The run dies partway through a batch
+- **WHEN** a run applying a batch is killed after some files have moved
+- **THEN** the journal holds an entry for every file that moved, and
+  `borax undo` reverts all of them
+
+#### Scenario: The journal cannot be appended to
+- **WHEN** appending an entry fails partway through an applying run
+- **THEN** that file and every remaining one are left where they are and
+  reported, and the moves already made are still reported and undoable
 
 ### Requirement: Undo reverts the last applied run safely
 `borax undo` SHALL revert the renames of the most recent applied run in

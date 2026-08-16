@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use borax::event::{Counts, Event, SkipReason};
 use borax::pipeline::FileRecord;
 use borax::renaming::{
-    Filesystem, PlannedRename, RealFilesystem, RenameError, apply_renames, counts_for,
-    plan_renames, target_name,
+    Filesystem, LogFailure, MoveLog, PlannedRename, RealFilesystem, RenameError, apply_renames,
+    counts_for, plan_renames, target_name,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::record::{DateParts, EntryType, Name, Record};
@@ -529,7 +529,7 @@ fn preview_reports_every_rename_as_planned_and_moves_nothing() {
     ];
     let filesystem = FakeFilesystem::new();
 
-    let events = apply_renames(&plan, &filesystem, false);
+    let events = apply_renames(&plan, &filesystem, false, None).events;
 
     assert_eq!(
         events,
@@ -562,7 +562,7 @@ fn applying_reports_every_rename_as_renamed_and_moves_each_one_in_plan_order() {
     ];
     let filesystem = FakeFilesystem::new();
 
-    let events = apply_renames(&plan, &filesystem, true);
+    let events = apply_renames(&plan, &filesystem, true, None).events;
 
     assert_eq!(
         events,
@@ -600,7 +600,7 @@ fn a_failing_rename_is_skipped_with_the_error_message_and_the_batch_continues() 
     ];
     let filesystem = FakeFilesystem::new().with_failure("/lib/a.pdf", "permission denied");
 
-    let events = apply_renames(&plan, &filesystem, true);
+    let events = apply_renames(&plan, &filesystem, true, None).events;
 
     assert_eq!(
         events,
@@ -635,8 +635,8 @@ fn already_named_reports_the_same_way_in_preview_and_applying() {
     let plan = vec![already_named("/lib/Smith2024.pdf")];
     let filesystem = FakeFilesystem::new();
 
-    let preview = apply_renames(&plan, &filesystem, false);
-    let applying = apply_renames(&plan, &filesystem, true);
+    let preview = apply_renames(&plan, &filesystem, false, None).events;
+    let applying = apply_renames(&plan, &filesystem, true, None).events;
 
     let expected = vec![Event::Skipped {
         path: PathBuf::from("/lib/Smith2024.pdf"),
@@ -652,8 +652,8 @@ fn target_taken_reports_the_same_way_in_preview_and_applying() {
     let plan = vec![target_taken("/lib/b.pdf", "/lib/Smith2024.pdf")];
     let filesystem = FakeFilesystem::new();
 
-    let preview = apply_renames(&plan, &filesystem, false);
-    let applying = apply_renames(&plan, &filesystem, true);
+    let preview = apply_renames(&plan, &filesystem, false, None).events;
+    let applying = apply_renames(&plan, &filesystem, true, None).events;
 
     let expected = vec![Event::Skipped {
         path: PathBuf::from("/lib/b.pdf"),
@@ -671,8 +671,8 @@ fn unnameable_reports_the_same_way_in_preview_and_applying() {
     let plan = vec![unnameable("/lib/mystery.pdf")];
     let filesystem = FakeFilesystem::new();
 
-    let preview = apply_renames(&plan, &filesystem, false);
-    let applying = apply_renames(&plan, &filesystem, true);
+    let preview = apply_renames(&plan, &filesystem, false, None).events;
+    let applying = apply_renames(&plan, &filesystem, true, None).events;
 
     let expected = vec![Event::Skipped {
         path: PathBuf::from("/lib/mystery.pdf"),
@@ -691,8 +691,14 @@ fn unnameable_reports_the_same_way_in_preview_and_applying() {
 fn an_empty_plan_produces_no_events_in_either_mode() {
     let filesystem = FakeFilesystem::new();
 
-    assert_eq!(apply_renames(&[], &filesystem, false), Vec::new());
-    assert_eq!(apply_renames(&[], &filesystem, true), Vec::new());
+    assert_eq!(
+        apply_renames(&[], &filesystem, false, None).events,
+        Vec::new()
+    );
+    assert_eq!(
+        apply_renames(&[], &filesystem, true, None).events,
+        Vec::new()
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -865,4 +871,218 @@ fn rename_refuses_to_overwrite_an_existing_destination() {
     );
     assert!(from.exists(), "the source must still be there");
     assert_eq!(fs::read(&from).unwrap(), b"new bytes");
+}
+
+// ---------------------------------------------------------------------
+// apply_renames: the move log (write-ahead journaling)
+// ---------------------------------------------------------------------
+
+/// A [`MoveLog`] fake recording every call in order, with a per-path
+/// failure of either kind.
+struct FakeLog {
+    recorded: RefCell<Vec<(PathBuf, PathBuf)>>,
+    failures: BTreeMap<PathBuf, LogFailure>,
+}
+
+impl FakeLog {
+    fn new() -> FakeLog {
+        FakeLog {
+            recorded: RefCell::new(Vec::new()),
+            failures: BTreeMap::new(),
+        }
+    }
+
+    fn with_failure(mut self, from: impl Into<PathBuf>, failure: LogFailure) -> FakeLog {
+        self.failures.insert(from.into(), failure);
+        self
+    }
+
+    fn recorded(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.recorded.borrow().clone()
+    }
+}
+
+impl MoveLog for FakeLog {
+    fn record(&self, from: &Path, to: &Path) -> Result<(), LogFailure> {
+        if let Some(failure) = self.failures.get(from) {
+            return Err(failure.clone());
+        }
+        self.recorded
+            .borrow_mut()
+            .push((from.to_path_buf(), to.to_path_buf()));
+        Ok(())
+    }
+}
+
+#[test]
+fn every_applied_move_is_recorded() {
+    let plan = vec![
+        rename("/lib/a.pdf", "/lib/Smith2024.pdf"),
+        rename("/lib/b.pdf", "/lib/Doe2023.pdf"),
+    ];
+    let filesystem = FakeFilesystem::new();
+    let log = FakeLog::new();
+
+    let applied = apply_renames(&plan, &filesystem, true, Some(&log));
+
+    assert_eq!(applied.halted, None);
+    assert_eq!(log.recorded(), filesystem.renames());
+}
+
+// A preview records nothing: there is no move to be able to reverse.
+#[test]
+fn a_preview_records_nothing() {
+    let plan = vec![rename("/lib/a.pdf", "/lib/Smith2024.pdf")];
+    let filesystem = FakeFilesystem::new();
+    let log = FakeLog::new();
+
+    apply_renames(&plan, &filesystem, false, Some(&log));
+
+    assert!(log.recorded().is_empty());
+}
+
+// The whole point of write-ahead: a move that cannot be recorded is a
+// move that does not happen, so nothing ever moves unrecorded.
+#[test]
+fn a_move_that_cannot_be_recorded_does_not_happen() {
+    let plan = vec![rename("/lib/a.pdf", "/lib/Smith2024.pdf")];
+    let filesystem = FakeFilesystem::new();
+    let log = FakeLog::new().with_failure(
+        "/lib/a.pdf",
+        LogFailure::Move("no content hash".to_string()),
+    );
+
+    let applied = apply_renames(&plan, &filesystem, true, Some(&log));
+
+    assert_eq!(
+        applied.events,
+        vec![Event::Skipped {
+            path: PathBuf::from("/lib/a.pdf"),
+            reason: SkipReason::Unjournalable {
+                message: "no content hash".to_string(),
+            },
+        }]
+    );
+    assert!(
+        filesystem.renames().is_empty(),
+        "an unrecordable move must not be made"
+    );
+    assert_eq!(applied.halted, None, "one bad file does not end the run");
+}
+
+#[test]
+fn a_move_that_cannot_be_recorded_does_not_stop_the_others() {
+    let plan = vec![
+        rename("/lib/a.pdf", "/lib/Smith2024.pdf"),
+        rename("/lib/b.pdf", "/lib/Doe2023.pdf"),
+    ];
+    let filesystem = FakeFilesystem::new();
+    let log = FakeLog::new().with_failure(
+        "/lib/a.pdf",
+        LogFailure::Move("no content hash".to_string()),
+    );
+
+    let applied = apply_renames(&plan, &filesystem, true, Some(&log));
+
+    assert_eq!(
+        filesystem.renames(),
+        vec![(
+            PathBuf::from("/lib/b.pdf"),
+            PathBuf::from("/lib/Doe2023.pdf")
+        )]
+    );
+    assert_eq!(applied.halted, None);
+}
+
+// An unusable journal stops the run: every later move would be
+// unrecorded too, and an unrecorded move is one `undo` cannot reverse.
+#[test]
+fn an_unusable_journal_halts_the_run_before_any_further_move() {
+    let plan = vec![
+        rename("/lib/a.pdf", "/lib/Smith2024.pdf"),
+        rename("/lib/b.pdf", "/lib/Doe2023.pdf"),
+        rename("/lib/c.pdf", "/lib/Roe2022.pdf"),
+    ];
+    let filesystem = FakeFilesystem::new();
+    let log =
+        FakeLog::new().with_failure("/lib/b.pdf", LogFailure::Journal("disk full".to_string()));
+
+    let applied = apply_renames(&plan, &filesystem, true, Some(&log));
+
+    assert_eq!(applied.halted, Some("disk full".to_string()));
+    // The first move was recorded and made; the rest neither.
+    assert_eq!(
+        filesystem.renames(),
+        vec![(
+            PathBuf::from("/lib/a.pdf"),
+            PathBuf::from("/lib/Smith2024.pdf")
+        )]
+    );
+}
+
+// The moves that did happen before the halt are still reported: they
+// are on disk and in the journal, and a caller that never heard of them
+// could not undo them.
+#[test]
+fn a_halted_run_still_reports_the_moves_it_made() {
+    let plan = vec![
+        rename("/lib/a.pdf", "/lib/Smith2024.pdf"),
+        rename("/lib/b.pdf", "/lib/Doe2023.pdf"),
+        rename("/lib/c.pdf", "/lib/Roe2022.pdf"),
+    ];
+    let filesystem = FakeFilesystem::new();
+    let log =
+        FakeLog::new().with_failure("/lib/b.pdf", LogFailure::Journal("disk full".to_string()));
+
+    let applied = apply_renames(&plan, &filesystem, true, Some(&log));
+
+    assert_eq!(
+        applied.events,
+        vec![
+            Event::Renamed {
+                path: PathBuf::from("/lib/a.pdf"),
+                target: PathBuf::from("/lib/Smith2024.pdf"),
+            },
+            Event::Skipped {
+                path: PathBuf::from("/lib/b.pdf"),
+                reason: SkipReason::Unjournalable {
+                    message: "disk full".to_string(),
+                },
+            },
+            Event::Skipped {
+                path: PathBuf::from("/lib/c.pdf"),
+                reason: SkipReason::Unjournalable {
+                    message: "disk full".to_string(),
+                },
+            },
+        ]
+    );
+}
+
+// Recording happens before the move, so a crash between the two leaves
+// an entry for a move that did not happen — which `undo` verifies and
+// reports — rather than a move with no entry, which it cannot see.
+#[test]
+fn a_move_is_recorded_before_it_is_made() {
+    let plan = vec![rename("/lib/a.pdf", "/lib/Smith2024.pdf")];
+    let filesystem = FakeFilesystem::new().with_failure("/lib/a.pdf", "permission denied");
+    let log = FakeLog::new();
+
+    let applied = apply_renames(&plan, &filesystem, true, Some(&log));
+
+    assert_eq!(
+        log.recorded(),
+        vec![(
+            PathBuf::from("/lib/a.pdf"),
+            PathBuf::from("/lib/Smith2024.pdf")
+        )],
+        "the move was recorded even though it then failed"
+    );
+    assert!(matches!(
+        applied.events.as_slice(),
+        [Event::Skipped {
+            reason: SkipReason::RenameFailed { .. },
+            ..
+        }]
+    ));
 }
