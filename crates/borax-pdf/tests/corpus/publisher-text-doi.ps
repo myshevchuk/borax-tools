@@ -1,0 +1,29 @@
+% publisher-text-doi.pdf -- DOI only in the page-one masthead.
+%
+% Neither the Info dictionary nor an XMP packet carries the identifier;
+% it sits on the third line of the masthead, which is where a journal
+% front page usually prints it.
+
+[ /Title (Fixtures for Tiered Identifier Extraction)
+  /Author (D. Masthead)
+  /Subject (Synthetic fixture for tiered extraction)
+  /Creator (borax-tools fixture corpus)
+  /CreationDate (D:20240103120000Z)
+  /ModDate (D:20240103120000Z)
+/DOCINFO pdfmark
+
+/Helvetica-Bold findfont 13 scalefont setfont
+72 720 moveto (Fixtures for Tiered Identifier Extraction) show
+/Helvetica findfont 10 scalefont setfont
+72 702 moveto (Journal of Synthetic Instrumentation, vol 3, no 2, 2024) show
+72 688 moveto (https://doi.org/10.1234/borax.2024.003) show
+72 660 moveto (D. Masthead) show
+72 630 moveto (Abstract. The masthead above prints the identifier; nothing) show
+72 616 moveto (else in this document does.) show
+showpage
+
+/Helvetica-Bold findfont 11 scalefont setfont
+72 720 moveto (References) show
+/Helvetica findfont 10 scalefont setfont
+72 700 moveto (Masthead, D. Setting a front page. Synthetic Press, 2023.) show
+showpage

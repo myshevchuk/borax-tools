@@ -1,0 +1,32 @@
+% Source for both encrypted fixtures.
+%
+% encrypted-owner-only.pdf   -- owner password set, user password empty
+% encrypted-user-password.pdf -- user password "secret"
+%
+% The DOI in the custom Info key is reachable only from the first: the
+% second cannot be opened without its password, so its contents never
+% matter to a test.
+
+[ /Title (Permissions and Passwords)
+  /Author (I. Locksmith)
+  /Subject (Synthetic fixture for tiered extraction)
+  /Creator (borax-tools fixture corpus)
+  /CreationDate (D:20240103120000Z)
+  /ModDate (D:20240103120000Z)
+  /doi (10.1234/borax.2024.008)
+/DOCINFO pdfmark
+
+/Helvetica-Bold findfont 13 scalefont setfont
+72 720 moveto (Permissions and Passwords) show
+/Helvetica findfont 10 scalefont setfont
+72 702 moveto (Journal of Synthetic Instrumentation, vol 3, no 2, 2024) show
+72 684 moveto (I. Locksmith) show
+72 654 moveto (Abstract. Encryption that only encodes permissions leaves the) show
+72 640 moveto (document readable; a user password does not.) show
+showpage
+
+/Helvetica-Bold findfont 11 scalefont setfont
+72 720 moveto (References) show
+/Helvetica findfont 10 scalefont setfont
+72 700 moveto (Locksmith, I. Empty passwords. Synthetic Press, 2023.) show
+showpage

@@ -1,0 +1,25 @@
+% Shared prologue: a fixed, identifier-free XMP packet.
+%
+% Left to itself pdfwrite writes an XMP packet containing a freshly
+% minted document UUID, which changes the bytes of every fixture on
+% every run. Supplying a packet replaces the generated one, so
+% regeneration is reproducible.
+%
+% The packet carries no identifier of any kind: the fixture whose DOI
+% lives in XMP brings its own packet and is rendered without this one.
+
+[ /_objdef {xmp} /type /stream /OBJ pdfmark
+[ {xmp} << /Type /Metadata /Subtype /XML >> /PUT pdfmark
+[ {xmp} (<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/">
+   <xmp:CreatorTool>borax-tools fixture corpus</xmp:CreatorTool>
+   <xmp:CreateDate>2024-01-03T12:00:00Z</xmp:CreateDate>
+   <xmp:ModifyDate>2024-01-03T12:00:00Z</xmp:ModifyDate>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>
+) /PUT pdfmark
+[ {Catalog} << /Metadata {xmp} >> /PUT pdfmark

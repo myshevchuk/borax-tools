@@ -1,0 +1,47 @@
+% publisher-xmp-doi.pdf -- DOI only in the XMP packet.
+%
+% The Info dictionary carries no identifier and neither does the page
+% text; the DOI is reachable only through the catalog /Metadata stream.
+
+[ /Title (Metadata Packets in Practice)
+  /Author (C. Packet)
+  /Subject (Synthetic fixture for tiered extraction)
+  /Creator (borax-tools fixture corpus)
+  /CreationDate (D:20240103120000Z)
+  /ModDate (D:20240103120000Z)
+/DOCINFO pdfmark
+
+[ /_objdef {xmp} /type /stream /OBJ pdfmark
+[ {xmp} << /Type /Metadata /Subtype /XML >> /PUT pdfmark
+[ {xmp} (<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:prism="http://prismstandard.org/namespaces/basic/2.0/">
+   <dc:title><rdf:Alt><rdf:li xml:lang="x-default">Metadata Packets in Practice</rdf:li></rdf:Alt></dc:title>
+   <prism:publicationName>Journal of Synthetic Instrumentation</prism:publicationName>
+   <prism:volume>3</prism:volume>
+   <prism:doi>10.1234/borax.2024.002</prism:doi>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>
+) /PUT pdfmark
+[ {Catalog} << /Metadata {xmp} >> /PUT pdfmark
+
+/Helvetica-Bold findfont 13 scalefont setfont
+72 720 moveto (Metadata Packets in Practice) show
+/Helvetica findfont 10 scalefont setfont
+72 702 moveto (Journal of Synthetic Instrumentation, vol 3, no 2, 2024) show
+72 684 moveto (C. Packet) show
+72 654 moveto (Abstract. This document keeps its identifier in an embedded) show
+72 640 moveto (metadata packet. Neither the information dictionary nor the) show
+72 626 moveto (page text repeats it.) show
+showpage
+
+/Helvetica-Bold findfont 11 scalefont setfont
+72 720 moveto (References) show
+/Helvetica findfont 10 scalefont setfont
+72 700 moveto (Packet, C. Packets all the way down. Synthetic Press, 2023.) show
+showpage

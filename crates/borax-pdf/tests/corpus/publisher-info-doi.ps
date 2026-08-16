@@ -1,0 +1,32 @@
+% publisher-info-doi.pdf -- DOI only in the Info dictionary.
+%
+% Imitates the shape of a publisher PDF that stamps the article DOI into
+% custom Info keys. Everything here is invented: the DOI prefix 10.1234
+% is a test prefix and resolves to nothing.
+
+[ /Title (A Study of Probe Fixtures)
+  /Author (A. Fixture and B. Corpus)
+  /Subject (Synthetic fixture for tiered extraction)
+  /Creator (borax-tools fixture corpus)
+  /CreationDate (D:20240103120000Z)
+  /ModDate (D:20240103120000Z)
+  /doi (10.1234/borax.2024.001)
+  /WPS-ARTICLEDOI (10.1234/borax.2024.001)
+/DOCINFO pdfmark
+
+/Helvetica-Bold findfont 13 scalefont setfont
+72 720 moveto (A Study of Probe Fixtures) show
+/Helvetica findfont 10 scalefont setfont
+72 702 moveto (Journal of Synthetic Instrumentation, vol 3, no 2, 2024) show
+72 684 moveto (A. Fixture and B. Corpus) show
+72 654 moveto (Abstract. The identifier for this document lives in the) show
+72 640 moveto (document information dictionary and nowhere else. The page) show
+72 626 moveto (text deliberately carries no identifier of any kind.) show
+showpage
+
+/Helvetica-Bold findfont 11 scalefont setfont
+72 720 moveto (References) show
+/Helvetica findfont 10 scalefont setfont
+72 700 moveto (Corpus, B. Fixtures that behave. Synthetic Press, 2023.) show
+72 686 moveto (Fixture, A. On probing probes. Synthetic Press, 2022.) show
+showpage

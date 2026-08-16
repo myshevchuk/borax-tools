@@ -1,0 +1,7 @@
+# The fixture PDFs are compared byte for byte by the extraction tests,
+# so no checkout may rewrite their line endings.
+*.pdf binary
+
+# Shell scripts keep LF, so a Windows checkout still runs them under
+# git-bash or WSL.
+*.sh text eol=lf

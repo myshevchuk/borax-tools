@@ -1,0 +1,39 @@
+% doi-on-third-page.pdf -- four pages, DOI only on page three.
+%
+% Page three is the last page the default text pass reads, so this
+% fixture pins the inclusive edge of the page limit.
+
+[ /Title (A Cover Sheet and Then Some)
+  /Author (G. Frontmatter)
+  /Subject (Synthetic fixture for tiered extraction)
+  /Creator (borax-tools fixture corpus)
+  /CreationDate (D:20240103120000Z)
+  /ModDate (D:20240103120000Z)
+/DOCINFO pdfmark
+
+/Helvetica-Bold findfont 13 scalefont setfont
+72 720 moveto (A Cover Sheet and Then Some) show
+/Helvetica findfont 10 scalefont setfont
+72 700 moveto (Deposited copy. Cover sheet added by the repository.) show
+showpage
+
+/Helvetica-Bold findfont 11 scalefont setfont
+72 720 moveto (Licence) show
+/Helvetica findfont 10 scalefont setfont
+72 700 moveto (This synthetic document is distributed with the fixture) show
+72 686 moveto (corpus and carries no identifier on this page.) show
+showpage
+
+/Helvetica-Bold findfont 13 scalefont setfont
+72 720 moveto (A Cover Sheet and Then Some) show
+/Helvetica findfont 10 scalefont setfont
+72 702 moveto (Journal of Synthetic Instrumentation, vol 3, no 2, 2024) show
+72 688 moveto (https://doi.org/10.1234/borax.2024.006) show
+72 660 moveto (Abstract. The article proper starts on the third page.) show
+showpage
+
+/Helvetica-Bold findfont 11 scalefont setfont
+72 720 moveto (References) show
+/Helvetica findfont 10 scalefont setfont
+72 700 moveto (Frontmatter, G. Cover sheets. Synthetic Press, 2023.) show
+showpage
