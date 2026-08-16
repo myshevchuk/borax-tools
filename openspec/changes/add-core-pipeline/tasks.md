@@ -242,14 +242,20 @@ Both were in scope for the write-safety review and are held back
 deliberately: each is a design change rather than a fix, and doing
 either badly costs more than leaving it undone.
 
-- [ ] 11.1 Bounded concurrency across files. `map_bounded` is written
-      and tested but requires `F: Fn(I) -> O + Sync`, so wiring it means
-      adding `Sync` to the `Source`, `Library`, and `Cache` seams. Every
-      test fake counts calls through `Cell`/`RefCell`/`Rc`, none of
-      which is `Sync`, so the bound would have to be paid for across
-      seven test files at the same time as the three trait definitions.
-      Worth doing as its own change, where the seam change and the fake
-      rework can be reviewed together
+- [x] 11.1 Bounded concurrency across files. `Source`, `Library`,
+      `Cache` and `Transport` gained a `Sync` supertrait and
+      `resolve_batch` now runs files on `map_bounded`'s pool. Every
+      production type was already `Sync`, so the cost was entirely in
+      the test fakes, which counted calls through `Cell`/`RefCell`/`Rc`;
+      those became atomics and mutexes first, while everything still
+      compiled, so adding the bounds was a clean second step.
+      `map_bounded` writes each result back at its input position, so
+      the event stream is unchanged: over the local corpus, concurrency
+      1 and 8 produce byte-identical JSONL, and the run takes 7s instead
+      of 18s. Pacing is what keeps this polite — it sits in the sources,
+      one interval per service, so no service is asked faster however
+      many threads are running
+
 - [ ] 11.2 Nested rename destinations. The templates spec makes `/` a
       directory separator and `sanitize` honours it, but a subdirectory
       target currently fails every file: `RealFilesystem::rename` never

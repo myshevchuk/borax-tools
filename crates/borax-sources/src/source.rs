@@ -207,7 +207,11 @@ pub(crate) fn attribute(record: &mut Record, source: borax_core::record::Source)
 }
 
 /// A bibliographic service borax can ask about an identifier.
-pub trait Source {
+///
+/// `Sync` because resolution runs files on a bounded pool of threads
+/// ([`crate::pace::map_bounded`]) that share one set of sources. Nothing
+/// is moved between threads, so `Send` is not required of it.
+pub trait Source: Sync {
     /// Which service this is.
     fn name(&self) -> SourceName;
 

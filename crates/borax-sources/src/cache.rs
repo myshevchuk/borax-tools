@@ -58,7 +58,11 @@ fn slug(value: &str) -> String {
 /// Implementations are adapters over a directory; [`MemoryCache`] is
 /// the in-process one used by tests and by runs that disable
 /// persistence.
-pub trait Cache {
+///
+/// `Sync` because resolution runs files on a bounded pool of threads
+/// ([`crate::pace::map_bounded`]) that share one cache. Nothing is moved
+/// between threads, so `Send` is not required of it.
+pub trait Cache: Sync {
     /// The record stored under `key`, if any. A failure to read is
     /// reported as a miss: a broken cache must never fail a run.
     fn get(&self, key: &str) -> Option<Record>;

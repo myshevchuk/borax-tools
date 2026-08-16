@@ -63,6 +63,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which drops the archive that is part of such an identifier, so every
   pre-2007 preprint failed with a malformed-response error.
 
+### Changed
+
+- Files are resolved on a bounded pool of threads rather than one at a
+  time, so a directory of PDFs is processed several times faster.
+  `network.concurrency` sets the width. The event stream is unaffected:
+  results are written back at their input position, so the JSON output
+  is identical to a sequential run's and stays diffable. Requests stay
+  paced per service, so more threads do not mean a faster rate of
+  asking.
+
 ### Added
 
 - `borax resolve` now emits the whole canonical record on each

@@ -1,10 +1,12 @@
 #![allow(clippy::unwrap_used)]
 
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use borax::event::{Attempt, Counts, Event, SkipReason};
 use borax::pipeline::{
@@ -112,16 +114,16 @@ struct LibraryEntry {
 /// content-index hit never touched the file.
 struct FakeLibrary {
     entries: BTreeMap<PathBuf, LibraryEntry>,
-    hash_calls: Cell<usize>,
-    open_calls: Cell<usize>,
+    hash_calls: AtomicUsize,
+    open_calls: AtomicUsize,
 }
 
 impl FakeLibrary {
     fn new() -> FakeLibrary {
         FakeLibrary {
             entries: BTreeMap::new(),
-            hash_calls: Cell::new(0),
-            open_calls: Cell::new(0),
+            hash_calls: AtomicUsize::new(0),
+            open_calls: AtomicUsize::new(0),
         }
     }
 
@@ -178,19 +180,19 @@ impl FakeLibrary {
 
     /// Number of times [`Library::hash`] has been called.
     fn hash_calls(&self) -> usize {
-        self.hash_calls.get()
+        self.hash_calls.load(Ordering::Relaxed)
     }
 
     /// Number of times [`Library::open`] has been called. The assertion
     /// that proves a content-index hit never opened the file.
     fn open_calls(&self) -> usize {
-        self.open_calls.get()
+        self.open_calls.load(Ordering::Relaxed)
     }
 }
 
 impl Library for FakeLibrary {
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
-        self.hash_calls.set(self.hash_calls.get() + 1);
+        self.hash_calls.fetch_add(1, Ordering::Relaxed);
         self.entries.get(path).map_or_else(
             || {
                 Err(ExtractionError::Unreadable {
@@ -202,7 +204,7 @@ impl Library for FakeLibrary {
     }
 
     fn open(&self, path: &Path) -> Result<Box<dyn PdfSource>, ExtractionError> {
-        self.open_calls.set(self.open_calls.get() + 1);
+        self.open_calls.fetch_add(1, Ordering::Relaxed);
         match self.entries.get(path) {
             Some(entry) => entry
                 .pdf
@@ -215,16 +217,53 @@ impl Library for FakeLibrary {
     }
 }
 
+/// A [`Library`] that sleeps before opening a file, keyed by path, so a
+/// batch resolved concurrently has jobs that finish in a different order
+/// than they were queued — the condition under which `resolve_batch`
+/// restoring input order is actually being exercised, rather than
+/// trivially true because nothing raced.
+struct DelayedLibrary {
+    inner: FakeLibrary,
+    delays: BTreeMap<PathBuf, Duration>,
+}
+
+impl DelayedLibrary {
+    fn new(inner: FakeLibrary) -> DelayedLibrary {
+        DelayedLibrary {
+            inner,
+            delays: BTreeMap::new(),
+        }
+    }
+
+    fn with_delay(mut self, path: impl Into<PathBuf>, delay: Duration) -> DelayedLibrary {
+        self.delays.insert(path.into(), delay);
+        self
+    }
+}
+
+impl Library for DelayedLibrary {
+    fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
+        self.inner.hash(path)
+    }
+
+    fn open(&self, path: &Path) -> Result<Box<dyn PdfSource>, ExtractionError> {
+        if let Some(delay) = self.delays.get(path) {
+            thread::sleep(*delay);
+        }
+        self.inner.open(path)
+    }
+}
+
 /// A [`Source`] whose name, support answer, and canned response are
 /// fixed at construction, following the shape of the one in
 /// `borax-sources/tests/cache.rs`. The call counter is shared through
-/// an `Rc` so a test can read it after the source has been borrowed
+/// an `Arc` so a test can read it after the source has been borrowed
 /// into a `&[&dyn Source]` slice.
 struct FakeSource {
     name: SourceName,
     supports: bool,
     response: Result<Record, SourceError>,
-    calls: Rc<Cell<usize>>,
+    calls: Arc<AtomicUsize>,
 }
 
 impl Source for FakeSource {
@@ -237,7 +276,7 @@ impl Source for FakeSource {
     }
 
     fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
-        self.calls.set(self.calls.get() + 1);
+        self.calls.fetch_add(1, Ordering::Relaxed);
         self.response.clone()
     }
 }
@@ -245,8 +284,8 @@ impl Source for FakeSource {
 fn fake_source(
     name: SourceName,
     response: Result<Record, SourceError>,
-) -> (FakeSource, Rc<Cell<usize>>) {
-    let calls = Rc::new(Cell::new(0));
+) -> (FakeSource, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
     (
         FakeSource {
             name,
@@ -432,7 +471,7 @@ fn cache_false_bypasses_the_content_index() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(library.open_calls(), 1);
-    assert_eq!(calls.get(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(file_record.record, record_with_doi("10.1000/live"));
     assert!(!file_record.cached);
 }
@@ -880,6 +919,7 @@ fn events_come_in_input_order_ending_with_run_finished_and_nothing_after() {
         &sources,
         &index,
         &|_: &Path| config(true),
+        1,
     );
 
     assert_eq!(run.events.len(), 4);
@@ -919,9 +959,14 @@ fn counts_reflect_the_outcomes_and_renamed_is_always_zero() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let run = resolve_batch(&[p1, p2, p3], &library, &sources, &index, &|_: &Path| {
-        config(true)
-    });
+    let run = resolve_batch(
+        &[p1, p2, p3],
+        &library,
+        &sources,
+        &index,
+        &|_: &Path| config(true),
+        1,
+    );
 
     assert_eq!(
         run.counts,
@@ -941,7 +986,14 @@ fn the_final_event_carries_the_same_counts_as_run_counts() {
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let run = resolve_batch(&[p1], &library, &sources, &index, &|_: &Path| config(true));
+    let run = resolve_batch(
+        &[p1],
+        &library,
+        &sources,
+        &index,
+        &|_: &Path| config(true),
+        1,
+    );
 
     match run.events.last() {
         Some(Event::RunFinished { counts }) => assert_eq!(*counts, run.counts),
@@ -984,6 +1036,7 @@ fn a_mixed_batch_completes_and_an_unreadable_file_does_not_curtail_it() {
         &sources,
         &index,
         &|_: &Path| config(true),
+        1,
     );
 
     assert_eq!(run.events.len(), 5);
@@ -1011,7 +1064,7 @@ fn an_empty_batch_produces_just_the_finishing_event_with_zero_counts() {
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let run = resolve_batch(&[], &library, &sources, &index, &|_: &Path| config(true));
+    let run = resolve_batch(&[], &library, &sources, &index, &|_: &Path| config(true), 1);
 
     assert_eq!(
         run.events,
@@ -1052,6 +1105,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
         &live_sources,
         &index,
         &|_: &Path| conf,
+        1,
     );
     assert_eq!(
         first.counts,
@@ -1061,7 +1115,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
             skipped: 0,
         }
     );
-    assert_eq!(calls.get(), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     let opens_after_first_run = library.open_calls();
 
     let panic_crossref = PanicSource {
@@ -1069,13 +1123,18 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
     };
     let panic_sources: Vec<&dyn Source> = vec![&panic_crossref];
 
-    let second = resolve_batch(&[p1, p2], &library, &panic_sources, &index, &|_: &Path| {
-        conf
-    });
+    let second = resolve_batch(
+        &[p1, p2],
+        &library,
+        &panic_sources,
+        &index,
+        &|_: &Path| conf,
+        1,
+    );
 
     assert_eq!(second.counts, first.counts);
     assert_eq!(library.open_calls(), opens_after_first_run);
-    assert_eq!(calls.get(), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     // Both runs end with the summary event; the per-file events are
     // everything before it.
     let first_files = &first.events[..first.events.len() - 1];
@@ -1136,10 +1195,11 @@ fn a_renamed_file_with_identical_content_is_served_from_the_index_without_openin
         &sources,
         &index,
         &|_: &Path| config(true),
+        1,
     );
 
     assert_eq!(library.open_calls(), 1);
-    assert_eq!(calls.get(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
     match &run.events[1] {
         Event::Resolved {
             path,
@@ -1153,6 +1213,210 @@ fn a_renamed_file_with_identical_content_is_served_from_the_index_without_openin
         }
         other => panic!("expected Resolved for the renamed file, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// resolve_batch: concurrency
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_batch_resolved_on_many_threads_reports_its_files_in_input_order() {
+    let paths: Vec<PathBuf> = (0..12)
+        .map(|i| PathBuf::from(format!("many-threads-{i:02}.pdf")))
+        .collect();
+    let mut library = FakeLibrary::new();
+    for (i, path) in paths.iter().enumerate() {
+        library = if i % 2 == 0 {
+            library.with_file(
+                path,
+                hash_for(&format!("many-threads-{i}")),
+                pdf_with_embedded_doi(&format!("10.1000/many-threads-{i}")),
+            )
+        } else {
+            library.with_file(
+                path,
+                hash_for(&format!("many-threads-{i}")),
+                pdf_with_no_identifier(),
+            )
+        };
+    }
+    // Earlier files sleep longer, so a job-order-dependent implementation
+    // would report them last rather than first.
+    let mut library = DelayedLibrary::new(library);
+    for (i, path) in paths.iter().enumerate() {
+        library = library.with_delay(path, Duration::from_millis((paths.len() - i) as u64 * 5));
+    }
+    let (crossref, _) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/many-threads")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let run = resolve_batch(
+        &paths,
+        &library,
+        &sources,
+        &index,
+        &|_: &Path| config(true),
+        8,
+    );
+
+    assert_eq!(run.events.len(), paths.len() + 1);
+    let reported: Vec<&PathBuf> = run.events[..paths.len()]
+        .iter()
+        .map(|event| match event {
+            Event::Resolved { path, .. } | Event::Skipped { path, .. } => path,
+            other => panic!("unexpected event {other:?}"),
+        })
+        .collect();
+    assert_eq!(reported, paths.iter().collect::<Vec<_>>());
+}
+
+#[test]
+fn a_batch_resolved_with_one_worker_or_eight_produces_the_same_run() {
+    let paths: Vec<PathBuf> = (0..12)
+        .map(|i| PathBuf::from(format!("same-run-{i:02}.pdf")))
+        .collect();
+    let mut library = FakeLibrary::new();
+    for (i, path) in paths.iter().enumerate() {
+        library = if i % 3 == 0 {
+            library.with_file(
+                path,
+                hash_for(&format!("same-run-{i}")),
+                pdf_with_no_identifier(),
+            )
+        } else {
+            library.with_file(
+                path,
+                hash_for(&format!("same-run-{i}")),
+                pdf_with_embedded_doi(&format!("10.1000/same-run-{i}")),
+            )
+        };
+    }
+    let (crossref, _) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/same-run")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    // A fresh index per run: sharing one would make the second run a
+    // cache hit and give it a different `cached`/`source` than the
+    // first, which is not the property under test.
+    let index_one = ContentIndex::new(MemoryCache::new());
+    let run_one = resolve_batch(
+        &paths,
+        &library,
+        &sources,
+        &index_one,
+        &|_: &Path| config(true),
+        1,
+    );
+    let index_eight = ContentIndex::new(MemoryCache::new());
+    let run_eight = resolve_batch(
+        &paths,
+        &library,
+        &sources,
+        &index_eight,
+        &|_: &Path| config(true),
+        8,
+    );
+
+    assert_eq!(run_one.events, run_eight.events);
+    assert_eq!(run_one.counts, run_eight.counts);
+}
+
+#[test]
+fn every_file_in_a_concurrent_batch_reaches_the_network_exactly_once() {
+    let paths: Vec<PathBuf> = (0..12)
+        .map(|i| PathBuf::from(format!("exactly-once-{i:02}.pdf")))
+        .collect();
+    let mut library = FakeLibrary::new();
+    for (i, path) in paths.iter().enumerate() {
+        library = library.with_file(
+            path,
+            hash_for(&format!("exactly-once-{i}")),
+            pdf_with_embedded_doi(&format!("10.1000/exactly-once-{i}")),
+        );
+    }
+    let (crossref, calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/exactly-once")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let run = resolve_batch(
+        &paths,
+        &library,
+        &sources,
+        &index,
+        &|_: &Path| config(true),
+        8,
+    );
+
+    assert_eq!(calls.load(Ordering::Relaxed), paths.len());
+    assert_eq!(run.counts.resolved, paths.len());
+    assert_eq!(run.counts.skipped, 0);
+}
+
+#[test]
+fn a_concurrency_of_zero_still_resolves_the_whole_batch() {
+    let p1 = PathBuf::from("zero-a.pdf");
+    let p2 = PathBuf::from("zero-b.pdf");
+    let p3 = PathBuf::from("zero-c.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &p1,
+            hash_for("zero-a"),
+            pdf_with_embedded_doi("10.1000/zero-a"),
+        )
+        .with_file(&p2, hash_for("zero-b"), pdf_with_no_text_layer())
+        .with_file(
+            &p3,
+            hash_for("zero-c"),
+            pdf_with_embedded_doi("10.1000/zero-c"),
+        );
+    let (crossref, _) = fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/zero-a")));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let run = resolve_batch(
+        &[p1.clone(), p2.clone(), p3.clone()],
+        &library,
+        &sources,
+        &index,
+        &|_: &Path| config(true),
+        0,
+    );
+
+    assert_eq!(run.events.len(), 4);
+    assert_eq!(
+        run.counts,
+        Counts {
+            resolved: 2,
+            renamed: 0,
+            skipped: 1,
+        }
+    );
+    assert!(matches!(run.events[3], Event::RunFinished { .. }));
+}
+
+#[test]
+fn an_empty_batch_with_high_concurrency_still_produces_just_the_finishing_event() {
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let run = resolve_batch(&[], &library, &sources, &index, &|_: &Path| config(true), 8);
+
+    assert_eq!(
+        run.events,
+        vec![Event::RunFinished {
+            counts: Counts::default(),
+        }]
+    );
+    assert_eq!(run.counts, Counts::default());
 }
 
 // ---------------------------------------------------------------------

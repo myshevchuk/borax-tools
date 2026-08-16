@@ -529,6 +529,9 @@ fn resolve_events<C: Cache>(
         adapters.sources,
         adapters.index,
         &|path| resolving(configs.for_path(path).config()),
+        // How many files at once is a network setting, so it comes from
+        // the run rather than from any one file's directory.
+        configs.run().config().concurrency,
     );
     // A batch closes its own stream; the one framing a whole invocation
     // is `dispatch`'s to open and close.

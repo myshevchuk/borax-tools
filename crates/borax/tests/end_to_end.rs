@@ -16,10 +16,10 @@
 //! `tests/cassettes` by the identifier in their URL, so a wrong URL
 //! fails the test rather than quietly reaching the network.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use borax::bib::{RealBibFiles, sidecar_path};
 use borax::cli::{Cli, Command, Settings};
@@ -55,7 +55,7 @@ const ARXIV_OLD: &str = include_str!("cassettes/arxiv-math.GT-0309136.xml");
 /// looking like a service with no record.
 struct CassetteTransport {
     routes: Vec<(&'static str, &'static str)>,
-    seen: RefCell<Vec<String>>,
+    seen: Mutex<Vec<String>>,
 }
 
 impl CassetteTransport {
@@ -67,19 +67,19 @@ impl CassetteTransport {
                 ("2401.12345", ARXIV_NEW),
                 ("math.GT/0309136", ARXIV_OLD),
             ],
-            seen: RefCell::new(Vec::new()),
+            seen: Mutex::new(Vec::new()),
         }
     }
 
     /// The URLs requested, in call order.
     fn seen(&self) -> Vec<String> {
-        self.seen.borrow().clone()
+        self.seen.lock().unwrap().clone()
     }
 }
 
 impl Transport for &CassetteTransport {
     fn get(&self, request: &HttpRequest) -> Result<HttpResponse, TransportError> {
-        self.seen.borrow_mut().push(request.url.clone());
+        self.seen.lock().unwrap().push(request.url.clone());
 
         // arXiv identifiers reach the URL percent-encoded, so the route
         // is matched against the decoded form.

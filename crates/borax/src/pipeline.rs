@@ -23,6 +23,7 @@ use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier, extract};
 use borax_sources::cache::Cache;
 use borax_sources::conflict::check_title;
 use borax_sources::dispatch::{Unresolved, resolve};
+use borax_sources::pace::map_bounded;
 use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 
@@ -33,7 +34,10 @@ use crate::event::{Attempt, Counts, Event, SkipReason};
 /// The one seam to the filesystem. A run hashes a file before it opens
 /// it, because a hash that matches the content index makes opening it
 /// unnecessary.
-pub trait Library {
+///
+/// `Sync` because resolution runs files on a bounded pool of threads
+/// ([`borax_sources::pace::map_bounded`]) that share one library.
+pub trait Library: Sync {
     /// The content hash of the file at `path`.
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError>;
 
@@ -315,27 +319,35 @@ pub struct Run {
 /// the settings a file runs under come from its own directory: one
 /// invocation can span two trees that configure extraction differently.
 ///
-/// The run is sequential. Bounded concurrency
-/// ([`borax_sources::pace::map_bounded`]) belongs here but arrives with
-/// the real transport, and because that helper restores input order it
-/// can be introduced without changing a single event.
+/// Up to `concurrency` files are resolved at once
+/// ([`borax_sources::pace::map_bounded`]). Ordering is unaffected: that
+/// helper restores input order whatever order the jobs finish in, so
+/// the event stream is the same as a sequential run\'s and a run
+/// remains diffable against itself. Pacing is what keeps concurrency
+/// from becoming rudeness — it lives in the sources, one interval per
+/// service, so however many threads are running no service is asked
+/// faster than it allows.
 pub fn resolve_batch<C: Cache>(
     paths: &[PathBuf],
     library: &dyn Library,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
-    config: &dyn Fn(&Path) -> ResolveConfig,
+    config: &(dyn Fn(&Path) -> ResolveConfig + Sync),
+    concurrency: usize,
 ) -> Run {
-    let mut events = Vec::with_capacity(paths.len() + 1);
-    let mut counts = Counts::default();
+    let outcomes = map_bounded(paths.to_vec(), concurrency, |path| {
+        let outcome = resolve_file(&path, library, sources, index, &config(&path));
+        (path, outcome)
+    });
 
-    for path in paths {
-        let outcome = resolve_file(path, library, sources, index, &config(path));
+    let mut events = Vec::with_capacity(outcomes.len() + 1);
+    let mut counts = Counts::default();
+    for (path, outcome) in &outcomes {
         match outcome {
             FileOutcome::Resolved(_) => counts.resolved += 1,
             FileOutcome::Skipped(_) => counts.skipped += 1,
         }
-        events.push(event_for(path, &outcome));
+        events.push(event_for(path, outcome));
     }
 
     events.push(Event::RunFinished { counts });

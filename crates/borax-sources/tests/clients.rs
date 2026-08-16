@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
 use borax_sources::arxiv::ArxivClient;
@@ -19,7 +19,7 @@ const ARXIV_EMPTY: &str = include_str!("cassettes/arxiv-empty.xml");
 /// every request it is asked to perform.
 struct FakeTransport {
     response: Result<HttpResponse, TransportError>,
-    seen: RefCell<Vec<HttpRequest>>,
+    seen: Mutex<Vec<HttpRequest>>,
 }
 
 impl FakeTransport {
@@ -29,21 +29,21 @@ impl FakeTransport {
                 status,
                 body: body.to_string(),
             }),
-            seen: RefCell::new(Vec::new()),
+            seen: Mutex::new(Vec::new()),
         }
     }
 
     fn failing(error: TransportError) -> FakeTransport {
         FakeTransport {
             response: Err(error),
-            seen: RefCell::new(Vec::new()),
+            seen: Mutex::new(Vec::new()),
         }
     }
 }
 
 impl Transport for &FakeTransport {
     fn get(&self, request: &HttpRequest) -> Result<HttpResponse, TransportError> {
-        self.seen.borrow_mut().push(request.clone());
+        self.seen.lock().unwrap().push(request.clone());
         self.response.clone()
     }
 }
@@ -179,7 +179,7 @@ fn crossref_fetch_200_returns_record_and_sends_expected_request() {
     let record = client.fetch(&doi_identifier()).unwrap();
     assert_eq!(record.doi, Some(Doi::parse("10.1038/171737a0").unwrap()));
 
-    let seen = transport.seen.borrow();
+    let seen = transport.seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(
         seen[0].url,
@@ -242,7 +242,7 @@ fn crossref_fetch_unsupported_identifier_sends_no_request() {
         client.fetch(&arxiv_identifier()),
         Err(SourceError::Unavailable { .. })
     ));
-    assert!(transport.seen.borrow().is_empty());
+    assert!(transport.seen.lock().unwrap().is_empty());
 }
 
 // ================= OpenAlex: fetch =================
@@ -263,7 +263,7 @@ fn openalex_fetch_unsupported_identifier_sends_no_request() {
         client.fetch(&arxiv_identifier()),
         Err(SourceError::Unavailable { .. })
     ));
-    assert!(transport.seen.borrow().is_empty());
+    assert!(transport.seen.lock().unwrap().is_empty());
 }
 
 // ================= arXiv: fetch =================
@@ -297,7 +297,7 @@ fn arxiv_fetch_unsupported_identifier_sends_no_request() {
         client.fetch(&doi_identifier()),
         Err(SourceError::Unavailable { .. })
     ));
-    assert!(transport.seen.borrow().is_empty());
+    assert!(transport.seen.lock().unwrap().is_empty());
 }
 
 // ================= name() / supports() =================

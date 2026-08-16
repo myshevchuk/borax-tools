@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use borax_core::identifier::{ArxivId, Doi, Identifier, Pmid};
 use borax_core::record::{EntryType, Record};
@@ -38,14 +38,14 @@ fn article_with_doi(value: &str) -> Record {
 }
 
 /// A [`Source`] whose name, support answer, and canned response are
-/// fixed at construction. The call counter is shared through an `Rc`
+/// fixed at construction. The call counter is shared through an `Arc`
 /// so a test can still read it after the source has been moved into a
 /// [`Cached`].
 struct FakeSource {
     name: SourceName,
     supports: bool,
     response: Result<Record, SourceError>,
-    calls: Rc<Cell<usize>>,
+    calls: Arc<AtomicUsize>,
 }
 
 impl Source for FakeSource {
@@ -58,7 +58,7 @@ impl Source for FakeSource {
     }
 
     fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
-        self.calls.set(self.calls.get() + 1);
+        self.calls.fetch_add(1, Ordering::Relaxed);
         self.response.clone()
     }
 }
@@ -217,7 +217,7 @@ fn memory_cache_get_for_absent_key_is_none() {
 #[test]
 fn cached_fetch_miss_then_hit_calls_wrapped_source_once() {
     let memory = MemoryCache::new();
-    let calls = Rc::new(Cell::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
     let record = article_with_doi("10.1038/171737a0");
     let fake = FakeSource {
         name: SourceName::Crossref,
@@ -233,7 +233,7 @@ fn cached_fetch_miss_then_hit_calls_wrapped_source_once() {
 
     assert_eq!(first, record);
     assert_eq!(second, record);
-    assert_eq!(calls.get(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn cached_fetch_populates_the_cache_on_success() {
         name: SourceName::Crossref,
         supports: true,
         response: Ok(article_with_doi("10.1038/171737a0")),
-        calls: Rc::new(Cell::new(0)),
+        calls: Arc::new(AtomicUsize::new(0)),
     };
     let cached = Cached::new(fake, SharedCache::new(&memory));
 
@@ -255,7 +255,7 @@ fn cached_fetch_populates_the_cache_on_success() {
 #[test]
 fn cached_fetch_does_not_cache_unavailable_errors() {
     let memory = MemoryCache::new();
-    let calls = Rc::new(Cell::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
     let fake = FakeSource {
         name: SourceName::Crossref,
         supports: true,
@@ -270,14 +270,14 @@ fn cached_fetch_does_not_cache_unavailable_errors() {
     assert!(cached.fetch(&id).is_err());
     assert!(cached.fetch(&id).is_err());
 
-    assert_eq!(calls.get(), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert!(memory.is_empty());
 }
 
 #[test]
 fn cached_fetch_does_not_cache_not_found_errors() {
     let memory = MemoryCache::new();
-    let calls = Rc::new(Cell::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
     let fake = FakeSource {
         name: SourceName::Crossref,
         supports: true,
@@ -290,14 +290,14 @@ fn cached_fetch_does_not_cache_not_found_errors() {
     assert!(cached.fetch(&id).is_err());
     assert!(cached.fetch(&id).is_err());
 
-    assert_eq!(calls.get(), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert!(memory.is_empty());
 }
 
 #[test]
 fn cached_fetch_different_identifiers_do_not_share_an_entry() {
     let memory = MemoryCache::new();
-    let calls = Rc::new(Cell::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
     let fake = FakeSource {
         name: SourceName::Crossref,
         supports: true,
@@ -309,7 +309,7 @@ fn cached_fetch_different_identifiers_do_not_share_an_entry() {
     cached.fetch(&doi_identifier()).unwrap();
     cached.fetch(&other_doi_identifier()).unwrap();
 
-    assert_eq!(calls.get(), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert_eq!(memory.len(), 2);
 }
 
@@ -320,7 +320,7 @@ fn cached_name_delegates_to_wrapped_source() {
         name: SourceName::OpenAlex,
         supports: true,
         response: Ok(article_with_doi("10.1038/171737a0")),
-        calls: Rc::new(Cell::new(0)),
+        calls: Arc::new(AtomicUsize::new(0)),
     };
     let cached = Cached::new(fake, SharedCache::new(&memory));
 
@@ -334,7 +334,7 @@ fn cached_supports_delegates_to_wrapped_source_when_true() {
         name: SourceName::Crossref,
         supports: true,
         response: Ok(article_with_doi("10.1038/171737a0")),
-        calls: Rc::new(Cell::new(0)),
+        calls: Arc::new(AtomicUsize::new(0)),
     };
     let cached = Cached::new(fake, SharedCache::new(&memory));
 
@@ -348,7 +348,7 @@ fn cached_supports_delegates_to_wrapped_source_when_false() {
         name: SourceName::Crossref,
         supports: false,
         response: Ok(article_with_doi("10.1038/171737a0")),
-        calls: Rc::new(Cell::new(0)),
+        calls: Arc::new(AtomicUsize::new(0)),
     };
     let cached = Cached::new(fake, SharedCache::new(&memory));
 
@@ -362,7 +362,7 @@ fn cached_source_is_object_safe_and_resolves_through_dispatch() {
         name: SourceName::Crossref,
         supports: true,
         response: Ok(article_with_doi("10.1038/171737a0")),
-        calls: Rc::new(Cell::new(0)),
+        calls: Arc::new(AtomicUsize::new(0)),
     };
     let cached = Cached::new(fake, SharedCache::new(&memory));
     let sources: Vec<&dyn Source> = vec![&cached];

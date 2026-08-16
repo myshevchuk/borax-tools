@@ -44,6 +44,16 @@ and, when configured, a contact mailto (Crossref/OpenAlex polite pools).
 Requests SHALL be rate-limited per source, and concurrent resolution
 across files SHALL be bounded by a configurable limit.
 
+Concurrency SHALL NOT change what a run reports: results are ordered by
+their input position, so the event stream of a concurrent run is
+identical to a sequential one's over the same inputs. Rate limiting is
+per service and independent of the number of threads in flight.
+
+#### Scenario: Concurrency does not reorder the stream
+- **WHEN** the same batch is resolved with a concurrency of one and with
+  a concurrency of eight
+- **THEN** both runs emit the same events in the same order
+
 #### Scenario: Polite-pool identification
 - **WHEN** a contact address is set in configuration and a Crossref
   request is issued

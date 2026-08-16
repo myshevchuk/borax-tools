@@ -66,7 +66,10 @@ impl From<TransportError> for SourceError {
 /// The one trait in this crate that touches the network. Tests
 /// implement it over recorded bodies; production uses
 /// [`crate::transport::UreqTransport`].
-pub trait Transport {
+///
+/// `Sync` because a [`crate::source::Source`] holds one and resolution
+/// shares that source across a pool of threads.
+pub trait Transport: Sync {
     fn get(&self, request: &HttpRequest) -> Result<HttpResponse, TransportError>;
 }
 

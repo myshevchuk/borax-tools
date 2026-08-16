@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
 use borax_core::record::{EntryType, Record};
@@ -32,9 +32,9 @@ fn article() -> Record {
 /// called on it.
 struct FakeSource {
     name: SourceName,
-    supports: Box<dyn Fn(&Identifier) -> bool>,
+    supports: Box<dyn Fn(&Identifier) -> bool + Sync>,
     response: Result<Record, SourceError>,
-    calls: Cell<usize>,
+    calls: AtomicUsize,
 }
 
 impl FakeSource {
@@ -43,7 +43,7 @@ impl FakeSource {
             name,
             supports: Box::new(|_identifier| true),
             response,
-            calls: Cell::new(0),
+            calls: AtomicUsize::new(0),
         }
     }
 
@@ -52,7 +52,7 @@ impl FakeSource {
             name,
             supports: Box::new(|_identifier| false),
             response,
-            calls: Cell::new(0),
+            calls: AtomicUsize::new(0),
         }
     }
 }
@@ -67,7 +67,7 @@ impl Source for FakeSource {
     }
 
     fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
-        self.calls.set(self.calls.get() + 1);
+        self.calls.fetch_add(1, Ordering::Relaxed);
         self.response.clone()
     }
 }
@@ -124,7 +124,7 @@ fn resolve_succeeds_on_first_source_without_consulting_the_rest() {
             source: SourceName::Crossref,
         })
     );
-    assert_eq!(openalex.calls.get(), 0);
+    assert_eq!(openalex.calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn resolve_never_fetches_a_source_that_does_not_support_the_identifier() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let unresolved = resolve(&sources, &doi_identifier()).unwrap_err();
 
-    assert_eq!(crossref.calls.get(), 0);
+    assert_eq!(crossref.calls.load(Ordering::Relaxed), 0);
     assert!(unresolved.attempts.is_empty());
 }
 
@@ -216,7 +216,7 @@ fn resolve_never_consults_a_source_outside_priority_order() {
     let sources: Vec<&dyn Source> = vec![&pubmed];
     let unresolved = resolve(&sources, &doi_identifier()).unwrap_err();
 
-    assert_eq!(pubmed.calls.get(), 0);
+    assert_eq!(pubmed.calls.load(Ordering::Relaxed), 0);
     assert!(unresolved.attempts.is_empty());
 }
 

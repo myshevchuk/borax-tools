@@ -294,3 +294,19 @@ fn the_wrapped_source_keeps_its_name_and_support_answer() {
     assert_eq!(paced.name(), SourceName::Crossref);
     assert!(paced.supports(&an_identifier()));
 }
+
+// `map_bounded` shares one `job` closure across every worker thread, so
+// anything captured into it — a transport, a cache, a client — has to be
+// `Sync`. Pinning the real types here means a field that breaks that
+// (an `Rc`, a `RefCell`, a raw pointer) fails in this one-line test
+// instead of surfacing as a trait-bound error deep inside
+// `resolve_batch`.
+#[test]
+fn the_real_transport_cache_and_client_types_are_sync() {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<borax_sources::transport::UreqTransport>();
+    assert_sync::<borax_sources::cache::MemoryCache>();
+    assert_sync::<borax_sources::store::FileCache>();
+    assert_sync::<borax_sources::crossref::CrossrefClient<borax_sources::transport::UreqTransport>>(
+    );
+}
