@@ -254,6 +254,7 @@ pub fn event_for(path: &Path, outcome: &FileOutcome) -> Event {
         FileOutcome::Resolved(file) => Event::Resolved {
             path: path.to_path_buf(),
             identifier: identifier_of(&file.record),
+            record: Box::new(file.record.clone()),
             source: file
                 .source
                 .map_or("cache", |source| source.as_str())

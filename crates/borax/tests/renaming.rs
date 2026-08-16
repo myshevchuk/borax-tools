@@ -711,6 +711,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
         Event::Resolved {
             path: PathBuf::from("a.pdf"),
             identifier: "doi:10.1000/a".to_string(),
+            record: Box::new(Record::new(EntryType::Article)),
             source: "crossref".to_string(),
             tier: None,
             cached: false,
@@ -718,6 +719,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
             identifier: "doi:10.1000/b".to_string(),
+            record: Box::new(Record::new(EntryType::Article)),
             source: "crossref".to_string(),
             tier: None,
             cached: false,
@@ -758,6 +760,7 @@ fn a_preview_runs_counts_report_zero_renamed_however_many_moves_were_planned() {
         Event::Resolved {
             path: PathBuf::from("a.pdf"),
             identifier: "doi:10.1000/a".to_string(),
+            record: Box::new(Record::new(EntryType::Article)),
             source: "crossref".to_string(),
             tier: None,
             cached: false,

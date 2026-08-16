@@ -787,10 +787,11 @@ fn identifier_unknown_everywhere_is_skipped_as_unresolvable() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn a_resolved_file_produces_a_resolved_event_with_path_identifier_source_tier_and_cached() {
+fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_tier_and_cached() {
     let path = PathBuf::from("paper.pdf");
+    let record = record_with_doi("10.1000/xyz");
     let outcome = FileOutcome::Resolved(FileRecord {
-        record: record_with_doi("10.1000/xyz"),
+        record: record.clone(),
         source: Some(SourceName::Crossref),
         tier: Some(Tier::EmbeddedMetadata),
         cached: false,
@@ -804,6 +805,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_source_tier_an
         Event::Resolved {
             path: path.clone(),
             identifier: "doi:10.1000/xyz".to_string(),
+            record: Box::new(record),
             source: "crossref".to_string(),
             tier: Some(tier_str(Tier::EmbeddedMetadata).to_string()),
             cached: false,
@@ -1224,4 +1226,59 @@ fn open_of_a_real_pdf_fixture_succeeds_with_a_nonzero_page_count() {
         .unwrap();
 
     assert!(pdf.page_count() > 0, "got {}", pdf.page_count());
+}
+
+// ---------------------------------------------------------------------
+// event_for: the resolved record travels with the event
+// ---------------------------------------------------------------------
+
+// The CLI spec defines `resolve` as "extract + resolve, emit records".
+// An identifier alone is not a record: a consumer would have to go back
+// to the network for what borax already had in hand.
+#[test]
+fn a_resolved_event_carries_the_whole_record() {
+    let path = Path::new("paper.pdf");
+    let record = record_with_doi_and_title("10.1000/x", "A Title Worth Keeping");
+    let outcome = FileOutcome::Resolved(FileRecord {
+        record: record.clone(),
+        source: Some(SourceName::Crossref),
+        tier: Some(Tier::TextLayer),
+        cached: false,
+        hash: None,
+    });
+
+    let Event::Resolved {
+        record: reported, ..
+    } = event_for(path, &outcome)
+    else {
+        panic!("expected a resolved event");
+    };
+
+    assert_eq!(*reported, record);
+}
+
+// The record survives the JSON rendering, so a `--json` consumer reads
+// the same record the run resolved.
+#[test]
+fn a_resolved_event_round_trips_its_record_through_json() {
+    let path = Path::new("paper.pdf");
+    let record = record_with_doi_and_title("10.1000/x", "A Title Worth Keeping");
+    let event = event_for(
+        path,
+        &FileOutcome::Resolved(FileRecord {
+            record: record.clone(),
+            source: Some(SourceName::Crossref),
+            tier: Some(Tier::TextLayer),
+            cached: false,
+            hash: None,
+        }),
+    );
+
+    let line = borax::event::json_line(&event);
+    let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+    assert_eq!(
+        parsed["record"]["title"],
+        serde_json::json!("A Title Worth Keeping")
+    );
 }

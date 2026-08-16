@@ -41,7 +41,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that do work. Selecting one used to resolve nothing and report every
   file unresolvable.
 
+- Requests to a service are now spaced out. `--min-interval-ms` and
+  `network.min-interval-ms` were accepted, validated and reported while
+  changing nothing, so borax asked for polite-pool access and
+  rate-limited none of its traffic.
+- Successful source responses are now cached on disk, not just the
+  content-hash index. Two different files carrying the same DOI, or a
+  re-run after the index is cleared, no longer re-query the service.
+
 ### Added
 
+- `borax resolve` now emits the whole canonical record on each
+  `resolved` event, not just the identifier it looked up — the JSON
+  stream is the composable interface, and a caller should not have to
+  go back to the network for what borax already resolved.
 - Skip events for a metadata conflict now report how similar the two
   titles were, so a near miss can be told from two unrelated works.

@@ -112,6 +112,11 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       flag, task 8)
 - [x] 7.9 Tests + implementation: rate-limit pacing and bounded
       concurrency
+- [x] 7.12 Tests + implementation: the `Paced` decorator, and both it
+      and `Cached` wired into the binary. `delay_before` and the cache
+      decorator existed and were tested but nothing in production
+      called either, so `--min-interval-ms` was inert and borax asked
+      for polite-pool trust while rate-limiting nothing
 - [x] 7.10 Tests + implementation: conflict detection for the
       skip-and-report contract
 - [x] 7.11 Revise conflict detection, which 7.10 built as exact equality
@@ -190,3 +195,38 @@ a feature that was missing.
       a run may be configured to use. `ALL` keeps naming DataCite and
       PubMed for the dispatch table, but a configuration selecting one
       resolved nothing and reported every file unresolvable
+
+## 11. Deferred, with the reason
+
+Both were in scope for the write-safety review and are held back
+deliberately: each is a design change rather than a fix, and doing
+either badly costs more than leaving it undone.
+
+- [ ] 11.1 Bounded concurrency across files. `map_bounded` is written
+      and tested but requires `F: Fn(I) -> O + Sync`, so wiring it means
+      adding `Sync` to the `Source`, `Library`, and `Cache` seams. Every
+      test fake counts calls through `Cell`/`RefCell`/`Rc`, none of
+      which is `Sync`, so the bound would have to be paid for across
+      seven test files at the same time as the three trait definitions.
+      Worth doing as its own change, where the seam change and the fake
+      rework can be reviewed together
+- [ ] 11.2 Nested rename destinations. The templates spec makes `/` a
+      directory separator and `sanitize` honours it, but a subdirectory
+      target currently fails every file: `RealFilesystem::rename` never
+      creates the target's parent, and `Filesystem::existing` lists the
+      source's directory rather than the target's, so collisions inside
+      a subdirectory are invisible to the planner.
+      The fix is not to add a `create_dir_all`. `borax_core::rename::plan`
+      is a single-directory planner by contract — one flat, case-folded
+      namespace — and that contract is what makes deterministic suffixing
+      and case-insensitive collision detection work. Supporting nesting
+      means grouping by *target* directory in `plan_renames` rather than
+      by source directory, which in turn changes what "already named"
+      means for a file whose source and target directories differ: the
+      source is no longer a member of the namespace being planned, so
+      the `exempt` rule the planner uses cannot apply unchanged.
+      Adding the `create_dir_all` alone would be worse than the current
+      failure: files would move, but two files claiming one nested name
+      would collide at the filesystem instead of being suffixed, losing
+      the deterministic-collision guarantee that is the point of the
+      planner. Needs its own change and its own spec delta

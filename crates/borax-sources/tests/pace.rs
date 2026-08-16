@@ -2,9 +2,14 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use borax_sources::pace::{DEFAULT_CONCURRENCY, DEFAULT_MIN_INTERVAL, delay_before, map_bounded};
+use borax_core::identifier::{Doi, Identifier};
+use borax_core::record::{EntryType, Record};
+use borax_sources::pace::{
+    DEFAULT_CONCURRENCY, DEFAULT_MIN_INTERVAL, Paced, delay_before, map_bounded,
+};
+use borax_sources::source::{Source, SourceError, SourceName};
 
 // --- constants ---
 
@@ -186,4 +191,106 @@ fn map_bounded_supports_a_non_copy_output_type() {
 
     let expected: Vec<String> = (0..5).map(|i| format!("job-{i}")).collect();
     assert_eq!(result, expected);
+}
+
+// ---------------------------------------------------------------------
+// Paced
+// ---------------------------------------------------------------------
+
+/// A [`Source`] that answers instantly and counts its calls.
+struct InstantSource {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl InstantSource {
+    fn new() -> InstantSource {
+        InstantSource {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Source for InstantSource {
+    fn name(&self) -> SourceName {
+        SourceName::Crossref
+    }
+
+    fn supports(&self, _identifier: &Identifier) -> bool {
+        true
+    }
+
+    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Record::new(EntryType::Article))
+    }
+}
+
+fn an_identifier() -> Identifier {
+    Identifier::Doi(Doi::parse("10.1000/paced").unwrap())
+}
+
+#[test]
+fn the_first_request_is_not_delayed() {
+    let paced = Paced::new(InstantSource::new(), Duration::from_millis(200));
+
+    let started = Instant::now();
+    paced.fetch(&an_identifier()).unwrap();
+
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "nothing has been asked yet, so there is nothing to wait for"
+    );
+}
+
+#[test]
+fn a_second_request_waits_out_the_interval() {
+    let interval = Duration::from_millis(120);
+    let paced = Paced::new(InstantSource::new(), interval);
+
+    let started = Instant::now();
+    paced.fetch(&an_identifier()).unwrap();
+    paced.fetch(&an_identifier()).unwrap();
+
+    assert!(
+        started.elapsed() >= interval,
+        "two requests to one service must be at least {interval:?} apart, got {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn pacing_delays_rather_than_dropping_requests() {
+    let source = InstantSource::new();
+    let paced = Paced::new(source, Duration::from_millis(1));
+
+    for _ in 0..3 {
+        paced.fetch(&an_identifier()).unwrap();
+    }
+
+    assert_eq!(paced.source().calls(), 3);
+}
+
+#[test]
+fn a_zero_interval_paces_nothing() {
+    let paced = Paced::new(InstantSource::new(), Duration::ZERO);
+
+    let started = Instant::now();
+    for _ in 0..5 {
+        paced.fetch(&an_identifier()).unwrap();
+    }
+
+    assert!(started.elapsed() < Duration::from_millis(50));
+}
+
+#[test]
+fn the_wrapped_source_keeps_its_name_and_support_answer() {
+    let paced = Paced::new(InstantSource::new(), Duration::ZERO);
+
+    assert_eq!(paced.name(), SourceName::Crossref);
+    assert!(paced.supports(&an_identifier()));
 }

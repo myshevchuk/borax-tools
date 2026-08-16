@@ -339,6 +339,7 @@ fn record_by(family: &str, year: i32, doi_value: &str) -> Record {
 fn resolved_event(
     path: &Path,
     identifier: &str,
+    record: &Record,
     source: &str,
     tier: Option<&str>,
     cached: bool,
@@ -346,6 +347,7 @@ fn resolved_event(
     Event::Resolved {
         path: path.to_path_buf(),
         identifier: identifier.to_string(),
+        record: Box::new(record.clone()),
         source: source.to_string(),
         tier: tier.map(str::to_string),
         cached,
@@ -711,6 +713,7 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
             resolved_event(
                 &good,
                 "doi:10.1000/events-for-good",
+                &record_by("Smith", 2024, "10.1000/events-for-good"),
                 "crossref",
                 Some("embedded-metadata"),
                 false,
@@ -773,6 +776,7 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
             resolved_event(
                 &path,
                 "doi:10.1000/rename-preview",
+                &record_by("Smith", 2024, "10.1000/rename-preview"),
                 "crossref",
                 Some("embedded-metadata"),
                 false,
@@ -838,6 +842,7 @@ fn rename_preview_with_no_journal_succeeds() {
             resolved_event(
                 &path,
                 "doi:10.1000/rename-preview-no-journal",
+                &record_by("Smith", 2024, "10.1000/rename-preview-no-journal"),
                 "crossref",
                 Some("embedded-metadata"),
                 false,
@@ -898,6 +903,7 @@ fn rename_apply_emits_renamed_moves_the_file_and_journals_an_entry() {
             resolved_event(
                 &path,
                 "doi:10.1000/rename-apply",
+                &record_by("Smith", 2024, "10.1000/rename-apply"),
                 "crossref",
                 Some("embedded-metadata"),
                 false,
@@ -1033,6 +1039,7 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
     let mut expected = vec![resolved_event(
         &path,
         "doi:10.1000/bib",
+        &record,
         "crossref",
         Some("embedded-metadata"),
         false,

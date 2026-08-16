@@ -14,6 +14,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use borax_core::record::Record;
 use serde::{Deserialize, Serialize};
 
 /// The version of the event schema, emitted on every JSON line.
@@ -42,6 +43,15 @@ pub enum Event {
     Resolved {
         path: PathBuf,
         identifier: String,
+        /// The whole canonical record, so a consumer of the JSON stream
+        /// has what the run resolved rather than only what it looked up.
+        /// `borax resolve` exists to emit records; an identifier alone
+        /// would send a caller back to the network for what borax
+        /// already held.
+        ///
+        /// Boxed because events accumulate in a `Vec` for the whole
+        /// run, where every event pays the size of the largest variant.
+        record: Box<Record>,
         source: String,
         /// Which extraction pass supplied the identifier, or `None`
         /// when the caller named it rather than a file carrying it.

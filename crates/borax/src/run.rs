@@ -14,16 +14,17 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borax_core::record::{EntryType, Record};
 use borax_core::template::{Template, TemplateTable};
 use borax_pdf::tiered::ExtractionConfig;
 use borax_sources::arxiv::ArxivClient;
-use borax_sources::cache::{Cache, MemoryCache};
+use borax_sources::cache::{Cache, Cached, MemoryCache};
 use borax_sources::crossref::CrossrefClient;
 use borax_sources::http::Politeness;
 use borax_sources::openalex::OpenAlexClient;
+use borax_sources::pace::Paced;
 use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, FileCache, default_cache_root};
 use borax_sources::transport::UreqTransport;
@@ -710,23 +711,26 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
     let politeness = Politeness {
         mailto: effective.config().mailto.clone(),
     };
-    let crossref = CrossrefClient::new(transport.clone(), politeness.clone());
-    let openalex = OpenAlexClient::new(transport.clone(), politeness.clone());
-    let arxiv = ArxivClient::new(transport, politeness);
-    let sources: Vec<&dyn Source> = [
-        (SourceName::Crossref, &crossref as &dyn Source),
-        (SourceName::OpenAlex, &openalex as &dyn Source),
-        (SourceName::Arxiv, &arxiv as &dyn Source),
-    ]
-    .into_iter()
-    .filter(|(name, _)| effective.config().sources.contains(name))
-    .map(|(_, source)| source)
-    .collect();
+    let interval = Duration::from_millis(effective.config().min_interval_ms);
+    let caching = effective.config().cache;
 
-    let index = ContentIndex::new(match FileCache::open_default() {
-        Some(cache) => ResponseCache::File(cache),
-        None => ResponseCache::Memory(MemoryCache::new()),
-    });
+    let mut owned: Vec<Box<dyn Source>> = Vec::new();
+    let selected = |name| effective.config().sources.contains(&name);
+    if selected(SourceName::Crossref) {
+        let client = CrossrefClient::new(transport.clone(), politeness.clone());
+        owned.push(polite(client, interval, caching));
+    }
+    if selected(SourceName::OpenAlex) {
+        let client = OpenAlexClient::new(transport.clone(), politeness.clone());
+        owned.push(polite(client, interval, caching));
+    }
+    if selected(SourceName::Arxiv) {
+        let client = ArxivClient::new(transport, politeness);
+        owned.push(polite(client, interval, caching));
+    }
+    let sources: Vec<&dyn Source> = owned.iter().map(Box::as_ref).collect();
+
+    let index = ContentIndex::new(response_cache());
     let journal = FileJournal::open_default();
 
     dispatch(
@@ -748,6 +752,38 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
         },
         streams,
     )
+}
+
+/// `source` wrapped in the decorators a real run adds to it: pacing
+/// always, and the response cache unless the run was told to bypass it.
+///
+/// The cache goes outside the pacing so an answer borax already holds
+/// costs neither a request nor the interval a request would have had to
+/// wait out; a run over a directory it has seen before then finishes at
+/// disk speed rather than at the network's.
+///
+/// Each source gets a cache of its own. They address the same store —
+/// the key carries the service's name, so two services cannot collide
+/// over one identifier — and a [`FileCache`] is a path, not an open
+/// handle, so holding three costs nothing.
+fn polite<S: Source + 'static>(source: S, interval: Duration, caching: bool) -> Box<dyn Source> {
+    let paced = Paced::new(source, interval);
+    match caching {
+        true => Box::new(Cached::new(paced, response_cache())),
+        false => Box::new(paced),
+    }
+}
+
+/// A cache over the borax cache directory, or an in-memory one when the
+/// system names no such directory.
+///
+/// The in-memory fallback still saves a run from asking twice about one
+/// identifier; it simply forgets when the process ends.
+fn response_cache() -> ResponseCache {
+    match FileCache::open_default() {
+        Some(cache) => ResponseCache::File(cache),
+        None => ResponseCache::Memory(MemoryCache::new()),
+    }
 }
 
 /// The directory the configuration search climbs from: the directory

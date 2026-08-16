@@ -7,7 +7,7 @@
 
 use std::sync::{Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The gap borax leaves between two requests to the same service.
 ///
@@ -121,4 +121,81 @@ where
         .into_iter()
         .flatten()
         .collect()
+}
+
+/// A [`Source`](crate::source::Source) that spaces out its requests.
+///
+/// Wraps a source so two requests through it are never closer together
+/// than `min_interval`, by waiting before each one. Waiting rather than
+/// refusing: a paced run is slower, and a run that dropped requests
+/// would be wrong.
+///
+/// The interval is per wrapper, and one wrapper holds one service's
+/// client, so pacing is per service — asking Crossref does not delay
+/// the next question to arXiv.
+///
+/// [`delay_before`] decides how long to wait; this is the part that
+/// owns a clock and does the sleeping.
+#[derive(Debug)]
+pub struct Paced<S> {
+    source: S,
+    min_interval: Duration,
+    last: Mutex<Option<Instant>>,
+}
+
+impl<S> Paced<S> {
+    /// Wrap `source` so its requests are at least `min_interval` apart.
+    ///
+    /// A zero interval paces nothing, which is how pacing is turned
+    /// off without a second code path.
+    pub fn new(source: S, min_interval: Duration) -> Paced<S> {
+        Paced {
+            source,
+            min_interval,
+            last: Mutex::new(None),
+        }
+    }
+
+    /// The wrapped source.
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    /// Wait until enough time has passed since the previous request,
+    /// then record this one as the new previous.
+    ///
+    /// A poisoned lock is recovered from rather than propagated: the
+    /// value behind it is a timestamp, and a run that panicked
+    /// elsewhere should still be polite rather than dead.
+    fn pause(&self) {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        let delay = delay_before(last.map(|at| at.elapsed()), self.min_interval);
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+        *last = Some(Instant::now());
+    }
+}
+
+impl<S: crate::source::Source> crate::source::Source for Paced<S> {
+    fn name(&self) -> crate::source::SourceName {
+        self.source.name()
+    }
+
+    fn supports(&self, identifier: &borax_core::identifier::Identifier) -> bool {
+        self.source.supports(identifier)
+    }
+
+    /// Wait out the interval, then ask the wrapped source.
+    ///
+    /// The wait happens before every request, hit or miss — a cache in
+    /// front of this wrapper is what keeps answers borax already has
+    /// from costing the interval.
+    fn fetch(
+        &self,
+        identifier: &borax_core::identifier::Identifier,
+    ) -> Result<borax_core::record::Record, crate::source::SourceError> {
+        self.pause();
+        self.source.fetch(identifier)
+    }
 }

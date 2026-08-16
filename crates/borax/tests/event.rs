@@ -6,6 +6,7 @@ use borax::event::{
     Attempt, Counts, Diagnostic, Event, Format, Level, SCHEMA, SkipReason, human_line, json_line,
     render,
 };
+use borax_core::record::{EntryType, Record};
 use serde_json::Value;
 
 // --- event constructors ---
@@ -22,6 +23,7 @@ fn resolved() -> Event {
     Event::Resolved {
         path: PathBuf::from("paper.pdf"),
         identifier: "10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
         source: "crossref".to_string(),
         tier: Some("first-page".to_string()),
         cached: false,
@@ -234,6 +236,7 @@ fn json_line_of_resolved_has_exactly_the_documented_field_set() {
             "event",
             "identifier",
             "path",
+            "record",
             "schema",
             "source",
             "tier"
@@ -706,6 +709,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
         Event::Resolved {
             path: PathBuf::from("a.pdf"),
             identifier: "10.1000/aaa".to_string(),
+            record: Box::new(Record::new(EntryType::Article)),
             source: "crossref".to_string(),
             tier: Some("first-page".to_string()),
             cached: false,
@@ -713,6 +717,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
             identifier: "10.1000/bbb".to_string(),
+            record: Box::new(Record::new(EntryType::Article)),
             source: "arxiv".to_string(),
             tier: None,
             cached: true,
