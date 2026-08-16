@@ -75,9 +75,14 @@ build feature, never a mandatory dependency.
 - [x] 6.6 Build the real-PDF fixture corpus (publisher PDFs, arXiv PDFs,
       encrypted, no-text-layer, malformed); ghostscript generates them
       locally
-- [ ] 6.7 Optional `pdfium` cargo feature: a second `PdfSource` backend
-      plus its prebuilt-binary pipeline. Deferred until Windows testing
-      shows the default backend is not enough
+- [ ] 6.7 DESCOPED, not abandoned — Optional `pdfium` cargo feature: a
+      second `PdfSource` backend plus its prebuilt-binary pipeline.
+      Deferred until Windows testing shows the default backend is not
+      enough, and it did not: the fixture corpus and the live contract
+      tests pass on all three platforms with the pure-Rust backend
+      alone. This change was archived with the task deliberately open
+      rather than done; the condition for revisiting it is recorded
+      under "Not built yet" in `openspec/STATE.md`
 - [x] 6.8 Tests + implementation: `scan::xmp_title`, reading `dc:title`
       (including its `rdf:Alt` language table) so the conflict check
       sees every title a document claims rather than only the Info
@@ -162,8 +167,11 @@ a socket, and only the file-backed cache (7.8) touches a disk.
       it, so `.../abs/math.GT/0309136v1` parsed as the bare number
       `0309136v1` and every pre-2007 preprint failed to resolve. The
       recorded cassette is a new-style id, so no unit test reached it
-- [ ] 9.2 Windows CI green, including sanitization and case-insensitive
-      collision tests
+- [x] 9.2 Windows CI green, including sanitization and case-insensitive
+      collision tests. The last failures were in the `nearest_override`
+      tests, which matched `/`-separated literals against paths built by
+      `Path::join` and so matched nothing on Windows; the search itself
+      was correct on every platform
 - [x] 9.3 Wire the scheduled live contract-test job against the real
       APIs, and widen what it covers. The parse-level tests said nothing
       about whether a client's own URL still lands on the service, so
