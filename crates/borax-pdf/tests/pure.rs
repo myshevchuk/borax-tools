@@ -54,6 +54,57 @@ fn page_with_text(
     })
 }
 
+/// A page whose content stream is exactly `operations`, for exercising
+/// a specific text-showing operator in isolation from [`page_with_text`]'s
+/// fixed `Tj` shape.
+fn page_with_operations(
+    doc: &mut Document,
+    pages_id: lopdf::ObjectId,
+    resources_id: lopdf::ObjectId,
+    operations: Vec<Operation>,
+) -> lopdf::ObjectId {
+    let content = Content { operations };
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+    doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Resources" => resources_id,
+        "Contents" => content_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+    })
+}
+
+/// A minimal single-page PDF whose page's content stream is exactly
+/// `operations`.
+fn build_pdf_from_operations(operations: Vec<Operation>) -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let font_id = helvetica_font(&mut doc);
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let page_id = page_with_operations(&mut doc, pages_id, resources_id, operations);
+
+    let pages = dictionary! {
+        "Type" => "Pages",
+        "Kids" => vec![page_id.into()],
+        "Count" => 1,
+        "Resources" => resources_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+    };
+    doc.objects.insert(pages_id, Object::Dictionary(pages));
+
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    bytes
+}
+
 /// A page with an empty content stream: no text-showing operators at
 /// all, the shape a scan without OCR produces.
 fn blank_page(doc: &mut Document, pages_id: lopdf::ObjectId) -> lopdf::ObjectId {
@@ -547,4 +598,124 @@ fn a_font_the_text_extractor_panics_on_is_reported_unreadable_not_a_process_abor
     let result = pdf.page_text(0);
 
     assert!(matches!(result, Err(ExtractionError::Unreadable { .. })));
+}
+
+// ---------------------------------------------------------------------
+// Text-showing shorthand operators (' and ")
+// ---------------------------------------------------------------------
+
+#[test]
+fn double_quote_operator_is_expanded_into_word_and_char_spacing_plus_tj() {
+    let bytes = build_pdf_from_operations(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12.into()]),
+        Operation::new("Td", vec![72.into(), 720.into()]),
+        Operation::new(
+            "\"",
+            vec![
+                0.into(),
+                0.into(),
+                Object::string_literal("unique-marker-quote"),
+            ],
+        ),
+        Operation::new("ET", vec![]),
+    ]);
+    let pdf = PurePdf::from_bytes(&bytes).unwrap();
+
+    let text = pdf.page_text(0).unwrap();
+
+    assert!(text.contains("unique-marker-quote"), "got {text:?}");
+}
+
+#[test]
+fn apostrophe_operator_is_expanded_into_next_line_plus_tj() {
+    let bytes = build_pdf_from_operations(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12.into()]),
+        Operation::new("Td", vec![72.into(), 720.into()]),
+        Operation::new(
+            "'",
+            vec![Object::string_literal("unique-marker-apostrophe")],
+        ),
+        Operation::new("ET", vec![]),
+    ]);
+    let pdf = PurePdf::from_bytes(&bytes).unwrap();
+
+    let text = pdf.page_text(0).unwrap();
+
+    assert!(text.contains("unique-marker-apostrophe"), "got {text:?}");
+}
+
+#[test]
+fn a_page_mixing_tj_apostrophe_and_double_quote_yields_all_three_strings_in_order() {
+    let bytes = build_pdf_from_operations(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12.into()]),
+        Operation::new("Td", vec![72.into(), 720.into()]),
+        Operation::new("Tj", vec![Object::string_literal("marker-tj")]),
+        Operation::new("'", vec![Object::string_literal("marker-apostrophe")]),
+        Operation::new(
+            "\"",
+            vec![0.into(), 0.into(), Object::string_literal("marker-quote")],
+        ),
+        Operation::new("ET", vec![]),
+    ]);
+    let pdf = PurePdf::from_bytes(&bytes).unwrap();
+
+    let text = pdf.page_text(0).unwrap();
+
+    let tj = text.find("marker-tj");
+    let apostrophe = text.find("marker-apostrophe");
+    let quote = text.find("marker-quote");
+    assert!(
+        tj.is_some() && apostrophe.is_some() && quote.is_some(),
+        "got {text:?}"
+    );
+    assert!(tj < apostrophe && apostrophe < quote, "got {text:?}");
+}
+
+#[test]
+fn page_text_is_idempotent_across_repeated_calls_on_a_page_using_apostrophe_and_double_quote() {
+    let bytes = build_pdf_from_operations(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12.into()]),
+        Operation::new("Td", vec![72.into(), 720.into()]),
+        Operation::new("'", vec![Object::string_literal("marker-apostrophe")]),
+        Operation::new(
+            "\"",
+            vec![0.into(), 0.into(), Object::string_literal("marker-quote")],
+        ),
+        Operation::new("ET", vec![]),
+    ]);
+    let pdf = PurePdf::from_bytes(&bytes).unwrap();
+
+    let first = pdf.page_text(0).unwrap();
+    let second = pdf.page_text(0).unwrap();
+
+    assert_eq!(first, second, "first {first:?}, second {second:?}");
+}
+
+#[test]
+fn a_malformed_double_quote_operator_does_not_make_the_page_unreadable() {
+    let bytes = build_pdf_from_operations(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12.into()]),
+        Operation::new("Td", vec![72.into(), 720.into()]),
+        Operation::new(
+            "Tj",
+            vec![Object::string_literal("marker-before-malformed")],
+        ),
+        Operation::new(
+            "\"",
+            vec![0.into(), Object::string_literal("marker-malformed")],
+        ),
+        Operation::new("ET", vec![]),
+    ]);
+    let pdf = PurePdf::from_bytes(&bytes).unwrap();
+
+    let result = pdf.page_text(0);
+
+    assert!(result.is_ok(), "got {result:?}");
+    let text = result.unwrap();
+    assert!(text.contains("marker-before-malformed"), "got {text:?}");
 }
