@@ -8,6 +8,7 @@ use borax::config::{
     BibLayer, Config, ConfigError, ExtractionLayer, Layer, NetworkLayer, OVERRIDE_FILE, Origin,
     RenameLayer, global_config_path, layer_from_env, layer_from_toml, nearest_override, resolve,
 };
+use borax::event::Event;
 use borax_core::bib_output::DuplicatePolicy;
 use borax_core::rename::CollisionPolicy;
 use borax_pdf::tiered::DEFAULT_PAGE_LIMIT;
@@ -727,6 +728,61 @@ fn entries_are_ordered_by_key_and_cover_every_setting() {
             "sources",
             "templates.default",
         ]
+    );
+}
+
+// --- Effective::events() ---
+
+#[test]
+fn events_yields_one_config_setting_per_entry_in_the_same_key_order_with_matching_values_and_origins()
+ {
+    let effective = resolve(vec![]).unwrap();
+
+    let entries = effective.entries();
+    let events = effective.events();
+
+    assert_eq!(events.len(), entries.len(), "got {events:?}");
+    for (entry, event) in entries.iter().zip(events.iter()) {
+        let (key, value, origin) = entry;
+        assert_eq!(
+            *event,
+            Event::ConfigSetting {
+                key: key.clone(),
+                value: value.clone(),
+                origin: origin.to_string(),
+            },
+            "mismatch for key {key}"
+        );
+    }
+}
+
+/// `events` renders `origin` through [`Origin`]'s own `Display`, not a
+/// bespoke wording of its own — pinned with a non-default origin so a
+/// mismatch between the two would show up as an unequal string.
+#[test]
+fn events_renders_a_non_default_origin_using_its_display_form() {
+    let layers = vec![(
+        Origin::Flag("mailto".to_string()),
+        Layer {
+            mailto: Some("flag@example.org".to_string()),
+            ..Layer::default()
+        },
+    )];
+    let effective = resolve(layers).unwrap();
+
+    let events = effective.events();
+    let mailto_event = events
+        .iter()
+        .find(|event| matches!(event, Event::ConfigSetting { key, .. } if key == "mailto"))
+        .unwrap_or_else(|| panic!("no ConfigSetting for mailto in {events:?}"));
+
+    assert_eq!(
+        *mailto_event,
+        Event::ConfigSetting {
+            key: "mailto".to_string(),
+            value: "\"flag@example.org\"".to_string(),
+            origin: Origin::Flag("mailto".to_string()).to_string(),
+        }
     );
 }
 

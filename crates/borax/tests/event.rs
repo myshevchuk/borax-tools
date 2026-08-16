@@ -57,6 +57,37 @@ fn bib_entry() -> Event {
     }
 }
 
+fn sidecar() -> Event {
+    Event::Sidecar {
+        path: PathBuf::from("paper.pdf"),
+        target: PathBuf::from("paper.bib"),
+    }
+}
+
+fn config_setting() -> Event {
+    Event::ConfigSetting {
+        key: "mailto".to_string(),
+        value: "\"test@example.org\"".to_string(),
+        origin: "defaults".to_string(),
+    }
+}
+
+fn cache_status() -> Event {
+    Event::CacheStatus {
+        root: PathBuf::from("/cache"),
+        entries: 4,
+        bytes: 1024,
+    }
+}
+
+fn cache_cleared() -> Event {
+    Event::CacheCleared {
+        root: PathBuf::from("/cache"),
+        entries: 4,
+        bytes: 1024,
+    }
+}
+
 fn run_finished() -> Event {
     Event::RunFinished {
         counts: Counts {
@@ -93,7 +124,15 @@ fn all_events() -> Vec<Event> {
         skipped(SkipReason::Unreadable {
             message: "not a PDF".to_string(),
         }),
+        skipped(SkipReason::BibWriteFailed {
+            message: "disk full".to_string(),
+        }),
+        skipped(SkipReason::Unciteable),
         bib_entry(),
+        sidecar(),
+        config_setting(),
+        cache_status(),
+        cache_cleared(),
         run_finished(),
     ]
 }
@@ -126,6 +165,10 @@ fn all_skip_reasons() -> Vec<SkipReason> {
         SkipReason::Unreadable {
             message: "not a PDF".to_string(),
         },
+        SkipReason::BibWriteFailed {
+            message: "disk full".to_string(),
+        },
+        SkipReason::Unciteable,
     ]
 }
 
@@ -162,6 +205,10 @@ fn json_line_event_tag_is_the_variant_name_in_kebab_case() {
         (renamed(), "renamed"),
         (skipped(SkipReason::NoIdentifier), "skipped"),
         (bib_entry(), "bib-entry"),
+        (sidecar(), "sidecar"),
+        (config_setting(), "config-setting"),
+        (cache_status(), "cache-status"),
+        (cache_cleared(), "cache-cleared"),
         (run_finished(), "run-finished"),
     ];
 
@@ -227,6 +274,61 @@ fn json_line_of_run_finished_has_exactly_the_documented_field_set() {
     );
 }
 
+#[test]
+fn json_line_of_sidecar_has_exactly_the_documented_field_set() {
+    let value: Value = serde_json::from_str(&json_line(&sidecar())).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["event", "path", "schema", "target"]);
+
+    assert_eq!(object["path"], Value::from("paper.pdf"));
+    assert_eq!(object["target"], Value::from("paper.bib"));
+}
+
+#[test]
+fn json_line_of_config_setting_has_exactly_the_documented_field_set() {
+    let value: Value = serde_json::from_str(&json_line(&config_setting())).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["event", "key", "origin", "schema", "value"]);
+
+    assert_eq!(object["key"], Value::from("mailto"));
+    assert_eq!(object["value"], Value::from("\"test@example.org\""));
+    assert_eq!(object["origin"], Value::from("defaults"));
+}
+
+#[test]
+fn json_line_of_cache_status_has_exactly_the_documented_field_set() {
+    let value: Value = serde_json::from_str(&json_line(&cache_status())).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["bytes", "entries", "event", "root", "schema"]);
+
+    assert_eq!(object["root"], Value::from("/cache"));
+    assert_eq!(object["entries"], Value::from(4));
+    assert_eq!(object["bytes"], Value::from(1024));
+}
+
+#[test]
+fn json_line_of_cache_cleared_has_exactly_the_documented_field_set() {
+    let value: Value = serde_json::from_str(&json_line(&cache_cleared())).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["bytes", "entries", "event", "root", "schema"]);
+
+    assert_eq!(object["root"], Value::from("/cache"));
+    assert_eq!(object["entries"], Value::from(4));
+    assert_eq!(object["bytes"], Value::from(1024));
+}
+
 // --- SkipReason nesting under Skipped.reason, tagged by kind ---
 
 #[test]
@@ -260,6 +362,13 @@ fn skipped_nests_the_reason_under_reason_with_a_kebab_case_kind_tag() {
             },
             "unreadable",
         ),
+        (
+            SkipReason::BibWriteFailed {
+                message: "disk full".to_string(),
+            },
+            "bib-write-failed",
+        ),
+        (SkipReason::Unciteable, "unciteable"),
     ];
 
     for (reason, expected_kind) in cases {
@@ -280,6 +389,13 @@ fn no_identifier_reason_carries_nothing_but_its_kind() {
 fn already_named_reason_carries_nothing_but_its_kind() {
     let value: Value =
         serde_json::from_str(&json_line(&skipped(SkipReason::AlreadyNamed))).unwrap();
+    let reason = value["reason"].as_object().unwrap();
+    assert_eq!(reason.keys().collect::<Vec<_>>(), vec!["kind"]);
+}
+
+#[test]
+fn unciteable_reason_carries_nothing_but_its_kind() {
+    let value: Value = serde_json::from_str(&json_line(&skipped(SkipReason::Unciteable))).unwrap();
     let reason = value["reason"].as_object().unwrap();
     assert_eq!(reason.keys().collect::<Vec<_>>(), vec!["kind"]);
 }
@@ -401,6 +517,41 @@ fn human_line_of_bib_entry_mentions_the_path_and_the_key() {
 }
 
 #[test]
+fn human_line_of_sidecar_mentions_the_path_and_the_target() {
+    let line = human_line(&sidecar()).unwrap();
+    assert!(!line.contains('\n'));
+    assert!(line.contains("paper.pdf"));
+    assert!(line.contains("paper.bib"));
+}
+
+#[test]
+fn human_line_of_config_setting_mentions_the_key_value_and_origin() {
+    let line = human_line(&config_setting()).unwrap();
+    assert!(!line.contains('\n'));
+    assert!(line.contains("mailto"));
+    assert!(line.contains("test@example.org"));
+    assert!(line.contains("defaults"));
+}
+
+#[test]
+fn human_line_of_cache_status_mentions_the_root_and_the_counts() {
+    let line = human_line(&cache_status()).unwrap();
+    assert!(!line.contains('\n'));
+    assert!(line.contains("/cache"));
+    assert!(line.contains('4'));
+    assert!(line.contains("1024"));
+}
+
+#[test]
+fn human_line_of_cache_cleared_mentions_the_root_and_the_counts() {
+    let line = human_line(&cache_cleared()).unwrap();
+    assert!(!line.contains('\n'));
+    assert!(line.contains("/cache"));
+    assert!(line.contains('4'));
+    assert!(line.contains("1024"));
+}
+
+#[test]
 fn human_line_of_run_finished_is_not_silent() {
     assert!(human_line(&run_finished()).is_some());
 }
@@ -451,6 +602,13 @@ fn human_line_of_skipped_makes_the_reason_legible_for_every_variant() {
             },
             "not a PDF",
         ),
+        (
+            SkipReason::BibWriteFailed {
+                message: "disk full".to_string(),
+            },
+            "disk full",
+        ),
+        (SkipReason::Unciteable, "citation key"),
     ];
 
     for (reason, must_contain) in cases {
