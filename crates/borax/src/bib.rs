@@ -65,8 +65,9 @@ const FORBIDDEN_IN_KEY: [char; 4] = [',', '{', '}', '%'];
 /// The citation key `record` is cited under.
 ///
 /// Rendered from `templates` exactly as a filename is, then stripped of
-/// the characters a BibTeX key cannot carry — whitespace and
-/// [`FORBIDDEN_IN_KEY`] — so a work is cited under the same name its
+/// the characters a BibTeX key cannot carry — whitespace, and the
+/// comma, braces, and percent sign that end a key, open or close a
+/// group, or start a comment — so a work is cited under the same name its
 /// file is stored under. `hash` supplies the `sha1` field a template
 /// may use.
 ///

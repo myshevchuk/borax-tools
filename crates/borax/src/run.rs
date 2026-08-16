@@ -237,8 +237,13 @@ pub struct Adapters<'a, C: Cache> {
     /// The response cache's directory, or `None` when the system names
     /// no cache directory.
     pub cache_root: Option<PathBuf>,
-    /// What an applied rename records as the time it happened, and what
-    /// identifies the run in the journal.
+    /// What an applied rename records as the time it happened.
+    ///
+    /// Called once per run, not once per file: its value timestamps
+    /// every entry the run journals and, as a
+    /// [`RunId`](crate::journal::RunId), is what makes
+    /// them one run. `undo` reverts a run rather than a file, so entries
+    /// that moved together have to be identified together.
     pub now: fn() -> String,
 }
 
@@ -275,11 +280,17 @@ pub fn templates(config: &Config) -> Result<TemplateTable, Diagnostic> {
 /// `adapters` they reach for.
 ///
 /// Returns a [`Diagnostic`] for the failures that are about the run
-/// rather than about a file: a template that will not compile, and an
-/// applying rename with no journal to record it in. An unjournaled
-/// rename cannot be undone, and being undoable is the promise that
-/// makes renaming safe to offer, so the run is refused rather than
-/// performed.
+/// rather than about a file, all three of which are the same shape —
+/// something the whole invocation needs is missing, so there is no
+/// per-file verdict to report:
+///
+/// - a template that will not compile, which is wrong for every file
+///   in the batch;
+/// - an applying rename with no journal to record it in, since an
+///   unjournaled rename cannot be undone and being undoable is the
+///   promise that makes renaming safe to offer;
+/// - `cache` with no cache directory, because reporting an empty cache
+///   would answer a question that was never asked.
 pub fn events_for<C: Cache>(
     command: &Command,
     effective: &Effective,
