@@ -9,11 +9,16 @@
 //! filesystem as arguments, and one supplying the real ones. The first
 //! is what tests use; the second is what the binary calls.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::config::{ConfigError, Effective, Layer, Origin};
+use crate::config::{
+    ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
+    layer_from_toml, nearest_override, resolve,
+};
 
 /// The extension a file needs to be picked up from a directory.
 pub const PDF_EXTENSION: &str = "pdf";
@@ -35,7 +40,61 @@ pub const PDF_EXTENSION: &str = "pdf";
 /// ending the run: a batch is not the place to discover a permissions
 /// problem, and the files that were readable still deserve their run.
 pub fn inputs(paths: &[PathBuf]) -> Vec<PathBuf> {
-    todo!("expand the directories, keep the files, drop the repeats")
+    let mut collected: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    for path in paths {
+        let Ok(metadata) = fs::metadata(path) else {
+            continue;
+        };
+
+        let mut reached = Vec::new();
+        if metadata.is_dir() {
+            documents(path, &mut reached);
+            reached.sort();
+        } else {
+            reached.push(path.clone());
+        }
+
+        collected.extend(
+            reached
+                .into_iter()
+                .filter(|reached| seen.insert(reached.clone())),
+        );
+    }
+
+    collected
+}
+
+/// Add every file below `directory` whose extension is
+/// [`PDF_EXTENSION`], ignoring case, to `found`.
+///
+/// A directory that cannot be read adds nothing, so one unreadable
+/// subtree costs its own files and no others.
+///
+/// Metadata is read without following symlinks, so a link is neither a
+/// file nor a directory here: it cannot send the walk round a loop, and
+/// naming it directly is still how a user says they meant it.
+fn documents(directory: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(listing) = fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in listing.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let path = entry.path();
+        if metadata.is_dir() {
+            documents(&path, found);
+        } else if metadata.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case(PDF_EXTENSION))
+        {
+            found.push(path);
+        }
+    }
 }
 
 /// The configuration a run started in `start` uses.
@@ -64,7 +123,56 @@ pub fn config_for(
     environment: &[(String, String)],
     read: &dyn Fn(&Path) -> io::Result<String>,
 ) -> Result<Effective, ConfigError> {
-    todo!("stack the layers and resolve them")
+    let mut layers: Vec<(Origin, Layer)> = Vec::new();
+
+    let global = global_config_path(|name| {
+        environment
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, value)| OsString::from(value))
+    });
+    if let Some(path) = global {
+        if let Some(layer) = file_layer(&path, read)? {
+            layers.push((Origin::GlobalFile(path), layer));
+        }
+    }
+
+    if let Some(path) = nearest_override(start, |candidate| read(candidate).is_ok()) {
+        if let Some(layer) = file_layer(&path, read)? {
+            layers.push((Origin::DirectoryFile(path), layer));
+        }
+    }
+
+    // One layer per variable rather than one for the whole environment,
+    // so `borax config` names the variable a value came from.
+    for (name, value) in environment {
+        let Some(suffix) = name.strip_prefix(ENV_PREFIX) else {
+            continue;
+        };
+        layers.push((
+            Origin::Env(suffix.to_string()),
+            layer_from_env([(name, value)])?,
+        ));
+    }
+
+    layers.extend(flags);
+    resolve(layers)
+}
+
+/// The layer the configuration file at `path` holds, or `None` when
+/// there is no file there to read.
+///
+/// A read that fails contributes nothing, which is what lets the layers
+/// below an absent file show through. Text that will not parse is a
+/// [`ConfigError`] naming `path`.
+fn file_layer(
+    path: &Path,
+    read: &dyn Fn(&Path) -> io::Result<String>,
+) -> Result<Option<Layer>, ConfigError> {
+    match read(path) {
+        Ok(text) => layer_from_toml(&text, path).map(Some),
+        Err(_) => Ok(None),
+    }
 }
 
 /// [`config_for`] over the real environment and filesystem.

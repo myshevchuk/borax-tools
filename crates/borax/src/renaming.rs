@@ -12,6 +12,7 @@
 //! to agree.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
@@ -19,6 +20,7 @@ use borax_core::record::Record;
 use borax_core::rename::{CollisionPolicy, PlanInput, PlannedAction, plan};
 use borax_core::sanitize::sanitize;
 use borax_core::template::{RenderInput, TemplateTable};
+use borax_sources::store::hash_file;
 
 use crate::event::{Counts, Event, SkipReason};
 use crate::pipeline::FileRecord;
@@ -298,7 +300,22 @@ impl Filesystem for RealFilesystem {
     /// hash cannot be taken reports `None` for it, so neither failure
     /// ends the run.
     fn existing(&self, directory: &Path) -> BTreeMap<String, Option<String>> {
-        todo!("list the directory and hash what is in it")
+        let Ok(listing) = fs::read_dir(directory) else {
+            return BTreeMap::new();
+        };
+
+        listing
+            .flatten()
+            .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.is_file()))
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    hash_file(&entry.path())
+                        .ok()
+                        .map(|hash| hash.as_str().to_string()),
+                )
+            })
+            .collect()
     }
 
     /// Move `from` to `to` without ever overwriting `to`.
@@ -314,6 +331,15 @@ impl Filesystem for RealFilesystem {
     /// process killed in that instant leaves the file under both. That
     /// is recoverable; an overwrite is not.
     fn rename(&self, from: &Path, to: &Path) -> Result<(), RenameError> {
-        todo!("link, then unlink the old name")
+        let failed = |error: std::io::Error| RenameError {
+            message: error.to_string(),
+        };
+
+        fs::hard_link(from, to).map_err(failed)?;
+        // An unlink that fails leaves the file under both names rather
+        // than undoing the link: removing `to` would be the only link
+        // left if `from` disappeared under us, and a duplicate costs a
+        // second run where that would cost the file.
+        fs::remove_file(from).map_err(failed)
     }
 }

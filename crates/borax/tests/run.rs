@@ -3,6 +3,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::slice;
 
 use borax::config::{ConfigError, Layer, Origin, resolve};
 use borax::run::{config_for, inputs};
@@ -45,7 +46,7 @@ fn a_single_file_path_passes_through_unchanged_whatever_its_extension() {
     let path = dir.path().join("notes.txt");
     fs::write(&path, b"").unwrap();
 
-    let result = inputs(&[path.clone()]);
+    let result = inputs(slice::from_ref(&path));
 
     assert_eq!(result, vec![path], "got {result:?}");
 }
@@ -166,7 +167,7 @@ fn an_unreadable_directory_contributes_nothing_rather_than_panicking() {
         return;
     }
 
-    let result = inputs(&[locked.clone()]);
+    let result = inputs(slice::from_ref(&locked));
 
     // Restored before the temp directory's own cleanup, which needs to
     // read and remove what is inside it.

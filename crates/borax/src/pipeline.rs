@@ -16,13 +16,14 @@ use std::path::{Path, PathBuf};
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
 use borax_core::record::Record;
+use borax_pdf::pure::PurePdf;
 use borax_pdf::source::{ExtractionError, PdfSource};
 use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier, extract};
 use borax_sources::cache::Cache;
 use borax_sources::conflict::check_title;
 use borax_sources::dispatch::{Unresolved, resolve};
 use borax_sources::source::{Source, SourceName};
-use borax_sources::store::ContentIndex;
+use borax_sources::store::{ContentIndex, hash_file};
 
 use crate::event::{Attempt, Counts, Event, SkipReason};
 
@@ -334,10 +335,12 @@ impl Library for RealLibrary {
     /// what [`resolve_file`] treats as a content-index miss rather than
     /// as a verdict.
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
-        todo!("hash the file, mapping the I/O error")
+        hash_file(path).map_err(|error| ExtractionError::Unreadable {
+            message: error.to_string(),
+        })
     }
 
     fn open(&self, path: &Path) -> Result<Box<dyn PdfSource>, ExtractionError> {
-        todo!("open with the pure-Rust engine")
+        Ok(Box::new(PurePdf::open(path)?))
     }
 }
