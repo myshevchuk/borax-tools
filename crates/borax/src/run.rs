@@ -35,13 +35,13 @@ use crate::config::{
     Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
     layer_from_toml, nearest_override, resolve,
 };
-use crate::event::{Diagnostic, Event, Level, render};
+use crate::event::{Counts, Diagnostic, Event, Format, Level, render};
 use crate::journal::{Entry, FileJournal, Journal, RunId, undo_last};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
 };
 use crate::renaming::{
-    Filesystem, LogFailure, MoveLog, RealFilesystem, apply_renames, counts_for, plan_renames,
+    Filesystem, LogFailure, MoveLog, RealFilesystem, apply_renames, plan_renames,
 };
 use crate::session::{Outcome, outcome_for};
 
@@ -497,8 +497,13 @@ pub enum Prepared<'a> {
     /// A command with nothing that could fail: `config`, `resolve`,
     /// `undo`.
     Unchecked,
-    /// `cache`, over the directory it will inspect or clear.
-    Cache { root: &'a Path },
+    /// `cache`, with the report inspecting or clearing produced.
+    ///
+    /// This command's whole work is the one event, and that work is
+    /// what can fail — an unreadable cache is not an empty one — so it
+    /// happens in [`preflight`], where there is still a way to refuse
+    /// the run.
+    Cache { report: Event },
     /// `rename` or `bib`: the run's paths grouped by the directory
     /// holding them, in the order those directories are first reached,
     /// each paired with the template table compiled for it.
@@ -528,18 +533,75 @@ pub enum Prepared<'a> {
 /// - an applying rename with no journal to record it in, since an
 ///   unjournaled rename cannot be undone and being undoable is the
 ///   promise that makes renaming safe to offer;
-/// - `cache` with no cache directory, because reporting an empty cache
-///   would answer a question that was never asked.
+/// - `cache` with no cache directory, or with one that cannot be read,
+///   because reporting an empty cache would answer a question that was
+///   never asked.
 ///
-/// Nothing here reads a file, queries a source, or moves anything, so a
-/// run that fails this check costs no network and leaves no trace.
+/// For a command that works on files, nothing here reads one, queries a
+/// source, or moves anything, so a run refused at this point costs no
+/// network and leaves no trace. `borax cache` is the exception, and the
+/// third failure above is why: its whole work is a single event, and
+/// the work is the part that can fail.
 pub fn preflight<'a, C: Cache>(
     command: &Command,
     configs: &Configs,
-    adapters: &Adapters<'a, C>,
+    adapters: &'a Adapters<'a, C>,
 ) -> Result<Prepared<'a>, Diagnostic> {
-    let _ = (command, configs, adapters);
-    todo!()
+    match command {
+        Command::Config | Command::Resolve { .. } | Command::Undo => Ok(Prepared::Unchecked),
+        Command::Cache { clear } => match adapters.cache_root.as_deref() {
+            Some(root) => Ok(Prepared::Cache {
+                report: cache_report(*clear, root)?,
+            }),
+            None => Err(error("this system names no cache directory".to_string())),
+        },
+        Command::Rename { paths, apply } => {
+            // An invocation missing both a journal and a compilable
+            // template is told about the journal. Nothing is touched
+            // either way, so the order decides only which of the two
+            // refusals the user reads first.
+            let journal = match (*apply, adapters.journal) {
+                (true, None) => {
+                    return Err(error(
+                        "--apply needs a journal to record the moves in, and this system names no \
+                         state directory"
+                            .to_string(),
+                    ));
+                }
+                (true, journal) => journal,
+                (false, _) => None,
+            };
+            Ok(Prepared::Grouped {
+                groups: compiled_groups(paths, configs)?,
+                journal,
+            })
+        }
+        Command::Bib { paths } => Ok(Prepared::Grouped {
+            groups: compiled_groups(paths, configs)?,
+            // A bibliography run moves nothing, so it has nothing to
+            // record and needs no journal to record it in.
+            journal: None,
+        }),
+    }
+}
+
+/// `paths` grouped by directory ([`by_directory`]), each group paired
+/// with the template table its directory's configuration compiles to.
+///
+/// Every group is compiled before any of them is worked, so a template
+/// that will not compile — in any of the directories the run spans —
+/// ends the run before a single file is read.
+fn compiled_groups(
+    paths: &[PathBuf],
+    configs: &Configs,
+) -> Result<Vec<(PathBuf, Vec<PathBuf>, TemplateTable)>, Diagnostic> {
+    by_directory(paths)
+        .into_iter()
+        .map(|(directory, group)| {
+            let table = templates(configs.for_directory(&directory).config())?;
+            Ok((directory, group, table))
+        })
+        .collect()
 }
 
 /// Write the events `command` produces into `sink`, between the run's
@@ -549,10 +611,10 @@ pub fn preflight<'a, C: Cache>(
 /// everything that could have gone wrong, so what is left is work that
 /// reports its own outcome per file.
 ///
-/// Events reach `sink` in the order they happen, and a file's own
-/// events are contiguous — its resolution, the rename planned or
-/// applied for it, and any sidecar written beside it — so a reader
-/// pairs a verdict with a fate without looking anywhere else.
+/// Events reach `sink` as the run decides them rather than at the end,
+/// so a reader watches a slow run make progress. Which command writes
+/// as it decides and which has to gather a batch first is the
+/// command's own contract.
 pub fn emit_events<C: Cache>(
     prepared: &Prepared<'_>,
     command: &Command,
@@ -560,69 +622,81 @@ pub fn emit_events<C: Cache>(
     adapters: &Adapters<'_, C>,
     sink: &mut dyn Sink,
 ) {
-    let _ = (prepared, command, configs, adapters, sink);
-    todo!()
+    match (command, prepared) {
+        (Command::Config, _) => {
+            for event in configs.run().events() {
+                sink.emit(event);
+            }
+        }
+        (Command::Cache { .. }, Prepared::Cache { report }) => sink.emit(report.clone()),
+        (Command::Resolve { paths }, _) => resolve_events(paths, configs, adapters, sink),
+        (Command::Rename { apply, .. }, Prepared::Grouped { groups, journal }) => {
+            rename_events(groups, *apply, *journal, configs, adapters, sink);
+        }
+        (Command::Bib { .. }, Prepared::Grouped { groups, .. }) => {
+            bib_events(groups, configs, adapters, sink);
+        }
+        (Command::Undo, _) => undo_events(adapters, sink),
+        // A `Prepared` that does not go with the command could only
+        // come of pairing one command's preflight with another's
+        // emission, which no caller does: `events_for` and `dispatch`
+        // both preflight the command they go on to emit. There is
+        // nothing such a pair could report, so it reports nothing.
+        _ => {}
+    }
 }
 
-/// The events `command` produces, between the run's first and last.
+/// The events `command` produces, between the run's first and last,
+/// collected rather than streamed.
 ///
-/// One function per subcommand would repeat the same three lines of
-/// setup six times; what differs between them is only which of
-/// `adapters` they reach for.
+/// [`preflight`] and [`emit_events`], with a `Vec<Event>` for the sink:
+/// a caller that wants a whole run as a value — to assert on it, or to
+/// look at its order — runs exactly the code a streaming caller runs,
+/// so neither can drift from the other.
 ///
-/// Returns a [`Diagnostic`] for the failures that are about the run
-/// rather than about a file, all three of which are the same shape —
-/// something the whole invocation needs is missing, so there is no
-/// per-file verdict to report:
-///
-/// - a template that will not compile, which is wrong for every file
-///   in the batch;
-/// - an applying rename with no journal to record it in, since an
-///   unjournaled rename cannot be undone and being undoable is the
-///   promise that makes renaming safe to offer;
-/// - `cache` with no cache directory, because reporting an empty cache
-///   would answer a question that was never asked.
+/// Returns whatever [`preflight`] refuses the run for, in which case
+/// nothing was emitted and nothing was touched.
 pub fn events_for<C: Cache>(
     command: &Command,
     configs: &Configs,
     adapters: &Adapters<C>,
 ) -> Result<Vec<Event>, Diagnostic> {
-    match command {
-        Command::Config => Ok(configs.run().events()),
-        Command::Cache { clear } => cache_events(*clear, adapters.cache_root.as_deref()),
-        Command::Resolve { paths } => Ok(resolve_events(paths, configs, adapters)),
-        Command::Rename { paths, apply } => rename_events(paths, *apply, configs, adapters),
-        Command::Bib { paths } => bib_events(paths, configs, adapters),
-        Command::Undo => Ok(undo_events(adapters)),
-    }
+    let prepared = preflight(command, configs, adapters)?;
+    let mut events: Vec<Event> = Vec::new();
+    emit_events(&prepared, command, configs, adapters, &mut events);
+    Ok(events)
 }
 
-/// The events `borax cache` produces over the cache at `root`.
+/// What `borax cache` makes of the cache at `root`.
 ///
 /// One event either way: what the cache holds, or what emptying it
 /// removed. A cache that cannot be read is a [`Diagnostic`] rather than
 /// a count of zero, since an unreadable cache is not an empty one.
-fn cache_events(clear: bool, root: Option<&Path>) -> Result<Vec<Event>, Diagnostic> {
-    let Some(root) = root else {
-        return Err(error("this system names no cache directory".to_string()));
-    };
-
+fn cache_report(clear: bool, root: &Path) -> Result<Event, Diagnostic> {
     match clear {
-        true => crate::cache::clear(root).map(|stats| vec![crate::cache::cleared_event(&stats)]),
-        false => crate::cache::inspect(root).map(|stats| vec![crate::cache::status_event(&stats)]),
+        true => crate::cache::clear(root).map(|stats| crate::cache::cleared_event(&stats)),
+        false => crate::cache::inspect(root).map(|stats| crate::cache::status_event(&stats)),
     }
     .map_err(|failure| error(format!("\"{}\": {failure}", root.display())))
 }
 
-/// The events `borax resolve` produces for `paths`.
+/// Write the events `borax resolve` produces for `paths` into `sink`.
 ///
 /// One event per file, in the order given, each resolved under the
 /// configuration its own directory implies.
+///
+/// The batch is resolved before the first line is written, which is the
+/// price of `concurrency`: files finish in whatever order the network
+/// answers, and reporting them as they finish would make the stream's
+/// order depend on that. Order is the property worth keeping — a run
+/// stays diffable against itself — so `resolve` waits where `rename`,
+/// which is serial, does not.
 fn resolve_events<C: Cache>(
     paths: &[PathBuf],
     configs: &Configs,
     adapters: &Adapters<C>,
-) -> Vec<Event> {
+    sink: &mut dyn Sink,
+) {
     let mut run = resolve_batch(
         paths,
         adapters.library,
@@ -636,7 +710,9 @@ fn resolve_events<C: Cache>(
     // A batch closes its own stream; the one framing a whole invocation
     // is `dispatch`'s to open and close.
     run.events.pop();
-    run.events
+    for event in run.events {
+        sink.emit(event);
+    }
 }
 
 /// What a run may do while resolving, from `config`.
@@ -649,45 +725,29 @@ fn resolving(config: &Config) -> ResolveConfig {
     }
 }
 
-/// The events `borax rename` produces for `paths`, moving the files
-/// when `apply` is set.
+/// Write the events `borax rename` produces for `groups` into `sink`,
+/// moving the files when `apply` is set.
 ///
-/// The journal is required before anything is resolved rather than
-/// after the moves are planned, so a run that could not have been undone
-/// costs no network and touches no file.
+/// `groups` is what [`preflight`] made of the run's paths: each
+/// directory the run spans, the files in it, and the template table its
+/// configuration compiled to. `journal` is where an applying run records
+/// its moves, and is `None` for a preview, which makes none.
+///
+/// A group is worked under its own directory's configuration — its
+/// template, its collision policy, its bibliography destination — since
+/// a run spanning two trees is a run under two configurations.
 fn rename_events<C: Cache>(
-    paths: &[PathBuf],
+    groups: &[(PathBuf, Vec<PathBuf>, TemplateTable)],
     apply: bool,
+    journal: Option<&dyn Journal>,
     configs: &Configs,
     adapters: &Adapters<C>,
-) -> Result<Vec<Event>, Diagnostic> {
-    let journal = match (apply, adapters.journal) {
-        (true, None) => {
-            return Err(error(
-                "--apply needs a journal to record the moves in, and this system names no state \
-                 directory"
-                    .to_string(),
-            ));
-        }
-        (true, journal) => journal,
-        (false, _) => None,
-    };
-
-    // Every template is compiled before any file is touched, so a
-    // template that will not compile — in any of the directories the run
-    // spans — ends it before a single move.
-    let groups = by_directory(paths);
-    let compiled: Vec<TemplateTable> = groups
-        .iter()
-        .map(|(directory, _)| templates(configs.for_directory(directory).config()))
-        .collect::<Result<_, _>>()?;
-
+    sink: &mut dyn Sink,
+) {
     let at = (adapters.now)();
-    let mut events = Vec::with_capacity(paths.len());
-    for ((directory, group), templates) in groups.iter().zip(&compiled) {
+    for (directory, group, templates) in groups {
         let effective = configs.for_directory(directory);
-        let (resolved_events, resolved) = resolved_records(group, effective, adapters);
-        events.extend(resolved_events);
+        let resolved = resolved_records(group, effective, adapters, sink);
 
         let log = journal.map(|journal| JournalLog {
             journal,
@@ -710,10 +770,11 @@ fn rename_events<C: Cache>(
         // already an `Unjournalable` skip carrying the reason, so the run
         // says what happened through the same stream as everything else.
         let resolved = at_current_paths(resolved, &applied.events);
-        events.extend(applied.events);
-        events.extend(bib_output(&resolved, templates, effective, adapters));
+        for event in applied.events {
+            sink.emit(event);
+        }
+        bib_output(&resolved, templates, effective, adapters, sink);
     }
-    Ok(events)
 }
 
 /// `paths` grouped by the directory holding them, in the order those
@@ -781,19 +842,23 @@ impl MoveLog for JournalLog<'_> {
     }
 }
 
-/// Resolve `paths`, keeping the records alongside the events.
+/// Resolve `paths`, writing each file's verdict into `sink` as it is
+/// reached and keeping the records.
 ///
 /// Renaming and bibliography output both work from the records rather
-/// than from the events, so the pair is what they need;
+/// than from the events, so the records are what this hands back;
 /// [`crate::pipeline::resolve_batch`] reports the same events and keeps
-/// nothing. Only resolved files appear in the records, each paired with
-/// the path it was resolved from.
+/// nothing. Only resolved files appear, each paired with the path it was
+/// resolved from.
+///
+/// Each file is resolved and reported before the next is opened, so a
+/// reader watching a network-bound run sees it make progress.
 fn resolved_records<C: Cache>(
     paths: &[PathBuf],
     effective: &Effective,
     adapters: &Adapters<C>,
-) -> (Vec<Event>, Vec<(PathBuf, FileRecord)>) {
-    let mut events = Vec::with_capacity(paths.len());
+    sink: &mut dyn Sink,
+) -> Vec<(PathBuf, FileRecord)> {
     let mut resolved = Vec::new();
 
     for path in paths {
@@ -804,13 +869,13 @@ fn resolved_records<C: Cache>(
             adapters.index,
             &resolving(effective.config()),
         );
-        events.push(crate::pipeline::event_for(path, &outcome));
+        sink.emit(crate::pipeline::event_for(path, &outcome));
         if let FileOutcome::Resolved(file) = outcome {
             resolved.push((path.clone(), file));
         }
     }
 
-    (events, resolved)
+    resolved
 }
 
 /// `resolved` with every path `events` reports a move for replaced by
@@ -844,44 +909,44 @@ fn bib_output<C: Cache>(
     templates: &TemplateTable,
     effective: &Effective,
     adapters: &Adapters<C>,
-) -> Vec<Event> {
+    sink: &mut dyn Sink,
+) {
     let config = bib_config(effective.config());
-    match config.path.is_some() || config.sidecars {
-        true => write_bib(resolved, templates, &config, adapters.bib_files),
-        false => Vec::new(),
+    if config.path.is_some() || config.sidecars {
+        for event in write_bib(resolved, templates, &config, adapters.bib_files) {
+            sink.emit(event);
+        }
     }
 }
 
-/// The events `borax bib` produces for `paths`.
+/// Write the events `borax bib` produces for `groups` into `sink`.
+///
+/// `groups` is what [`preflight`] made of the run's paths, as it is for
+/// [`rename_events`]: each directory, its files, and the template table
+/// compiled for it.
 ///
 /// Unlike the bibliography output a rename run produces on the side,
 /// this one is what was asked for, so it runs whether or not a
 /// destination is configured — a run that writes nowhere still reports
 /// what it resolved.
 fn bib_events<C: Cache>(
-    paths: &[PathBuf],
+    groups: &[(PathBuf, Vec<PathBuf>, TemplateTable)],
     configs: &Configs,
     adapters: &Adapters<C>,
-) -> Result<Vec<Event>, Diagnostic> {
-    let groups = by_directory(paths);
-    let compiled: Vec<TemplateTable> = groups
-        .iter()
-        .map(|(directory, _)| templates(configs.for_directory(directory).config()))
-        .collect::<Result<_, _>>()?;
-
-    let mut events = Vec::with_capacity(paths.len());
-    for ((directory, group), templates) in groups.iter().zip(&compiled) {
+    sink: &mut dyn Sink,
+) {
+    for (directory, group, templates) in groups {
         let effective = configs.for_directory(directory);
-        let (resolved_events, resolved) = resolved_records(group, effective, adapters);
-        events.extend(resolved_events);
-        events.extend(write_bib(
+        let resolved = resolved_records(group, effective, adapters, sink);
+        for event in write_bib(
             &resolved,
             templates,
             &bib_config(effective.config()),
             adapters.bib_files,
-        ));
+        ) {
+            sink.emit(event);
+        }
     }
-    Ok(events)
 }
 
 /// Where bibliography output goes, from `config`.
@@ -893,19 +958,44 @@ fn bib_config(config: &Config) -> BibConfig {
     }
 }
 
-/// The events `borax undo` produces.
+/// Write the events `borax undo` produces into `sink`.
 ///
 /// A run with no journal reverts nothing and reports nothing, which is
 /// what an absent journal means: there is no move on record to undo.
-fn undo_events<C: Cache>(adapters: &Adapters<C>) -> Vec<Event> {
+fn undo_events<C: Cache>(adapters: &Adapters<C>, sink: &mut dyn Sink) {
     let Some(journal) = adapters.journal else {
-        return Vec::new();
+        return;
     };
 
-    undo_last(journal, adapters.library, adapters.filesystem)
-        .iter()
-        .map(crate::journal::event_for)
-        .collect()
+    for reversal in undo_last(journal, adapters.library, adapters.filesystem) {
+        sink.emit(crate::journal::event_for(&reversal));
+    }
+}
+
+/// The sink a real run writes through: each event rendered in the run's
+/// format, written as its own line, and folded into the run's totals.
+///
+/// An event a format has nothing to say about — [`Event::RunStarted`]
+/// in [`Format::Human`] — writes no line and is counted all the same,
+/// so what the two formats report at the end agrees however much they
+/// differ in between.
+///
+/// A write that fails is dropped rather than reported: the stream is
+/// where a run says things, and a run whose stream has gone has nowhere
+/// left to say that it went.
+struct Rendering<'a> {
+    format: Format,
+    out: &'a mut dyn Write,
+    counts: Counts,
+}
+
+impl Sink for Rendering<'_> {
+    fn emit(&mut self, event: Event) {
+        if let Some(line) = render(self.format, &event) {
+            let _ = writeln!(self.out, "{line}");
+        }
+        self.counts.observe(&event);
+    }
 }
 
 /// Carry out `cli` against `adapters`, writing to `streams`.
@@ -915,38 +1005,46 @@ fn undo_events<C: Cache>(adapters: &Adapters<C>) -> Vec<Event> {
 /// can tell a run that produced nothing from a run that was cut off.
 /// Events a format has nothing to say about are simply not written.
 ///
-/// A [`Diagnostic`] from [`events_for`] goes to `streams.err` and ends
-/// the run as [`Outcome::Fatal`]: nothing was attempted, so there is no
-/// event stream to close.
+/// Each event is written when it happens rather than when the run ends,
+/// so a network-bound run is watchable while it is bound.
+///
+/// A [`Diagnostic`] from [`preflight`] goes to `streams.err` and ends
+/// the run as [`Outcome::Fatal`] with `streams.out` untouched: nothing
+/// was attempted, so there is no event stream to close — which is why
+/// everything that can fail is settled before the first event rather
+/// than as the run goes.
 pub fn dispatch<C: Cache>(
     cli: &Cli,
     configs: &Configs,
     adapters: &Adapters<C>,
     streams: &mut Streams,
 ) -> Outcome {
-    let body = match events_for(&cli.command, configs, adapters) {
-        Ok(body) => body,
+    let prepared = match preflight(&cli.command, configs, adapters) {
+        Ok(prepared) => prepared,
         Err(diagnostic) => {
             let _ = writeln!(streams.err, "{diagnostic}");
             return Outcome::Fatal;
         }
     };
 
-    let counts = counts_for(&body);
-    let mut events = Vec::with_capacity(body.len() + 2);
-    events.push(Event::RunStarted {
+    let mut sink = Rendering {
+        format: cli.format(),
+        out: streams.out,
+        counts: Counts::default(),
+    };
+    sink.emit(Event::RunStarted {
         command: cli.command.name().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         applying: applying(&cli.command),
     });
-    events.extend(body);
-    events.push(Event::RunFinished { counts });
+    emit_events(&prepared, &cli.command, configs, adapters, &mut sink);
 
-    for event in &events {
-        if let Some(line) = render(cli.format(), event) {
-            let _ = writeln!(streams.out, "{line}");
-        }
-    }
+    // Read before the last event is emitted, so what `RunFinished`
+    // reports is the body's totals and nothing else: the framing events
+    // are about the run rather than about a file, and `Counts::observe`
+    // leaves them out either way.
+    let counts = sink.counts;
+    sink.emit(Event::RunFinished { counts });
 
     outcome_for(&counts)
 }

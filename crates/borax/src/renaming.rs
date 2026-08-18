@@ -379,7 +379,7 @@ pub fn apply_renames(
 /// that halted it, so every move the halt abandoned carries the reason
 /// the first one did. A run with no log at all records nothing and
 /// succeeds: `--apply` is refused without a journal long before here
-/// ([`crate::run::events_for`]), so the only caller reaching this with
+/// ([`crate::run::preflight`]), so the only caller reaching this with
 /// `None` is one that is not moving anything.
 fn record_move(
     path: &Path,
@@ -398,18 +398,18 @@ fn record_move(
 
 /// The totals `events` add up to.
 ///
+/// A fold over [`Counts::observe`], which is also what a run streaming
+/// its events counts them with: a caller holding the whole stream as a
+/// value and a caller watching it go past reach the same totals because
+/// they add them up the same way.
+///
 /// Counts what happened, not what was planned: a preview run renames
 /// nothing and reports `renamed` as zero however many moves it
 /// described.
 pub fn counts_for(events: &[Event]) -> Counts {
     let mut counts = Counts::default();
     for event in events {
-        match event {
-            Event::Resolved { .. } => counts.resolved += 1,
-            Event::Renamed { .. } => counts.renamed += 1,
-            Event::Skipped { .. } => counts.skipped += 1,
-            _ => {}
-        }
+        counts.observe(event);
     }
     counts
 }

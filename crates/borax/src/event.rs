@@ -197,8 +197,12 @@ impl Counts {
     /// it described. An event that is about the run rather than about a
     /// file changes nothing.
     pub fn observe(&mut self, event: &Event) {
-        let _ = event;
-        todo!()
+        match event {
+            Event::Resolved { .. } => self.resolved += 1,
+            Event::Renamed { .. } => self.renamed += 1,
+            Event::Skipped { .. } => self.skipped += 1,
+            _ => {}
+        }
     }
 }
 

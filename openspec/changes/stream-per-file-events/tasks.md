@@ -27,13 +27,13 @@ independent and land in this order because each is green on its own.
       `run-started` nor `run-finished` to stdout, for each of the three
       fatal cases — uncompilable template, `--apply` without a journal,
       `cache` with no cache directory
-- [ ] 2.3 Add `Sink` with the `Vec<Event>` implementation, and the
+- [x] 2.3 Add `Sink` with the `Vec<Event>` implementation, and the
       rendering-and-counting sink `dispatch` uses
-- [ ] 2.4 Split `preflight` (fallible, produces `Prepared`) from
+- [x] 2.4 Split `preflight` (fallible, produces `Prepared`) from
       `emit_events` (infallible, writes into a sink); keep `events_for`
       as the wrapper that preflights and collects, so
       `tests/dispatch.rs` is unchanged
-- [ ] 2.5 Rewrite `dispatch` to emit `RunStarted`, stream the body, and
+- [x] 2.5 Rewrite `dispatch` to emit `RunStarted`, stream the body, and
       emit `RunFinished` from the counts the sink accumulated
 
 ## 3. Per-file rename reporting (borax)
