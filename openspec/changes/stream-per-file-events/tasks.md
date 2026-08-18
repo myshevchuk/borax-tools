@@ -19,11 +19,11 @@ independent and land in this order because each is green on its own.
 
 ## 2. The event sink (borax)
 
-- [ ] 2.1 Test: `dispatch` writes a run's lines in event order, and a
+- [x] 2.1 Test: `dispatch` writes a run's lines in event order, and a
       run whose events are produced slowly writes them without waiting
       for the last (asserted through a `Streams.out` that records the
       order writes arrive in relative to the adapters being called)
-- [ ] 2.2 Test: a run ended by a `Diagnostic` writes neither
+- [x] 2.2 Test: a run ended by a `Diagnostic` writes neither
       `run-started` nor `run-finished` to stdout, for each of the three
       fatal cases — uncompilable template, `--apply` without a journal,
       `cache` with no cache directory
