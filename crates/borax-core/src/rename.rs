@@ -99,20 +99,32 @@ impl Planner {
     }
 
     /// The decision for `item` under `policy`, claiming whatever name it
-    /// takes.
+    /// takes. Paths are compared case-insensitively throughout.
     ///
-    /// [`PlannedAction::Rename`] claims the path it names — the desired
+    /// - `AlreadyNamed` when `item`'s source equals its target
+    ///   (byte-equal), or when the snapshot holds the target with a hash
+    ///   equal to `item`'s. An unknown hash never counts as identical.
+    /// - Otherwise the target is free iff nothing claimed equals it —
+    ///   neither a path the snapshot held nor a target an earlier call
+    ///   took.
+    /// - A taken target follows `policy`. `Suffix` tries stem+`a`, `b`,
+    ///   … `z`, `aa`, … (before the extension, the suffix ladder of the
+    ///   bib merge) and takes the first free candidate; identical
+    ///   content elsewhere never short-circuits suffixing, because two
+    ///   distinct files both need names. `Skip` yields
+    ///   `Skip { TargetCollision }`.
+    ///
+    /// `PlannedAction::Rename` claims the path it names — the desired
     /// target, or the suffixed candidate the ladder reached — for every
-    /// later call. [`PlannedAction::AlreadyNamed`] and
-    /// [`PlannedAction::Skip`] claim nothing the snapshot did not
-    /// already hold.
+    /// later call. `AlreadyNamed` and `Skip` claim nothing the snapshot
+    /// did not already hold.
     ///
-    /// `item`'s own `source` is exempt from the collision check for the
-    /// duration of this call, which is what lets a file change only the
-    /// case of its name. The exemption is never extended to a later
-    /// input: a source is not treated as vacated by the rename that
-    /// leaves it, so no ordering of the executed moves can overwrite
-    /// anything.
+    /// `item`'s own `source` is exempt from every one of those checks
+    /// for the duration of this call, which is what lets a file change
+    /// only the case of its name. The exemption is never extended to a
+    /// later input: a source is not treated as vacated by the rename
+    /// that leaves it, so no ordering of the executed moves can
+    /// overwrite anything.
     pub fn plan(&mut self, item: &PlanInput, policy: CollisionPolicy) -> PlanItem {
         let source_key = item.source.to_lowercase();
         let exempt = self
@@ -159,83 +171,26 @@ impl Planner {
 
 /// Plan a batch of renames against a filesystem snapshot.
 ///
-/// `existing` maps each path already present in the target namespace
-/// to its content hash where known (`None` = unknown; unknown never
-/// counts as identical). Decisions, in input order:
+/// `existing` maps each path already present in the target namespace to
+/// its content hash where known (`None` = unknown). One decision per
+/// item, in input order, by the rules [`Planner::plan`] states: a batch
+/// is a [`Planner`] over `existing` driven across `items`, so every
+/// target an earlier item takes is claimed against every later one.
 ///
-/// - `AlreadyNamed` when the item's source equals its target
-///   (byte-equal), or when `existing` holds the target
-///   (case-insensitively) with a hash equal to the item's. The item's
-///   own `source` entry is exempt here as everywhere: a case-only
-///   rename of a file onto its new casing is a `Rename`, not
-///   `AlreadyNamed`.
-/// - Otherwise the target is free iff no `existing` path and no
-///   target claimed by an earlier item equals it case-insensitively.
-///   The item's own `source` entry in `existing` is exempt for that
-///   item (a file may change only its casing); sources are otherwise
-///   *not* treated as vacated — a later item never moves into a slot
-///   an earlier rename frees, so no ordering of the executed renames
-///   can overwrite anything.
-/// - A taken target follows `policy`: `Suffix` tries stem+`a`, `b`,
-///   … `z`, `aa`, … (before the extension, the suffix ladder of the
-///   bib merge) and claims the first free candidate — identical
-///   content elsewhere never short-circuits suffixing, because two
-///   distinct files both need names. `Skip` yields
-///   `Skip { TargetCollision }`.
-///
-/// Planned targets (including suffixed ones) are claimed
-/// case-insensitively for the rest of the batch. The function is
-/// pure and deterministic.
+/// The function is pure and deterministic.
 pub fn plan(
     items: &[PlanInput],
     existing: &BTreeMap<String, Option<String>>,
     policy: CollisionPolicy,
 ) -> Vec<PlanItem> {
-    let mut claimed: BTreeSet<String> = existing.keys().map(|path| path.to_lowercase()).collect();
-    let mut planned = Vec::with_capacity(items.len());
-
-    for item in items {
-        let source_key = item.source.to_lowercase();
-        let exempt = existing
-            .keys()
-            .any(|path| path.to_lowercase() == source_key)
-            .then_some(source_key.as_str());
-        let target_key = item.target.to_lowercase();
-
-        let action = if item.source == item.target || occupied_by_twin(item, existing, exempt) {
-            PlannedAction::AlreadyNamed
-        } else if is_free(&target_key, &claimed, exempt) {
-            claimed.insert(target_key);
-            PlannedAction::Rename {
-                to: item.target.clone(),
-            }
-        } else {
-            match policy {
-                CollisionPolicy::Suffix => {
-                    let mut index = 0;
-                    loop {
-                        let candidate = with_suffix(&item.target, &letter_suffix(index));
-                        let candidate_key = candidate.to_lowercase();
-                        if is_free(&candidate_key, &claimed, exempt) {
-                            claimed.insert(candidate_key);
-                            break PlannedAction::Rename { to: candidate };
-                        }
-                        index += 1;
-                    }
-                }
-                CollisionPolicy::Skip => PlannedAction::Skip {
-                    reason: SkipReason::TargetCollision,
-                },
-            }
-        };
-
-        planned.push(PlanItem {
-            source: item.source.clone(),
-            action,
-        });
-    }
-
-    planned
+    // The snapshot is cloned because a planner owns the namespace it
+    // answers about: a caller driving one directly may widen it as
+    // targets reach into subdirectories it has not looked at yet.
+    let mut planner = Planner::new(existing.clone());
+    items
+        .iter()
+        .map(|item| planner.plan(item, policy))
+        .collect()
 }
 
 /// Whether an existing file other than `item`'s own source sits at its

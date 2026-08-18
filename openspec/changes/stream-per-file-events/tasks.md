@@ -13,7 +13,7 @@ independent and land in this order because each is green on its own.
       exemption
 - [x] 1.2 Implement `Planner::new` / `Planner::plan`, holding the
       `claimed` set and the `existing` snapshot
-- [ ] 1.3 Refactor `plan(items, existing, policy)` into a fold over
+- [x] 1.3 Refactor `plan(items, existing, policy)` into a fold over
       `Planner::plan`, so the batch entry point cannot drift from the
       incremental one
 
