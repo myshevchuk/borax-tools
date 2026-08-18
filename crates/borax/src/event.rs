@@ -189,6 +189,19 @@ pub struct Counts {
     pub skipped: usize,
 }
 
+impl Counts {
+    /// Fold `event` into the totals.
+    ///
+    /// Counts what happened, not what was planned: a preview run
+    /// renames nothing and leaves `renamed` at zero however many moves
+    /// it described. An event that is about the run rather than about a
+    /// file changes nothing.
+    pub fn observe(&mut self, event: &Event) {
+        let _ = event;
+        todo!()
+    }
+}
+
 /// Which rendering of the event stream to write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {

@@ -464,6 +464,106 @@ fn error(message: String) -> Diagnostic {
     }
 }
 
+/// Where a run's events go as it produces them.
+///
+/// A run writes each event when it happens rather than returning them
+/// all at the end, which is what lets a reader watch a network-bound
+/// run make progress. What becomes of an event is the sink's own
+/// business: [`dispatch`] renders one and writes the line, and a
+/// `Vec<Event>` collects it for a caller that wants the whole run as a
+/// value.
+pub trait Sink {
+    /// Take `event`.
+    fn emit(&mut self, event: Event);
+}
+
+/// Collecting a run rather than showing it, for a caller that wants to
+/// look at the whole stream.
+impl Sink for Vec<Event> {
+    fn emit(&mut self, event: Event) {
+        self.push(event);
+    }
+}
+
+/// What a run's fallible checks produced.
+///
+/// Every way a run can end before it starts — a template that will not
+/// compile, `--apply` with nowhere to journal, `cache` on a system that
+/// names no cache directory — is settled by [`preflight`], which runs
+/// before the first event is written. What it hands back is what those
+/// checks yielded, which is why [`emit_events`] has no failure left to
+/// report and a [`Diagnostic`] can still mean that nothing was emitted.
+pub enum Prepared<'a> {
+    /// A command with nothing that could fail: `config`, `resolve`,
+    /// `undo`.
+    Unchecked,
+    /// `cache`, over the directory it will inspect or clear.
+    Cache { root: &'a Path },
+    /// `rename` or `bib`: the run's paths grouped by the directory
+    /// holding them, in the order those directories are first reached,
+    /// each paired with the template table compiled for it.
+    ///
+    /// Holding the compiled table is what makes "every template
+    /// compiles before any file is touched" a property of the type
+    /// rather than an ordering inside a function: emitting cannot reach
+    /// a file without already holding the table for its directory.
+    Grouped {
+        groups: Vec<(PathBuf, Vec<PathBuf>, TemplateTable)>,
+        /// Where an applying rename records its moves. `None` for a
+        /// preview and for `bib`, neither of which moves anything.
+        journal: Option<&'a dyn Journal>,
+    },
+}
+
+/// Settle everything about `command` that could end the run, before any
+/// of it is reported.
+///
+/// Returns a [`Diagnostic`] for the failures that are about the run
+/// rather than about a file, all three of which are the same shape —
+/// something the whole invocation needs is missing, so there is no
+/// per-file verdict to report:
+///
+/// - a template that will not compile, which is wrong for every file in
+///   the batch;
+/// - an applying rename with no journal to record it in, since an
+///   unjournaled rename cannot be undone and being undoable is the
+///   promise that makes renaming safe to offer;
+/// - `cache` with no cache directory, because reporting an empty cache
+///   would answer a question that was never asked.
+///
+/// Nothing here reads a file, queries a source, or moves anything, so a
+/// run that fails this check costs no network and leaves no trace.
+pub fn preflight<'a, C: Cache>(
+    command: &Command,
+    configs: &Configs,
+    adapters: &Adapters<'a, C>,
+) -> Result<Prepared<'a>, Diagnostic> {
+    let _ = (command, configs, adapters);
+    todo!()
+}
+
+/// Write the events `command` produces into `sink`, between the run's
+/// first and last.
+///
+/// Infallible by construction: `prepared` is what [`preflight`] made of
+/// everything that could have gone wrong, so what is left is work that
+/// reports its own outcome per file.
+///
+/// Events reach `sink` in the order they happen, and a file's own
+/// events are contiguous — its resolution, the rename planned or
+/// applied for it, and any sidecar written beside it — so a reader
+/// pairs a verdict with a fate without looking anywhere else.
+pub fn emit_events<C: Cache>(
+    prepared: &Prepared<'_>,
+    command: &Command,
+    configs: &Configs,
+    adapters: &Adapters<'_, C>,
+    sink: &mut dyn Sink,
+) {
+    let _ = (prepared, command, configs, adapters, sink);
+    todo!()
+}
+
 /// The events `command` produces, between the run's first and last.
 ///
 /// One function per subcommand would repeat the same three lines of
