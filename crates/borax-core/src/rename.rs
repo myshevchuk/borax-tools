@@ -66,6 +66,59 @@ pub struct PlanItem {
     pub action: PlannedAction,
 }
 
+/// A plan in progress, driven one input at a time.
+///
+/// Holds what a batch call holds between its items: the filesystem
+/// snapshot every decision is measured against, and the set of paths
+/// already claimed — by a file that was there to begin with, or by an
+/// earlier input's target. Carrying claims across calls is what lets a
+/// caller interleave planning with other work and still get the plan
+/// [`plan`] would have produced for the same inputs in the same order.
+///
+/// Decisions depend on the snapshot, the policy, and the order inputs
+/// arrive. Nothing else: a planner given the same sequence twice answers
+/// the same way twice.
+#[derive(Debug, Clone)]
+pub struct Planner {
+    /// The namespace as it was found, path to content hash where known.
+    existing: BTreeMap<String, Option<String>>,
+    /// Every path spoken for, lowercased: the snapshot's own paths, plus
+    /// the target each planned rename took.
+    claimed: BTreeSet<String>,
+}
+
+impl Planner {
+    /// A planner over `existing` — the paths already present in the
+    /// namespace inputs will be planned in, each with its content hash
+    /// where that is known, keyed as [`plan`] keys them.
+    ///
+    /// Every path in `existing` starts out claimed.
+    pub fn new(existing: BTreeMap<String, Option<String>>) -> Self {
+        let _ = existing;
+        todo!()
+    }
+
+    /// The decision for `item` under `policy`, claiming whatever name it
+    /// takes.
+    ///
+    /// [`PlannedAction::Rename`] claims the path it names — the desired
+    /// target, or the suffixed candidate the ladder reached — for every
+    /// later call. [`PlannedAction::AlreadyNamed`] and
+    /// [`PlannedAction::Skip`] claim nothing the snapshot did not
+    /// already hold.
+    ///
+    /// `item`'s own `source` is exempt from the collision check for the
+    /// duration of this call, which is what lets a file change only the
+    /// case of its name. The exemption is never extended to a later
+    /// input: a source is not treated as vacated by the rename that
+    /// leaves it, so no ordering of the executed moves can overwrite
+    /// anything.
+    pub fn plan(&mut self, item: &PlanInput, policy: CollisionPolicy) -> PlanItem {
+        let _ = (item, policy);
+        todo!()
+    }
+}
+
 /// Plan a batch of renames against a filesystem snapshot.
 ///
 /// `existing` maps each path already present in the target namespace

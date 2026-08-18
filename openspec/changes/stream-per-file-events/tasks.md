@@ -6,7 +6,7 @@ independent and land in this order because each is green on its own.
 
 ## 1. Incremental planning (borax-core)
 
-- [ ] 1.1 Test: a `Planner` driven one input at a time produces, for
+- [x] 1.1 Test: a `Planner` driven one input at a time produces, for
       every case the batch tests cover, exactly what `plan` produces for
       the same inputs as a batch — collisions, suffix ladder,
       case-insensitive folding, `AlreadyNamed` by twin, the source
