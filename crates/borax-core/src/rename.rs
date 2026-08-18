@@ -94,8 +94,8 @@ impl Planner {
     ///
     /// Every path in `existing` starts out claimed.
     pub fn new(existing: BTreeMap<String, Option<String>>) -> Self {
-        let _ = existing;
-        todo!()
+        let claimed = existing.keys().map(|path| path.to_lowercase()).collect();
+        Self { existing, claimed }
     }
 
     /// The decision for `item` under `policy`, claiming whatever name it
@@ -114,8 +114,46 @@ impl Planner {
     /// leaves it, so no ordering of the executed moves can overwrite
     /// anything.
     pub fn plan(&mut self, item: &PlanInput, policy: CollisionPolicy) -> PlanItem {
-        let _ = (item, policy);
-        todo!()
+        let source_key = item.source.to_lowercase();
+        let exempt = self
+            .existing
+            .keys()
+            .any(|path| path.to_lowercase() == source_key)
+            .then_some(source_key.as_str());
+        let target_key = item.target.to_lowercase();
+
+        let action = if item.source == item.target || occupied_by_twin(item, &self.existing, exempt)
+        {
+            PlannedAction::AlreadyNamed
+        } else if is_free(&target_key, &self.claimed, exempt) {
+            self.claimed.insert(target_key);
+            PlannedAction::Rename {
+                to: item.target.clone(),
+            }
+        } else {
+            match policy {
+                CollisionPolicy::Suffix => {
+                    let mut index = 0;
+                    loop {
+                        let candidate = with_suffix(&item.target, &letter_suffix(index));
+                        let candidate_key = candidate.to_lowercase();
+                        if is_free(&candidate_key, &self.claimed, exempt) {
+                            self.claimed.insert(candidate_key);
+                            break PlannedAction::Rename { to: candidate };
+                        }
+                        index += 1;
+                    }
+                }
+                CollisionPolicy::Skip => PlannedAction::Skip {
+                    reason: SkipReason::TargetCollision,
+                },
+            }
+        };
+
+        PlanItem {
+            source: item.source.clone(),
+            action,
+        }
     }
 }
 
