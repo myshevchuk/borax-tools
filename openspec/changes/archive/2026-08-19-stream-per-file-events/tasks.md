@@ -59,10 +59,10 @@ independent and land in this order because each is green on its own.
 
 ## 4. Wrap-up
 
-- [ ] 4.1 Run the suite on Linux, macOS and Windows via CI
+- [x] 4.1 Run the suite on Linux, macOS and Windows via CI
 - [x] 4.2 Verify against the local real-PDF corpus that a rename run
       over a nested tree reads as one file per block
 - [x] 4.3 `CHANGELOG.md`: a `Changed` bullet under `[Unreleased]` for
       the reporting order and liveness
-- [ ] 4.4 Update `openspec/STATE.md` if this change alters anything it
+- [x] 4.4 Update `openspec/STATE.md` if this change alters anything it
       asserts, then archive the change
