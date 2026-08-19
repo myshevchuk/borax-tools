@@ -98,6 +98,24 @@ impl Planner {
         Self { existing, claimed }
     }
 
+    /// Add `existing` to the namespace this planner answers about, keyed
+    /// as [`plan`] keys it, and claim every path it names.
+    ///
+    /// A path the snapshot already held takes the entry given for it
+    /// here. Claims are only ever added: a target an earlier decision
+    /// took stays taken, so widening frees nothing.
+    ///
+    /// Decisions already made are not revisited — each was measured
+    /// against the namespace as it stood when it was made — so widening
+    /// yields the plan a planner over the union would have produced
+    /// exactly when every path added is one no earlier decision could
+    /// have consulted.
+    pub fn widen(&mut self, existing: BTreeMap<String, Option<String>>) {
+        self.claimed
+            .extend(existing.keys().map(|path| path.to_lowercase()));
+        self.existing.extend(existing);
+    }
+
     /// The decision for `item` under `policy`, claiming whatever name it
     /// takes. Paths are compared case-insensitively throughout.
     ///

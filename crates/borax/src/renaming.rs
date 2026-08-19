@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use borax_core::record::Record;
-use borax_core::rename::{CollisionPolicy, PlanInput, PlannedAction, plan};
+use borax_core::rename::{CollisionPolicy, PlanInput, PlannedAction, Planner};
 use borax_core::sanitize::sanitize;
 use borax_core::template::{RenderInput, TemplateTable};
 use borax_sources::store::hash_file;
@@ -170,47 +170,116 @@ pub fn target_name(
     Some(sanitize(&named))
 }
 
-/// What is already occupying the namespace `inputs` are planned in,
-/// keyed by path relative to `directory`.
+/// Planning one directory's renames, a file at a time.
+///
+/// Holds what every decision in the directory is measured against: the
+/// names the directory held when this was built, and the names the
+/// renames planned since have taken. Files arrive in the order the run
+/// gives them and each decision sees every claim its predecessors made,
+/// so the suffix a collision receives is the one it would receive from a
+/// single call planning the whole directory.
 ///
 /// A template may render a name containing `/`, which
 /// [`borax_core::sanitize::sanitize`] keeps as a directory separator, so
-/// a batch's targets can land in subdirectories of `directory` as well
-/// as in `directory` itself. Every one of those subdirectories has to be
-/// looked at: a name is free only if nothing holds it *where the file is
-/// going*, and asking only about `directory` would let a rename be
-/// planned onto a file the planner never saw.
+/// a target can land in a subdirectory of the directory as well as in the
+/// directory itself. Each such subdirectory is looked at the first time a
+/// target names it and kept for the rest of the directory: a name is free
+/// only if nothing holds it *where the file is going*, and asking only
+/// about the directory would let a rename be planned onto a file the
+/// planner never saw. A subdirectory that does not exist reads as empty,
+/// so a target heading somewhere not yet created finds nothing in its way.
 ///
-/// Keys are relative paths — `Name.pdf` for `directory` itself,
-/// `sub/Name.pdf` for a subdirectory — which is the namespace
-/// [`borax_core::rename::plan`] compares in and suffixes within.
-///
-/// A subdirectory that does not exist reports as empty, so a target
-/// heading somewhere not yet created simply finds nothing in its way.
-fn occupied(
-    directory: &Path,
-    inputs: &[PlanInput],
-    filesystem: &dyn Filesystem,
-) -> BTreeMap<String, Option<String>> {
-    let mut occupied: BTreeMap<String, Option<String>> = filesystem.existing(directory);
+/// Paths cross two namespaces here: the planner is handed bare file
+/// names and `sub/name` relative paths, matching
+/// [`Filesystem::existing`], while every path in a returned decision is
+/// full.
+pub struct Planning<'a> {
+    directory: PathBuf,
+    templates: &'a TemplateTable,
+    policy: CollisionPolicy,
+    filesystem: &'a dyn Filesystem,
+    planner: Planner,
+    /// The subdirectories already added to the planner's namespace,
+    /// relative to `directory`.
+    listed: BTreeSet<String>,
+}
 
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    for input in inputs {
-        let Some((subdirectory, _)) = input.target.rsplit_once('/') else {
-            continue;
-        };
-        if !seen.insert(subdirectory) {
-            continue;
+impl<'a> Planning<'a> {
+    /// A plan in progress for files in `directory`, named from
+    /// `templates` and resolving collisions by `policy`.
+    ///
+    /// `directory` is read here, once, and every decision is measured
+    /// against what it held at that moment.
+    pub fn new(
+        directory: &Path,
+        templates: &'a TemplateTable,
+        policy: CollisionPolicy,
+        filesystem: &'a dyn Filesystem,
+    ) -> Planning<'a> {
+        Planning {
+            directory: directory.to_path_buf(),
+            templates,
+            policy,
+            filesystem,
+            // Eagerly, unlike the subdirectories below: reading a
+            // directory hashes every file in it, and one pass per file
+            // planned would cost the square of what one pass per
+            // directory does.
+            planner: Planner::new(filesystem.existing(directory)),
+            listed: BTreeSet::new(),
         }
-        occupied.extend(
-            filesystem
-                .existing(&directory.join(subdirectory))
-                .into_iter()
-                .map(|(name, hash)| (format!("{subdirectory}/{name}"), hash)),
-        );
     }
 
-    occupied
+    /// The decision for the resolved file `file` at `path`.
+    ///
+    /// `path` is taken to lie in the directory this was built for: only
+    /// its file name is planned against, and that directory is what a
+    /// returned target is joined to.
+    ///
+    /// A record that renders no usable name is
+    /// [`PlannedRename::Unnameable`] and never reaches the planner — it
+    /// claims no name, so it cannot cost a later file its unsuffixed one.
+    pub fn plan(&mut self, path: &Path, file: &FileRecord) -> PlannedRename {
+        let path = path.to_path_buf();
+        let Some(input) = plan_input(&path, file, self.templates) else {
+            return PlannedRename::Unnameable { path };
+        };
+        self.reach(&input.target);
+
+        match self.planner.plan(&input, self.policy).action {
+            PlannedAction::Rename { to } => PlannedRename::Rename {
+                target: self.directory.join(to),
+                path,
+            },
+            PlannedAction::AlreadyNamed => PlannedRename::AlreadyNamed { path },
+            PlannedAction::Skip { .. } => PlannedRename::TargetTaken {
+                target: self.directory.join(&input.target),
+                path,
+            },
+        }
+    }
+
+    /// Add the subdirectory `target` names to the planner's namespace,
+    /// unless `target` names none or it is there already.
+    ///
+    /// Keys are relative to the directory — `sub/Name.pdf` — which is
+    /// the namespace [`borax_core::rename::Planner`] compares in and
+    /// suffixes within.
+    fn reach(&mut self, target: &str) {
+        let Some((subdirectory, _)) = target.rsplit_once('/') else {
+            return;
+        };
+        if !self.listed.insert(subdirectory.to_string()) {
+            return;
+        }
+        self.planner.widen(
+            self.filesystem
+                .existing(&self.directory.join(subdirectory))
+                .into_iter()
+                .map(|(name, hash)| (format!("{subdirectory}/{name}"), hash))
+                .collect(),
+        );
+    }
 }
 
 /// What the planner needs to know about one resolved file, or `None`
@@ -236,15 +305,13 @@ fn plan_input(path: &Path, file: &FileRecord, templates: &TemplateTable) -> Opti
 /// batch were planned as a single namespace.
 ///
 /// Within a group, order follows the input, so the suffix a collision
-/// receives is deterministic. A file whose record renders no usable
-/// name is [`PlannedRename::Unnameable`] and never reaches the
-/// planner — it claims no name, so it cannot cost a later file its
-/// unsuffixed one.
+/// receives is deterministic.
 ///
-/// Paths cross the two namespaces here: the planner is handed bare
-/// file names, matching [`Filesystem::existing`], while every path in
-/// the returned decisions is full — the input path as given, and a
-/// target of its directory joined to the planned name.
+/// A group is a [`Planning`] driven across its files, so a batch and a
+/// caller feeding one file at a time decide the same way by construction.
+/// Everything a decision rests on — how a name is rendered, when a
+/// collision is suffixed, which subdirectories are looked at — is stated
+/// there.
 pub fn plan_renames(
     resolved: &[(PathBuf, FileRecord)],
     templates: &TemplateTable,
@@ -261,35 +328,10 @@ pub fn plan_renames(
     // visits directories in sorted order — cannot reorder the result.
     let mut decisions: Vec<Option<PlannedRename>> = vec![None; resolved.len()];
     for (directory, members) in groups {
-        let mut inputs = Vec::with_capacity(members.len());
-        let mut planned_indices = Vec::with_capacity(members.len());
+        let mut planning = Planning::new(directory, templates, policy, filesystem);
         for index in members {
             let (path, file) = &resolved[index];
-            match plan_input(path, file, templates) {
-                Some(input) => {
-                    inputs.push(input);
-                    planned_indices.push(index);
-                }
-                None => {
-                    decisions[index] = Some(PlannedRename::Unnameable { path: path.clone() });
-                }
-            }
-        }
-
-        let items = plan(&inputs, &occupied(directory, &inputs, filesystem), policy);
-        for ((item, input), index) in items.into_iter().zip(&inputs).zip(planned_indices) {
-            let path = resolved[index].0.clone();
-            decisions[index] = Some(match item.action {
-                PlannedAction::Rename { to } => PlannedRename::Rename {
-                    path,
-                    target: directory.join(to),
-                },
-                PlannedAction::AlreadyNamed => PlannedRename::AlreadyNamed { path },
-                PlannedAction::Skip { .. } => PlannedRename::TargetTaken {
-                    path,
-                    target: directory.join(&input.target),
-                },
-            });
+            decisions[index] = Some(planning.plan(path, file));
         }
     }
 
@@ -308,20 +350,71 @@ pub fn plan_renames(
 /// [`PlannedRename::TargetTaken`], [`PlannedRename::Unnameable`] —
 /// reports the same way in both modes, since a preview has nothing to
 /// add about a file nothing will happen to.
+///
+/// An [`Applying`] driven across `plan`, so a caller feeding one
+/// decision at a time acts the same way. The halt [`Applied::halted`]
+/// reports spans this call and no more: a later call starts unhalted.
 pub fn apply_renames(
     plan: &[PlannedRename],
     filesystem: &dyn Filesystem,
     apply: bool,
     log: Option<&dyn MoveLog>,
 ) -> Applied {
-    let mut events = Vec::with_capacity(plan.len());
-    let mut halted: Option<String> = None;
+    let mut applying = Applying::new(filesystem, apply);
+    let events = plan
+        .iter()
+        .map(|decision| applying.carry_out(decision, log))
+        .collect();
 
-    for decision in plan {
-        let event = match decision {
-            PlannedRename::Rename { path, target } if apply => {
-                match record_move(path, target, log, &halted) {
-                    Ok(()) => match filesystem.rename(path, target) {
+    Applied {
+        events,
+        halted: applying.halted,
+    }
+}
+
+/// Carrying out a plan, a decision at a time.
+///
+/// Holds the halt: once a log has refused an entry because the log
+/// itself is unusable, no later move could be recorded either, so every
+/// decision reached afterwards is abandoned and reported as
+/// [`crate::event::SkipReason::Unjournalable`] carrying the reason the
+/// first one gave. The halt reaches exactly as far as this value lives.
+pub struct Applying<'a> {
+    filesystem: &'a dyn Filesystem,
+    apply: bool,
+    halted: Option<String>,
+}
+
+impl<'a> Applying<'a> {
+    /// A run over `filesystem` that moves files when `apply` is set and
+    /// otherwise only says what it would move.
+    pub fn new(filesystem: &'a dyn Filesystem, apply: bool) -> Applying<'a> {
+        Applying {
+            filesystem,
+            apply,
+            halted: None,
+        }
+    }
+
+    /// Carry out `decision`, or report what it would do, and say what
+    /// happened. `log` is where the move is recorded before it is made.
+    ///
+    /// [`PlannedRename::Rename`] is [`Event::Planned`] while previewing
+    /// and [`Event::Renamed`] once carried out; a move the filesystem
+    /// refuses is [`crate::event::SkipReason::RenameFailed`] and the run
+    /// goes on, because one file that cannot be moved says nothing about
+    /// the next. Every variant that moves nothing reports the same way in
+    /// both modes, since a preview has nothing to add about a file
+    /// nothing will happen to.
+    ///
+    /// Recording comes before moving, and a move that cannot be recorded
+    /// is not made ([`MoveLog`]). A [`LogFailure::Journal`] halts this
+    /// value as well as skipping the file.
+    pub fn carry_out(&mut self, decision: &PlannedRename, log: Option<&dyn MoveLog>) -> Event {
+        match decision {
+            PlannedRename::Rename { path, target } if self.apply => {
+                match self.record_move(path, target, log) {
+                    Ok(()) => match self.filesystem.rename(path, target) {
                         Ok(()) => Event::Renamed {
                             path: path.clone(),
                             target: target.clone(),
@@ -337,7 +430,7 @@ pub fn apply_renames(
                         let message = match failure {
                             LogFailure::Move(message) => message,
                             LogFailure::Journal(message) => {
-                                halted.get_or_insert(message.clone());
+                                self.halted.get_or_insert(message.clone());
                                 message
                             }
                         };
@@ -366,33 +459,30 @@ pub fn apply_renames(
                 path: path.clone(),
                 reason: SkipReason::Unnameable,
             },
-        };
-        events.push(event);
+        }
     }
 
-    Applied { events, halted }
-}
-
-/// Record the move of `path` to `target`, or say why it cannot be.
-///
-/// A run already halted records nothing further and reports the failure
-/// that halted it, so every move the halt abandoned carries the reason
-/// the first one did. A run with no log at all records nothing and
-/// succeeds: `--apply` is refused without a journal long before here
-/// ([`crate::run::preflight`]), so the only caller reaching this with
-/// `None` is one that is not moving anything.
-fn record_move(
-    path: &Path,
-    target: &Path,
-    log: Option<&dyn MoveLog>,
-    halted: &Option<String>,
-) -> Result<(), LogFailure> {
-    if let Some(message) = halted {
-        return Err(LogFailure::Journal(message.clone()));
-    }
-    match log {
-        Some(log) => log.record(path, target),
-        None => Ok(()),
+    /// Record the move of `path` to `target`, or say why it cannot be.
+    ///
+    /// A halted run records nothing further and reports the failure that
+    /// halted it, so every move the halt abandoned carries the reason the
+    /// first one did. A run with no log at all records nothing and
+    /// succeeds: `--apply` is refused without a journal long before here
+    /// ([`crate::run::preflight`]), so the only caller reaching this with
+    /// `None` is one that is not moving anything.
+    fn record_move(
+        &self,
+        path: &Path,
+        target: &Path,
+        log: Option<&dyn MoveLog>,
+    ) -> Result<(), LogFailure> {
+        if let Some(message) = &self.halted {
+            return Err(LogFailure::Journal(message.clone()));
+        }
+        match log {
+            Some(log) => log.record(path, target),
+            None => Ok(()),
+        }
     }
 }
 

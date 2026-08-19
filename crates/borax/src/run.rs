@@ -16,6 +16,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use borax_core::content::ContentHash;
 use borax_core::record::{EntryType, Record};
 use borax_core::template::{Template, TemplateTable};
 use borax_pdf::tiered::ExtractionConfig;
@@ -29,7 +30,7 @@ use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, FileCache, default_cache_root};
 use borax_sources::transport::UreqTransport;
 
-use crate::bib::{BibConfig, BibFiles, RealBibFiles, write_bib};
+use crate::bib::{BibConfig, BibFiles, Keyed, RealBibFiles, merge_master, write_sidecar};
 use crate::cli::{Cli, Command, flag_layers};
 use crate::config::{
     Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
@@ -40,9 +41,7 @@ use crate::journal::{Entry, FileJournal, Journal, RunId, undo_last};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
 };
-use crate::renaming::{
-    Filesystem, LogFailure, MoveLog, RealFilesystem, apply_renames, plan_renames,
-};
+use crate::renaming::{Applying, Filesystem, LogFailure, MoveLog, Planning, RealFilesystem};
 use crate::session::{Outcome, outcome_for};
 
 /// The extension a file needs to be picked up from a directory.
@@ -736,6 +735,13 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// A group is worked under its own directory's configuration — its
 /// template, its collision policy, its bibliography destination — since
 /// a run spanning two trees is a run under two configurations.
+///
+/// Within a group a file is finished before the next is opened: its
+/// verdict, the move planned or made for it, and any sidecar written
+/// beside it are one contiguous run of events, in the order the group
+/// gives its files. The merge into the master `.bib` is the exception
+/// and trails the group, being work about the whole of it rather than
+/// about any one file.
 fn rename_events<C: Cache>(
     groups: &[(PathBuf, Vec<PathBuf>, TemplateTable)],
     apply: bool,
@@ -747,33 +753,106 @@ fn rename_events<C: Cache>(
     let at = (adapters.now)();
     for (directory, group, templates) in groups {
         let effective = configs.for_directory(directory);
-        let resolved = resolved_records(group, effective, adapters, sink);
+        let config = bib_config(effective.config());
+        // A run with neither a master file nor sidecars has nowhere to
+        // write, and citing anyway would report records too sparse to
+        // cite as skipped in a run that was never going to cite them.
+        let cites = config.path.is_some() || config.sidecars;
 
-        let log = journal.map(|journal| JournalLog {
-            journal,
-            resolved: &resolved,
-            at: at.clone(),
-        });
-        let applied = apply_renames(
-            &plan_renames(
-                &resolved,
-                templates,
-                effective.config().collision,
-                adapters.filesystem,
-            ),
+        let mut planning = Planning::new(
+            directory,
+            templates,
+            effective.config().collision,
             adapters.filesystem,
-            apply,
-            log.as_ref().map(|log| log as &dyn MoveLog),
         );
-
         // A halt needs no separate report: every move it abandoned is
         // already an `Unjournalable` skip carrying the reason, so the run
         // says what happened through the same stream as everything else.
-        let resolved = at_current_paths(resolved, &applied.events);
-        for event in applied.events {
+        let mut applying = Applying::new(adapters.filesystem, apply);
+        let mut cited = Citations::default();
+
+        for path in group {
+            let Some(file) = resolved_record(path, effective, adapters, sink) else {
+                continue;
+            };
+
+            let log = journal.map(|journal| JournalLog {
+                journal,
+                hash: file.hash.clone(),
+                at: at.clone(),
+            });
+            let event = applying.carry_out(
+                &planning.plan(path, &file),
+                log.as_ref().map(|log| log as &dyn MoveLog),
+            );
+            // A sidecar goes beside the name the file now carries rather
+            // than beside the one it has just lost, so where it lands is
+            // where the move that just happened put it.
+            let current = match &event {
+                Event::Renamed { target, .. } => target.clone(),
+                _ => path.clone(),
+            };
+            sink.emit(event);
+
+            if cites {
+                cited.add(current, file, templates, &config, adapters.bib_files, sink);
+            }
+        }
+
+        if cites {
+            cited.merge(&config, adapters.bib_files, sink);
+        }
+    }
+}
+
+/// A directory group's citable records, held from the file each was
+/// resolved from until the group's merge into the master `.bib`.
+///
+/// A sidecar is one file's own output and is written as that file is
+/// reached. The master file is one read-modify-write over the whole
+/// group, and the merge assigns keys unique across everything it is
+/// given, so it waits until the group has nothing left to add.
+#[derive(Default)]
+struct Citations {
+    entries: Vec<(PathBuf, FileRecord, String)>,
+}
+
+impl Citations {
+    /// Write the sidecar for the file now at `path`, reporting it into
+    /// `sink`, and keep `file` for the merge when it has a citation key.
+    fn add(
+        &mut self,
+        path: PathBuf,
+        file: FileRecord,
+        templates: &TemplateTable,
+        config: &BibConfig,
+        files: &dyn BibFiles,
+        sink: &mut dyn Sink,
+    ) {
+        let (key, event) = write_sidecar(&path, &file, templates, config, files);
+        if let Some(event) = event {
             sink.emit(event);
         }
-        bib_output(&resolved, templates, effective, adapters, sink);
+        if let Some(key) = key {
+            self.entries.push((path, file, key));
+        }
+    }
+
+    /// Merge everything kept into the master file, reporting each entry's
+    /// outcome into `sink`.
+    fn merge(self, config: &BibConfig, files: &dyn BibFiles, sink: &mut dyn Sink) {
+        let keyed: Vec<Keyed> = self
+            .entries
+            .iter()
+            .map(|(path, file, key)| Keyed {
+                path,
+                record: &file.record,
+                key: key.clone(),
+            })
+            .collect();
+        for event in merge_master(&keyed, config, files) {
+            sink.emit(event);
+        }
     }
 }
 
@@ -801,15 +880,16 @@ fn by_directory(paths: &[PathBuf]) -> Vec<(PathBuf, Vec<PathBuf>)> {
     groups
 }
 
-/// The [`MoveLog`] backed by the run's journal.
+/// The [`MoveLog`] recording one file's move in the run's journal.
 ///
 /// Every entry a run appends carries the same `at`, which is what makes
-/// them one run for [`crate::journal::undo_last`]. The hash comes from
-/// the record resolved for the file, since `undo` verifies by content
-/// and an entry without a hash names a move nothing could reverse.
+/// them one run for [`crate::journal::undo_last`]. `hash` is what was
+/// resolved for the file this log is about, since `undo` verifies by
+/// content and an entry without a hash names a move nothing could
+/// reverse.
 struct JournalLog<'a> {
     journal: &'a dyn Journal,
-    resolved: &'a [(PathBuf, FileRecord)],
+    hash: Option<ContentHash>,
     at: String,
 }
 
@@ -824,10 +904,8 @@ impl MoveLog for JournalLog<'_> {
     /// journal that would not take this entry will not take the next.
     fn record(&self, from: &Path, to: &Path) -> Result<(), LogFailure> {
         let hash = self
-            .resolved
-            .iter()
-            .find(|(path, _)| path == from)
-            .and_then(|(_, file)| file.hash.clone())
+            .hash
+            .clone()
             .ok_or_else(|| LogFailure::Move("the file's content hash is unknown".to_string()))?;
 
         self.journal
@@ -842,80 +920,32 @@ impl MoveLog for JournalLog<'_> {
     }
 }
 
-/// Resolve `paths`, writing each file's verdict into `sink` as it is
-/// reached and keeping the records.
+/// Resolve the file at `path` under `effective`, writing its verdict
+/// into `sink`, and hand back the record when there is one.
 ///
-/// Renaming and bibliography output both work from the records rather
-/// than from the events, so the records are what this hands back;
-/// [`crate::pipeline::resolve_batch`] reports the same events and keeps
-/// nothing. Only resolved files appear, each paired with the path it was
-/// resolved from.
+/// Renaming and bibliography output both work from the record rather
+/// than from the event, so the record is what this hands back; the event
+/// is already written by the time it does.
 ///
 /// Each file is resolved and reported before the next is opened, so a
 /// reader watching a network-bound run sees it make progress.
-fn resolved_records<C: Cache>(
-    paths: &[PathBuf],
+fn resolved_record<C: Cache>(
+    path: &Path,
     effective: &Effective,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
-) -> Vec<(PathBuf, FileRecord)> {
-    let mut resolved = Vec::new();
-
-    for path in paths {
-        let outcome = resolve_file(
-            path,
-            adapters.library,
-            adapters.sources,
-            adapters.index,
-            &resolving(effective.config()),
-        );
-        sink.emit(crate::pipeline::event_for(path, &outcome));
-        if let FileOutcome::Resolved(file) = outcome {
-            resolved.push((path.clone(), file));
-        }
-    }
-
-    resolved
-}
-
-/// `resolved` with every path `events` reports a move for replaced by
-/// where it moved, so a sidecar lands beside the name a file now carries
-/// rather than beside the one it has just lost.
-fn at_current_paths(
-    resolved: Vec<(PathBuf, FileRecord)>,
-    events: &[Event],
-) -> Vec<(PathBuf, FileRecord)> {
-    resolved
-        .into_iter()
-        .map(|(path, file)| {
-            let moved = events.iter().find_map(|event| match event {
-                Event::Renamed { path: from, target } if *from == path => Some(target.clone()),
-                _ => None,
-            });
-            (moved.unwrap_or(path), file)
-        })
-        .collect()
-}
-
-/// The bibliography events a run that was not asked for bibliography
-/// output still produces, which is none unless a destination is
-/// configured.
-///
-/// A run with neither a master file nor sidecars has nowhere to write,
-/// and asking [`crate::bib::write_bib`] anyway would report records too
-/// sparse to cite as skipped in a run that was never going to cite them.
-fn bib_output<C: Cache>(
-    resolved: &[(PathBuf, FileRecord)],
-    templates: &TemplateTable,
-    effective: &Effective,
-    adapters: &Adapters<C>,
-    sink: &mut dyn Sink,
-) {
-    let config = bib_config(effective.config());
-    if config.path.is_some() || config.sidecars {
-        for event in write_bib(resolved, templates, &config, adapters.bib_files) {
-            sink.emit(event);
-        }
+) -> Option<FileRecord> {
+    let outcome = resolve_file(
+        path,
+        adapters.library,
+        adapters.sources,
+        adapters.index,
+        &resolving(effective.config()),
+    );
+    sink.emit(crate::pipeline::event_for(path, &outcome));
+    match outcome {
+        FileOutcome::Resolved(file) => Some(file),
+        _ => None,
     }
 }
 
@@ -923,7 +953,9 @@ fn bib_output<C: Cache>(
 ///
 /// `groups` is what [`preflight`] made of the run's paths, as it is for
 /// [`rename_events`]: each directory, its files, and the template table
-/// compiled for it.
+/// compiled for it. A file's verdict and its sidecar are adjacent, in the
+/// order the group gives its files, and the merge into the master `.bib`
+/// trails the group.
 ///
 /// Unlike the bibliography output a rename run produces on the side,
 /// this one is what was asked for, so it runs whether or not a
@@ -937,15 +969,23 @@ fn bib_events<C: Cache>(
 ) {
     for (directory, group, templates) in groups {
         let effective = configs.for_directory(directory);
-        let resolved = resolved_records(group, effective, adapters, sink);
-        for event in write_bib(
-            &resolved,
-            templates,
-            &bib_config(effective.config()),
-            adapters.bib_files,
-        ) {
-            sink.emit(event);
+        let config = bib_config(effective.config());
+        let mut cited = Citations::default();
+
+        for path in group {
+            if let Some(file) = resolved_record(path, effective, adapters, sink) {
+                cited.add(
+                    path.clone(),
+                    file,
+                    templates,
+                    &config,
+                    adapters.bib_files,
+                    sink,
+                );
+            }
         }
+
+        cited.merge(&config, adapters.bib_files, sink);
     }
 }
 

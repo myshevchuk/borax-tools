@@ -130,31 +130,19 @@ fn sidecar_is_ours(target: &Path, files: &dyn BibFiles) -> bool {
 
 /// Write bibliography output for `resolved`.
 ///
-/// Per file, in the order given:
+/// [`write_sidecar`] per file in the order given, then [`merge_master`]
+/// over every file that had a citation key, so a caller doing the two
+/// halves itself — a sidecar as each file is reached, the merge once the
+/// batch is done — writes the same files and reports the same outcomes.
 ///
-/// 1. A citation key is rendered ([`citation_key`]). A record that
-///    renders none is [`crate::event::SkipReason::Unciteable`] and
-///    contributes nothing to either destination.
-/// 2. When [`BibConfig::sidecars`] is set, a sidecar
-///    ([`borax_core::bib_output::sidecar`]) is written beside the file,
-///    reported as [`Event::Sidecar`].
-///
-/// Then, when [`BibConfig::path`] names a master file, every keyed
-/// record is merged into it in one pass
-/// ([`borax_core::bib_output::merge`]) and the file rewritten once.
-/// Merging as one batch is what lets the merge assign unique keys
-/// across the whole run rather than one file at a time. Each addition
-/// reports an [`Event::BibEntry`] naming the key it landed under and
-/// the outcome — `added`, `already-present`, or `updated`.
+/// Events come back in a fixed order — every sidecar event in input
+/// order, then every master-file event in input order — so two runs
+/// over the same inputs produce the same stream.
 ///
 /// A read or write that fails is
 /// [`crate::event::SkipReason::BibWriteFailed`] for the files it cost,
 /// and the run continues: bibliography output is the last thing a run
 /// does, and losing it does not undo the renames that preceded it.
-///
-/// Events come back in a fixed order — every sidecar event in input
-/// order, then every master-file event in input order — so two runs
-/// over the same inputs produce the same stream.
 pub fn write_bib(
     resolved: &[(PathBuf, FileRecord)],
     templates: &TemplateTable,
@@ -165,61 +153,113 @@ pub fn write_bib(
     let mut keyed = Vec::new();
 
     for (path, file) in resolved {
-        let Some(key) = citation_key(&file.record, file.hash.as_ref(), templates) else {
-            events.push(Event::Skipped {
-                path: path.clone(),
-                reason: SkipReason::Unciteable,
-            });
-            continue;
-        };
-
-        if config.sidecars {
-            let target = sidecar_path(path);
-            events.push(match sidecar_is_ours(&target, files) {
-                false => Event::Skipped {
-                    path: path.clone(),
-                    reason: SkipReason::SidecarTaken { target },
-                },
-                true => match files.write(&target, &sidecar(&file.record, &key)) {
-                    Ok(()) => Event::Sidecar {
-                        path: path.clone(),
-                        target,
-                    },
-                    // The two destinations are independent, so a file
-                    // whose sidecar failed still goes to the master file.
-                    Err(error) => {
-                        bib_failed(path, format!("writing \"{}\": {error}", target.display()))
-                    }
-                },
+        let (key, event) = write_sidecar(path, file, templates, config, files);
+        events.extend(event);
+        if let Some(key) = key {
+            keyed.push(Keyed {
+                path,
+                record: &file.record,
+                key,
             });
         }
-
-        keyed.push(Keyed {
-            path,
-            record: &file.record,
-            key,
-        });
     }
 
-    let Some(master) = &config.path else {
-        return events;
+    events.extend(merge_master(&keyed, config, files));
+    events
+}
+
+/// Write the sidecar for the resolved file `file` at `path`, and answer
+/// the key its record is cited under.
+///
+/// The key is [`citation_key`]'s, and `path` is where the file is now:
+/// it is where the sidecar goes and what the events name, so a run that
+/// has already moved the file gives the name it now carries.
+///
+/// A record that renders no key is [`SkipReason::Unciteable`], which is
+/// the `None` key and that skip together: it has no place in either
+/// destination.
+///
+/// A sidecar is written only when [`BibConfig::sidecars`] is set,
+/// reported as [`Event::Sidecar`]. One that would overwrite something
+/// borax did not write is [`SkipReason::SidecarTaken`], and one the
+/// filesystem refuses is [`SkipReason::BibWriteFailed`]. The key comes
+/// back regardless, since the master file is a separate destination and
+/// losing one does not cost the other.
+pub fn write_sidecar(
+    path: &Path,
+    file: &FileRecord,
+    templates: &TemplateTable,
+    config: &BibConfig,
+    files: &dyn BibFiles,
+) -> (Option<String>, Option<Event>) {
+    let Some(key) = citation_key(&file.record, file.hash.as_ref(), templates) else {
+        return (
+            None,
+            Some(Event::Skipped {
+                path: path.to_path_buf(),
+                reason: SkipReason::Unciteable,
+            }),
+        );
     };
-    // A run with nothing to merge leaves the master file as it is,
-    // rather than reading and rewriting it byte for byte.
+
+    if !config.sidecars {
+        return (Some(key), None);
+    }
+
+    let target = sidecar_path(path);
+    let event = match sidecar_is_ours(&target, files) {
+        false => Event::Skipped {
+            path: path.to_path_buf(),
+            reason: SkipReason::SidecarTaken { target },
+        },
+        true => match files.write(&target, &sidecar(&file.record, &key)) {
+            Ok(()) => Event::Sidecar {
+                path: path.to_path_buf(),
+                target,
+            },
+            Err(error) => bib_failed(path, format!("writing \"{}\": {error}", target.display())),
+        },
+    };
+    (Some(key), Some(event))
+}
+
+/// Merge `keyed` into the master `.bib` and report what became of each
+/// entry.
+///
+/// Nothing is read or written when [`BibConfig::path`] names no master
+/// file, and nothing when `keyed` is empty — a run with nothing to merge
+/// leaves the file as it is rather than rewriting it byte for byte.
+///
+/// Otherwise the file is read, every entry merged into it in one pass
+/// ([`borax_core::bib_output::merge`]), and the whole of it written back.
+/// One pass is what lets the merge assign keys unique across everything
+/// it is given rather than a file at a time. Each entry is an
+/// [`Event::BibEntry`], in `keyed`'s order, naming the key it landed
+/// under and the outcome — `added`, `already-present`, or `updated`.
+///
+/// A read or a write that fails is [`SkipReason::BibWriteFailed`] for
+/// every entry it cost, naming the master file, and no entry is
+/// reported twice.
+pub fn merge_master(keyed: &[Keyed<'_>], config: &BibConfig, files: &dyn BibFiles) -> Vec<Event> {
+    let Some(master) = &config.path else {
+        return Vec::new();
+    };
     if keyed.is_empty() {
-        return events;
+        return Vec::new();
     }
 
     let existing = match files.read(master) {
         Ok(existing) => existing,
         Err(error) => {
-            events.extend(keyed.iter().map(|entry| {
-                bib_failed(
-                    entry.path,
-                    format!("reading \"{}\": {error}", master.display()),
-                )
-            }));
-            return events;
+            return keyed
+                .iter()
+                .map(|entry| {
+                    bib_failed(
+                        entry.path,
+                        format!("reading \"{}\": {error}", master.display()),
+                    )
+                })
+                .collect();
         }
     };
 
@@ -229,12 +269,12 @@ pub fn write_bib(
         .collect();
     let merged = merge(&existing, &additions, config.duplicates);
 
-    events.extend(match files.write(master, &merged.content) {
+    match files.write(master, &merged.content) {
         Ok(()) => keyed
             .iter()
             .zip(&merged.outcomes)
             .map(|(entry, outcome)| entry_event(entry.path, outcome))
-            .collect::<Vec<Event>>(),
+            .collect(),
         Err(error) => keyed
             .iter()
             .map(|entry| {
@@ -244,16 +284,18 @@ pub fn write_bib(
                 )
             })
             .collect(),
-    });
-    events
+    }
 }
 
-/// One resolved file that has a citation key, and so a place in both
-/// destinations.
-struct Keyed<'a> {
-    path: &'a Path,
-    record: &'a Record,
-    key: String,
+/// One resolved file that has a citation key, and so a place in the
+/// master `.bib`.
+pub struct Keyed<'a> {
+    /// Where the file is, which is what the events about it name.
+    pub path: &'a Path,
+    /// What the master file gets under `key`.
+    pub record: &'a Record,
+    /// The key the record is cited under, from [`citation_key`].
+    pub key: String,
 }
 
 /// The [`Event::BibEntry`] reporting what the master-file merge did with

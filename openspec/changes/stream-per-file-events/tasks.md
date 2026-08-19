@@ -38,23 +38,23 @@ independent and land in this order because each is green on its own.
 
 ## 3. Per-file rename reporting (borax)
 
-- [ ] 3.1 Test: a rename run over a directory of files that variously
+- [x] 3.1 Test: a rename run over a directory of files that variously
       resolve, skip, collide and are already named emits each file's
       events contiguously and in input order
-- [ ] 3.2 Test: the same batch produces the same names, suffixes and
+- [x] 3.2 Test: the same batch produces the same names, suffixes and
       journal entries as before the change — the ordering assertion of
       3.1 must not be able to pass by changing a decision
-- [ ] 3.3 Test: a run spanning a directory and its subdirectory reports
+- [x] 3.3 Test: a run spanning a directory and its subdirectory reports
       each file under its own configuration, with no interleaving
       between the two groups' files
-- [ ] 3.4 Rewrite `rename_events` as a per-directory loop holding a
+- [x] 3.4 Rewrite `rename_events` as a per-directory loop holding a
       `Planner` and the directory snapshot, resolving, planning,
       applying and journaling one file at a time
-- [ ] 3.5 Make the subdirectory listing lazy and memoized per group,
+- [x] 3.5 Make the subdirectory listing lazy and memoized per group,
       replacing the eager whole-batch scan in `occupied`
-- [ ] 3.6 Split `write_bib`: a per-file sidecar write called from the
+- [x] 3.6 Split `write_bib`: a per-file sidecar write called from the
       loop, and the master merge left at the end of the group
-- [ ] 3.7 Apply the same per-file loop to `bib_events`, whose two-phase
+- [x] 3.7 Apply the same per-file loop to `bib_events`, whose two-phase
       shape is the same one
 
 ## 4. Wrap-up
