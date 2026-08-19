@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A run reports as it goes. Each event is written when it happens
+  rather than after the run has ended, so a network-bound run shows
+  progress while it is bound and a slow run is distinguishable from a
+  stopped one. A run ended by a configuration or usage error still
+  emits neither `run-started` nor `run-finished`.
+- `rename` and `bib` report one file at a time. A file's resolution,
+  the rename planned or applied for it, and any sidecar written beside
+  it now appear together and in the order the files were given,
+  instead of every file's resolution followed by every file's rename —
+  two lists that could not be paired, since the second omitted the
+  files that were skipped. Output written to a shared master `.bib`
+  is unchanged and still follows the files of its directory. No file
+  receives a different name for this: collision suffixes stay
+  deterministic and a preview stays identical to what `--apply` does.
+
 ## [0.1.0] - 2026-08-17
 
 The first release. Nothing was published before it, so the "Changed"

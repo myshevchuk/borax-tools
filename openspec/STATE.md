@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-08-17, when `add-core-pipeline` was archived.
+Last reviewed: 2026-08-19, when `stream-per-file-events` landed.
 
 ## What is built
 
@@ -18,6 +18,14 @@ OpenAlex and arXiv with on-disk caching and per-service pacing, the
 CSL-JSON record model, the template engine, collision-aware rename
 planning with a journal that `borax undo` reads, and BibTeX output to a
 master file or to sidecars.
+
+`stream-per-file-events` is implemented on top of that. A
+run writes each event when it happens rather than assembling the whole
+stream first, and `rename` and `bib` work one file at a time, so a
+file's verdict and its fate are adjacent. The decisions are unchanged:
+`borax_core::rename::Planner` is the batch planner's own state made
+drivable one input at a time, and the batch entry point is a fold over
+it.
 
 Tests run green on Linux, macOS and Windows. A scheduled job exercises
 the real APIs, so schema drift at a source surfaces without a user
@@ -63,6 +71,15 @@ finding it first.
   `bib-output` currently derives keys without a specified default that a
   user can rely on or override by entry type. Settle this before anyone
   depends on the keys being stable across versions.
+- **How `rename` could ever honour `concurrency`.** `resolve` runs its
+  batch on a bounded pool; `rename` is serial, and
+  `stream-per-file-events` made that harder to change by choosing live
+  per-file reporting. The two pull against each other: resolving
+  concurrently means files finish in whatever order the network
+  answers, so a concurrent `rename` would either report out of order or
+  buffer completions to restore input order — which is the buffering
+  that change removed. Nothing is broken today, and the answer is not
+  obvious enough to guess at.
 - **Whether the cache and the journal share one on-disk store.** They
   are separate flat files today. The specifications constrain behaviour
   and not storage, so this stays open — and the ledger change would
