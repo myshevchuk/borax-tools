@@ -26,16 +26,27 @@ TDD throughout: red test first for every pure behaviour.
 
 ## 2. Ledger adapter and subcommand (borax)
 
-- [ ] 2.1 Tests + implementation: collection-root discovery (nearest
+- [x] 2.1 Tests + implementation: collection-root discovery (nearest
       `.borax.toml`, `collection-root` override) shared with config
       resolution
-- [ ] 2.2 Tests + implementation: ledger load/append adapter with
+- [x] 2.2 Tests + implementation: ledger load/append adapter with
       degrade-loudly behaviour (absent, unparsable, no collection,
       `--no-ledger`)
-- [ ] 2.3 Tests + implementation: `borax ledger rebuild` scanning files
+- [x] 2.3 Tests + implementation: `borax ledger rebuild` scanning files
       + sidecars; compaction of entries for missing files
-- [ ] 2.4 Tests + implementation: pipeline wiring — content check after
+- [x] 2.4 Tests + implementation: pipeline wiring — content check after
       hashing, work check after resolution, applied admissions append
+      (units only: `resolve_file_checking_ledger` and `admission_entry`
+      are pinned and green; composing them into `Adapters` is 2.5)
+- [ ] 2.5 Tests + implementation: carry the ledger and the collection
+      root on `Adapters`, so `rename` runs the duplicate checks and an
+      applied run appends its admissions. Touches 36 `Adapters` literals
+      across the test suite; do it once, with the run-log plumbing of
+      group 3, which needs the same collection root
+- [ ] 2.6 Tests + implementation: dispatch `borax ledger rebuild` —
+      a rebuilt event, `scan_collection` + `rebuild` + write — and drop
+      the preflight refusal standing in for it. `events_for`'s catch-all
+      must never be what a real subcommand falls through
 
 ## 3. Run logs (borax)
 
@@ -80,7 +91,7 @@ is red.
 - [ ] 5.3 Tests: `apply = true` in a config file is a load-time error;
       implement the message naming it as command-line-only if the
       shipped unknown-key wording does not already say so
-- [ ] 5.4 Tests + implementation: the `collection-root` key overriding
+- [x] 5.4 Tests + implementation: the `collection-root` key overriding
       discovery, with `borax config` reporting its origin
 
 ## 6. Integration

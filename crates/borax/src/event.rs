@@ -14,6 +14,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use borax_core::ledger::DuplicateReason;
 use borax_core::record::Record;
 use serde::{Deserialize, Serialize};
 
@@ -172,6 +173,15 @@ pub enum SkipReason {
     /// The path a file would be moved back to is occupied, so
     /// reverting would overwrite whatever now holds it.
     OriginalTaken,
+    /// The collection has already admitted this file, by content or by
+    /// work. `existing_path` is where the ledger says the file it
+    /// duplicates sits, as a full path rather than the
+    /// collection-relative one the ledger stores, so the report names
+    /// somewhere the reader can go and look.
+    Duplicate {
+        reason: DuplicateReason,
+        existing_path: PathBuf,
+    },
 }
 
 /// One source's answer during resolution.
@@ -386,6 +396,17 @@ fn skipped_because(reason: &SkipReason) -> String {
         SkipReason::Unjournalable { message } => {
             format!("the move could not be recorded, so it was not made ({message})")
         }
+        SkipReason::Duplicate {
+            reason: DuplicateReason::Content,
+            existing_path,
+        } => format!("same bytes already archived at {}", existing_path.display()),
+        SkipReason::Duplicate {
+            reason: DuplicateReason::Work,
+            existing_path,
+        } => format!(
+            "same work already archived at {} (different file)",
+            existing_path.display()
+        ),
     }
 }
 

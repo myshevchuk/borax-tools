@@ -195,7 +195,8 @@ pub fn serialize_jsonl(entries: &[Entry]) -> String {
 }
 
 /// Why an incoming file is already in the collection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DuplicateReason {
     /// The same bytes are archived: the file's hash has an entry.
     Content,

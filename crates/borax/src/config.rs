@@ -58,6 +58,10 @@ pub struct Config {
     /// The contact address sent to the Crossref and OpenAlex polite
     /// pools.
     pub mailto: Option<String>,
+    /// The directory anchoring the collection's `.borax/` accounting,
+    /// or `None` when nothing configured one and
+    /// [`collection_root`]'s discovery decides it.
+    pub collection_root: Option<PathBuf>,
     /// How many files may be resolved at once.
     pub concurrency: usize,
     /// The floor on the gap between two requests to the same service,
@@ -85,8 +89,9 @@ impl Default for Config {
     /// `[auth:lower][year]_[shorttitle3:camel]`, and `citation_keys`
     /// holds `default` alone, as `[auth:lower][year]`; every service borax
     /// speaks to is enabled ([`SourceName::SUPPORTED`]); there is no
-    /// contact address, no master `.bib`, and no sidecars. Concurrency
-    /// and pacing take [`borax_sources::pace::DEFAULT_CONCURRENCY`] and
+    /// contact address, no master `.bib`, no configured collection
+    /// root, and no sidecars. Concurrency and pacing take
+    /// [`borax_sources::pace::DEFAULT_CONCURRENCY`] and
     /// [`borax_sources::pace::DEFAULT_MIN_INTERVAL`], extraction takes
     /// [`borax_pdf::tiered::DEFAULT_PAGE_LIMIT`], collisions are
     /// suffixed, duplicate entries skipped, and the cache is on.
@@ -102,6 +107,7 @@ impl Default for Config {
             )]),
             sources: SourceName::SUPPORTED.to_vec(),
             mailto: None,
+            collection_root: None,
             concurrency: DEFAULT_CONCURRENCY,
             min_interval_ms: DEFAULT_MIN_INTERVAL.as_millis() as u64,
             page_limit: DEFAULT_PAGE_LIMIT,
@@ -132,6 +138,8 @@ pub struct Layer {
     pub sources: Option<Vec<String>>,
     #[serde(default)]
     pub mailto: Option<String>,
+    #[serde(default, rename = "collection-root")]
+    pub collection_root: Option<PathBuf>,
     #[serde(default)]
     pub rename: Option<RenameLayer>,
     #[serde(default)]
@@ -365,6 +373,14 @@ const SETTINGS: &[Setting] = &[
         key: "bib.sidecars",
         slot: |layer| Slot::Flag(&mut layer.bib.get_or_insert_default().sidecars),
         render: |config| config.sidecars.to_string(),
+    },
+    Setting {
+        key: "collection-root",
+        slot: |layer| Slot::Path(&mut layer.collection_root),
+        render: |config| match &config.collection_root {
+            Some(path) => quote(&path.to_string_lossy()),
+            None => String::new(),
+        },
     },
     Setting {
         key: "extraction.page-limit",
@@ -653,6 +669,9 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
     if let Some(mailto) = winning.mailto {
         config.mailto = Some(mailto);
     }
+    if let Some(collection_root) = winning.collection_root {
+        config.collection_root = Some(collection_root);
+    }
     if let Some(names) = winning.sources {
         let mut sources = Vec::with_capacity(names.len());
         for name in names {
@@ -729,6 +748,31 @@ pub fn nearest_override(start: &Path, exists: impl Fn(&Path) -> bool) -> Option<
         .ancestors()
         .map(|directory| directory.join(OVERRIDE_FILE))
         .find(|candidate| exists(candidate))
+}
+
+/// The directory anchoring the collection a run in `start` belongs to.
+///
+/// `configured` is the `collection-root` setting, and when it is set it
+/// is the answer outright: the search is replaced, not merely
+/// outranked, so an unusual layout can put the accounting somewhere no
+/// override file sits. Otherwise the root is the directory holding the
+/// nearest [`OVERRIDE_FILE`] at or above `start` — one mechanism
+/// serving both roles, so the file that configures a tree also says
+/// where the tree's `.borax/` lives. `exists` answers as it does for
+/// [`nearest_override`].
+///
+/// `None` when nothing is configured and no override file is found up
+/// to the filesystem root, which is a run outside any collection: no
+/// ledger is read or written for it.
+pub fn collection_root(
+    start: &Path,
+    configured: Option<&Path>,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    match configured {
+        Some(configured) => Some(configured.to_path_buf()),
+        None => Some(nearest_override(start, exists)?.parent()?.to_path_buf()),
+    }
 }
 
 /// The global configuration file implied by `lookup`, which answers the

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use borax::cli::{Cli, Command, Settings, flag_layers};
+use borax::cli::{Cli, Command, LedgerAction, Settings, flag_layers};
 use borax::config::{
     BibLayer, ExtractionLayer, Layer, NetworkLayer, Origin, RenameLayer, layer_from_toml, resolve,
 };
@@ -144,6 +144,51 @@ fn cache_with_clear_parses_clear_as_true() {
         "got {:?}",
         cli.command
     );
+}
+
+#[test]
+fn ledger_rebuild_parses_with_no_paths() {
+    let cli = parse(&["ledger", "rebuild"]);
+
+    assert_eq!(
+        cli.command,
+        Command::Ledger {
+            action: LedgerAction::Rebuild,
+        },
+        "got {:?}",
+        cli.command
+    );
+}
+
+#[test]
+fn ledger_with_no_action_is_a_parse_error() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "ledger"]);
+    assert!(result.is_err(), "got {result:?}");
+}
+
+#[test]
+fn ledger_rebuild_takes_no_positional_arguments() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "ledger", "rebuild", "extra.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+}
+
+#[test]
+fn ledger_rebuild_reports_its_own_command_name() {
+    assert_eq!(
+        Command::Ledger {
+            action: LedgerAction::Rebuild,
+        }
+        .name(),
+        "ledger rebuild"
+    );
+}
+
+#[test]
+fn ledger_rebuild_has_no_paths() {
+    let command = Command::Ledger {
+        action: LedgerAction::Rebuild,
+    };
+    assert!(command.paths().is_empty());
 }
 
 #[test]

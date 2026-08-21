@@ -573,6 +573,13 @@ pub fn preflight<'a, C: Cache>(
 ) -> Result<Prepared<'a>, Diagnostic> {
     match command {
         Command::Config | Command::Resolve { .. } | Command::Undo => Ok(Prepared::Unchecked),
+        // The rebuild itself is not wired yet. Refusing here keeps the
+        // subcommand from reaching the catch-all in `events_for`, which
+        // exists for command/`Prepared` pairs no caller can build and
+        // would report a rebuild that never ran as a clean run.
+        Command::Ledger { .. } => Err(error(
+            "`borax ledger rebuild` is not wired up yet".to_string(),
+        )),
         Command::Cache { clear } => match adapters.cache_root.as_deref() {
             Some(root) => Ok(Prepared::Cache {
                 report: cache_report(*clear, root)?,
@@ -1130,7 +1137,7 @@ fn applying(command: &Command) -> bool {
     match command {
         Command::Rename { apply, .. } => *apply,
         Command::Cache { clear } => *clear,
-        Command::Bib { .. } | Command::Undo => true,
+        Command::Bib { .. } | Command::Undo | Command::Ledger { .. } => true,
         Command::Resolve { .. } | Command::Config => false,
     }
 }
@@ -1299,7 +1306,9 @@ fn expanded(command: &Command) -> Command {
         Command::Bib { paths } => Command::Bib {
             paths: inputs(paths),
         },
-        Command::Undo | Command::Config | Command::Cache { .. } => command.clone(),
+        Command::Undo | Command::Config | Command::Cache { .. } | Command::Ledger { .. } => {
+            command.clone()
+        }
     }
 }
 

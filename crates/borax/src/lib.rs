@@ -11,6 +11,7 @@ pub mod cli;
 pub mod config;
 pub mod event;
 pub mod journal;
+pub mod ledger;
 pub mod pipeline;
 pub mod renaming;
 pub mod run;

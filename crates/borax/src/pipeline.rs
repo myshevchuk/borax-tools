@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
+use borax_core::ledger::DuplicateReason;
 use borax_core::record::Record;
 use borax_pdf::pure::PurePdf;
 use borax_pdf::scan::xmp_title;
@@ -28,6 +29,7 @@ use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 
 use crate::event::{Attempt, Counts, Event, SkipReason};
+use crate::ledger::Collection;
 
 /// The files a run works on, as something that can be read.
 ///
@@ -189,6 +191,83 @@ pub fn resolve_file<C: Cache>(
         cached: false,
         hash,
     })
+}
+
+/// Resolve one file, checking `collection` for it on the way.
+///
+/// [`resolve_file`] with the ledger's two duplicate checks around it,
+/// in the two places the answers become available:
+///
+/// 1. **Content**: the file's hash is looked up before anything else
+///    happens, so a byte-identical re-download is recognised without
+///    the file being opened or a single source asked.
+/// 2. **Work**: the identifiers of the resolved record are looked up
+///    after resolution, which is the earliest a second PDF of an
+///    archived paper can be recognised at all.
+///
+/// A match is [`SkipReason::Duplicate`] carrying the reason and the
+/// existing file's full path; the incoming file is left where it is.
+/// Only a match whose recorded file is still in the collection counts,
+/// so an entry left behind by an undone or deleted admission does not
+/// keep the file out. Everything else — a skip, an unhashable file, a
+/// ledger with no entries — is [`resolve_file`]'s outcome unchanged.
+pub fn resolve_file_checking_ledger<C: Cache>(
+    path: &Path,
+    library: &dyn Library,
+    sources: &[&dyn Source],
+    index: &ContentIndex<C>,
+    config: &ResolveConfig,
+    collection: &Collection<'_>,
+) -> FileOutcome {
+    if let Some(existing) = library
+        .hash(path)
+        .ok()
+        .and_then(|hash| collection.ledger.content_duplicate(&hash))
+        .and_then(|duplicate| collection.live_path(&duplicate))
+    {
+        return FileOutcome::Skipped(SkipReason::Duplicate {
+            reason: DuplicateReason::Content,
+            existing_path: existing,
+        });
+    }
+
+    let outcome = resolve_file(path, library, sources, index, config);
+
+    let FileOutcome::Resolved(file) = &outcome else {
+        return outcome;
+    };
+    match collection
+        .ledger
+        .work_duplicate(&identifiers_of(&file.record))
+        .and_then(|duplicate| collection.live_path(&duplicate))
+    {
+        Some(existing) => FileOutcome::Skipped(SkipReason::Duplicate {
+            reason: DuplicateReason::Work,
+            existing_path: existing,
+        }),
+        None => outcome,
+    }
+}
+
+/// Every identifier `record` carries, in the order DOI, arXiv, PMID,
+/// ISBN — the same order [`borax_core::ledger::Entry::identifiers`]
+/// uses, so the ledger is asked about an incoming file's identifiers in
+/// the order it recorded an admitted one's.
+fn identifiers_of(record: &Record) -> Vec<Identifier> {
+    let mut identifiers = Vec::new();
+    if let Some(doi) = &record.doi {
+        identifiers.push(Identifier::Doi(doi.clone()));
+    }
+    if let Some(arxiv) = &record.borax.arxiv {
+        identifiers.push(Identifier::Arxiv(arxiv.clone()));
+    }
+    if let Some(pmid) = &record.pmid {
+        identifiers.push(Identifier::Pmid(*pmid));
+    }
+    if let Some(isbn) = &record.isbn {
+        identifiers.push(Identifier::Isbn(isbn.clone()));
+    }
+    identifiers
 }
 
 /// Extract from the file at `path`, along with every title its own
