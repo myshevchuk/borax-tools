@@ -1,8 +1,13 @@
 # Tasks: add-ledger-and-run-logs
 
-Depends on `add-core-pipeline` implementation (record model, planner,
-event schema, config resolution). TDD throughout: red test first for
-every pure behaviour.
+`add-core-pipeline` is implemented, archived and released as v0.1.0, so
+everything this change builds on (record model, planner, event schema,
+config resolution) exists. That also means this change edits working
+code: group 4 deletes the shipped journal rather than writing a new
+component, and group 5 is mostly verification of behaviour v0.1.0
+already has.
+
+TDD throughout: red test first for every pure behaviour.
 
 ## 1. Ledger core (borax-core)
 
@@ -43,23 +48,40 @@ every pure behaviour.
 - [ ] 3.3 Tests + implementation: XDG state fallback outside a
       collection, discoverable by undo
 
-## 4. Undo rewiring (borax)
+## 4. Undo rewiring (borax), replacing the shipped journal
 
 - [ ] 4.1 Tests + implementation: replace journal reads with
       latest-apply-log discovery (collection first, then XDG state)
 - [ ] 4.2 Tests + implementation: reverse replay with per-entry hash
-      verification (carried over) and schema-version refusal
+      verification (carried over from the journal, behaviour unchanged)
+      and schema-version refusal
+- [ ] 4.3 Carry over the journal's apply gate: `--apply` aborts before
+      touching anything when the apply-run log cannot be created or
+      written, with a message naming the log rather than the journal
+- [ ] 4.4 Delete `crates/borax/src/journal.rs`, its tests, and the
+      `Journal`/`FileJournal` adapter wiring in `run.rs`; port the
+      cases in `crates/borax/tests/journal.rs` that still describe
+      wanted behaviour onto the run-log path and drop the rest. Nothing
+      reads a v0.1.0 `renames.jsonl` afterwards
 
 ## 5. Config hardening (borax)
 
-- [ ] 5.1 Tests + implementation: single option schema emitting both
-      clap flags and serde TOML keys; unknown-key and wrong-type
-      load-time errors naming the key
-- [ ] 5.2 Tests + implementation: auto-generated `--no-*` negations for
-      config-settable booleans, last-one-wins
-- [ ] 5.3 Tests + implementation: config-forbidden set (`apply`,
-      destructive selectors) rejected at load with the
-      pass-on-command-line message
+Verification-first: 5.1 and 5.3 are largely shipped, so each starts by
+writing the test that proves it and only then changes code if the test
+is red.
+
+- [ ] 5.1 Tests: unknown key and wrongly typed value are load-time
+      errors naming the key and expected type (`deny_unknown_fields`
+      over typed TOML should already give this); implement only what
+      the tests show missing
+- [ ] 5.2 Tests + implementation: `--no-` negation for every
+      config-settable boolean, last-one-wins, including the `ledger`
+      and `run-log` booleans this change adds
+- [ ] 5.3 Tests: `apply = true` in a config file is a load-time error;
+      implement the message naming it as command-line-only if the
+      shipped unknown-key wording does not already say so
+- [ ] 5.4 Tests + implementation: the `collection-root` key overriding
+      discovery, with `borax config` reporting its origin
 
 ## 6. Integration
 
@@ -72,3 +94,6 @@ every pure behaviour.
       (byte-identical double rebuild; compaction after deletion)
 - [ ] 6.4 Windows CI coverage for collection-root discovery and run-log
       paths
+- [ ] 6.5 `CHANGELOG.md` entry under `[Unreleased]` stating plainly
+      that the journal is gone and an undo spanning the upgrade will
+      not find its run

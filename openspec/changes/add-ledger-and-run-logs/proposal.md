@@ -28,10 +28,15 @@ improved design is intended to flow back into accession later.
   dry run pairs visibly with the apply run that follows it. Apply-run
   logs are mandatory and flushed before the first rename executes;
   dry-run logs are optional.
-- **Journal unification** (**BREAKING** relative to the unimplemented
-  `add-core-pipeline` spec): the separate undo journal is removed;
+- **Journal unification** (**BREAKING**): the separate undo journal —
+  shipped in v0.1.0 as a single append-only `renames.jsonl` in the XDG
+  state directory — is removed outright, code and tests with it.
   `borax undo` replays the latest apply-run log's rename events in
-  reverse, with the same per-entry hash verification.
+  reverse, with the same per-entry hash verification. Journals written
+  by an earlier release are not read and not migrated; per `CLAUDE.md`
+  no compatibility is owed before `1.0.0`, and the accounting is
+  derived, so the cost of dropping it is one lost `undo` for anyone who
+  upgrades between an apply run and its undo.
 - A **collection root** concept in configuration: the nearest directory
   containing `.borax.toml` anchors `.borax/`. Apply-run logs fall back
   to the XDG state directory outside any collection; the ledger is
@@ -67,7 +72,17 @@ improved design is intended to flow back into accession later.
 - `crates/borax-core`: ledger record model, in-memory duplicate index,
   deterministic rebuild serialization (pure).
 - `crates/borax`: `.borax/` discovery, run-log writer, `borax undo`
-  rewiring, `borax ledger` subcommand, config schema unification.
-- No implementation exists yet for either change, so the `rename`/`cli`
-  modifications cost nothing at runtime; `add-core-pipeline` should be
-  implemented with this change's final shape in mind.
+  rewiring, `borax ledger` subcommand, `collection-root` config key.
+- **This change edits working code, not a plan.** `add-core-pipeline` is
+  implemented, archived, and released as v0.1.0, so the `rename`
+  modification deletes `crates/borax/src/journal.rs` and its 1107 lines
+  of tests and rebuilds `borax undo` on the run log. The apply-run log
+  inherits the journal's hard invariant unchanged: `--apply` refuses to
+  run when there is nowhere to record the moves, because an unrecorded
+  rename cannot be undone.
+- Parts of the config hardening are already shipped and need verifying
+  rather than building: unknown keys and wrongly typed values are
+  already load-time errors (`deny_unknown_fields` over typed TOML), and
+  both config-settable booleans already have `--no-` negations. What is
+  genuinely new is the `collection-root` key, and holding the negation
+  property as this change adds booleans of its own.

@@ -2,8 +2,11 @@
 
 ## Context
 
-borax's core pipeline (`add-core-pipeline`) is stateless: the only
-persistent state so far is the response cache and a rename journal. The
+borax's core pipeline (`add-core-pipeline`) is implemented, archived and
+released as v0.1.0; `stream-per-file-events` landed on top of it. The
+pipeline is stateless: the only persistent state today is the response
+cache and the rename journal — a single append-only `renames.jsonl` in
+the XDG state directory, which this change removes. The
 albumin project's `accession.py` — same disk-is-truth ideology, for
 media files — demonstrates two accounting features borax needs
 (duplicate prevention via a rebuildable log; per-run manifests for
@@ -121,8 +124,10 @@ record that follows it.
 
 For an `--apply` run, the run log is created and the planned rename
 events flushed to disk *before the first rename executes*; failure to
-create or write it aborts the run before any mutation. The separate
-undo journal from `add-core-pipeline` is removed: `borax undo` reads
+create or write it aborts the run before any mutation. This is the
+shipped journal's invariant, moved rather than invented: `--apply`
+already refuses when the system names no state directory to journal
+into. The undo journal is removed: `borax undo` reads
 the most recent apply-run log and replays its rename events in reverse,
 verifying each file sits at its recorded new path with its recorded
 hash (verification semantics unchanged from the journal spec).
@@ -149,6 +154,15 @@ that anchors `.borax/`. One mechanism, two roles; an explicit
 
 ### Config: one schema, typed values, symmetric booleans
 
+Most of this is already true in the shipped code and is written down
+here to be locked in and held, not built: `Config` is typed TOML behind
+`deny_unknown_fields`, so unknown keys and wrong types are already
+load-time errors; `--apply` is not a `Config` field, so `apply = true`
+is already rejected; and both config-settable booleans (`sidecars`,
+`cache`) already have `--no-` forms. The work this change actually
+carries is the `collection-root` key, and keeping the negation property
+total as it adds `ledger` and `run-log` booleans of its own.
+
 - CLI flags and TOML keys are generated from a single declaration
   (shared clap+serde structs); a key exists in config exactly when its
   flag is declared configurable — no parallel table to drift, unlike
@@ -164,6 +178,17 @@ that anchors `.borax/`. One mechanism, two roles; an explicit
   destructive selectors (accession's `FORBIDDEN_KEYS` rule, kept).
 - Unknown config keys are load-time errors (accession's loud
   validation, kept).
+
+### Nothing migrates off the old journal
+
+A `renames.jsonl` written by v0.1.0 is not read, not converted, and not
+deleted; it simply stops being consulted, and the file is left where it
+lies rather than cleaned up behind the user's back. `CLAUDE.md` owes no
+compatibility before `1.0.0`, and the journal is derived accounting,
+so the entire loss is that an undo spanning the upgrade — apply on the
+old binary, undo on the new one — does not find its run. A reader kept
+alive for that window would be exactly the "legacy branch" the project
+rules out.
 
 ## Risks / Trade-offs
 
