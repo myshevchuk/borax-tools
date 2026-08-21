@@ -418,32 +418,41 @@ pub fn entry_type(name: &str) -> Option<EntryType> {
     }
 }
 
-/// The templates `config` describes, compiled.
+/// The templates `map` describes, compiled.
 ///
-/// `templates.default` is the table's fallback and is always present:
-/// the built-in defaults supply it and merging removes no key. Every
-/// other key names an entry type and overrides the default for it.
+/// `map` is one of the configuration's template tables — the filename
+/// templates or the citation-key ones — and `prefix` is the name that
+/// table goes by in a configuration file, which every diagnostic here
+/// names the offending key under: `templates.thesis`,
+/// `citation-keys.default`.
+///
+/// The `default` key is the table's fallback and is always present: the
+/// built-in defaults supply it and merging removes no key. Every other
+/// key names an entry type and overrides the default for it.
 ///
 /// A key naming no entry type, and a template that will not compile,
 /// are both [`Diagnostic`]s rather than skips: a template is
 /// configuration, so a broken one is wrong for every file in the batch
 /// and there is nothing to be gained by finding that out once per file.
-pub fn templates(config: &Config) -> Result<TemplateTable, Diagnostic> {
+pub fn templates(
+    map: &BTreeMap<String, String>,
+    prefix: &str,
+) -> Result<TemplateTable, Diagnostic> {
     let compile = |key: &str, source: &str| {
-        Template::compile(source).map_err(|failure| error(format!("templates.{key}: {failure}")))
+        Template::compile(source).map_err(|failure| error(format!("{prefix}.{key}: {failure}")))
     };
 
-    let Some(default) = config.templates.get(DEFAULT_TEMPLATE) else {
-        return Err(error(format!("templates.{DEFAULT_TEMPLATE} is unset")));
+    let Some(default) = map.get(DEFAULT_TEMPLATE) else {
+        return Err(error(format!("{prefix}.{DEFAULT_TEMPLATE} is unset")));
     };
     let mut table = TemplateTable::new(compile(DEFAULT_TEMPLATE, default)?);
 
-    for (name, source) in &config.templates {
+    for (name, source) in map {
         if name == DEFAULT_TEMPLATE {
             continue;
         }
         let Some(entry_type) = entry_type(name) else {
-            return Err(error(format!("templates.{name} names no entry type")));
+            return Err(error(format!("{prefix}.{name} names no entry type")));
         };
         table.insert(entry_type, compile(name, source)?);
     }
@@ -484,6 +493,22 @@ impl Sink for Vec<Event> {
     }
 }
 
+/// One directory's share of a run: the files below it, and the
+/// compiled templates its configuration calls for.
+///
+/// A run spanning two trees is a run under two configurations, so both
+/// tables are the ones that directory's own configuration resolved to.
+pub struct Group {
+    /// The directory the group's configuration was resolved for.
+    pub directory: PathBuf,
+    /// The files in it, in the order the run reached them.
+    pub paths: Vec<PathBuf>,
+    /// The filename templates, which name a renamed file.
+    pub filenames: TemplateTable,
+    /// The citation-key templates, which name a cited record.
+    pub citation_keys: TemplateTable,
+}
+
 /// What a run's fallible checks produced.
 ///
 /// Every way a run can end before it starts — a template that will not
@@ -505,14 +530,14 @@ pub enum Prepared<'a> {
     Cache { report: Event },
     /// `rename` or `bib`: the run's paths grouped by the directory
     /// holding them, in the order those directories are first reached,
-    /// each paired with the template table compiled for it.
+    /// each paired with the tables compiled for it.
     ///
-    /// Holding the compiled table is what makes "every template
+    /// Holding the compiled tables is what makes "every template
     /// compiles before any file is touched" a property of the type
     /// rather than an ordering inside a function: emitting cannot reach
-    /// a file without already holding the table for its directory.
+    /// a file without already holding the tables for its directory.
     Grouped {
-        groups: Vec<(PathBuf, Vec<PathBuf>, TemplateTable)>,
+        groups: Vec<Group>,
         /// Where an applying rename records its moves. `None` for a
         /// preview and for `bib`, neither of which moves anything.
         journal: Option<&'a dyn Journal>,
@@ -585,20 +610,23 @@ pub fn preflight<'a, C: Cache>(
 }
 
 /// `paths` grouped by directory ([`by_directory`]), each group paired
-/// with the template table its directory's configuration compiles to.
+/// with the template tables its directory's configuration compiles to.
 ///
-/// Every group is compiled before any of them is worked, so a template
-/// that will not compile — in any of the directories the run spans —
-/// ends the run before a single file is read.
-fn compiled_groups(
-    paths: &[PathBuf],
-    configs: &Configs,
-) -> Result<Vec<(PathBuf, Vec<PathBuf>, TemplateTable)>, Diagnostic> {
+/// Every group is compiled before any of them is worked, and both of a
+/// group's tables before either is used, so a template that will not
+/// compile — filename or citation key, in any of the directories the
+/// run spans — ends the run before a single file is read.
+fn compiled_groups(paths: &[PathBuf], configs: &Configs) -> Result<Vec<Group>, Diagnostic> {
     by_directory(paths)
         .into_iter()
-        .map(|(directory, group)| {
-            let table = templates(configs.for_directory(&directory).config())?;
-            Ok((directory, group, table))
+        .map(|(directory, paths)| {
+            let config = configs.for_directory(&directory).config();
+            Ok(Group {
+                filenames: templates(&config.templates, "templates")?,
+                citation_keys: templates(&config.citation_keys, "citation-keys")?,
+                directory,
+                paths,
+            })
         })
         .collect()
 }
@@ -728,12 +756,12 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// moving the files when `apply` is set.
 ///
 /// `groups` is what [`preflight`] made of the run's paths: each
-/// directory the run spans, the files in it, and the template table its
+/// directory the run spans, the files in it, and the template tables its
 /// configuration compiled to. `journal` is where an applying run records
 /// its moves, and is `None` for a preview, which makes none.
 ///
 /// A group is worked under its own directory's configuration — its
-/// template, its collision policy, its bibliography destination — since
+/// templates, its collision policy, its bibliography destination — since
 /// a run spanning two trees is a run under two configurations.
 ///
 /// Within a group a file is finished before the next is opened: its
@@ -743,7 +771,7 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// and trails the group, being work about the whole of it rather than
 /// about any one file.
 fn rename_events<C: Cache>(
-    groups: &[(PathBuf, Vec<PathBuf>, TemplateTable)],
+    groups: &[Group],
     apply: bool,
     journal: Option<&dyn Journal>,
     configs: &Configs,
@@ -751,8 +779,8 @@ fn rename_events<C: Cache>(
     sink: &mut dyn Sink,
 ) {
     let at = (adapters.now)();
-    for (directory, group, templates) in groups {
-        let effective = configs.for_directory(directory);
+    for group in groups {
+        let effective = configs.for_directory(&group.directory);
         let config = bib_config(effective.config());
         // A run with neither a master file nor sidecars has nowhere to
         // write, and citing anyway would report records too sparse to
@@ -760,8 +788,8 @@ fn rename_events<C: Cache>(
         let cites = config.path.is_some() || config.sidecars;
 
         let mut planning = Planning::new(
-            directory,
-            templates,
+            &group.directory,
+            &group.filenames,
             effective.config().collision,
             adapters.filesystem,
         );
@@ -771,7 +799,7 @@ fn rename_events<C: Cache>(
         let mut applying = Applying::new(adapters.filesystem, apply);
         let mut cited = Citations::default();
 
-        for path in group {
+        for path in &group.paths {
             let Some(file) = resolved_record(path, effective, adapters, sink) else {
                 continue;
             };
@@ -795,7 +823,14 @@ fn rename_events<C: Cache>(
             sink.emit(event);
 
             if cites {
-                cited.add(current, file, templates, &config, adapters.bib_files, sink);
+                cited.add(
+                    current,
+                    file,
+                    &group.citation_keys,
+                    &config,
+                    adapters.bib_files,
+                    sink,
+                );
             }
         }
 
@@ -824,12 +859,12 @@ impl Citations {
         &mut self,
         path: PathBuf,
         file: FileRecord,
-        templates: &TemplateTable,
+        citation_keys: &TemplateTable,
         config: &BibConfig,
         files: &dyn BibFiles,
         sink: &mut dyn Sink,
     ) {
-        let (key, event) = write_sidecar(&path, &file, templates, config, files);
+        let (key, event) = write_sidecar(&path, &file, citation_keys, config, files);
         if let Some(event) = event {
             sink.emit(event);
         }
@@ -952,7 +987,7 @@ fn resolved_record<C: Cache>(
 /// Write the events `borax bib` produces for `groups` into `sink`.
 ///
 /// `groups` is what [`preflight`] made of the run's paths, as it is for
-/// [`rename_events`]: each directory, its files, and the template table
+/// [`rename_events`]: each directory, its files, and the template tables
 /// compiled for it. A file's verdict and its sidecar are adjacent, in the
 /// order the group gives its files, and the merge into the master `.bib`
 /// trails the group.
@@ -962,22 +997,22 @@ fn resolved_record<C: Cache>(
 /// destination is configured — a run that writes nowhere still reports
 /// what it resolved.
 fn bib_events<C: Cache>(
-    groups: &[(PathBuf, Vec<PathBuf>, TemplateTable)],
+    groups: &[Group],
     configs: &Configs,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
 ) {
-    for (directory, group, templates) in groups {
-        let effective = configs.for_directory(directory);
+    for group in groups {
+        let effective = configs.for_directory(&group.directory);
         let config = bib_config(effective.config());
         let mut cited = Citations::default();
 
-        for path in group {
+        for path in &group.paths {
             if let Some(file) = resolved_record(path, effective, adapters, sink) {
                 cited.add(
                     path.clone(),
                     file,
-                    templates,
+                    &group.citation_keys,
                     &config,
                     adapters.bib_files,
                     sink,

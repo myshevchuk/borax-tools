@@ -208,20 +208,60 @@ preprint `article`.
 Merging is per key, not per file, so a `.borax.toml` that sets only
 `templates.thesis` keeps the `default` it inherits from the global file.
 
+### Citation keys
+
+When borax writes bibliography output — the master `.bib` file, or a
+sidecar beside a file — each record needs a *citation key*, the name you
+type into a `\cite{...}`. Keys come from templates too, but from a table
+of their own, `[citation-keys]`, because the two settings have no reason
+to move together: you may want long, sortable file names and short keys.
+Changing how your files are named never changes how your works are
+cited.
+
+The table has the same shape as `[templates]`, uses the same template
+language, and is merged the same way. With no configuration, the key
+template is:
+
+```text
+[auth:lower][year]
+```
+
+so the 2024 paper by Smith renders the key `smith2024`, whatever
+`templates.default` happens to be. A record whose key would collide with
+one already in the master file gets a deterministic `a`, `b`, `c` suffix
+— `smith2024a` — and a record too sparse to render any key at all is
+reported as uncitable rather than given a made-up one.
+
+Override the default, or any entry type, the way you would a file-name
+template:
+
+```toml
+[citation-keys]
+default = "[auth:lower][year]"
+thesis  = "[auth:lower][year]phd"
+```
+
+A rendered key is stripped of whitespace and of the four characters a
+BibTeX key cannot carry (`,`, `{`, `}`, `%`), so a template that renders
+`Smith, J. 2024` yields the key `SmithJ.2024`.
+
 ### Errors are reported before any file is touched
 
 Templates are compiled when they are loaded — before the first file is
 processed — and an unknown field, an unknown filter, a bad regular
 expression, or a syntax error aborts the run then and there. A template
 is configuration, so a broken one is wrong for every file in the batch;
-there is nothing to be gained by discovering that once per file.
+there is nothing to be gained by discovering that once per file. Both
+tables are compiled, so a broken citation-key template stops the run
+just as a broken file-name template does.
 
-The message names the template and the offending token:
+The message names the table, the key, and the offending token:
 
 ```text
 templates.default: unknown filter "lwoer"
 templates.default: unknown field "titel"
 templates.default: template syntax error at byte 6: unclosed '['
+citation-keys.thesis: unknown field "titel"
 ```
 
 Rendering itself cannot fail. Once a template compiles, the same record

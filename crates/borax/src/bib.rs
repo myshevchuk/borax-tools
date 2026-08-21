@@ -65,21 +65,20 @@ const FORBIDDEN_IN_KEY: [char; 4] = [',', '{', '}', '%'];
 
 /// The citation key `record` is cited under.
 ///
-/// Rendered from `templates` exactly as a filename is, then stripped of
+/// Rendered from `citation_keys` then stripped of
 /// the characters a BibTeX key cannot carry — whitespace, and the
 /// comma, braces, and percent sign that end a key, open or close a
-/// group, or start a comment — so a work is cited under the same name its
-/// file is stored under. `hash` supplies the `sha1` field a template
-/// may use.
+/// group, or start a comment. `hash` supplies the `sha1` field a
+/// template may use.
 ///
 /// Returns `None` when the template renders nothing, or nothing that
 /// survives the stripping — a record too sparse to cite.
 pub fn citation_key(
     record: &Record,
     hash: Option<&ContentHash>,
-    templates: &TemplateTable,
+    citation_keys: &TemplateTable,
 ) -> Option<String> {
-    let key: String = templates
+    let key: String = citation_keys
         .render(&RenderInput {
             record,
             sha1: hash.map(ContentHash::as_str),
@@ -145,7 +144,7 @@ fn sidecar_is_ours(target: &Path, files: &dyn BibFiles) -> bool {
 /// does, and losing it does not undo the renames that preceded it.
 pub fn write_bib(
     resolved: &[(PathBuf, FileRecord)],
-    templates: &TemplateTable,
+    citation_keys: &TemplateTable,
     config: &BibConfig,
     files: &dyn BibFiles,
 ) -> Vec<Event> {
@@ -153,7 +152,7 @@ pub fn write_bib(
     let mut keyed = Vec::new();
 
     for (path, file) in resolved {
-        let (key, event) = write_sidecar(path, file, templates, config, files);
+        let (key, event) = write_sidecar(path, file, citation_keys, config, files);
         events.extend(event);
         if let Some(key) = key {
             keyed.push(Keyed {
@@ -188,11 +187,11 @@ pub fn write_bib(
 pub fn write_sidecar(
     path: &Path,
     file: &FileRecord,
-    templates: &TemplateTable,
+    citation_keys: &TemplateTable,
     config: &BibConfig,
     files: &dyn BibFiles,
 ) -> (Option<String>, Option<Event>) {
-    let Some(key) = citation_key(&file.record, file.hash.as_ref(), templates) else {
+    let Some(key) = citation_key(&file.record, file.hash.as_ref(), citation_keys) else {
         return (
             None,
             Some(Event::Skipped {

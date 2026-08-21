@@ -6,6 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use borax::bib::{BibConfig, BibFiles, citation_key, sidecar_path, write_bib};
+use borax::config::Config;
 use borax::event::{Event, SkipReason};
 use borax::pipeline::FileRecord;
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge, sidecar};
@@ -290,6 +291,49 @@ fn citation_key_matches_a_direct_template_render_when_nothing_needs_stripping() 
     let key = citation_key(&record, None, &templates);
 
     assert_eq!(key, Some(direct));
+}
+
+/// Spec scenario "Default key shape": a work by Smith published in 2024
+/// cites as `smith2024` under the built-in `citation-keys.default`
+/// template — the short shape a citation convention expects, not the
+/// long filename pattern `templates.default` carries.
+#[test]
+fn citation_key_under_the_built_in_default_cites_a_2024_smith_record_as_smith2024() {
+    let record = record("Smith", 2024, None);
+    let default_template = Config::default()
+        .citation_keys
+        .get("default")
+        .cloned()
+        .expect("Config::default() must carry a citation-keys default");
+    let templates = table(&default_template);
+
+    let key = citation_key(&record, None, &templates);
+
+    assert_eq!(key, Some("smith2024".to_string()));
+}
+
+/// Spec scenario "Per-entry-type key template": a citation-key override
+/// set for one entry type applies only to records of that type, and
+/// every other type still renders with the default.
+#[test]
+fn citation_key_uses_a_per_entry_type_override_only_for_that_type() {
+    let mut templates = table("[auth:lower][year]");
+    templates.insert(EntryType::Thesis, compile("[title]"));
+
+    let mut thesis = record("Smith", 2024, None);
+    thesis.entry_type = EntryType::Thesis;
+    thesis.title = Some("A Study of Borax".to_string());
+    let article = record("Smith", 2024, None);
+
+    assert_eq!(
+        citation_key(&thesis, None, &templates),
+        Some("AStudyofBorax".to_string())
+    );
+    assert_eq!(
+        citation_key(&article, None, &templates),
+        Some("smith2024".to_string()),
+        "an entry type with no override still falls back to the default"
+    );
 }
 
 // ---------------------------------------------------------------------

@@ -28,6 +28,20 @@ fn default_templates_holds_only_the_default_key_with_the_documented_pattern() {
     );
 }
 
+/// Citation keys are their own table, separate from the filename
+/// templates, and default to the short `[auth:lower][year]` shape a
+/// citation convention expects — not the long filename pattern.
+#[test]
+fn default_citation_keys_holds_only_the_default_key_with_the_documented_pattern() {
+    let config = Config::default();
+
+    assert_eq!(config.citation_keys.len(), 1);
+    assert_eq!(
+        config.citation_keys.get("default").map(String::as_str),
+        Some("[auth:lower][year]")
+    );
+}
+
 // The default is what borax has clients for, not every service it can
 // name: `SourceName::ALL` also lists the ones the dispatch table routes
 // to but no client exists for yet.
@@ -84,6 +98,10 @@ fn layer_from_toml_parses_a_full_document_into_the_expected_layer() {
         default = "[auth:lower][year]"
         thesis = "[auth:lower]_thesis"
 
+        [citation-keys]
+        default = "[auth:lower][year]"
+        thesis = "[auth:lower]_thesis_key"
+
         [rename]
         collision = "skip"
 
@@ -107,10 +125,15 @@ fn layer_from_toml_parses_a_full_document_into_the_expected_layer() {
     templates.insert("default".to_string(), "[auth:lower][year]".to_string());
     templates.insert("thesis".to_string(), "[auth:lower]_thesis".to_string());
 
+    let mut citation_keys = BTreeMap::new();
+    citation_keys.insert("default".to_string(), "[auth:lower][year]".to_string());
+    citation_keys.insert("thesis".to_string(), "[auth:lower]_thesis_key".to_string());
+
     assert_eq!(
         layer,
         Layer {
             templates: Some(templates),
+            citation_keys: Some(citation_keys),
             sources: Some(vec!["crossref".to_string(), "arxiv".to_string()]),
             mailto: Some("test@example.org".to_string()),
             rename: Some(RenameLayer {
@@ -145,6 +168,7 @@ fn layer_from_toml_setting_one_key_leaves_every_other_field_none() {
 
     assert_eq!(layer.mailto, Some("solo@example.org".to_string()));
     assert_eq!(layer.templates, None);
+    assert_eq!(layer.citation_keys, None);
     assert_eq!(layer.sources, None);
     assert_eq!(layer.rename, None);
     assert_eq!(layer.bib, None);
@@ -381,6 +405,7 @@ fn resolve_with_no_layers_gives_defaults_with_default_origin_everywhere() {
         "bib.duplicates",
         "bib.path",
         "bib.sidecars",
+        "citation-keys.default",
         "extraction.page-limit",
         "mailto",
         "network.cache",
@@ -588,6 +613,118 @@ fn directory_override_redefining_templates_default_wins_and_reports_its_own_orig
     );
 }
 
+// --- citation-key table merging ---
+
+#[test]
+fn citation_keys_table_merge_keeps_the_lower_layers_default_when_an_override_adds_thesis() {
+    let mut thesis_only = BTreeMap::new();
+    thesis_only.insert("thesis".to_string(), "[auth]_thesis".to_string());
+
+    let dir_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(dir_path.clone()),
+        Layer {
+            citation_keys: Some(thesis_only),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+    let config = effective.config();
+
+    assert_eq!(
+        config.citation_keys.get("default").map(String::as_str),
+        Some("[auth:lower][year]")
+    );
+    assert_eq!(
+        config.citation_keys.get("thesis").map(String::as_str),
+        Some("[auth]_thesis")
+    );
+
+    assert_eq!(
+        effective.origin("citation-keys.default"),
+        Some(&Origin::Default)
+    );
+    assert_eq!(
+        effective.origin("citation-keys.thesis"),
+        Some(&Origin::DirectoryFile(dir_path))
+    );
+}
+
+/// Spec scenario: "Citation-key override reported" — a configuration
+/// file redefining `citation-keys.default` wins, and its origin is
+/// reported as that file.
+#[test]
+fn directory_override_redefining_citation_keys_default_wins_and_reports_its_own_origin() {
+    let mut redefined = BTreeMap::new();
+    redefined.insert("default".to_string(), "[year]-[auth:lower]".to_string());
+
+    let dir_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(dir_path.clone()),
+        Layer {
+            citation_keys: Some(redefined),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+
+    assert_eq!(
+        effective
+            .config()
+            .citation_keys
+            .get("default")
+            .map(String::as_str),
+        Some("[year]-[auth:lower]")
+    );
+    assert_eq!(
+        effective.origin("citation-keys.default"),
+        Some(&Origin::DirectoryFile(dir_path))
+    );
+}
+
+/// The regression this change exists to prevent: `templates` and
+/// `citation-keys` are merged from separate layer fields, so redefining
+/// one leaves the other at its own default.
+#[test]
+fn overriding_templates_default_does_not_change_the_citation_keys_default() {
+    let mut redefined = BTreeMap::new();
+    redefined.insert("default".to_string(), "[year]-[auth]-long-form".to_string());
+
+    let layers = vec![(
+        Origin::Flag("templates".to_string()),
+        Layer {
+            templates: Some(redefined),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+
+    assert_eq!(
+        effective
+            .config()
+            .templates
+            .get("default")
+            .map(String::as_str),
+        Some("[year]-[auth]-long-form")
+    );
+    assert_eq!(
+        effective
+            .config()
+            .citation_keys
+            .get("default")
+            .map(String::as_str),
+        Some("[auth:lower][year]"),
+        "citation-keys.default must not move when templates.default does"
+    );
+    assert_eq!(
+        effective.origin("citation-keys.default"),
+        Some(&Origin::Default)
+    );
+}
+
 // --- value validation at resolve time ---
 
 #[test]
@@ -722,6 +859,7 @@ fn entries_are_ordered_by_key_and_cover_every_setting() {
             "bib.duplicates",
             "bib.path",
             "bib.sidecars",
+            "citation-keys.default",
             "extraction.page-limit",
             "mailto",
             "network.cache",
@@ -785,6 +923,40 @@ fn events_renders_a_non_default_origin_using_its_display_form() {
             key: "mailto".to_string(),
             value: "\"flag@example.org\"".to_string(),
             origin: Origin::Flag("mailto".to_string()).to_string(),
+        }
+    );
+}
+
+/// cli spec scenario "Citation-key override reported": a configuration
+/// file setting `citation-keys.default` is reported by `borax config`
+/// with that file as its origin.
+#[test]
+fn events_reports_a_citation_keys_override_with_its_file_origin() {
+    let config_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(config_path.clone()),
+        Layer {
+            citation_keys: Some(BTreeMap::from([(
+                "default".to_string(),
+                "[auth:lower][year]a".to_string(),
+            )])),
+            ..Layer::default()
+        },
+    )];
+    let effective = resolve(layers).unwrap();
+
+    let events = effective.events();
+    let event = events
+        .iter()
+        .find(|event| matches!(event, Event::ConfigSetting { key, .. } if key == "citation-keys.default"))
+        .unwrap_or_else(|| panic!("no ConfigSetting for citation-keys.default in {events:?}"));
+
+    assert_eq!(
+        *event,
+        Event::ConfigSetting {
+            key: "citation-keys.default".to_string(),
+            value: "\"[auth:lower][year]a\"".to_string(),
+            origin: Origin::DirectoryFile(config_path).to_string(),
         }
     );
 }

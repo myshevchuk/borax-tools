@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use borax::bib::BibFiles;
+use borax::bib::{BibFiles, citation_key};
 use borax::cache::{cleared_event, inspect, status_event};
 use borax::cli::{Cli, Command, Settings};
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
@@ -393,6 +393,17 @@ fn effective_with_default_template(template: &str) -> Effective {
     })
 }
 
+/// An [`Effective`] whose default citation-key template is `template` and
+/// which is otherwise the built-in defaults.
+fn effective_with_default_citation_key_template(template: &str) -> Effective {
+    effective_with(|layer| {
+        layer.citation_keys = Some(BTreeMap::from([(
+            "default".to_string(),
+            template.to_string(),
+        )]));
+    })
+}
+
 fn cli(command: Command, json: bool) -> Cli {
     Cli {
         command,
@@ -459,7 +470,7 @@ fn a_config_with_only_a_default_template_compiles_to_a_table_whose_default_rende
         ..borax::config::Config::default()
     };
 
-    let table = templates(&config).unwrap();
+    let table = templates(&config.templates, "templates").unwrap();
     let record = record_by("Smith", 2024, "10.1000/templates-default");
     let rendered = table.render(&RenderInput {
         record: &record,
@@ -479,7 +490,7 @@ fn a_specific_entry_type_overrides_the_default_and_other_types_still_use_it() {
         ..borax::config::Config::default()
     };
 
-    let table = templates(&config).unwrap();
+    let table = templates(&config.templates, "templates").unwrap();
 
     let mut thesis = record_by("Jones", 2020, "10.1000/templates-thesis");
     thesis.entry_type = EntryType::Thesis;
@@ -513,7 +524,7 @@ fn a_key_naming_no_entry_type_is_an_error_naming_the_offending_key() {
         ..borax::config::Config::default()
     };
 
-    let error = templates(&config).unwrap_err();
+    let error = templates(&config.templates, "templates").unwrap_err();
 
     assert_eq!(error.level, Level::Error);
     assert!(error.message.contains("journal-article"), "got {error:?}");
@@ -529,10 +540,119 @@ fn a_template_that_will_not_compile_is_an_error_mentioning_the_problem() {
         ..borax::config::Config::default()
     };
 
-    let error = templates(&config).unwrap_err();
+    let error = templates(&config.templates, "templates").unwrap_err();
 
     assert_eq!(error.level, Level::Error);
     assert!(error.message.contains("nonexistentfield"), "got {error:?}");
+}
+
+// ---------------------------------------------------------------------
+// templates: the citation-key table, compiled against its own prefix
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_config_with_only_a_default_citation_key_template_compiles_to_a_table_whose_default_renders_it()
+{
+    let config = borax::config::Config {
+        citation_keys: BTreeMap::from([("default".to_string(), "[auth:lower][year]".to_string())]),
+        ..borax::config::Config::default()
+    };
+
+    let table = templates(&config.citation_keys, "citation-keys").unwrap();
+    let record = record_by("Smith", 2024, "10.1000/citation-keys-default");
+
+    let key = citation_key(&record, None, &table);
+
+    assert_eq!(key, Some("smith2024".to_string()));
+}
+
+#[test]
+fn a_citation_key_override_for_one_entry_type_leaves_others_on_the_default() {
+    let config = borax::config::Config {
+        citation_keys: BTreeMap::from([
+            ("default".to_string(), "[auth:lower][year]".to_string()),
+            ("thesis".to_string(), "[title]".to_string()),
+        ]),
+        ..borax::config::Config::default()
+    };
+
+    let table = templates(&config.citation_keys, "citation-keys").unwrap();
+
+    let mut thesis = record_by("Jones", 2020, "10.1000/citation-keys-thesis");
+    thesis.entry_type = EntryType::Thesis;
+    thesis.title = Some("A Study of Borax".to_string());
+    let thesis_rendered = table.render(&RenderInput {
+        record: &thesis,
+        sha1: None,
+    });
+    assert_eq!(thesis_rendered, "A Study of Borax");
+
+    let mut book = record_by("Jones", 2020, "10.1000/citation-keys-book");
+    book.entry_type = EntryType::Book;
+    let book_rendered = table.render(&RenderInput {
+        record: &book,
+        sha1: None,
+    });
+    assert_eq!(
+        book_rendered, "jones2020",
+        "a type with no citation-key override still falls back to the default"
+    );
+}
+
+#[test]
+fn a_citation_key_naming_no_entry_type_is_an_error_naming_the_prefixed_key() {
+    let config = borax::config::Config {
+        citation_keys: BTreeMap::from([
+            ("default".to_string(), "[auth:lower][year]".to_string()),
+            // Not one of the eight variant names entry_type recognises.
+            ("journal-article".to_string(), "[title]".to_string()),
+        ]),
+        ..borax::config::Config::default()
+    };
+
+    let error = templates(&config.citation_keys, "citation-keys").unwrap_err();
+
+    assert_eq!(error.level, Level::Error);
+    assert!(
+        error.message.contains("citation-keys.journal-article"),
+        "expected the citation-keys prefix on the offending key, got {error:?}"
+    );
+}
+
+#[test]
+fn an_uncompilable_citation_key_template_is_an_error_naming_the_prefixed_key() {
+    let config = borax::config::Config {
+        citation_keys: BTreeMap::from([("default".to_string(), "[nonexistentfield]".to_string())]),
+        ..borax::config::Config::default()
+    };
+
+    let error = templates(&config.citation_keys, "citation-keys").unwrap_err();
+
+    assert_eq!(error.level, Level::Error);
+    assert!(
+        error.message.contains("citation-keys.default"),
+        "expected the citation-keys prefix on the offending key, got {error:?}"
+    );
+    assert!(error.message.contains("nonexistentfield"), "got {error:?}");
+}
+
+/// The regression this change exists to prevent, at the level the real
+/// pipeline compiles tables: a `templates.default` override reaches only
+/// the filename table, never the citation-key table compiled from
+/// `citation_keys`.
+#[test]
+fn changing_templates_default_does_not_change_the_compiled_citation_key_table() {
+    let config = borax::config::Config {
+        templates: BTreeMap::from([("default".to_string(), "[year]-[auth]-long-form".to_string())]),
+        ..borax::config::Config::default()
+    };
+
+    let citation_table = templates(&config.citation_keys, "citation-keys").unwrap();
+    let record = record_by("Smith", 2024, "10.1000/templates-independent");
+
+    let key = citation_key(&record, None, &citation_table);
+
+    assert_eq!(key, Some("smith2024".to_string()));
 }
 
 // ---------------------------------------------------------------------
@@ -1025,7 +1145,7 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let effective = effective_with(|layer| {
-        layer.templates = Some(BTreeMap::from([(
+        layer.citation_keys = Some(BTreeMap::from([(
             "default".to_string(),
             "[auth][year]".to_string(),
         )]));
@@ -1219,6 +1339,163 @@ fn bib_with_an_uncompilable_template_propagates_the_diagnostic() {
     .unwrap_err();
 
     assert_eq!(error.level, Level::Error);
+}
+
+// ---------------------------------------------------------------------
+// events_for: an uncompilable citation-key template propagates as a
+// Diagnostic, before any file is processed
+// ---------------------------------------------------------------------
+
+#[test]
+fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("events-for-rename-bad-citation-key-template"),
+        pdf_with_embedded_doi("10.1000/rename-bad-citation-key-template"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "Smith",
+            2024,
+            "10.1000/rename-bad-citation-key-template",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let journal = FakeJournal::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_citation_key_template("[nonexistentfield]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: Some(&journal as &dyn Journal),
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+    };
+
+    let error = events_for(
+        &Command::Rename {
+            paths: vec![path],
+            apply: false,
+        },
+        &Configs::uniform(effective.clone()),
+        &adapters,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.level, Level::Error);
+    assert!(
+        error.message.contains("citation-keys"),
+        "expected the citation-keys prefix, got {error:?}"
+    );
+}
+
+#[test]
+fn bib_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("events-for-bib-bad-citation-key-template"),
+        pdf_with_embedded_doi("10.1000/bib-bad-citation-key-template"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "Smith",
+            2024,
+            "10.1000/bib-bad-citation-key-template",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_citation_key_template("[nonexistentfield]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+    };
+
+    let error = events_for(
+        &Command::Bib { paths: vec![path] },
+        &Configs::uniform(effective.clone()),
+        &adapters,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.level, Level::Error);
+    assert!(
+        error.message.contains("citation-keys"),
+        "expected the citation-keys prefix, got {error:?}"
+    );
+}
+
+/// cli spec scenario "Citation-key key names no entry type": a
+/// `citation-keys` key matching no entry type aborts the run as a
+/// configuration error naming the key, before any file is processed —
+/// the filename `templates` table stays fine, so this failure can only
+/// come from the citation-key table also being compiled during preflight.
+#[test]
+fn bib_with_a_citation_key_naming_no_entry_type_propagates_the_diagnostic() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("events-for-bib-citation-key-bad-entry-type"),
+        pdf_with_embedded_doi("10.1000/bib-citation-key-bad-entry-type"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "Smith",
+            2024,
+            "10.1000/bib-citation-key-bad-entry-type",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.citation_keys = Some(BTreeMap::from([
+            ("default".to_string(), "[auth:lower][year]".to_string()),
+            ("journal-article".to_string(), "[title]".to_string()),
+        ]));
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+    };
+
+    let error = events_for(
+        &Command::Bib { paths: vec![path] },
+        &Configs::uniform(effective.clone()),
+        &adapters,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.level, Level::Error);
+    assert!(
+        error.message.contains("citation-keys.journal-article"),
+        "got {error:?}"
+    );
 }
 
 // ---------------------------------------------------------------------

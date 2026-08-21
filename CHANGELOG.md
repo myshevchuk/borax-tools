@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Citation keys now come from their own `[citation-keys]` table
+  instead of the `[templates]` table that names files, and their
+  built-in default is `[auth:lower][year]`, so a 2024 paper by Smith is
+  cited as `smith2024`. Keys written by 0.1.0 were the rendered file
+  name with whitespace and `,{}%` removed, so this release cites the
+  same works under different keys; setting `citation-keys.default` to
+  your file-name template restores the old keys exactly. Changing how
+  files are named no longer changes how works are cited.
 - A run reports as it goes. Each event is written when it happens
   rather than after the run has ended, so a network-bound run shows
   progress while it is bound and a slow run is distinguishable from a

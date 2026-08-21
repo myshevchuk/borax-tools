@@ -44,6 +44,12 @@ pub struct Config {
     /// is [`borax_core::template::TemplateTable`]'s job and reports its
     /// own errors.
     pub templates: BTreeMap<String, String>,
+    /// Citation-key templates by entry type, in the same shape as
+    /// `templates` and read by the same engine, but separate from it:
+    /// how a work is cited and how its file is named move
+    /// independently. `default` is always present, for the reason it is
+    /// under `templates`.
+    pub citation_keys: BTreeMap<String, String>,
     /// Which services may be asked. The order within it carries no
     /// meaning: which candidate an identifier goes to first is
     /// [`borax_sources::dispatch::priority`]'s decision, and this set
@@ -76,7 +82,8 @@ impl Default for Config {
     /// run with no configuration file, environment, or flags uses.
     ///
     /// `templates` holds `default` alone, as
-    /// `[auth:lower][year]_[shorttitle3:camel]`; every service borax
+    /// `[auth:lower][year]_[shorttitle3:camel]`, and `citation_keys`
+    /// holds `default` alone, as `[auth:lower][year]`; every service borax
     /// speaks to is enabled ([`SourceName::SUPPORTED`]); there is no
     /// contact address, no master `.bib`, and no sidecars. Concurrency
     /// and pacing take [`borax_sources::pace::DEFAULT_CONCURRENCY`] and
@@ -88,6 +95,10 @@ impl Default for Config {
             templates: BTreeMap::from([(
                 "default".to_string(),
                 "[auth:lower][year]_[shorttitle3:camel]".to_string(),
+            )]),
+            citation_keys: BTreeMap::from([(
+                "default".to_string(),
+                "[auth:lower][year]".to_string(),
             )]),
             sources: SourceName::SUPPORTED.to_vec(),
             mailto: None,
@@ -115,6 +126,8 @@ impl Default for Config {
 pub struct Layer {
     #[serde(default)]
     pub templates: Option<BTreeMap<String, String>>,
+    #[serde(default, rename = "citation-keys")]
+    pub citation_keys: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub sources: Option<Vec<String>>,
     #[serde(default)]
@@ -267,6 +280,9 @@ impl Effective {
         for (entry_type, template) in &self.config.templates {
             rendered.insert(format!("templates.{entry_type}"), quote(template));
         }
+        for (entry_type, template) in &self.config.citation_keys {
+            rendered.insert(format!("citation-keys.{entry_type}"), quote(template));
+        }
 
         rendered
             .into_iter()
@@ -328,9 +344,9 @@ struct Setting {
 
 /// Every single-valued setting, in key order.
 ///
-/// `templates` is absent because its keys are open-ended: it is merged
-/// and rendered per entry type instead, and cannot be addressed by one
-/// environment variable.
+/// `templates` and `citation-keys` are absent because their keys are
+/// open-ended: they are merged and rendered per entry type instead, and
+/// cannot be addressed by one environment variable.
 const SETTINGS: &[Setting] = &[
     Setting {
         key: "bib.duplicates",
@@ -540,8 +556,9 @@ pub fn layer_from_toml(text: &str, path: &Path) -> Result<Layer, ConfigError> {
 /// no key is [`ConfigError::UnknownEnv`].
 ///
 /// Values are parsed as their setting's type: `sources` is a
-/// comma-separated list, booleans are `true`/`false`, and
-/// `templates` cannot be set this way (its keys are open-ended).
+/// comma-separated list, booleans are `true`/`false`, and `templates`
+/// and `citation-keys` cannot be set this way (their keys are
+/// open-ended).
 pub fn layer_from_env<I, N, V>(vars: I) -> Result<Layer, ConfigError>
 where
     I: IntoIterator<Item = (N, V)>,
@@ -584,8 +601,10 @@ where
 /// `.borax.toml` that sets only the collision policy leaves every other
 /// setting to the layers below it.
 ///
-/// The `templates` table merges per entry type for the same reason —
-/// an override file defining `thesis` keeps the global `default`.
+/// The `templates` and `citation-keys` tables merge per entry type for
+/// the same reason — an override file defining `thesis` keeps the
+/// global `default` — and merge separately from each other, so a layer
+/// that renames files differently cites works the same way.
 pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
     let mut config = Config::default();
     let mut origins: BTreeMap<Key, Origin> = SETTINGS
@@ -596,6 +615,12 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
                 .templates
                 .keys()
                 .map(|entry_type| (format!("templates.{entry_type}"), Origin::Default)),
+        )
+        .chain(
+            config
+                .citation_keys
+                .keys()
+                .map(|entry_type| (format!("citation-keys.{entry_type}"), Origin::Default)),
         )
         .collect();
 
@@ -610,6 +635,11 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
         for (entry_type, template) in layer.templates.take().unwrap_or_default() {
             origins.insert(format!("templates.{entry_type}"), origin.clone());
             config.templates.insert(entry_type, template);
+        }
+
+        for (entry_type, template) in layer.citation_keys.take().unwrap_or_default() {
+            origins.insert(format!("citation-keys.{entry_type}"), origin.clone());
+            config.citation_keys.insert(entry_type, template);
         }
     }
 

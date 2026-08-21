@@ -66,11 +66,6 @@ finding it first.
 
 ## Open decisions
 
-- **Citation-key generation.** The same template engine will produce
-  citation keys, but the default key scheme was never settled, so
-  `bib-output` currently derives keys without a specified default that a
-  user can rely on or override by entry type. Settle this before anyone
-  depends on the keys being stable across versions.
 - **How `rename` could ever honour `concurrency`.** `resolve` runs its
   batch on a bounded pool; `rename` is serial, and
   `stream-per-file-events` made that harder to change by choosing live
