@@ -22,8 +22,9 @@ that order of scrutiny but with error-free winning any conflict.
 - Canonical record model is a CSL-JSON superset; BibTeX is an emission
   format, never the internal model.
 - Every subcommand emits a typed event stream; `--json` (JSON Lines) and
-  human output are two renderings of it. JSONL schemas are the public
-  integration contract and follow SemVer with the binary.
+  human output are two renderings of it. JSONL schemas are the intended
+  public integration contract, but they are not frozen: before `1.0.0`
+  they may change in any release (see `CLAUDE.md`).
 
 ## Development workflow
 
@@ -39,8 +40,9 @@ that order of scrutiny but with error-free winning any conflict.
 
 ## Conventions
 
-- Conventional Commits, 50/72; version and changelog discipline per Keep
-  a Changelog and SemVer (`0.y.z` until the stable surface exists).
+- Conventional Commits, 50/72; changelog discipline per Keep a
+  Changelog. Versions are `0.y.z` release counters and promise no
+  compatibility — `CLAUDE.md` is the authority on that.
 - License: MIT OR Apache-2.0. AGPL dependencies are not acceptable
   (this ruled out MuPDF as the PDF backend).
 - Network requests always identify the tool (User-Agent, configurable
