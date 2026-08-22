@@ -15,4 +15,5 @@ pub mod ledger;
 pub mod pipeline;
 pub mod renaming;
 pub mod run;
+pub mod runlog;
 pub mod session;

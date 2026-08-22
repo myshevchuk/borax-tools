@@ -21,6 +21,7 @@ use borax_core::content::ContentHash;
 use borax_core::ledger::Index;
 use borax_core::record::{EntryType, Record};
 use borax_core::template::{Template, TemplateTable};
+use borax_core::time::utc_basic;
 use borax_pdf::tiered::ExtractionConfig;
 use borax_sources::arxiv::ArxivClient;
 use borax_sources::cache::{Cache, Cached, MemoryCache};
@@ -409,13 +410,18 @@ pub struct Adapters<'a, C: Cache> {
     /// root to keep it in, or `None` when the system names no state
     /// directory either.
     pub state_root: Option<PathBuf>,
-    /// What an applied rename records as the time it happened.
+    /// What a run records as the time it happened.
     ///
-    /// Called once per run, not once per file: its value timestamps
-    /// every entry the run journals and, as a
-    /// [`RunId`](crate::journal::RunId), is what makes
-    /// them one run. `undo` reverts a run rather than a file, so entries
-    /// that moved together have to be identified together.
+    /// Asked once for the whole batch, never once per file: its value
+    /// timestamps every entry the run journals and admits and, as a
+    /// [`RunId`](crate::journal::RunId), is what makes them one run.
+    /// `undo` reverts a run rather than a file, so entries that moved
+    /// together have to be identified together.
+    ///
+    /// Naming the run's log is a second reading, taken before the batch
+    /// begins. Nothing joins a log to a run by its name — the log's
+    /// contents carry the run — so the two readings need not agree to
+    /// the second.
     pub now: fn() -> String,
 }
 
@@ -491,6 +497,14 @@ const DEFAULT_TEMPLATE: &str = "default";
 fn error(message: String) -> Diagnostic {
     Diagnostic {
         level: Level::Error,
+        message,
+    }
+}
+
+/// A warning [`Diagnostic`] carrying `message`.
+fn warning(message: String) -> Diagnostic {
+    Diagnostic {
+        level: Level::Warning,
         message,
     }
 }
@@ -1331,6 +1345,108 @@ impl Sink for Rendering<'_> {
     }
 }
 
+/// The terminal's sink with the run's log behind it: every event goes
+/// to the log as JSON before it goes wherever the terminal wants it.
+///
+/// The log is written in the versioned JSON Lines schema whatever
+/// format the terminal is in, so the record of a run is the same file
+/// whether the person watching it asked for prose or for JSON — and a
+/// `--json` run's log is its stdout, byte for byte.
+///
+/// Wrapping the terminal's sink rather than sitting beside it is what
+/// puts [`Event::RunStarted`] and [`Event::RunFinished`] in the log
+/// too: the framing is emitted through the outermost sink, and a log
+/// missing it would not be the stream it claims to be.
+///
+/// The file is unbuffered, so an event is on disk by the time the next
+/// one is decided. A write that fails is dropped, for
+/// [`Rendering`]'s reason turned around: a run that cannot record
+/// itself still has a person to report to.
+struct Logging<'a> {
+    terminal: Rendering<'a>,
+    log: Option<fs::File>,
+}
+
+impl Sink for Logging<'_> {
+    fn emit(&mut self, event: Event) {
+        if let Some(log) = &mut self.log {
+            let _ = writeln!(log, "{}", crate::event::json_line(&event));
+        }
+        self.terminal.emit(event);
+    }
+}
+
+/// What came of opening a run's log.
+enum Opened {
+    /// The file the run writes itself to, or `None` when it keeps no
+    /// log — the setting says so, or there is nowhere a log of this run
+    /// would belong.
+    Log(Option<fs::File>),
+    /// There was a log to write and it could not be opened.
+    /// `mandatory` is [`crate::runlog::Destination`]'s: when it is set,
+    /// the run is abandoned rather than run unrecorded.
+    Failed {
+        diagnostic: Diagnostic,
+        mandatory: bool,
+    },
+}
+
+/// A run-log failure, at the level its consequence deserves: an error
+/// when the run cannot go ahead without the log, a warning when losing
+/// the record is the whole of the damage.
+fn log_failure(mandatory: bool, message: String) -> Opened {
+    Opened::Failed {
+        diagnostic: match mandatory {
+            true => error(message),
+            false => warning(message),
+        },
+        mandatory,
+    }
+}
+
+/// Open the log `cli` calls for against `adapters`.
+///
+/// Where it goes and whether the run depends on it are
+/// [`crate::runlog::destination`]'s to say. What is decided here is
+/// only what to do about a destination that will not open, and the one
+/// case the placement rules express as a refusal: an applying rename
+/// with neither a collection nor a state directory has nowhere to
+/// record itself, and a rename nothing recorded is a rename `borax
+/// undo` cannot see.
+fn open_log<C: Cache>(cli: &Cli, configs: &Configs, adapters: &Adapters<C>) -> Opened {
+    let destination = crate::runlog::destination(
+        &cli.command,
+        applying(&cli.command),
+        configs.run().config().run_log,
+        &(adapters.now)(),
+        adapters.collection_root.as_deref(),
+        adapters.state_root.as_deref(),
+    );
+
+    let Some(destination) = destination else {
+        return match crate::runlog::mandatory(&cli.command) {
+            true => log_failure(
+                true,
+                "--apply needs somewhere to record the run so it can be undone, and this is \
+                 neither in a collection nor on a system that names a state directory"
+                    .to_string(),
+            ),
+            false => Opened::Log(None),
+        };
+    };
+
+    match crate::runlog::create(&destination) {
+        Ok(file) => Opened::Log(Some(file)),
+        Err(failure) => log_failure(
+            destination.mandatory,
+            format!(
+                "the run log \"{}\" could not be created: {failure}",
+                destination.path.display()
+            ),
+        ),
+    }
+}
+
 /// Carry out `cli` against `adapters`, writing to `streams`.
 ///
 /// The stream always opens with [`Event::RunStarted`] and closes with
@@ -1346,6 +1462,11 @@ impl Sink for Rendering<'_> {
 /// was attempted, so there is no event stream to close — which is why
 /// everything that can fail is settled before the first event rather
 /// than as the run goes.
+///
+/// The run's log is created before the first event, so an applying run
+/// that cannot record itself is refused with `streams.out` untouched
+/// and nothing moved. A log the run does not depend on failing to open
+/// is a warning on `streams.err`, and the run goes on unrecorded.
 ///
 /// What [`preflight`] has to say about the ledger goes to `streams.err`
 /// too, and the run goes ahead: a ledger that could not be read costs
@@ -1378,10 +1499,31 @@ pub fn dispatch<C: Cache>(
         let _ = writeln!(streams.err, "{warning}");
     }
 
-    let mut sink = Rendering {
-        format: cli.format(),
-        out: streams.out,
-        counts: Counts::default(),
+    // Before the first event and so before any file is touched: an
+    // applying run whose log cannot be created is a run that would move
+    // files it could not record, and it is refused while there is still
+    // nothing to regret.
+    let log = match open_log(cli, configs, adapters) {
+        Opened::Log(log) => log,
+        Opened::Failed {
+            diagnostic,
+            mandatory,
+        } => {
+            let _ = writeln!(streams.err, "{diagnostic}");
+            if mandatory {
+                return Outcome::Fatal;
+            }
+            None
+        }
+    };
+
+    let mut sink = Logging {
+        terminal: Rendering {
+            format: cli.format(),
+            out: streams.out,
+            counts: Counts::default(),
+        },
+        log,
     };
     sink.emit(Event::RunStarted {
         command: cli.command.name().to_string(),
@@ -1394,7 +1536,7 @@ pub fn dispatch<C: Cache>(
     // reports is the body's totals and nothing else: the framing events
     // are about the run rather than about a file, and `Counts::observe`
     // leaves them out either way.
-    let counts = sink.counts;
+    let counts = sink.terminal.counts;
     sink.emit(Event::RunFinished { counts });
 
     if let Some(warning) = discovered {
@@ -1600,18 +1742,23 @@ fn expanded(command: &Command) -> Command {
     }
 }
 
-/// The time a real run records for the moves it journals: milliseconds
-/// since the Unix epoch, in decimal.
+/// The time a real run stamps its records with: the current UTC
+/// instant in ISO 8601 basic form ([`borax_core::time::utc_basic`]).
 ///
-/// Two runs of the same binary a millisecond apart read differently,
-/// which is what [`Adapters::now`] needs of the value to make one run's
-/// entries tell themselves from another's. A clock reading before the
-/// epoch reports zero rather than ending the run.
+/// Legible in a ledger entry, sortable as a string, and legal as part
+/// of a filename on every platform — which it has to be, since a run
+/// log is named after it.
+///
+/// Two runs of the same binary within one second read the same, so what
+/// [`Adapters::now`] promises of the value — that one run's records
+/// tell themselves from another's — holds only down to the second. A
+/// clock reading before the epoch reports the epoch rather than ending
+/// the run.
 fn timestamp() -> String {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(since) => since.as_millis().to_string(),
-        Err(_) => "0".to_string(),
-    }
+    utc_basic(match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(since) => since.as_millis(),
+        Err(_) => 0,
+    })
 }
 
 /// The response cache a real run reads and writes.

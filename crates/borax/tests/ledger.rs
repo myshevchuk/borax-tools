@@ -458,6 +458,24 @@ fn effective_with_default_template(template: &str) -> borax::config::Effective {
     })
 }
 
+/// [`effective_with_default_template`] with the run log switched off.
+///
+/// These fixtures use `collection_root: Some("/lib")` as a stand-in
+/// collection that is never actually on disk — fine for a `Ledger`
+/// fake, which never touches it, but a real path an optional run log
+/// would now try to write under. Turning the run log off keeps these
+/// tests' stderr assertions about the ledger's own warnings, undiluted
+/// by an unrelated "could not write the run log" one.
+fn effective_with_default_template_and_no_run_log(template: &str) -> borax::config::Effective {
+    effective_with(|layer| {
+        layer.run_log = Some(false);
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            template.to_string(),
+        )]));
+    })
+}
+
 /// An [`borax::config::Effective`] built from a single layer, for tests
 /// that need to steer one or two settings away from the built-in
 /// defaults, following the shape of the one in `dispatch.rs`.
@@ -1336,7 +1354,7 @@ fn a_stale_duplicate_warns_that_the_ledger_holds_stale_entries() {
         index: Index::build(&[entry("Gone.pdf", "stale-warns")]),
         warning: None,
     });
-    let effective = effective_with_default_template("[auth][year]");
+    let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
         library: &library,
         sources: &sources,
@@ -1421,7 +1439,9 @@ fn a_live_duplicate_emits_no_stale_warning() {
         index: Index::build(&[entry("Smith2024.pdf", "live-dup-no-warning")]),
         warning: None,
     });
-    let effective = resolve(Vec::new()).unwrap();
+    let effective = effective_with(|layer| {
+        layer.run_log = Some(false);
+    });
     let adapters = Adapters {
         library: &library,
         sources: &sources,
@@ -1486,7 +1506,7 @@ fn no_match_emits_no_stale_warning() {
         index: Index::build(&[entry("Unrelated.pdf", "unrelated-seed")]),
         warning: None,
     });
-    let effective = effective_with_default_template("[auth][year]");
+    let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
         library: &library,
         sources: &sources,
@@ -1562,7 +1582,7 @@ fn several_stale_duplicates_in_one_run_still_produce_exactly_one_warning() {
         ]),
         warning: None,
     });
-    let effective = effective_with_default_template("[auth][year]");
+    let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
         library: &library,
         sources: &sources,
@@ -1920,7 +1940,7 @@ fn an_absent_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
         index: Index::build(&[]),
         warning: Some(LedgerWarning::Absent),
     });
-    let effective = effective_with_default_template("[auth][year]");
+    let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
         library: &library,
         sources: &sources,
@@ -1998,7 +2018,7 @@ fn an_unparsable_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
         index: Index::build(&[]),
         warning: Some(LedgerWarning::Unparsable(Unparsable { line: 3 })),
     });
-    let effective = effective_with_default_template("[auth][year]");
+    let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
         library: &library,
         sources: &sources,

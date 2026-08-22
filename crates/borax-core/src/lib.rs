@@ -11,3 +11,4 @@ pub mod record;
 pub mod rename;
 pub mod sanitize;
 pub mod template;
+pub mod time;

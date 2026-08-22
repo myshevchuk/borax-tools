@@ -51,13 +51,13 @@ TDD throughout: red test first for every pure behaviour.
 
 ## 3. Run logs (borax)
 
-- [ ] 3.1 Tests + implementation: run-log writer persisting the event
+- [x] 3.1 Tests + implementation: run-log writer persisting the event
       stream to `<UTC>-<command>-<dry|apply>.jsonl`; equality with the
       `--json` stream
-- [ ] 3.2 Tests + implementation: mandatory apply-log path — created
+- [x] 3.2 Tests + implementation: mandatory apply-log path — created
       and plan-events flushed before first rename; abort-before-mutation
       when unwritable; `--no-run-log` affects dry runs only
-- [ ] 3.3 Tests + implementation: XDG state fallback outside a
+- [x] 3.3 Tests + implementation: XDG state fallback outside a
       collection, discoverable by undo
 
 ## 4. Undo rewiring (borax), replacing the shipped journal

@@ -52,15 +52,16 @@ finding it first.
   Named out of scope in the `add-core-pipeline` proposal. Today such a
   file is reported unresolvable and skipped, which is correct but leaves
   a class of documents borax cannot help with.
-- **Run logs, and the journal they replace.** The
-  `change/add-ledger-and-run-logs` branch carries the design and four
-  spec deltas, and the ledger half of it is now built: the pure core,
-  the on-disk adapter, and the wiring that makes `rename` check every
-  file against the collection's ledger and record what it admits. Run
-  logs are not built, so the journal is still what `borax undo` reads
-  and the `--no-run-log` flag is accepted but does nothing. The change
-  imports ideas from the `accession.py` prototype with a critique
-  recorded in its `design.md`.
+- **The journal's removal.** The `change/add-ledger-and-run-logs`
+  branch has built the ledger and the run logs: the pure ledger core,
+  the on-disk adapter, `borax ledger rebuild`, duplicate checking in
+  `rename`, and a run log persisting each run's event stream, mandatory
+  for `rename --apply` and falling back to the XDG state directory
+  outside a collection. What remains is group 4 — pointing `borax undo`
+  at the latest apply-run log and deleting `journal.rs`. Until then a
+  run writes both records, and the journal is still what `undo` reads.
+  The change imports ideas from the `accession.py` prototype with a
+  critique recorded in its `design.md`.
 - **Everything the design names as a later change**: no library index,
   search or watch mode; no OCR or interactive candidate picker; no XMP
   write-back, Zotero interop or Emacs package; no bibliography format

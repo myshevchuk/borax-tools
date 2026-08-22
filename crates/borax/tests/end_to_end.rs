@@ -258,7 +258,11 @@ fn run_the_batch() -> Ran {
             now: || "e2e-run".to_string(),
             ledger: None,
             collection_root: None,
-            state_root: None,
+            // This apply run's mandatory run log needs somewhere to
+            // land now that there is no collection root; `state`
+            // already stands in for the XDG state directory for the
+            // journal above, so it does the same job here.
+            state_root: Some(state.path().to_path_buf()),
         },
         &mut Streams {
             out: &mut out,

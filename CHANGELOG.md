@@ -36,6 +36,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted or moved. The new ledger replaces the old one in a single
   atomic write, leaving the previous one intact if the rebuild cannot
   finish.
+- Every run can now leave a record of itself. A run log is the same
+  versioned event stream `--json` prints, written to
+  `.borax/runs/<UTC-timestamp>-<command>-<dry|apply>.jsonl`, so a
+  preview and the run that applied it sit next to each other in a
+  listing and a directory of them sorts by time. The log is written
+  whichever output format the terminal got, since the format chooses
+  what you read, not what is recorded. `--no-run-log` suppresses it,
+  and a log that cannot be written warns without failing the run —
+  except for `borax rename --apply`, whose log is created before the
+  first file moves and whose failure stops the run while every file
+  still has its original name. An applying rename outside any
+  collection writes that log under the XDG state directory instead, so
+  a one-off rename in a downloads directory stays recoverable.
 
 ### Changed
 
