@@ -79,6 +79,14 @@ pub struct Config {
     pub sidecars: bool,
     /// Whether to read and write the on-disk response cache.
     pub cache: bool,
+    /// Whether the collection's ledger is consulted for duplicates and
+    /// added to by an applied run. Off means the run keeps no
+    /// accounting and reports none missing.
+    pub ledger: bool,
+    /// Whether a run writes its event stream to a run log. An applying
+    /// run writes one regardless, since that log is what `borax undo`
+    /// reads; this setting is what a preview run obeys.
+    pub run_log: bool,
 }
 
 impl Default for Config {
@@ -94,7 +102,8 @@ impl Default for Config {
     /// [`borax_sources::pace::DEFAULT_CONCURRENCY`] and
     /// [`borax_sources::pace::DEFAULT_MIN_INTERVAL`], extraction takes
     /// [`borax_pdf::tiered::DEFAULT_PAGE_LIMIT`], collisions are
-    /// suffixed, duplicate entries skipped, and the cache is on.
+    /// suffixed, duplicate entries skipped, and the cache, the ledger
+    /// and the run log are on.
     fn default() -> Config {
         Config {
             templates: BTreeMap::from([(
@@ -116,6 +125,8 @@ impl Default for Config {
             duplicates: DuplicatePolicy::Skip,
             sidecars: false,
             cache: true,
+            ledger: true,
+            run_log: true,
         }
     }
 }
@@ -140,6 +151,10 @@ pub struct Layer {
     pub mailto: Option<String>,
     #[serde(default, rename = "collection-root")]
     pub collection_root: Option<PathBuf>,
+    #[serde(default)]
+    pub ledger: Option<bool>,
+    #[serde(default, rename = "run-log")]
+    pub run_log: Option<bool>,
     #[serde(default)]
     pub rename: Option<RenameLayer>,
     #[serde(default)]
@@ -388,6 +403,11 @@ const SETTINGS: &[Setting] = &[
         render: |config| config.page_limit.to_string(),
     },
     Setting {
+        key: "ledger",
+        slot: |layer| Slot::Flag(&mut layer.ledger),
+        render: |config| config.ledger.to_string(),
+    },
+    Setting {
         key: "mailto",
         slot: |layer| Slot::Text(&mut layer.mailto),
         render: |config| match &config.mailto {
@@ -414,6 +434,11 @@ const SETTINGS: &[Setting] = &[
         key: "rename.collision",
         slot: |layer| Slot::Text(&mut layer.rename.get_or_insert_default().collision),
         render: |config| quote(collision_name(config.collision)),
+    },
+    Setting {
+        key: "run-log",
+        slot: |layer| Slot::Flag(&mut layer.run_log),
+        render: |config| config.run_log.to_string(),
     },
     Setting {
         key: "sources",
@@ -671,6 +696,12 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
     }
     if let Some(collection_root) = winning.collection_root {
         config.collection_root = Some(collection_root);
+    }
+    if let Some(ledger) = winning.ledger {
+        config.ledger = ledger;
+    }
+    if let Some(run_log) = winning.run_log {
+        config.run_log = run_log;
     }
     if let Some(names) = winning.sources {
         let mut sources = Vec::with_capacity(names.len());

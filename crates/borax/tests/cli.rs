@@ -707,3 +707,175 @@ fn cache_and_no_cache_together_is_a_parse_error() {
     let result = <Cli as Parser>::try_parse_from(["borax", "--cache", "--no-cache", "undo"]);
     assert!(result.is_err(), "got {result:?}");
 }
+
+// ---------------------------------------------------------------------
+// flag_layers: --ledger / --no-ledger and --run-log / --no-run-log
+//
+// design "Config hardening": "Every config-settable boolean flag has an
+// auto-generated --no-* negation" — the ledger and run-log booleans this
+// change adds follow the same two-flag shape as sidecars and cache.
+// ---------------------------------------------------------------------
+
+#[test]
+fn ledger_alone_sets_ledger_true() {
+    let layers = flag_layers(&parse(&["--ledger", "undo"]).settings);
+
+    assert_eq!(
+        layers,
+        vec![(
+            Origin::Flag("ledger".to_string()),
+            Layer {
+                ledger: Some(true),
+                ..Layer::default()
+            },
+        )],
+        "got {layers:?}"
+    );
+}
+
+#[test]
+fn no_ledger_alone_sets_ledger_false() {
+    let layers = flag_layers(&parse(&["--no-ledger", "undo"]).settings);
+
+    assert_eq!(
+        layers,
+        vec![(
+            Origin::Flag("no-ledger".to_string()),
+            Layer {
+                ledger: Some(false),
+                ..Layer::default()
+            },
+        )],
+        "got {layers:?}"
+    );
+}
+
+#[test]
+fn ledger_and_no_ledger_together_is_a_parse_error() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "--ledger", "--no-ledger", "undo"]);
+    assert!(result.is_err(), "got {result:?}");
+}
+
+#[test]
+fn run_log_alone_sets_run_log_true() {
+    let layers = flag_layers(&parse(&["--run-log", "undo"]).settings);
+
+    assert_eq!(
+        layers,
+        vec![(
+            Origin::Flag("run-log".to_string()),
+            Layer {
+                run_log: Some(true),
+                ..Layer::default()
+            },
+        )],
+        "got {layers:?}"
+    );
+}
+
+#[test]
+fn no_run_log_alone_sets_run_log_false() {
+    let layers = flag_layers(&parse(&["--no-run-log", "undo"]).settings);
+
+    assert_eq!(
+        layers,
+        vec![(
+            Origin::Flag("no-run-log".to_string()),
+            Layer {
+                run_log: Some(false),
+                ..Layer::default()
+            },
+        )],
+        "got {layers:?}"
+    );
+}
+
+#[test]
+fn run_log_and_no_run_log_together_is_a_parse_error() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "--run-log", "--no-run-log", "undo"]);
+    assert!(result.is_err(), "got {result:?}");
+}
+
+// ---------------------------------------------------------------------
+// the CLI overrides a configured ledger/run-log value in both directions
+// ---------------------------------------------------------------------
+
+#[test]
+fn no_ledger_flag_overrides_a_configured_ledger_true() {
+    let settings = parse(&["--no-ledger", "undo"]).settings;
+    let file_layer = layer_from_toml("ledger = true", Path::new("/config.toml")).unwrap();
+
+    let mut layers = vec![(
+        Origin::GlobalFile(PathBuf::from("/config.toml")),
+        file_layer,
+    )];
+    layers.extend(flag_layers(&settings));
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(!effective.config().ledger);
+    assert_eq!(
+        effective.origin("ledger"),
+        Some(&Origin::Flag("no-ledger".to_string()))
+    );
+}
+
+#[test]
+fn ledger_flag_overrides_a_configured_ledger_false() {
+    let settings = parse(&["--ledger", "undo"]).settings;
+    let file_layer = layer_from_toml("ledger = false", Path::new("/config.toml")).unwrap();
+
+    let mut layers = vec![(
+        Origin::GlobalFile(PathBuf::from("/config.toml")),
+        file_layer,
+    )];
+    layers.extend(flag_layers(&settings));
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(effective.config().ledger);
+    assert_eq!(
+        effective.origin("ledger"),
+        Some(&Origin::Flag("ledger".to_string()))
+    );
+}
+
+#[test]
+fn no_run_log_flag_overrides_a_configured_run_log_true() {
+    let settings = parse(&["--no-run-log", "undo"]).settings;
+    let file_layer = layer_from_toml("run-log = true", Path::new("/config.toml")).unwrap();
+
+    let mut layers = vec![(
+        Origin::GlobalFile(PathBuf::from("/config.toml")),
+        file_layer,
+    )];
+    layers.extend(flag_layers(&settings));
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(!effective.config().run_log);
+    assert_eq!(
+        effective.origin("run-log"),
+        Some(&Origin::Flag("no-run-log".to_string()))
+    );
+}
+
+#[test]
+fn run_log_flag_overrides_a_configured_run_log_false() {
+    let settings = parse(&["--run-log", "undo"]).settings;
+    let file_layer = layer_from_toml("run-log = false", Path::new("/config.toml")).unwrap();
+
+    let mut layers = vec![(
+        Origin::GlobalFile(PathBuf::from("/config.toml")),
+        file_layer,
+    )];
+    layers.extend(flag_layers(&settings));
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(effective.config().run_log);
+    assert_eq!(
+        effective.origin("run-log"),
+        Some(&Origin::Flag("run-log".to_string()))
+    );
+}

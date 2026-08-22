@@ -256,6 +256,9 @@ fn run_the_batch() -> Ran {
             bib_files: &RealBibFiles,
             cache_root: None,
             now: || "e2e-run".to_string(),
+            ledger: None,
+            collection_root: None,
+            state_root: None,
         },
         &mut Streams {
             out: &mut out,

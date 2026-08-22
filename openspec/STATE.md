@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-08-19, when `stream-per-file-events` landed.
+Last reviewed: 2026-08-22, when the ledger was wired into `rename`.
 
 ## What is built
 
@@ -52,12 +52,15 @@ finding it first.
   Named out of scope in the `add-core-pipeline` proposal. Today such a
   file is reported unresolvable and skipped, which is correct but leaves
   a class of documents borax cannot help with.
-- **The ledger and run logs.** Designed in full on the
-  `change/add-ledger-and-run-logs` branch — proposal, design and four
-  spec deltas — with no implementation behind it. It replaces the
-  journal with a JSONL ledger and unifies the run log, and it imports
-  ideas from the `accession.py` prototype with a critique recorded in
-  its `design.md`.
+- **Run logs, and the journal they replace.** The
+  `change/add-ledger-and-run-logs` branch carries the design and four
+  spec deltas, and the ledger half of it is now built: the pure core,
+  the on-disk adapter, and the wiring that makes `rename` check every
+  file against the collection's ledger and record what it admits. Run
+  logs are not built, so the journal is still what `borax undo` reads
+  and the `--no-run-log` flag is accepted but does nothing. The change
+  imports ideas from the `accession.py` prototype with a critique
+  recorded in its `design.md`.
 - **Everything the design names as a later change**: no library index,
   search or watch mode; no OCR or interactive candidate picker; no XMP
   write-back, Zotero interop or Emacs package; no bibliography format
@@ -82,6 +85,13 @@ finding it first.
   path.
 - **Whether `pdfium` is ever worth it.** See above; the decision is
   evidence-gated rather than open in the usual sense.
+- **Whether a boolean and its `--no-` form conflict or the last wins.**
+  Shipped `--cache`/`--no-cache` and `--sidecars`/`--no-sidecars` reject
+  an invocation giving both; the `cli` spec delta on the ledger branch
+  says the last one given wins, and `--ledger`/`--run-log` were built to
+  the shipped convention so all four behave alike. Settling it either
+  rewords the spec or changes v0.1.0 public surface, so it is a decision
+  rather than a bug.
 
 ## Live risks
 

@@ -9,6 +9,7 @@
 //! filesystem as arguments, and one supplying the real ones. The first
 //! is what tests use; the second is what the binary calls.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borax_core::content::ContentHash;
+use borax_core::ledger::Index;
 use borax_core::record::{EntryType, Record};
 use borax_core::template::{Template, TemplateTable};
 use borax_pdf::tiered::ExtractionConfig;
@@ -38,8 +40,10 @@ use crate::config::{
 };
 use crate::event::{Counts, Diagnostic, Event, Format, Level, render};
 use crate::journal::{Entry, FileJournal, Journal, RunId, undo_last};
+use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
+    resolve_file_checking_ledger,
 };
 use crate::renaming::{Applying, Filesystem, LogFailure, MoveLog, Planning, RealFilesystem};
 use crate::session::{Outcome, outcome_for};
@@ -386,6 +390,25 @@ pub struct Adapters<'a, C: Cache> {
     /// The response cache's directory, or `None` when the system names
     /// no cache directory.
     pub cache_root: Option<PathBuf>,
+    /// The collection's record of what it has admitted — what the
+    /// duplicate checks are asked of, and where an applied admission is
+    /// appended — or `None` when the run is outside any collection and
+    /// there is none to keep.
+    ///
+    /// Whether it is touched at all is still the `ledger` setting's to
+    /// say; this only carries the one the run would touch.
+    pub ledger: Option<&'a dyn Ledger>,
+    /// The directory the run's `.borax/` accounting is anchored at, or
+    /// `None` when the run is outside any collection.
+    ///
+    /// A ledger entry's path is relative to it, so it is what turns an
+    /// entry into a path on this machine and a renamed file into an
+    /// entry.
+    pub collection_root: Option<PathBuf>,
+    /// Where an applying run's log goes when there is no collection
+    /// root to keep it in, or `None` when the system names no state
+    /// directory either.
+    pub state_root: Option<PathBuf>,
     /// What an applied rename records as the time it happened.
     ///
     /// Called once per run, not once per file: its value timestamps
@@ -541,6 +564,16 @@ pub enum Prepared<'a> {
         /// Where an applying rename records its moves. `None` for a
         /// preview and for `bib`, neither of which moves anything.
         journal: Option<&'a dyn Journal>,
+        /// What the collection has admitted already, keyed for the
+        /// duplicate checks. Empty whenever detection is off — the
+        /// setting says so, there is no collection, or the ledger could
+        /// not be read — so the checks run against it either way and
+        /// simply miss.
+        ledger: Index,
+        /// The one thing the run has to say about its ledger: that
+        /// there was none to read, or that what there was could not be
+        /// trusted. `None` when there was nothing to report.
+        warning: Option<Diagnostic>,
     },
 }
 
@@ -566,6 +599,12 @@ pub enum Prepared<'a> {
 /// network and leaves no trace. `borax cache` is the exception, and the
 /// third failure above is why: its whole work is a single event, and
 /// the work is the part that can fail.
+///
+/// A `rename` also reads the ledger here — once, before the first file,
+/// since every file in the batch is checked against the same entries.
+/// Nothing about it can refuse a run: whatever reading it had to say
+/// comes back as a [`Diagnostic`] alongside the groups, for the caller
+/// to write out, and the run proceeds with duplicate detection off.
 pub fn preflight<'a, C: Cache>(
     command: &Command,
     configs: &Configs,
@@ -602,9 +641,13 @@ pub fn preflight<'a, C: Cache>(
                 (true, journal) => journal,
                 (false, _) => None,
             };
+            let groups = compiled_groups(paths, configs)?;
+            let prepared = crate::ledger::prepare(configs.run().config().ledger, adapters.ledger);
             Ok(Prepared::Grouped {
-                groups: compiled_groups(paths, configs)?,
+                groups,
                 journal,
+                ledger: prepared.index,
+                warning: prepared.diagnostic,
             })
         }
         Command::Bib { paths } => Ok(Prepared::Grouped {
@@ -612,6 +655,10 @@ pub fn preflight<'a, C: Cache>(
             // A bibliography run moves nothing, so it has nothing to
             // record and needs no journal to record it in.
             journal: None,
+            // Nor does it admit anything, so it neither consults the
+            // ledger nor has cause to complain about not finding one.
+            ledger: Index::build(&[]),
+            warning: None,
         }),
     }
 }
@@ -649,34 +696,58 @@ fn compiled_groups(paths: &[PathBuf], configs: &Configs) -> Result<Vec<Group>, D
 /// so a reader watches a slow run make progress. Which command writes
 /// as it decides and which has to gather a batch first is the
 /// command's own contract.
+///
+/// Returns what the run has to say for itself once it is over, which
+/// only a `rename` has anything to fill in: the ledger turns out to
+/// hold entries for files that are no longer there. It is a
+/// [`Diagnostic`] rather than an event because it is about the ledger
+/// rather than about a file, and because it is only known when the last
+/// file has been checked.
 pub fn emit_events<C: Cache>(
     prepared: &Prepared<'_>,
     command: &Command,
     configs: &Configs,
     adapters: &Adapters<'_, C>,
     sink: &mut dyn Sink,
-) {
+) -> Option<Diagnostic> {
     match (command, prepared) {
         (Command::Config, _) => {
             for event in configs.run().events() {
                 sink.emit(event);
             }
+            None
         }
-        (Command::Cache { .. }, Prepared::Cache { report }) => sink.emit(report.clone()),
-        (Command::Resolve { paths }, _) => resolve_events(paths, configs, adapters, sink),
-        (Command::Rename { apply, .. }, Prepared::Grouped { groups, journal }) => {
-            rename_events(groups, *apply, *journal, configs, adapters, sink);
+        (Command::Cache { .. }, Prepared::Cache { report }) => {
+            sink.emit(report.clone());
+            None
         }
+        (Command::Resolve { paths }, _) => {
+            resolve_events(paths, configs, adapters, sink);
+            None
+        }
+        (
+            Command::Rename { apply, .. },
+            Prepared::Grouped {
+                groups,
+                journal,
+                ledger,
+                ..
+            },
+        ) => rename_events(groups, *apply, *journal, ledger, configs, adapters, sink),
         (Command::Bib { .. }, Prepared::Grouped { groups, .. }) => {
             bib_events(groups, configs, adapters, sink);
+            None
         }
-        (Command::Undo, _) => undo_events(adapters, sink),
+        (Command::Undo, _) => {
+            undo_events(adapters, sink);
+            None
+        }
         // A `Prepared` that does not go with the command could only
         // come of pairing one command's preflight with another's
         // emission, which no caller does: `events_for` and `dispatch`
         // both preflight the command they go on to emit. There is
         // nothing such a pair could report, so it reports nothing.
-        _ => {}
+        _ => None,
     }
 }
 
@@ -697,7 +768,10 @@ pub fn events_for<C: Cache>(
 ) -> Result<Vec<Event>, Diagnostic> {
     let prepared = preflight(command, configs, adapters)?;
     let mut events: Vec<Event> = Vec::new();
-    emit_events(&prepared, command, configs, adapters, &mut events);
+    // The stream is the whole of what this hands back, so a diagnostic
+    // about the run has nowhere to go here; [`dispatch`] is what writes
+    // one out.
+    let _ = emit_events(&prepared, command, configs, adapters, &mut events);
     Ok(events)
 }
 
@@ -765,11 +839,16 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// `groups` is what [`preflight`] made of the run's paths: each
 /// directory the run spans, the files in it, and the template tables its
 /// configuration compiled to. `journal` is where an applying run records
-/// its moves, and is `None` for a preview, which makes none.
+/// its moves, and is `None` for a preview, which makes none. `admitted`
+/// is what the collection has admitted already, which every file in the
+/// batch is checked against and which an applied move adds to.
 ///
 /// A group is worked under its own directory's configuration — its
 /// templates, its collision policy, its bibliography destination — since
-/// a run spanning two trees is a run under two configurations.
+/// a run spanning two trees is a run under two configurations. The
+/// ledger is the exception: it belongs to the collection the whole run
+/// sits in, so whether it is consulted at all is the run's own setting
+/// and not any one directory's.
 ///
 /// Within a group a file is finished before the next is opened: its
 /// verdict, the move planned or made for it, and any sidecar written
@@ -777,15 +856,51 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// gives its files. The merge into the master `.bib` is the exception
 /// and trails the group, being work about the whole of it rather than
 /// about any one file.
+///
+/// Returns a warning when any entry the run matched turned out to
+/// name a file that is no longer there. It comes back at the end
+/// rather than as an event because it is one fact about the ledger and
+/// not about the file that happened to reveal it — however many files
+/// find stale entries, the run says so once.
 fn rename_events<C: Cache>(
     groups: &[Group],
     apply: bool,
     journal: Option<&dyn Journal>,
+    admitted: &Index,
     configs: &Configs,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
-) {
+) -> Option<Diagnostic> {
     let at = (adapters.now)();
+    // Whether the ledger is in play at all: the setting says so, and
+    // the run is in a collection that has one.
+    let ledger = match configs.run().config().ledger {
+        true => adapters.ledger,
+        false => None,
+    };
+    let root = adapters.collection_root.clone().unwrap_or_default();
+    // `exists` is asked about a ledger entry that matched and about
+    // nothing else, so an answer of "not there" is exactly an entry
+    // that outlived its file. A file matching no entry never reaches
+    // the question, which is what keeps a plain miss from reading as
+    // staleness.
+    let stale = Cell::new(false);
+    let exists = |path: &Path| {
+        let present = is_present(adapters.filesystem, path);
+        stale.set(stale.get() || !present);
+        present
+    };
+    let collection = Collection {
+        ledger: admitted,
+        root: &root,
+        exists: &exists,
+    };
+    // A run with no ledger is resolved with no collection to check
+    // against rather than against an empty one, which is what keeps it
+    // from hashing every file a second time for a check that could only
+    // miss.
+    let checked = ledger.is_some().then_some(&collection);
+
     for group in groups {
         let effective = configs.for_directory(&group.directory);
         let config = bib_config(effective.config());
@@ -807,7 +922,7 @@ fn rename_events<C: Cache>(
         let mut cited = Citations::default();
 
         for path in &group.paths {
-            let Some(file) = resolved_record(path, effective, adapters, sink) else {
+            let Some(file) = resolved_record(path, effective, adapters, checked, sink) else {
                 continue;
             };
 
@@ -824,7 +939,14 @@ fn rename_events<C: Cache>(
             // than beside the one it has just lost, so where it lands is
             // where the move that just happened put it.
             let current = match &event {
-                Event::Renamed { target, .. } => target.clone(),
+                Event::Renamed { target, .. } => {
+                    // Only a move that happened is an admission: a
+                    // preview reports the same target and admits
+                    // nothing, which is why this reads the event rather
+                    // than `apply`.
+                    admit(ledger, &root, &file, target, &at);
+                    target.clone()
+                }
                 _ => path.clone(),
             };
             sink.emit(event);
@@ -845,6 +967,8 @@ fn rename_events<C: Cache>(
             cited.merge(&config, adapters.bib_files, sink);
         }
     }
+
+    stale.get().then(crate::ledger::stale_entries_warning)
 }
 
 /// A directory group's citable records, held from the file each was
@@ -962,6 +1086,57 @@ impl MoveLog for JournalLog<'_> {
     }
 }
 
+/// Whether `filesystem` reports a file at `path`.
+///
+/// [`Filesystem::existing`] answers about a directory, so a path is
+/// there when the directory holding it lists its file name; a directory
+/// that is unreadable or absent lists nothing, and everything in it
+/// reads as gone. A path naming no file in any directory — a bare root
+/// — is not there.
+fn is_present(filesystem: &dyn Filesystem, path: &Path) -> bool {
+    let Some((directory, name)) = path.parent().zip(path.file_name()) else {
+        return false;
+    };
+    filesystem
+        .existing(directory)
+        .contains_key(&*name.to_string_lossy())
+}
+
+/// Record in `ledger` that `file` was admitted to the collection at
+/// `root` and now sits at `path`, as of `at`.
+///
+/// The entry's path is `path` relative to `root` and `/`-separated, so
+/// the collection can be moved or opened on another machine and still
+/// find what it recorded. `at` is both the entry's timestamp and the
+/// run identifier that ties every entry of one run together.
+///
+/// Nothing is recorded when the run keeps no ledger, when the file
+/// landed outside the collection its ledger accounts for, or when the
+/// file's content hash is unknown ([`admission_entry`]). An append that
+/// fails costs nothing beyond itself and is not reported: the ledger is
+/// derived accounting, rebuildable from the collection, and a file that
+/// was renamed correctly was renamed correctly whether or not the note
+/// about it landed.
+fn admit(ledger: Option<&dyn Ledger>, root: &Path, file: &FileRecord, path: &Path, at: &str) {
+    let Some(ledger) = ledger else {
+        return;
+    };
+    let Some(relative) = collection_relative(root, path) else {
+        return;
+    };
+    let Some(entry) = admission_entry(
+        file,
+        &relative,
+        borax_core::ledger::RunId::new(at),
+        at,
+        env!("CARGO_PKG_VERSION"),
+    ) else {
+        return;
+    };
+
+    let _ = ledger.append(&[entry]);
+}
+
 /// Resolve the file at `path` under `effective`, writing its verdict
 /// into `sink`, and hand back the record when there is one.
 ///
@@ -969,21 +1144,38 @@ impl MoveLog for JournalLog<'_> {
 /// than from the event, so the record is what this hands back; the event
 /// is already written by the time it does.
 ///
+/// `collection` is what the file is checked against for duplicates —
+/// once on its hash before it is opened, and again on the identifiers it
+/// resolved to. `None` is a run that admits nothing to any collection,
+/// which is resolved without either check and so hashes the file once.
+///
 /// Each file is resolved and reported before the next is opened, so a
 /// reader watching a network-bound run sees it make progress.
 fn resolved_record<C: Cache>(
     path: &Path,
     effective: &Effective,
     adapters: &Adapters<C>,
+    collection: Option<&Collection<'_>>,
     sink: &mut dyn Sink,
 ) -> Option<FileRecord> {
-    let outcome = resolve_file(
-        path,
-        adapters.library,
-        adapters.sources,
-        adapters.index,
-        &resolving(effective.config()),
-    );
+    let config = resolving(effective.config());
+    let outcome = match collection {
+        Some(collection) => resolve_file_checking_ledger(
+            path,
+            adapters.library,
+            adapters.sources,
+            adapters.index,
+            &config,
+            collection,
+        ),
+        None => resolve_file(
+            path,
+            adapters.library,
+            adapters.sources,
+            adapters.index,
+            &config,
+        ),
+    };
     sink.emit(crate::pipeline::event_for(path, &outcome));
     match outcome {
         FileOutcome::Resolved(file) => Some(file),
@@ -1003,6 +1195,10 @@ fn resolved_record<C: Cache>(
 /// this one is what was asked for, so it runs whether or not a
 /// destination is configured — a run that writes nowhere still reports
 /// what it resolved.
+///
+/// Nothing here admits a file to the collection, so the ledger has no
+/// say in it: every file is resolved with no collection to check
+/// against, exactly as a run with no ledger is.
 fn bib_events<C: Cache>(
     groups: &[Group],
     configs: &Configs,
@@ -1015,7 +1211,7 @@ fn bib_events<C: Cache>(
         let mut cited = Citations::default();
 
         for path in &group.paths {
-            if let Some(file) = resolved_record(path, effective, adapters, sink) {
+            if let Some(file) = resolved_record(path, effective, adapters, None, sink) {
                 cited.add(
                     path.clone(),
                     file,
@@ -1095,6 +1291,13 @@ impl Sink for Rendering<'_> {
 /// was attempted, so there is no event stream to close — which is why
 /// everything that can fail is settled before the first event rather
 /// than as the run goes.
+///
+/// What [`preflight`] has to say about the ledger goes to `streams.err`
+/// too, and the run goes ahead: a ledger that could not be read costs
+/// the run its duplicate detection and nothing else. What the run
+/// itself discovers about the ledger — that it names files which are no
+/// longer there — follows on `streams.err` once the stream has closed,
+/// which is the first moment the whole batch has been checked.
 pub fn dispatch<C: Cache>(
     cli: &Cli,
     configs: &Configs,
@@ -1109,6 +1312,17 @@ pub fn dispatch<C: Cache>(
         }
     };
 
+    // Before the stream opens, so what a `--json` consumer reads on
+    // stdout is the run and nothing else. One line: the ledger is read
+    // once for the whole run, so it has at most one thing to say.
+    if let Prepared::Grouped {
+        warning: Some(warning),
+        ..
+    } = &prepared
+    {
+        let _ = writeln!(streams.err, "{warning}");
+    }
+
     let mut sink = Rendering {
         format: cli.format(),
         out: streams.out,
@@ -1119,7 +1333,7 @@ pub fn dispatch<C: Cache>(
         version: env!("CARGO_PKG_VERSION").to_string(),
         applying: applying(&cli.command),
     });
-    emit_events(&prepared, &cli.command, configs, adapters, &mut sink);
+    let discovered = emit_events(&prepared, &cli.command, configs, adapters, &mut sink);
 
     // Read before the last event is emitted, so what `RunFinished`
     // reports is the body's totals and nothing else: the framing events
@@ -1127,6 +1341,10 @@ pub fn dispatch<C: Cache>(
     // leaves them out either way.
     let counts = sink.counts;
     sink.emit(Event::RunFinished { counts });
+
+    if let Some(warning) = discovered {
+        let _ = writeln!(streams.err, "{warning}");
+    }
 
     outcome_for(&counts)
 }
@@ -1193,6 +1411,18 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
 
     let index = ContentIndex::new(response_cache());
     let journal = FileJournal::open_default();
+    // The collection the run sits in decides where its accounting
+    // goes, so it is discovered from the same directory the
+    // configuration was, under the `collection-root` that configuration
+    // may have named.
+    let collection_root = crate::config::collection_root(
+        &working,
+        effective.config().collection_root.as_deref(),
+        |candidate| candidate.is_file(),
+    );
+    let ledger = collection_root
+        .as_deref()
+        .map(FileLedger::at_collection_root);
 
     dispatch(
         &Cli {
@@ -1210,6 +1440,9 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
             bib_files: &RealBibFiles,
             cache_root: default_cache_root(),
             now: timestamp,
+            ledger: ledger.as_ref().map(|ledger| ledger as &dyn Ledger),
+            collection_root,
+            state_root: crate::journal::default_state_root(),
         },
         streams,
     )

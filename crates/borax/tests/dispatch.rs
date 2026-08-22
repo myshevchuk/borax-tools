@@ -676,6 +676,9 @@ fn config_emits_one_config_setting_event_per_setting_matching_effective_events()
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let events = events_for(
@@ -715,6 +718,9 @@ fn cache_status_without_clear_emits_a_single_cache_status_event() {
         bib_files: &bib_files,
         cache_root: Some(root.clone()),
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let events = events_for(
@@ -751,6 +757,9 @@ fn cache_clear_emits_a_single_cache_cleared_event_and_empties_the_directory() {
         bib_files: &bib_files,
         cache_root: Some(root.clone()),
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let events = events_for(
@@ -787,6 +796,9 @@ fn cache_with_no_cache_root_is_a_diagnostic() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let error = events_for(
@@ -836,6 +848,9 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let events = events_for(
@@ -898,6 +913,9 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let events = events_for(
@@ -964,6 +982,9 @@ fn rename_preview_with_no_journal_succeeds() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let events = events_for(
@@ -1024,6 +1045,9 @@ fn rename_apply_emits_renamed_moves_the_file_and_journals_an_entry() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let target = PathBuf::from("/lib/Smith2024.pdf");
 
@@ -1107,6 +1131,9 @@ fn rename_apply_with_no_journal_is_an_error_and_moves_nothing() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let error = events_for(
@@ -1164,6 +1191,9 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let events = events_for(
@@ -1237,6 +1267,9 @@ fn undo_emits_reverted_for_a_journaled_entry_whose_file_verifies() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let events = events_for(
@@ -1288,6 +1321,9 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let error = events_for(
@@ -1329,6 +1365,9 @@ fn bib_with_an_uncompilable_template_propagates_the_diagnostic() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let error = events_for(
@@ -1377,6 +1416,9 @@ fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic()
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let error = events_for(
@@ -1426,6 +1468,9 @@ fn bib_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let error = events_for(
@@ -1482,6 +1527,9 @@ fn bib_with_a_citation_key_naming_no_entry_type_propagates_the_diagnostic() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let error = events_for(
@@ -1519,6 +1567,9 @@ fn json_format_opens_with_run_started_and_closes_with_run_finished_and_every_lin
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -1595,6 +1646,9 @@ fn json_stdout_is_entirely_well_formed_json_lines_and_nothing_else() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -1657,6 +1711,9 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -1725,6 +1782,9 @@ fn run_finished_counts_match_counts_for_over_the_body_events() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -1788,6 +1848,9 @@ fn a_clean_run_returns_success() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -1839,6 +1902,9 @@ fn a_run_with_a_skip_returns_partial() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -1892,6 +1958,9 @@ fn a_diagnostic_from_events_for_returns_fatal_writes_to_err_and_nothing_to_stdou
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let command = Command::Rename {
         paths: vec![path],
@@ -1946,6 +2015,9 @@ fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() 
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();

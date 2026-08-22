@@ -94,6 +94,16 @@ fn default_has_no_sidecars_and_the_cache_is_on() {
     assert!(config.cache);
 }
 
+/// design: "The ledger is an append-only JSONL file" and "Run logs are
+/// the event stream, persisted" are both on by default, degrading loudly
+/// rather than opting in.
+#[test]
+fn default_has_the_ledger_and_the_run_log_on() {
+    let config = Config::default();
+    assert!(config.ledger);
+    assert!(config.run_log);
+}
+
 // --- layer_from_toml() ---
 
 #[test]
@@ -146,6 +156,8 @@ fn layer_from_toml_parses_a_full_document_into_the_expected_layer() {
             sources: Some(vec!["crossref".to_string(), "arxiv".to_string()]),
             mailto: Some("test@example.org".to_string()),
             collection_root: Some(PathBuf::from("/archive")),
+            ledger: None,
+            run_log: None,
             rename: Some(RenameLayer {
                 collision: Some("skip".to_string()),
             }),
@@ -203,6 +215,23 @@ fn layer_from_toml_reads_a_solo_collection_root_key() {
 }
 
 #[test]
+fn layer_from_toml_reads_the_ledger_and_run_log_keys() {
+    let layer =
+        layer_from_toml("ledger = false\nrun-log = false\n", Path::new("/solo.toml")).unwrap();
+
+    assert_eq!(layer.ledger, Some(false));
+    assert_eq!(layer.run_log, Some(false));
+}
+
+#[test]
+fn layer_from_toml_setting_only_run_log_leaves_ledger_unset() {
+    let layer = layer_from_toml("run-log = true", Path::new("/solo.toml")).unwrap();
+
+    assert_eq!(layer.run_log, Some(true));
+    assert_eq!(layer.ledger, None);
+}
+
+#[test]
 fn layer_from_toml_accepts_kebab_case_keys() {
     let text = r#"
         [extraction]
@@ -252,6 +281,44 @@ fn layer_from_toml_rejects_an_unknown_key_inside_a_table() {
     let text = "[network]\nbogus = 1\n";
     let err = layer_from_toml(text, Path::new("/unknown-nested.toml")).unwrap_err();
     assert!(matches!(err, ConfigError::Unreadable { .. }));
+}
+
+/// A typo of one of the two keys this change adds is still an unknown
+/// key, the same as any other misspelled setting.
+#[test]
+fn layer_from_toml_rejects_a_typo_of_the_new_ledger_key() {
+    let err = layer_from_toml("ledgerz = true", Path::new("/unknown-ledger.toml")).unwrap_err();
+    assert!(matches!(err, ConfigError::Unreadable { .. }));
+}
+
+/// cli spec 5.1 / design "one schema, typed values": `ledger` takes a
+/// boolean, and a string in its place is a load-time error naming both
+/// the key and the type it expected — not a value silently coerced or
+/// accepted.
+#[test]
+fn layer_from_toml_rejects_ledger_set_to_a_non_boolean_value() {
+    let err = layer_from_toml(r#"ledger = "yes""#, Path::new("/bad-ledger.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("ledger"), "got {message:?}");
+            assert!(message.to_lowercase().contains("bool"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+#[test]
+fn layer_from_toml_rejects_run_log_set_to_a_non_boolean_value() {
+    let err = layer_from_toml(r#"run-log = "yes""#, Path::new("/bad-run-log.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("run-log"), "got {message:?}");
+            assert!(message.to_lowercase().contains("bool"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
 }
 
 // --- layer_from_env() ---
@@ -440,11 +507,13 @@ fn resolve_with_no_layers_gives_defaults_with_default_origin_everywhere() {
         "citation-keys.default",
         "collection-root",
         "extraction.page-limit",
+        "ledger",
         "mailto",
         "network.cache",
         "network.concurrency",
         "network.min-interval-ms",
         "rename.collision",
+        "run-log",
         "sources",
         "templates.default",
     ] {
@@ -598,6 +667,35 @@ fn resolve_reports_a_collection_root_override_with_its_file_origin() {
     );
     assert_eq!(
         effective.origin("collection-root"),
+        Some(&Origin::DirectoryFile(dir_path))
+    );
+}
+
+/// design "Config hardening": the `ledger` and `run-log` booleans this
+/// change adds resolve and report their origin exactly like every other
+/// setting.
+#[test]
+fn resolve_applies_configured_ledger_and_run_log_values_with_their_origin() {
+    let dir_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(dir_path.clone()),
+        Layer {
+            ledger: Some(false),
+            run_log: Some(false),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(!effective.config().ledger);
+    assert!(!effective.config().run_log);
+    assert_eq!(
+        effective.origin("ledger"),
+        Some(&Origin::DirectoryFile(dir_path.clone()))
+    );
+    assert_eq!(
+        effective.origin("run-log"),
         Some(&Origin::DirectoryFile(dir_path))
     );
 }
@@ -922,11 +1020,13 @@ fn entries_are_ordered_by_key_and_cover_every_setting() {
             "citation-keys.default",
             "collection-root",
             "extraction.page-limit",
+            "ledger",
             "mailto",
             "network.cache",
             "network.concurrency",
             "network.min-interval-ms",
             "rename.collision",
+            "run-log",
             "sources",
             "templates.default",
         ]
@@ -1047,6 +1147,50 @@ fn events_reports_a_citation_keys_override_with_its_file_origin() {
         Event::ConfigSetting {
             key: "citation-keys.default".to_string(),
             value: "\"[auth:lower][year]a\"".to_string(),
+            origin: Origin::DirectoryFile(config_path).to_string(),
+        }
+    );
+}
+
+/// `borax config` reports the `ledger` and `run-log` booleans this
+/// change adds with the same key/value/origin shape as `network.cache`
+/// and every other setting.
+#[test]
+fn events_reports_a_ledger_and_run_log_override_with_its_file_origin() {
+    let config_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(config_path.clone()),
+        Layer {
+            ledger: Some(false),
+            run_log: Some(false),
+            ..Layer::default()
+        },
+    )];
+    let effective = resolve(layers).unwrap();
+
+    let events = effective.events();
+    let ledger_event = events
+        .iter()
+        .find(|event| matches!(event, Event::ConfigSetting { key, .. } if key == "ledger"))
+        .unwrap_or_else(|| panic!("no ConfigSetting for ledger in {events:?}"));
+    let run_log_event = events
+        .iter()
+        .find(|event| matches!(event, Event::ConfigSetting { key, .. } if key == "run-log"))
+        .unwrap_or_else(|| panic!("no ConfigSetting for run-log in {events:?}"));
+
+    assert_eq!(
+        *ledger_event,
+        Event::ConfigSetting {
+            key: "ledger".to_string(),
+            value: "false".to_string(),
+            origin: Origin::DirectoryFile(config_path.clone()).to_string(),
+        }
+    );
+    assert_eq!(
+        *run_log_event,
+        Event::ConfigSetting {
+            key: "run-log".to_string(),
+            value: "false".to_string(),
             origin: Origin::DirectoryFile(config_path).to_string(),
         }
     );

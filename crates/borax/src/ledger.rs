@@ -229,6 +229,21 @@ fn message_for(warning: &LedgerWarning) -> String {
     }
 }
 
+/// What a run says about having matched an entry whose file is no
+/// longer in the collection.
+///
+/// One warning however many entries turned out to be stale: they are
+/// all the same fact about the ledger as a whole, and the remedy is the
+/// same rebuild whether one entry is out of date or a hundred.
+pub fn stale_entries_warning() -> Diagnostic {
+    Diagnostic {
+        level: Level::Warning,
+        message: "the ledger records files that are no longer where it says, so it holds stale \
+                  entries; borax ledger rebuild restores it"
+            .to_string(),
+    }
+}
+
 /// The full path of `relative`, which is `/`-separated and relative to
 /// `collection_root` as a ledger entry's path is.
 ///
@@ -351,7 +366,7 @@ pub fn scan_collection(root: &Path) -> Vec<Scanned> {
 ///
 /// `None` when `path` is not below `root`, which no ledger entry can
 /// describe.
-fn collection_relative(root: &Path, path: &Path) -> Option<String> {
+pub(crate) fn collection_relative(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     let segments: Vec<String> = relative
         .components()

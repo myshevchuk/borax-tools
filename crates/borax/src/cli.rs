@@ -89,10 +89,13 @@ pub enum LedgerAction {
 ///
 /// Every field is optional in the sense a [`Layer`]'s fields are: absent
 /// means the command line was silent about that setting and a lower
-/// layer shows through. The two-flag pairs (`--sidecars` /
-/// `--no-sidecars`, `--cache` / `--no-cache`) are how a boolean says
-/// all three things — on, off, and silent — with flags that take no
-/// value.
+/// layer shows through. Every configurable boolean comes as a two-flag
+/// pair (`--sidecars` / `--no-sidecars`, `--cache` / `--no-cache`,
+/// `--ledger` / `--no-ledger`, `--run-log` / `--no-run-log`), which is
+/// how a boolean says all three things — on, off, and silent — with
+/// flags that take no value, and what lets the command line override a
+/// configured value in both directions. Naming both halves of a pair
+/// is a parse error rather than a last-one-wins guess.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
 pub struct Settings {
     /// The filename template for entry types with none of their own.
@@ -147,6 +150,24 @@ pub struct Settings {
     /// Ask every service again and open every file again.
     #[arg(long, global = true, conflicts_with = "cache")]
     pub no_cache: bool,
+
+    /// Check the collection's ledger for duplicates and record what an
+    /// applied run admits.
+    #[arg(long, global = true)]
+    pub ledger: bool,
+
+    /// Neither read nor write the collection's ledger.
+    #[arg(long, global = true, conflicts_with = "ledger")]
+    pub no_ledger: bool,
+
+    /// Write the run's event stream to a log in the collection.
+    #[arg(long, global = true)]
+    pub run_log: bool,
+
+    /// Write no log for this run. An applying run writes one anyway,
+    /// since that log is what `borax undo` reads.
+    #[arg(long, global = true, conflicts_with = "run_log")]
+    pub no_run_log: bool,
 }
 
 impl Cli {
@@ -324,6 +345,42 @@ pub fn flag_layers(settings: &Settings) -> Vec<(Origin, Layer)> {
                 cache: Some(false),
                 ..NetworkLayer::default()
             }),
+        );
+    }
+    if settings.ledger {
+        push(
+            "ledger",
+            Layer {
+                ledger: Some(true),
+                ..Layer::default()
+            },
+        );
+    }
+    if settings.no_ledger {
+        push(
+            "no-ledger",
+            Layer {
+                ledger: Some(false),
+                ..Layer::default()
+            },
+        );
+    }
+    if settings.run_log {
+        push(
+            "run-log",
+            Layer {
+                run_log: Some(true),
+                ..Layer::default()
+            },
+        );
+    }
+    if settings.no_run_log {
+        push(
+            "no-run-log",
+            Layer {
+                run_log: Some(false),
+                ..Layer::default()
+            },
         );
     }
 

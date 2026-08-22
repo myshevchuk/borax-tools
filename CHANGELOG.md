@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `rename` now checks each file against the collection's ledger and
+  skips the ones already admitted, so re-downloading a paper you
+  already filed no longer files it twice. A file is a duplicate by
+  content when its bytes are already recorded — caught after hashing,
+  before any network request — and by work when a different file
+  resolves to an identifier already recorded; both are reported with
+  the path of the file they duplicate and leave the source untouched.
+  The ledger lives at `.borax/ledger.jsonl` under the directory holding
+  the nearest `.borax.toml`, so it travels with the files it accounts
+  for. Only an applied run records anything; a preview records nothing.
+  Disk decides: an entry whose file has been moved or deleted never
+  keeps a file out, and a run that meets one warns that
+  `borax ledger rebuild` is due. A missing or unreadable ledger costs
+  the run its duplicate detection and nothing else, and `--no-ledger`
+  turns it off outright.
+
 ### Changed
 
 - Citation keys now come from their own `[citation-keys]` table

@@ -363,6 +363,9 @@ fn rename_preview_writes_each_file_s_resolved_line_before_the_next_file_is_hashe
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
 
     let mut out = SharedWriter(Arc::clone(&buffer));
@@ -444,6 +447,9 @@ fn an_uncompilable_template_is_fatal_and_opens_no_stream() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -492,6 +498,9 @@ fn apply_without_a_journal_is_fatal_and_opens_no_stream() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -539,6 +548,9 @@ fn cache_with_no_cache_root_is_fatal_and_opens_no_stream() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();
@@ -582,6 +594,9 @@ fn a_normal_json_run_emits_both_run_started_and_run_finished() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
     };
     let mut out = Vec::new();
     let mut err = Vec::new();

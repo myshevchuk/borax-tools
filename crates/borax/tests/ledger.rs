@@ -1,22 +1,33 @@
 #![allow(clippy::unwrap_used)]
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-use borax::event::Level;
+use borax::bib::BibFiles;
+use borax::cli::{Cli, Command, Settings};
+use borax::config::{Layer, Origin, resolve};
+use borax::event::{Event, Level, SkipReason};
+use borax::journal::{Entry as JournalEntry, Journal};
 use borax::ledger::{
     ACCOUNTING_DIR, FileLedger, LEDGER_FILE, Ledger, LedgerWarning, Loaded, Scanned,
     admission_entry, duplicate_is_live, prepare, rebuild, relative_to, scan_collection,
 };
-use borax::pipeline::FileRecord;
+use borax::pipeline::{FileRecord, Library};
+use borax::renaming::{Filesystem, RenameError};
+use borax::run::{Adapters, Configs, Streams, dispatch, events_for};
+use borax::session::Outcome;
 use borax_core::bib_output::sidecar;
 use borax_core::content::{ContentHash, hash_bytes};
-use borax_core::identifier::{ArxivId, Doi, Isbn, Pmid};
+use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
 use borax_core::ledger::{
     Duplicate, DuplicateReason, Entry, Index, RunId, Unparsable, serialize_jsonl,
 };
-use borax_core::record::{BoraxExt, EntryType, Record};
-use borax_sources::store::hash_file;
+use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record};
+use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
+use borax_sources::cache::MemoryCache;
+use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::store::{ContentIndex, hash_file};
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
@@ -44,6 +55,11 @@ impl FakeLedger {
 
     fn load_calls(&self) -> usize {
         *self.load_calls.borrow()
+    }
+
+    /// Every entry passed to `append`, in call order across every call.
+    fn appended(&self) -> Vec<Entry> {
+        self.appended.borrow().clone()
     }
 }
 
@@ -140,6 +156,299 @@ fn write_pdf_with_sidecar(
     std::fs::write(&path, content).unwrap();
     std::fs::write(borax::bib::sidecar_path(&path), sidecar(record, "key2024")).unwrap();
     path
+}
+
+// ---------------------------------------------------------------------
+// Fakes for 2.5: the ledger wired into a `rename` run through
+// `dispatch`/`events_for`, following the shape of the fakes in
+// `tests/dispatch.rs`.
+// ---------------------------------------------------------------------
+
+/// A [`PdfSource`] fake carrying an embedded identifier in its XMP
+/// packet, following the shape of the one in `dispatch.rs`.
+#[derive(Clone)]
+struct FakePdf {
+    info: InfoMetadata,
+    xmp: Option<String>,
+}
+
+impl PdfSource for FakePdf {
+    fn page_count(&self) -> usize {
+        0
+    }
+
+    fn info_metadata(&self) -> &InfoMetadata {
+        &self.info
+    }
+
+    fn xmp(&self) -> Option<&str> {
+        self.xmp.as_deref()
+    }
+
+    fn page_text(&self, _index: usize) -> Result<String, ExtractionError> {
+        Ok(String::new())
+    }
+}
+
+/// A PDF carrying `value` as a DOI in its XMP packet, resolved on the
+/// embedded-metadata pass.
+fn pdf_with_embedded_doi(value: &str) -> FakePdf {
+    FakePdf {
+        info: InfoMetadata::default(),
+        xmp: Some(format!("<prism:doi>{value}</prism:doi>")),
+    }
+}
+
+/// What [`FakeLibrary`] answers for one path.
+struct LibraryEntry {
+    hash: Result<ContentHash, ExtractionError>,
+    pdf: Result<FakePdf, ExtractionError>,
+}
+
+/// A [`Library`] fake backed by a map from path to a fixed `(hash, PDF
+/// content or error)` pair, following the shape of the one in
+/// `dispatch.rs`.
+struct FakeLibrary {
+    entries: BTreeMap<PathBuf, LibraryEntry>,
+}
+
+impl FakeLibrary {
+    fn new() -> FakeLibrary {
+        FakeLibrary {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// A readable file: hashing and opening both succeed.
+    fn with_file(
+        mut self,
+        path: impl Into<PathBuf>,
+        hash: ContentHash,
+        pdf: FakePdf,
+    ) -> FakeLibrary {
+        self.entries.insert(
+            path.into(),
+            LibraryEntry {
+                hash: Ok(hash),
+                pdf: Ok(pdf),
+            },
+        );
+        self
+    }
+
+    /// A file whose hash is known but which fails to open — used to
+    /// prove a content-duplicate check never opens the file it matches.
+    fn with_open_error(
+        mut self,
+        path: impl Into<PathBuf>,
+        hash: ContentHash,
+        error: ExtractionError,
+    ) -> FakeLibrary {
+        self.entries.insert(
+            path.into(),
+            LibraryEntry {
+                hash: Ok(hash),
+                pdf: Err(error),
+            },
+        );
+        self
+    }
+}
+
+impl Library for FakeLibrary {
+    fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
+        self.entries.get(path).map_or_else(
+            || {
+                Err(ExtractionError::Unreadable {
+                    message: format!("no fake entry for {}", path.display()),
+                })
+            },
+            |entry| entry.hash.clone(),
+        )
+    }
+
+    fn open(&self, path: &Path) -> Result<Box<dyn PdfSource>, ExtractionError> {
+        match self.entries.get(path) {
+            Some(entry) => entry
+                .pdf
+                .clone()
+                .map(|pdf| Box::new(pdf) as Box<dyn PdfSource>),
+            None => Err(ExtractionError::Unreadable {
+                message: format!("no fake entry for {}", path.display()),
+            }),
+        }
+    }
+}
+
+/// A [`Source`] whose name and canned response are fixed at
+/// construction, following the shape of the one in `dispatch.rs`.
+struct FakeSource {
+    name: SourceName,
+    response: Result<Record, SourceError>,
+}
+
+impl Source for FakeSource {
+    fn name(&self) -> SourceName {
+        self.name
+    }
+
+    fn supports(&self, _identifier: &Identifier) -> bool {
+        true
+    }
+
+    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+        self.response.clone()
+    }
+}
+
+fn fake_source(name: SourceName, response: Result<Record, SourceError>) -> FakeSource {
+    FakeSource { name, response }
+}
+
+/// A [`Filesystem`] fake backed by a map from directory to the names
+/// present there, following the shape of the one in `dispatch.rs`. Every
+/// [`Filesystem::rename`] call is recorded in order.
+struct FakeFilesystem {
+    existing: BTreeMap<PathBuf, BTreeMap<String, Option<String>>>,
+    renames: RefCell<Vec<(PathBuf, PathBuf)>>,
+}
+
+impl FakeFilesystem {
+    fn new() -> FakeFilesystem {
+        FakeFilesystem {
+            existing: BTreeMap::new(),
+            renames: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The same filesystem with `names` present in `directory`.
+    ///
+    /// A ledger entry names a file the collection is said to hold, and
+    /// what decides whether it still holds it is this map: an entry
+    /// whose file is absent records an admission that no longer stands.
+    fn with_existing(mut self, directory: &str, names: &[&str]) -> FakeFilesystem {
+        self.existing.insert(
+            PathBuf::from(directory),
+            names
+                .iter()
+                .map(|name| ((*name).to_string(), None))
+                .collect(),
+        );
+        self
+    }
+
+    fn renames(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.renames.borrow().clone()
+    }
+}
+
+impl Filesystem for FakeFilesystem {
+    fn existing(&self, directory: &Path) -> BTreeMap<String, Option<String>> {
+        self.existing.get(directory).cloned().unwrap_or_default()
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), RenameError> {
+        self.renames
+            .borrow_mut()
+            .push((from.to_path_buf(), to.to_path_buf()));
+        Ok(())
+    }
+}
+
+/// A [`Journal`] fake recording every append, following the shape of the
+/// one in `dispatch.rs`. Nothing in this file reads a journal back.
+struct FakeJournal {
+    appended: RefCell<Vec<JournalEntry>>,
+}
+
+impl FakeJournal {
+    fn new() -> FakeJournal {
+        FakeJournal {
+            appended: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Journal for FakeJournal {
+    fn append(&self, entries: &[JournalEntry]) -> std::io::Result<()> {
+        self.appended.borrow_mut().extend_from_slice(entries);
+        Ok(())
+    }
+
+    fn read(&self) -> Vec<JournalEntry> {
+        Vec::new()
+    }
+}
+
+/// A [`BibFiles`] fake that reads nothing and records nothing — none of
+/// these tests configure a bibliography destination.
+struct FakeBibFiles;
+
+impl BibFiles for FakeBibFiles {
+    fn read(&self, _path: &Path) -> std::io::Result<String> {
+        Ok(String::new())
+    }
+
+    fn write(&self, _path: &Path, _content: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// An `Article` by one author in the given year, carrying `doi_value`.
+/// Renders as `"{family}{year}"` under the `[auth][year]` template these
+/// tests use, following the shape of `record_by` in `dispatch.rs`.
+fn record_by(family: &str, year: i32, doi_value: &str) -> Record {
+    Record {
+        authors: vec![Name {
+            family: family.to_string(),
+            given: None,
+        }],
+        issued: Some(DateParts {
+            year,
+            month: None,
+            day: None,
+        }),
+        doi: Some(doi(doi_value)),
+        ..record_of(EntryType::Article)
+    }
+}
+
+/// The `now` every fixture in this section uses: a fixed string, so a
+/// ledger entry's timestamp and run id are pinned rather than depending
+/// on the clock.
+fn fixed_now() -> String {
+    "2024-01-01T00:00:00Z".to_string()
+}
+
+/// An [`borax::config::Effective`] whose default template is `template`
+/// and which is otherwise the built-in defaults, following the shape of
+/// the one in `dispatch.rs`.
+fn effective_with_default_template(template: &str) -> borax::config::Effective {
+    effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            template.to_string(),
+        )]));
+    })
+}
+
+/// An [`borax::config::Effective`] built from a single layer, for tests
+/// that need to steer one or two settings away from the built-in
+/// defaults, following the shape of the one in `dispatch.rs`.
+fn effective_with(customize: impl FnOnce(&mut Layer)) -> borax::config::Effective {
+    let mut layer = Layer::default();
+    customize(&mut layer);
+    resolve(vec![(Origin::Flag("test".to_string()), layer)]).unwrap()
+}
+
+/// A [`Cli`] running `command` in the given output format, following the
+/// shape of the one in `dispatch.rs`.
+fn cli(command: Command, json: bool) -> Cli {
+    Cli {
+        command,
+        settings: Settings::default(),
+        json,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -765,4 +1074,1024 @@ fn admission_entry_stamps_the_given_run_timestamp_and_tool_version() {
     assert_eq!(built.run, run);
     assert_eq!(built.timestamp, "2026-08-19T00:00:00Z");
     assert_eq!(built.tool_version, "0.2.0");
+}
+
+// ---------------------------------------------------------------------
+// 2.5: the ledger and the collection root on `Adapters` — a `rename`
+// run's duplicate checks and applied admissions, driven end to end
+// through `events_for`/`dispatch`.
+// ---------------------------------------------------------------------
+
+/// design "Duplicate detection is two distinct checks": the content
+/// check runs before resolution, so a byte-identical duplicate is caught
+/// without opening the file, is reported with the existing file's full
+/// path, and the source file itself is left where it is.
+#[test]
+fn a_content_duplicate_is_skipped_with_the_existing_files_full_path_and_the_source_untouched() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let hash = hash_of("dup-content");
+    let library = FakeLibrary::new().with_open_error(
+        &path,
+        hash,
+        ExtractionError::Unreadable {
+            message: "a content duplicate must never be opened".to_string(),
+        },
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new().with_existing("/lib", &["Smith2024.pdf"]);
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[entry("Smith2024.pdf", "dup-content")]),
+        warning: None,
+    });
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: vec![path.clone()],
+            apply: false,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::Skipped {
+            path,
+            reason: SkipReason::Duplicate {
+                reason: DuplicateReason::Content,
+                existing_path: PathBuf::from("/lib/Smith2024.pdf"),
+            },
+        }],
+        "got {events:?}"
+    );
+    assert!(filesystem.renames().is_empty());
+}
+
+/// design "Duplicate detection is two distinct checks": a work duplicate
+/// is only visible after resolution, since it is the resolved record's
+/// identifier — not the incoming file's hash — that matches the ledger.
+#[test]
+fn a_work_duplicate_is_skipped_with_the_work_reason() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("work-dup-incoming"),
+        pdf_with_embedded_doi("10.1000/work-dup"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/work-dup")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new().with_existing("/lib", &["Archived.pdf"]);
+    let bib_files = FakeBibFiles;
+    let existing = Entry {
+        doi: Some(doi("10.1000/work-dup")),
+        ..entry("Archived.pdf", "work-dup-existing")
+    };
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[existing]),
+        warning: None,
+    });
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: vec![path.clone()],
+            apply: false,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::Skipped {
+            path,
+            reason: SkipReason::Duplicate {
+                reason: DuplicateReason::Work,
+                existing_path: PathBuf::from("/lib/Archived.pdf"),
+            },
+        }],
+        "got {events:?}"
+    );
+}
+
+/// ledger spec scenario "Duplicate of an undone admission", exercised
+/// through a whole `rename` run rather than at `duplicate_is_live`'s own
+/// level: a ledger entry whose file is no longer on disk must not keep a
+/// re-admission out, so the file is resolved and planned exactly as it
+/// would be with no ledger at all.
+#[test]
+fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("stale-dup"),
+        pdf_with_embedded_doi("10.1000/stale-dup"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/stale-dup")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    // "Gone.pdf" is recorded in the ledger but the fake filesystem
+    // reports nothing under that name, so the admission it names no
+    // longer holds.
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[entry("Gone.pdf", "stale-dup")]),
+        warning: None,
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: vec![path.clone()],
+            apply: false,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            Event::Resolved {
+                path: path.clone(),
+                identifier: "doi:10.1000/stale-dup".to_string(),
+                record: Box::new(record_by("Smith", 2024, "10.1000/stale-dup")),
+                source: "crossref".to_string(),
+                tier: Some("embedded-metadata".to_string()),
+                cached: false,
+            },
+            Event::Planned {
+                path,
+                target: PathBuf::from("/lib/Smith2024.pdf"),
+            },
+        ],
+        "an undone admission must not veto re-admission, got {events:?}"
+    );
+}
+
+/// ledger spec scenario "Duplicate of an undone admission", the warning
+/// half: "the run warns that the ledger holds stale entries" and the
+/// warning suggests `borax ledger rebuild`. `events_for` cannot observe
+/// this — the warning is a stderr [`borax::event::Diagnostic`], never an
+/// event — so this drives the run through `dispatch`, matching the
+/// absent-ledger / unparsable-ledger warning tests above.
+#[test]
+fn a_stale_duplicate_warns_that_the_ledger_holds_stale_entries() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("stale-warns"),
+        pdf_with_embedded_doi("10.1000/stale-warns"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/stale-warns")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    // "Gone.pdf" is recorded in the ledger but the fake filesystem
+    // reports nothing under that name, so the matched entry is stale.
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[entry("Gone.pdf", "stale-warns")]),
+        warning: None,
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![path.clone()],
+                apply: false,
+            },
+            true,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    let err_text = String::from_utf8(err).unwrap();
+    let lines: Vec<&str> = err_text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one stale-entry warning, got {err_text:?}"
+    );
+    assert!(lines[0].starts_with("warning:"), "got {err_text:?}");
+    assert!(
+        lines[0].to_lowercase().contains("stale"),
+        "the warning must say the ledger holds stale entries, got {err_text:?}"
+    );
+    assert!(
+        lines[0].contains("borax ledger rebuild"),
+        "the warning must suggest borax ledger rebuild, got {err_text:?}"
+    );
+
+    let out_text = String::from_utf8(out).unwrap();
+    let events: Vec<Event> = out_text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Planned { path: planned, .. } if planned == &path)),
+        "a stale duplicate must still be processed normally, got {events:?}"
+    );
+}
+
+/// A matched entry whose file IS present is a live duplicate, not a
+/// stale one, so nothing about staleness is said.
+#[test]
+fn a_live_duplicate_emits_no_stale_warning() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let hash = hash_of("live-dup-no-warning");
+    let library = FakeLibrary::new().with_open_error(
+        &path,
+        hash,
+        ExtractionError::Unreadable {
+            message: "a content duplicate must never be opened".to_string(),
+        },
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new().with_existing("/lib", &["Smith2024.pdf"]);
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[entry("Smith2024.pdf", "live-dup-no-warning")]),
+        warning: None,
+    });
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![path],
+                apply: false,
+            },
+            true,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    assert!(
+        err.is_empty(),
+        "a live duplicate must not warn about staleness: {:?}",
+        String::from_utf8_lossy(&err)
+    );
+}
+
+/// A file matching no ledger entry at all is a miss, not staleness, so
+/// nothing about stale entries is said.
+#[test]
+fn no_match_emits_no_stale_warning() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("no-match-incoming"),
+        pdf_with_embedded_doi("10.1000/no-match"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/no-match")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new().with_existing("/lib", &["Unrelated.pdf"]);
+    let bib_files = FakeBibFiles;
+    // An entry for an unrelated file and identifier: the incoming file
+    // matches nothing here, by hash or by identifier.
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[entry("Unrelated.pdf", "unrelated-seed")]),
+        warning: None,
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![path],
+                apply: false,
+            },
+            true,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    assert!(
+        err.is_empty(),
+        "a miss is not staleness, must not warn: {:?}",
+        String::from_utf8_lossy(&err)
+    );
+}
+
+/// design: the ledger is read once per run and has at most one thing to
+/// say about it — several files each hitting a stale entry still
+/// produce exactly one warning, not one per file.
+#[test]
+fn several_stale_duplicates_in_one_run_still_produce_exactly_one_warning() {
+    let first = PathBuf::from("/lib/first.pdf");
+    let second = PathBuf::from("/lib/second.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &first,
+            hash_of("stale-first"),
+            pdf_with_embedded_doi("10.1000/stale-several"),
+        )
+        .with_file(
+            &second,
+            hash_of("stale-second"),
+            pdf_with_embedded_doi("10.1000/stale-several"),
+        );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/stale-several")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    // Neither "Gone1.pdf" nor "Gone2.pdf" is reported present, so both
+    // matched entries are stale.
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[
+            entry("Gone1.pdf", "stale-first"),
+            entry("Gone2.pdf", "stale-second"),
+        ]),
+        warning: None,
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![first, second],
+                apply: false,
+            },
+            true,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    let err_text = String::from_utf8(err).unwrap();
+    let lines: Vec<&str> = err_text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "two files hitting stale entries must still warn once, got {err_text:?}"
+    );
+
+    let out_text = String::from_utf8(out).unwrap();
+    let events: Vec<Event> = out_text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                reason: SkipReason::Duplicate { .. },
+                ..
+            }
+        )),
+        "a stale entry must not be reported as a duplicate, got {events:?}"
+    );
+}
+
+/// design "The ledger is an append-only JSONL file": an applied rename
+/// records the file's new path relative to the collection root — not
+/// relative to the directory it happened to be renamed within — and
+/// `/`-separated whatever the platform.
+#[test]
+fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root() {
+    let path = PathBuf::from("/collection/sub/original.pdf");
+    let hash = hash_of("apply-admission");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/apply-admission"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/apply-admission")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let journal = FakeJournal::new();
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: None,
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: Some(&journal as &dyn Journal),
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/collection")),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: vec![path.clone()],
+            apply: true,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            Event::Resolved {
+                path: path.clone(),
+                identifier: "doi:10.1000/apply-admission".to_string(),
+                record: Box::new(record_by("Smith", 2024, "10.1000/apply-admission")),
+                source: "crossref".to_string(),
+                tier: Some("embedded-metadata".to_string()),
+                cached: false,
+            },
+            Event::Renamed {
+                path,
+                target: PathBuf::from("/collection/sub/Smith2024.pdf"),
+            },
+        ],
+        "got {events:?}"
+    );
+    assert_eq!(
+        ledger.appended(),
+        vec![Entry {
+            hash,
+            doi: Some(doi("10.1000/apply-admission")),
+            arxiv: None,
+            pmid: None,
+            isbn: None,
+            path: "sub/Smith2024.pdf".to_string(),
+            entry_type: EntryType::Article,
+            run: RunId::new(fixed_now()),
+            timestamp: fixed_now(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        }],
+        "got {:?}",
+        ledger.appended()
+    );
+}
+
+/// design "Appends happen only on applied admissions": a preview run
+/// plans the identical rename but writes nothing to the ledger.
+#[test]
+fn a_preview_run_appends_nothing_to_the_ledger_even_when_it_plans_a_rename() {
+    let path = PathBuf::from("/collection/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("preview-no-append"),
+        pdf_with_embedded_doi("10.1000/preview-no-append"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/preview-no-append")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: None,
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/collection")),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: vec![path],
+            apply: false,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert!(
+        matches!(events.last(), Some(Event::Planned { .. })),
+        "expected a planned rename, got {events:?}"
+    );
+    assert!(
+        ledger.appended().is_empty(),
+        "a preview must append nothing, got {:?}",
+        ledger.appended()
+    );
+}
+
+/// design "`--no-ledger` disables it explicitly": with the ledger
+/// disabled, a file whose hash the ledger already holds is neither
+/// reported as a duplicate nor is anything appended for it.
+#[test]
+fn a_disabled_ledger_neither_checks_nor_appends() {
+    let path = PathBuf::from("/collection/original.pdf");
+    let hash = hash_of("disabled-ledger");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash,
+        pdf_with_embedded_doi("10.1000/disabled-ledger"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/disabled-ledger")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let journal = FakeJournal::new();
+    let bib_files = FakeBibFiles;
+    // The incoming file's hash is already in the ledger — if duplicate
+    // detection ran despite being disabled, this would be reported as a
+    // content duplicate rather than renamed.
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[entry("Smith2024.pdf", "disabled-ledger")]),
+        warning: None,
+    });
+    let effective = effective_with(|layer| {
+        layer.ledger = Some(false);
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: Some(&journal as &dyn Journal),
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/collection")),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: vec![path],
+            apply: true,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert!(
+        matches!(events.last(), Some(Event::Renamed { .. })),
+        "a disabled ledger must not report the file as a duplicate, got {events:?}"
+    );
+    assert!(
+        ledger.appended().is_empty(),
+        "a disabled ledger must not be written to, got {:?}",
+        ledger.appended()
+    );
+}
+
+/// design "Outside a collection... the ledger is simply inactive": with
+/// no collection root and no ledger, a run does the same as a disabled
+/// one — no check, no append — and, unlike a ledger that failed to load,
+/// says nothing about it on stderr.
+#[test]
+fn outside_a_collection_the_run_checks_nothing_appends_nothing_and_warns_nothing() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("no-collection"),
+        pdf_with_embedded_doi("10.1000/no-collection"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/no-collection")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![path],
+                apply: false,
+            },
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    assert!(
+        err.is_empty(),
+        "a run with no ledger at all must not warn: {:?}",
+        String::from_utf8_lossy(&err)
+    );
+}
+
+/// design "degrades loudly": an absent ledger earns exactly one warning
+/// line on stderr, and the run's events are unaffected by it.
+#[test]
+fn an_absent_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("absent-ledger"),
+        pdf_with_embedded_doi("10.1000/absent-ledger"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/absent-ledger")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: Some(LedgerWarning::Absent),
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![path.clone()],
+                apply: false,
+            },
+            true,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    let err_text = String::from_utf8(err).unwrap();
+    let lines: Vec<&str> = err_text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one warning, got {err_text:?}"
+    );
+    assert!(lines[0].starts_with("warning:"), "got {err_text:?}");
+
+    let out_text = String::from_utf8(out).unwrap();
+    let events: Vec<Event> = out_text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Planned { path: planned, .. } if planned == &path)),
+        "the run must still plan the rename despite the warning, got {events:?}"
+    );
+}
+
+/// design "degrades loudly": an unparsable ledger warns the same way an
+/// absent one does — exactly once, run unaffected.
+#[test]
+fn an_unparsable_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("unparsable-ledger"),
+        pdf_with_embedded_doi("10.1000/unparsable-ledger"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/unparsable-ledger")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: Some(LedgerWarning::Unparsable(Unparsable { line: 3 })),
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![path.clone()],
+                apply: false,
+            },
+            true,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    let err_text = String::from_utf8(err).unwrap();
+    let lines: Vec<&str> = err_text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one warning, got {err_text:?}"
+    );
+    assert!(lines[0].starts_with("warning:"), "got {err_text:?}");
+
+    let out_text = String::from_utf8(out).unwrap();
+    let events: Vec<Event> = out_text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Planned { path: planned, .. } if planned == &path)),
+        "the run must still plan the rename despite the warning, got {events:?}"
+    );
+}
+
+/// cli spec: a skipped duplicate is a skip like any other, so it counts
+/// toward the run's totals and its exit is `PARTIAL` rather than
+/// `SUCCESS`.
+#[test]
+fn a_content_duplicate_skip_counts_toward_a_partial_outcome() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let hash = hash_of("partial-dup");
+    let library = FakeLibrary::new().with_open_error(
+        &path,
+        hash,
+        ExtractionError::Unreadable {
+            message: "a content duplicate must never be opened".to_string(),
+        },
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new().with_existing("/lib", &["Smith2024.pdf"]);
+    let bib_files = FakeBibFiles;
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[entry("Smith2024.pdf", "partial-dup")]),
+        warning: None,
+    });
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/lib")),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![path],
+                apply: false,
+            },
+            true,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
+    let out_text = String::from_utf8(out).unwrap();
+    let events: Vec<Event> = out_text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let Some(Event::RunFinished { counts }) = events.last() else {
+        panic!("expected the last event to be RunFinished, got {events:?}")
+    };
+    assert_eq!(counts.skipped, 1, "got {counts:?}");
 }

@@ -11,17 +11,17 @@ TDD throughout: red test first for every pure behaviour.
 
 ## 1. Ledger core (borax-core)
 
-- [ ] 1.1 Tests + implementation: ledger entry model (hash,
+- [x] 1.1 Tests + implementation: ledger entry model (hash,
       identifiers, relative path, entry type, run id, timestamp, tool
       version) with lossless JSONL round-trip
-- [ ] 1.2 Tests + implementation: in-memory ledger index (hash → entry,
+- [x] 1.2 Tests + implementation: in-memory ledger index (hash → entry,
       identifier → entry) built from parsed lines; torn trailing line
       ignored with a reported warning; mid-file corruption reported as
       unparsable
-- [ ] 1.3 Tests + implementation: dual duplicate check with distinct
+- [x] 1.3 Tests + implementation: dual duplicate check with distinct
       reasons (content duplicate before resolution; work duplicate
       after) feeding the skip queue
-- [ ] 1.4 Tests + implementation: deterministic rebuild serialization
+- [x] 1.4 Tests + implementation: deterministic rebuild serialization
       (entries sorted by relative path, byte-stable output)
 
 ## 2. Ledger adapter and subcommand (borax)
@@ -38,11 +38,12 @@ TDD throughout: red test first for every pure behaviour.
       hashing, work check after resolution, applied admissions append
       (units only: `resolve_file_checking_ledger` and `admission_entry`
       are pinned and green; composing them into `Adapters` is 2.5)
-- [ ] 2.5 Tests + implementation: carry the ledger and the collection
+- [x] 2.5 Tests + implementation: carry the ledger and the collection
       root on `Adapters`, so `rename` runs the duplicate checks and an
       applied run appends its admissions. Touches 36 `Adapters` literals
       across the test suite; do it once, with the run-log plumbing of
-      group 3, which needs the same collection root
+      group 3, which needs the same collection root — done by adding
+      `state_root` in the same pass, unused until group 3 reads it
 - [ ] 2.6 Tests + implementation: dispatch `borax ledger rebuild` —
       a rebuilt event, `scan_collection` + `rebuild` + write — and drop
       the preflight refusal standing in for it. `events_for`'s catch-all
@@ -87,7 +88,16 @@ is red.
       the tests show missing
 - [ ] 5.2 Tests + implementation: `--no-` negation for every
       config-settable boolean, last-one-wins, including the `ledger`
-      and `run-log` booleans this change adds
+      and `run-log` booleans this change adds.
+
+      Partly done: `ledger` and `run-log` have their negations and the
+      command line overrides configuration in both directions. What
+      remains is a conflict to settle rather than code to write — the
+      `cli` spec says the last of a pair given wins, while shipped
+      `--cache`/`--no-cache` and `--sidecars`/`--no-sidecars` make
+      passing both a parse error, which the new pair was built to
+      match. Either the spec follows the shipped convention or all four
+      pairs change together; the latter alters v0.1.0 public surface
 - [ ] 5.3 Tests: `apply = true` in a config file is a load-time error;
       implement the message naming it as command-line-only if the
       shipped unknown-key wording does not already say so
