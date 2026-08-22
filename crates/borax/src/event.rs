@@ -108,6 +108,11 @@ pub enum Event {
         entries: usize,
         bytes: u64,
     },
+    /// The collection's ledger was regenerated from what is on disk.
+    /// `entries` is how many files the scan found worth recording,
+    /// which is the whole of what the ledger holds afterwards rather
+    /// than an addition to what it held before.
+    LedgerRebuilt { root: PathBuf, entries: usize },
     /// The run is over. Always the last event.
     RunFinished { counts: Counts },
 }
@@ -346,6 +351,10 @@ pub fn human_line(event: &Event) -> Option<String> {
             bytes,
         } => Some(format!(
             "{}: cleared {entries} entries, {bytes} bytes",
+            root.display()
+        )),
+        Event::LedgerRebuilt { root, entries } => Some(format!(
+            "{}: rebuilt with {entries} entries",
             root.display()
         )),
         Event::RunFinished { counts } => Some(format!(

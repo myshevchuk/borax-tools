@@ -20,9 +20,11 @@ use std::path::{Path, PathBuf};
 
 use borax_core::bib_output::parse_sidecar_record;
 use borax_core::content::ContentHash;
-use borax_core::ledger::{Duplicate, Entry, Index, RunId, Unparsable, Warning, parse_jsonl};
+use borax_core::ledger::{
+    Duplicate, Entry, Index, RunId, Unparsable, Warning, parse_jsonl, serialize_jsonl,
+};
 use borax_core::record::Record;
-use borax_sources::store::hash_file;
+use borax_sources::store::{hash_file, write_atomically};
 
 use crate::bib::sidecar_path;
 use crate::event::{Diagnostic, Level};
@@ -53,6 +55,14 @@ pub trait Ledger {
     /// The whole slice lands or none of it does, so a reader between
     /// two appends never sees half a run.
     fn append(&self, entries: &[Entry]) -> io::Result<()>;
+
+    /// Replace the whole ledger with `entries`.
+    ///
+    /// What `borax ledger rebuild` writes, and the only operation that
+    /// removes anything: entries the rebuild did not produce are gone
+    /// afterwards, which is what compacts a ledger whose files have
+    /// been deleted or moved.
+    fn replace(&self, entries: &[Entry]) -> io::Result<()>;
 }
 
 /// What reading a ledger revealed beyond its entries.
@@ -163,6 +173,19 @@ impl Ledger for FileLedger {
             .append(true)
             .open(&self.path)?
             .write_all(batch.as_bytes())
+    }
+
+    /// Writes what [`borax_core::ledger::serialize_jsonl`] makes of the
+    /// entries — sorted by path, byte stable — so two rebuilds of an
+    /// unchanged collection produce identical files and a rebuild diffs
+    /// cleanly against the ledger it replaces.
+    ///
+    /// The bytes land atomically, so a rebuild interrupted mid-write
+    /// leaves the previous ledger intact rather than a truncated one:
+    /// the file is the whole of the accounting here, where an append
+    /// risks only its own line.
+    fn replace(&self, entries: &[Entry]) -> io::Result<()> {
+        write_atomically(&self.path, serialize_jsonl(entries).as_bytes())
     }
 }
 

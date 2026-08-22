@@ -44,7 +44,7 @@ TDD throughout: red test first for every pure behaviour.
       across the test suite; do it once, with the run-log plumbing of
       group 3, which needs the same collection root — done by adding
       `state_root` in the same pass, unused until group 3 reads it
-- [ ] 2.6 Tests + implementation: dispatch `borax ledger rebuild` —
+- [x] 2.6 Tests + implementation: dispatch `borax ledger rebuild` —
       a rebuilt event, `scan_collection` + `rebuild` + write — and drop
       the preflight refusal standing in for it. `events_for`'s catch-all
       must never be what a real subcommand falls through

@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `borax ledger rebuild` is due. A missing or unreadable ledger costs
   the run its duplicate detection and nothing else, and `--no-ledger`
   turns it off outright.
+- `borax ledger rebuild` regenerates the ledger from the collection
+  itself, scanning its files and the sidecars beside them, so the
+  accounting is derived rather than authoritative: delete
+  `.borax/ledger.jsonl` and a rebuild restores it. Entries come out
+  sorted by path, which makes two rebuilds of an unchanged collection
+  byte-identical and a ledger something you can keep under version
+  control and read a diff of. A file the scan cannot account for —
+  no sidecar, no record borax wrote, or no readable bytes — yields no
+  entry, so a rebuild also compacts away whatever has since been
+  deleted or moved. The new ledger replaces the old one in a single
+  atomic write, leaving the previous one intact if the rebuild cannot
+  finish.
 
 ### Changed
 

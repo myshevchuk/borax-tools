@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use borax::bib::BibFiles;
-use borax::cli::{Cli, Command, Settings};
+use borax::cli::{Cli, Command, LedgerAction, Settings};
 use borax::config::{Layer, Origin, resolve};
 use borax::event::{Event, Level, SkipReason};
 use borax::journal::{Entry as JournalEntry, Journal};
@@ -37,11 +37,13 @@ use tempfile::tempdir;
 /// A [`Ledger`] fake returning a fixed [`Loaded`] from every `load`,
 /// counting how many times `load` was called — the counter is what
 /// proves [`prepare`] never touches a disabled or root-less ledger —
-/// and recording every `append`.
+/// and recording every `append` and `replace`.
 struct FakeLedger {
     loaded: Loaded,
     load_calls: RefCell<usize>,
     appended: RefCell<Vec<Entry>>,
+    replaced: RefCell<Option<Vec<Entry>>>,
+    replace_failure: Option<String>,
 }
 
 impl FakeLedger {
@@ -50,7 +52,17 @@ impl FakeLedger {
             loaded,
             load_calls: RefCell::new(0),
             appended: RefCell::new(Vec::new()),
+            replaced: RefCell::new(None),
+            replace_failure: None,
         }
+    }
+
+    /// Make the next call to `replace` fail with `message`, following
+    /// the failing-adapter pattern `FakeFilesystem::with_failure` uses
+    /// in `renaming.rs`.
+    fn with_replace_failure(mut self, message: impl Into<String>) -> FakeLedger {
+        self.replace_failure = Some(message.into());
+        self
     }
 
     fn load_calls(&self) -> usize {
@@ -60,6 +72,12 @@ impl FakeLedger {
     /// Every entry passed to `append`, in call order across every call.
     fn appended(&self) -> Vec<Entry> {
         self.appended.borrow().clone()
+    }
+
+    /// The entries passed to `replace`, or `None` when `replace` was
+    /// never called.
+    fn replaced(&self) -> Option<Vec<Entry>> {
+        self.replaced.borrow().clone()
     }
 }
 
@@ -71,6 +89,14 @@ impl Ledger for FakeLedger {
 
     fn append(&self, entries: &[Entry]) -> std::io::Result<()> {
         self.appended.borrow_mut().extend_from_slice(entries);
+        Ok(())
+    }
+
+    fn replace(&self, entries: &[Entry]) -> std::io::Result<()> {
+        if let Some(message) = &self.replace_failure {
+            return Err(std::io::Error::other(message.clone()));
+        }
+        *self.replaced.borrow_mut() = Some(entries.to_vec());
         Ok(())
     }
 }
@@ -2094,4 +2120,533 @@ fn a_content_duplicate_skip_counts_toward_a_partial_outcome() {
         panic!("expected the last event to be RunFinished, got {events:?}")
     };
     assert_eq!(counts.skipped, 1, "got {counts:?}");
+}
+
+// ---------------------------------------------------------------------
+// 2.6: `borax ledger rebuild` dispatched — scan_collection + rebuild +
+// ledger.replace, wired behind `preflight`/`emit_events` the same way
+// `borax cache` is: the whole work is one event, and the work is what
+// can fail.
+// ---------------------------------------------------------------------
+
+/// A rebuild over a collection of PDFs-with-sidecars replaces the
+/// ledger with exactly what `scan_collection` + `rebuild` — already
+/// tested on their own above — produce from it, and reports the count.
+#[test]
+fn rebuild_replaces_the_ledger_with_one_entry_per_scanned_file_and_reports_the_count() {
+    let dir = tempdir().unwrap();
+    write_pdf_with_sidecar(
+        dir.path(),
+        "a.pdf",
+        b"a-bytes",
+        &record_of(EntryType::Article),
+    );
+    write_pdf_with_sidecar(dir.path(), "b.pdf", b"b-bytes", &record_of(EntryType::Book));
+
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: None,
+    });
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Ledger {
+            action: LedgerAction::Rebuild,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::LedgerRebuilt {
+            root: dir.path().to_path_buf(),
+            entries: 2,
+        }],
+        "got {events:?}"
+    );
+    assert_eq!(
+        ledger.replaced(),
+        Some(rebuild(
+            &scan_collection(dir.path()),
+            RunId::new(fixed_now()),
+            &fixed_now(),
+            env!("CARGO_PKG_VERSION"),
+        )),
+        "got {:?}",
+        ledger.replaced()
+    );
+}
+
+/// ledger spec scenario "Rebuild after manual deletions": an entry for a
+/// file no longer on disk does not survive the rebuild.
+#[test]
+fn rebuild_compacts_away_entries_for_files_no_longer_on_disk() {
+    let dir = tempdir().unwrap();
+    let record = record_of(EntryType::Article);
+    let a = write_pdf_with_sidecar(dir.path(), "a.pdf", b"a-bytes", &record);
+    write_pdf_with_sidecar(dir.path(), "b.pdf", b"b-bytes", &record);
+    std::fs::remove_file(&a).unwrap();
+    std::fs::remove_file(borax::bib::sidecar_path(&a)).unwrap();
+
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: None,
+    });
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Ledger {
+            action: LedgerAction::Rebuild,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::LedgerRebuilt {
+            root: dir.path().to_path_buf(),
+            entries: 1,
+        }],
+        "got {events:?}"
+    );
+    let replaced = ledger
+        .replaced()
+        .unwrap_or_else(|| panic!("replace was never called"));
+    assert_eq!(
+        replaced
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b.pdf"],
+        "got {replaced:?}"
+    );
+}
+
+/// ledger spec scenario "Rebuild is idempotent", proven against a real
+/// [`FileLedger`] rather than a fake: a fake cannot show that the bytes
+/// written are stable, only that the entries passed to it are.
+#[test]
+fn rebuilding_an_unchanged_collection_twice_through_dispatch_is_byte_identical() {
+    let dir = tempdir().unwrap();
+    let record = record_of(EntryType::Article);
+    write_pdf_with_sidecar(dir.path(), "z.pdf", b"z-bytes", &record);
+    write_pdf_with_sidecar(dir.path(), "a.pdf", b"a-bytes", &record);
+
+    let ledger_path = dir.path().join(ACCOUNTING_DIR).join(LEDGER_FILE);
+    let real_ledger = FileLedger::new(&ledger_path);
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&real_ledger),
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let command = Command::Ledger {
+        action: LedgerAction::Rebuild,
+    };
+
+    events_for(&command, &Configs::uniform(effective.clone()), &adapters).unwrap();
+    let first = std::fs::read(&ledger_path).unwrap();
+
+    events_for(&command, &Configs::uniform(effective), &adapters).unwrap();
+    let second = std::fs::read(&ledger_path).unwrap();
+
+    assert_eq!(
+        first, second,
+        "two rebuilds of an unchanged collection must be byte identical"
+    );
+    assert_eq!(
+        String::from_utf8(first).unwrap().lines().count(),
+        2,
+        "expected one line per scanned file"
+    );
+}
+
+/// `scan_collection`'s own contract — a file with no sidecar, and one
+/// whose sidecar carries no recoverable record, each contribute no
+/// entry — has to survive being wired into the subcommand.
+#[test]
+fn rebuild_skips_files_scan_collection_would_not_count() {
+    let dir = tempdir().unwrap();
+    write_pdf_with_sidecar(
+        dir.path(),
+        "good.pdf",
+        b"good-bytes",
+        &record_of(EntryType::Article),
+    );
+    std::fs::write(dir.path().join("orphan.pdf"), b"bytes").unwrap();
+    let broken_path = dir.path().join("broken.pdf");
+    std::fs::write(&broken_path, b"bytes").unwrap();
+    std::fs::write(borax::bib::sidecar_path(&broken_path), "@article{key,}\n").unwrap();
+
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: None,
+    });
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Ledger {
+            action: LedgerAction::Rebuild,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::LedgerRebuilt {
+            root: dir.path().to_path_buf(),
+            entries: 1,
+        }],
+        "got {events:?}"
+    );
+    let replaced = ledger
+        .replaced()
+        .unwrap_or_else(|| panic!("replace was never called"));
+    assert_eq!(
+        replaced
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["good.pdf"],
+        "got {replaced:?}"
+    );
+}
+
+/// Outside any collection there is nothing to scan and nowhere for a
+/// rebuilt ledger to go, so the run is refused before anything is
+/// written — the same shape as `borax cache` with no cache directory.
+#[test]
+fn rebuild_outside_a_collection_is_refused_and_writes_nothing() {
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: None,
+    });
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(
+            Command::Ledger {
+                action: LedgerAction::Rebuild,
+            },
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Fatal, "got {outcome:?}");
+    assert!(
+        out.is_empty(),
+        "a refused rebuild must write no event stream: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(
+        !err.is_empty(),
+        "expected a diagnostic naming the missing collection"
+    );
+    assert!(
+        ledger.replaced().is_none(),
+        "nothing must be written when there is no collection to rebuild"
+    );
+}
+
+/// A ledger that cannot be written refuses the run rather than
+/// reporting a clean rebuild that never landed — the same shape as
+/// `borax cache` over an unreadable cache directory.
+#[test]
+fn a_failing_replace_refuses_the_run_rather_than_reporting_a_clean_rebuild() {
+    let dir = tempdir().unwrap();
+    write_pdf_with_sidecar(
+        dir.path(),
+        "a.pdf",
+        b"a-bytes",
+        &record_of(EntryType::Article),
+    );
+
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: None,
+    })
+    .with_replace_failure("disk full");
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(
+            Command::Ledger {
+                action: LedgerAction::Rebuild,
+            },
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Fatal, "got {outcome:?}");
+    assert!(
+        out.is_empty(),
+        "a failed rebuild must not report success: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    let err_text = String::from_utf8(err).unwrap();
+    assert!(!err_text.is_empty(), "expected a diagnostic on stderr");
+}
+
+/// Precedent: `--no-cache` governs the pipeline's use of the response
+/// cache and has no bearing on `borax cache`. `ledger rebuild` is an
+/// explicit instruction to do ledger work, so `ledger = false` /
+/// `--no-ledger` must not stop it either.
+#[test]
+fn a_disabled_ledger_setting_does_not_prevent_a_rebuild() {
+    let dir = tempdir().unwrap();
+    write_pdf_with_sidecar(
+        dir.path(),
+        "a.pdf",
+        b"a-bytes",
+        &record_of(EntryType::Article),
+    );
+
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: None,
+    });
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = effective_with(|layer| {
+        layer.ledger = Some(false);
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Ledger {
+            action: LedgerAction::Rebuild,
+        },
+        &Configs::uniform(effective),
+        &adapters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::LedgerRebuilt {
+            root: dir.path().to_path_buf(),
+            entries: 1,
+        }],
+        "a disabled ledger setting must not stop an explicit rebuild, got {events:?}"
+    );
+    assert!(
+        ledger.replaced().is_some(),
+        "the rebuild must still write, even with ledger = false"
+    );
+}
+
+/// The rebuild's `--json` line is the event stream and nothing else: it
+/// carries the schema field every other event does, under the
+/// `ledger-rebuilt` tag, with no diagnostic mixed onto stdout.
+#[test]
+fn dispatching_a_rebuild_writes_ledger_rebuilt_on_stdout_carrying_the_schema_field() {
+    let dir = tempdir().unwrap();
+    write_pdf_with_sidecar(
+        dir.path(),
+        "a.pdf",
+        b"a-bytes",
+        &record_of(EntryType::Article),
+    );
+
+    let ledger = FakeLedger::new(Loaded {
+        index: Index::build(&[]),
+        warning: None,
+    });
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        journal: None,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::Ledger {
+                action: LedgerAction::Rebuild,
+            },
+            true,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    assert!(
+        err.is_empty(),
+        "a clean rebuild must not write to stderr: {:?}",
+        String::from_utf8_lossy(&err)
+    );
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rebuilt = lines
+        .iter()
+        .find(|line| line["event"] == "ledger-rebuilt")
+        .unwrap_or_else(|| panic!("no ledger-rebuilt line in {lines:?}"));
+    assert_eq!(rebuilt["schema"], serde_json::json!(1));
+    assert_eq!(rebuilt["entries"], serde_json::json!(1));
+    assert_eq!(rebuilt["root"], serde_json::to_value(dir.path()).unwrap());
 }

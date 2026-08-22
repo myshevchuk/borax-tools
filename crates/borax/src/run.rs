@@ -575,6 +575,14 @@ pub enum Prepared<'a> {
         /// trusted. `None` when there was nothing to report.
         warning: Option<Diagnostic>,
     },
+    /// `ledger rebuild`, with the report the regenerated ledger
+    /// produced.
+    ///
+    /// The ledger is already written by the time this exists, for
+    /// [`Prepared::Cache`]'s reason: the subcommand's whole work is the
+    /// one event, and that work — scanning the collection and writing
+    /// what it found — is the part that can fail.
+    Rebuilt { report: Event },
 }
 
 /// Settle everything about `command` that could end the run, before any
@@ -592,13 +600,18 @@ pub enum Prepared<'a> {
 ///   promise that makes renaming safe to offer;
 /// - `cache` with no cache directory, or with one that cannot be read,
 ///   because reporting an empty cache would answer a question that was
-///   never asked.
+///   never asked;
+/// - `ledger rebuild` outside any collection, or over a ledger that
+///   cannot be written, since a rebuild reported but not written would
+///   leave the user believing the accounting was put right.
 ///
 /// For a command that works on files, nothing here reads one, queries a
 /// source, or moves anything, so a run refused at this point costs no
-/// network and leaves no trace. `borax cache` is the exception, and the
-/// third failure above is why: its whole work is a single event, and
-/// the work is the part that can fail.
+/// network and leaves no trace. `borax cache` and `borax ledger
+/// rebuild` are the exceptions, and the last two failures above are
+/// why: each one's whole work is a single event, and the work is the
+/// part that can fail, so it belongs where there is still a way to
+/// refuse the run.
 ///
 /// A `rename` also reads the ledger here — once, before the first file,
 /// since every file in the batch is checked against the same entries.
@@ -612,13 +625,17 @@ pub fn preflight<'a, C: Cache>(
 ) -> Result<Prepared<'a>, Diagnostic> {
     match command {
         Command::Config | Command::Resolve { .. } | Command::Undo => Ok(Prepared::Unchecked),
-        // The rebuild itself is not wired yet. Refusing here keeps the
-        // subcommand from reaching the catch-all in `events_for`, which
-        // exists for command/`Prepared` pairs no caller can build and
-        // would report a rebuild that never ran as a clean run.
-        Command::Ledger { .. } => Err(error(
-            "`borax ledger rebuild` is not wired up yet".to_string(),
-        )),
+        // The root and the ledger are discovered together, so a run
+        // holding one holds the other; either being absent is the one
+        // situation of being outside a collection.
+        Command::Ledger { .. } => match (adapters.collection_root.as_deref(), adapters.ledger) {
+            (Some(root), Some(ledger)) => Ok(Prepared::Rebuilt {
+                report: rebuilt_ledger(root, ledger, (adapters.now)())?,
+            }),
+            _ => Err(error(
+                "this directory is in no collection, so there is no ledger to rebuild".to_string(),
+            )),
+        },
         Command::Cache { clear } => match adapters.cache_root.as_deref() {
             Some(root) => Ok(Prepared::Cache {
                 report: cache_report(*clear, root)?,
@@ -717,7 +734,8 @@ pub fn emit_events<C: Cache>(
             }
             None
         }
-        (Command::Cache { .. }, Prepared::Cache { report }) => {
+        (Command::Cache { .. }, Prepared::Cache { report })
+        | (Command::Ledger { .. }, Prepared::Rebuilt { report }) => {
             sink.emit(report.clone());
             None
         }
@@ -786,6 +804,43 @@ fn cache_report(clear: bool, root: &Path) -> Result<Event, Diagnostic> {
         false => crate::cache::inspect(root).map(|stats| crate::cache::status_event(&stats)),
     }
     .map_err(|failure| error(format!("\"{}\": {failure}", root.display())))
+}
+
+/// Regenerate the ledger of the collection at `root` and report what it
+/// now holds.
+///
+/// The collection is scanned ([`crate::ledger::scan_collection`]) and
+/// what the scan found becomes the whole ledger: a file the scan does
+/// not count keeps no entry, which is what compacts away the records of
+/// files that have been deleted or moved. Every entry is stamped with
+/// `at`, as both its timestamp and its run identifier, since one
+/// rebuild is one admission of everything it found.
+///
+/// The run's `ledger` setting has no say here. It governs whether the
+/// pipeline consults and adds to the ledger; `ledger rebuild` is an
+/// instruction to do ledger work, and refusing it because the pipeline
+/// was told to leave the ledger alone would refuse the very command
+/// that puts a disabled ledger back in order.
+///
+/// A ledger that will not take the entries is a [`Diagnostic`] rather
+/// than a clean report: a rebuild announced but not written would leave
+/// the user believing the accounting had been put right.
+fn rebuilt_ledger(root: &Path, ledger: &dyn Ledger, at: String) -> Result<Event, Diagnostic> {
+    let entries = crate::ledger::rebuild(
+        &crate::ledger::scan_collection(root),
+        borax_core::ledger::RunId::new(&at),
+        &at,
+        env!("CARGO_PKG_VERSION"),
+    );
+
+    ledger
+        .replace(&entries)
+        .map_err(|failure| error(format!("\"{}\": {failure}", root.display())))?;
+
+    Ok(Event::LedgerRebuilt {
+        root: root.to_path_buf(),
+        entries: entries.len(),
+    })
 }
 
 /// Write the events `borax resolve` produces for `paths` into `sink`.
