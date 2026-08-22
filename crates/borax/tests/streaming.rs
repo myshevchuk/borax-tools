@@ -480,8 +480,12 @@ fn an_uncompilable_template_is_fatal_and_opens_no_stream() {
     );
 }
 
+/// design "retires the journal from the write path" / tasks.md 4.3:
+/// the message names the run log rather than the journal, since nothing
+/// checks for a journal here any more — a run with neither a collection
+/// nor a state directory has nowhere to record itself for `undo`.
 #[test]
-fn apply_without_a_journal_is_fatal_and_opens_no_stream() {
+fn apply_with_nowhere_to_record_itself_is_fatal_and_opens_no_stream() {
     let path = PathBuf::from("/lib/paper.pdf");
     let library = LiveLibrary::new(Arc::new(Mutex::new(Vec::new())));
     let sources: Vec<&dyn Source> = Vec::new();
@@ -526,8 +530,12 @@ fn apply_without_a_journal_is_fatal_and_opens_no_stream() {
     assert_stream_never_opened(&out);
     let err_text = String::from_utf8(err).unwrap();
     assert!(
-        err_text.contains("journal"),
-        "expected the missing journal named in stderr, got {err_text:?}"
+        err_text.contains("record"),
+        "expected the run's inability to record itself named in stderr, got {err_text:?}"
+    );
+    assert!(
+        !err_text.to_lowercase().contains("journal"),
+        "the journal is retired from this gate, got {err_text:?}"
     );
 }
 

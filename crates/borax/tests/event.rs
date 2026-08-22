@@ -6,6 +6,7 @@ use borax::event::{
     Attempt, Counts, Diagnostic, Event, Format, Level, SCHEMA, SkipReason, human_line, json_line,
     render,
 };
+use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::record::{EntryType, Record};
 use serde_json::Value;
 
@@ -37,10 +38,16 @@ fn planned() -> Event {
     }
 }
 
+/// A fixed hash for fixtures that need one but do not test its value.
+fn hash_of(seed: &str) -> ContentHash {
+    hash_bytes(seed.as_bytes())
+}
+
 fn renamed() -> Event {
     Event::Renamed {
         path: PathBuf::from("paper.pdf"),
         target: PathBuf::from("smith2024_borax.pdf"),
+        hash: hash_of("paper.pdf"),
     }
 }
 
@@ -138,6 +145,9 @@ fn all_events() -> Vec<Event> {
             message: "disk full".to_string(),
         }),
         skipped(SkipReason::Unciteable),
+        skipped(SkipReason::Unrecordable {
+            message: "the file's content hash is unknown".to_string(),
+        }),
         bib_entry(),
         sidecar(),
         config_setting(),
@@ -181,6 +191,9 @@ fn all_skip_reasons() -> Vec<SkipReason> {
             message: "disk full".to_string(),
         },
         SkipReason::Unciteable,
+        SkipReason::Unrecordable {
+            message: "the file's content hash is unknown".to_string(),
+        },
     ]
 }
 
@@ -356,6 +369,55 @@ fn json_line_of_ledger_rebuilt_has_exactly_the_documented_field_set() {
     assert_eq!(object["entries"], Value::from(3));
 }
 
+/// design: `Renamed` carries the hash the file resolved to, required
+/// rather than optional — an applying rename already refuses to move a
+/// file whose hash is unknown, so this is the shape the invariant
+/// takes in the type.
+#[test]
+fn json_line_of_renamed_has_exactly_the_documented_field_set() {
+    let value: Value = serde_json::from_str(&json_line(&renamed())).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["event", "hash", "path", "schema", "target"]);
+
+    assert_eq!(object["path"], Value::from("paper.pdf"));
+    assert_eq!(object["target"], Value::from("smith2024_borax.pdf"));
+    assert_eq!(object["hash"], Value::from(hash_of("paper.pdf").as_str()));
+}
+
+/// `Planned` moves nothing, so unlike `Renamed` it has no hash to
+/// carry — pinned so a future edit cannot quietly add one to match.
+#[test]
+fn json_line_of_planned_has_exactly_the_documented_field_set() {
+    let value: Value = serde_json::from_str(&json_line(&planned())).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["event", "path", "schema", "target"]);
+}
+
+/// The component `Unrecordable` replaces is gone from every rendering,
+/// in either format — a name a future skip reason must not resurrect.
+#[test]
+fn unjournalable_appears_nowhere_in_any_rendering() {
+    for event in all_events() {
+        let json = json_line(&event);
+        assert!(
+            !json.to_lowercase().contains("unjournalable"),
+            "got {json:?}"
+        );
+        if let Some(line) = human_line(&event) {
+            assert!(
+                !line.to_lowercase().contains("unjournalable"),
+                "got {line:?}"
+            );
+        }
+    }
+}
+
 // --- SkipReason nesting under Skipped.reason, tagged by kind ---
 
 #[test]
@@ -397,6 +459,12 @@ fn skipped_nests_the_reason_under_reason_with_a_kebab_case_kind_tag() {
             "bib-write-failed",
         ),
         (SkipReason::Unciteable, "unciteable"),
+        (
+            SkipReason::Unrecordable {
+                message: "the file's content hash is unknown".to_string(),
+            },
+            "unrecordable",
+        ),
     ];
 
     for (reason, expected_kind) in cases {
@@ -646,6 +714,12 @@ fn human_line_of_skipped_makes_the_reason_legible_for_every_variant() {
             "disk full",
         ),
         (SkipReason::Unciteable, "citation key"),
+        (
+            SkipReason::Unrecordable {
+                message: "the file's content hash is unknown".to_string(),
+            },
+            "content hash",
+        ),
     ];
 
     for (reason, must_contain) in cases {
@@ -755,6 +829,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
         Event::Renamed {
             path: PathBuf::from("a.pdf"),
             target: PathBuf::from("smith2024_a.pdf"),
+            hash: hash_of("a.pdf"),
         },
         Event::Skipped {
             path: PathBuf::from("c.pdf"),

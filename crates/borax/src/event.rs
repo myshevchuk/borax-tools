@@ -14,6 +14,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use borax_core::content::ContentHash;
 use borax_core::ledger::DuplicateReason;
 use borax_core::record::Record;
 use serde::{Deserialize, Serialize};
@@ -66,8 +67,21 @@ pub enum Event {
     /// applying run emits [`Event::Renamed`] instead, so no file is
     /// ever reported twice in one run.
     Planned { path: PathBuf, target: PathBuf },
-    /// A rename that did happen.
-    Renamed { path: PathBuf, target: PathBuf },
+    /// A rename that did happen, with the content hash of the file
+    /// that moved.
+    ///
+    /// The hash is what lets the move be reversed safely: `borax undo`
+    /// verifies that the file now at `target` is still the one this
+    /// event describes before moving it back. It is required rather
+    /// than optional because an applying rename refuses to move a file
+    /// whose hash it does not know
+    /// ([`SkipReason::Unrecordable`]), so a move that happened always
+    /// has one.
+    Renamed {
+        path: PathBuf,
+        target: PathBuf,
+        hash: ContentHash,
+    },
     /// A rename that was undone: `path` moved back to `target`.
     ///
     /// Distinct from [`Event::Renamed`] even though both describe a
@@ -165,10 +179,11 @@ pub enum SkipReason {
     /// Something borax did not write already sits where the file's
     /// sidecar would go, so the sidecar was not written.
     SidecarTaken { target: PathBuf },
-    /// The move could not be recorded in the undo journal, so it was
-    /// not made. A move nothing recorded is one `borax undo` could
-    /// never reverse.
-    Unjournalable { message: String },
+    /// The move could not be recorded well enough to be reversed, so
+    /// it was not made. A move nothing recorded is one `borax undo`
+    /// could never reverse, and being reversible is the promise that
+    /// makes renaming safe to offer.
+    Unrecordable { message: String },
     /// Nothing is at the path the journal says a file was moved to, so
     /// there is nothing to move back.
     Missing,
@@ -312,7 +327,7 @@ pub fn human_line(event: &Event) -> Option<String> {
             path.display(),
             target.display()
         )),
-        Event::Renamed { path, target } => Some(format!(
+        Event::Renamed { path, target, .. } => Some(format!(
             "{}: renamed to {}",
             path.display(),
             target.display()
@@ -402,7 +417,7 @@ fn skipped_because(reason: &SkipReason) -> String {
         SkipReason::SidecarTaken { target } => {
             format!("{} exists and borax did not write it", target.display())
         }
-        SkipReason::Unjournalable { message } => {
+        SkipReason::Unrecordable { message } => {
             format!("the move could not be recorded, so it was not made ({message})")
         }
         SkipReason::Duplicate {

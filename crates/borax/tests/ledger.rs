@@ -1706,6 +1706,7 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
             Event::Renamed {
                 path,
                 target: PathBuf::from("/collection/sub/Smith2024.pdf"),
+                hash: hash.clone(),
             },
         ],
         "got {events:?}"

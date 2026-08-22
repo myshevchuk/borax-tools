@@ -9,7 +9,7 @@ use borax::bib::{BibFiles, citation_key};
 use borax::cache::{cleared_event, inspect, status_event};
 use borax::cli::{Cli, Command, Settings};
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
-use borax::event::{Diagnostic, Event, Level, SkipReason};
+use borax::event::{Event, Level, SkipReason};
 use borax::journal::{Entry, Journal, RunId};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError, counts_for};
@@ -1022,7 +1022,7 @@ fn rename_preview_with_no_journal_succeeds() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn rename_apply_emits_renamed_moves_the_file_and_journals_an_entry() {
+fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
     let path = PathBuf::from("/lib/original.pdf");
     let hash = hash_for("events-for-rename-apply");
     let library = library_with_resolvable(&path, hash.clone(), "10.1000/rename-apply");
@@ -1075,24 +1075,18 @@ fn rename_apply_emits_renamed_moves_the_file_and_journals_an_entry() {
             Event::Renamed {
                 path: path.clone(),
                 target: target.clone(),
+                hash,
             },
         ],
         "got {events:?}"
     );
     assert_eq!(filesystem.renames(), vec![(path.clone(), target.clone())]);
-    // The docstring on `Adapters::now` states that its return value is
-    // both the recorded time and what identifies the run in the
-    // journal, so a fixed `now` pins a fixed `RunId` as well as a fixed
-    // `at`.
-    assert_eq!(
-        journal.appended(),
-        vec![Entry {
-            run: RunId::new(fixed_now()),
-            from: path,
-            to: target,
-            hash,
-            at: fixed_now(),
-        }],
+    // design "retires the journal from the write path": the record a
+    // rename needs now travels on `Event::Renamed` itself, so nothing
+    // appends to the journal here any more, even though one is wired
+    // in.
+    assert!(
+        journal.appended().is_empty(),
         "got {:?}",
         journal.appended()
     );
@@ -1105,12 +1099,21 @@ fn library_with_resolvable(path: &Path, hash: ContentHash, doi_value: &str) -> F
     FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi(doi_value))
 }
 
+/// design: "retires the journal from the write path" — `adapters.journal`
+/// gates nothing about `--apply` any more; what protects an apply run
+/// with nowhere to record itself is the run-log destination check in
+/// `dispatch`'s `open_log` (see `runlog.rs`'s
+/// `an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving_anything`),
+/// which `events_for` — a value-collecting convenience that never calls
+/// `dispatch` — does not run. So `events_for` alone still moves the
+/// file, exactly as `dispatch` would were the run log writable.
 #[test]
-fn rename_apply_with_no_journal_is_an_error_and_moves_nothing() {
+fn events_for_moves_the_file_on_apply_even_with_no_journal_since_that_gate_lives_in_dispatch() {
     let path = PathBuf::from("/lib/original.pdf");
+    let hash = hash_for("events-for-rename-apply-no-journal");
     let library = FakeLibrary::new().with_file(
         &path,
-        hash_for("events-for-rename-apply-no-journal"),
+        hash.clone(),
         pdf_with_embedded_doi("10.1000/rename-apply-no-journal"),
     );
     let crossref = fake_source(
@@ -1135,22 +1138,38 @@ fn rename_apply_with_no_journal_is_an_error_and_moves_nothing() {
         collection_root: None,
         state_root: None,
     };
+    let target = PathBuf::from("/lib/Smith2024.pdf");
 
-    let error = events_for(
+    let events = events_for(
         &Command::Rename {
-            paths: vec![path],
+            paths: vec![path.clone()],
             apply: true,
         },
         &Configs::uniform(effective.clone()),
         &adapters,
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error.level, Level::Error);
-    assert!(
-        filesystem.renames().is_empty(),
-        "an unjournaled apply must not move any file"
+    assert_eq!(
+        events,
+        vec![
+            resolved_event(
+                &path,
+                "doi:10.1000/rename-apply-no-journal",
+                &record_by("Smith", 2024, "10.1000/rename-apply-no-journal"),
+                "crossref",
+                Some("embedded-metadata"),
+                false,
+            ),
+            Event::Renamed {
+                path: path.clone(),
+                target: target.clone(),
+                hash,
+            },
+        ],
+        "got {events:?}"
     );
+    assert_eq!(filesystem.renames(), vec![(path, target)]);
 }
 
 // ---------------------------------------------------------------------
@@ -1929,11 +1948,16 @@ fn a_run_with_a_skip_returns_partial() {
 }
 
 // ---------------------------------------------------------------------
-// dispatch: a Diagnostic from events_for
+// dispatch: a refusal that only dispatch can make
 // ---------------------------------------------------------------------
 
+/// An applying rename with nowhere to record itself is refused by
+/// `dispatch` rather than by `events_for`: the gate is the run log's,
+/// and `events_for` never opens one. The refusal still has to behave
+/// like every other one — nothing on stdout, the reason on stderr, and
+/// no file moved.
 #[test]
-fn a_diagnostic_from_events_for_returns_fatal_writes_to_err_and_nothing_to_stdout() {
+fn a_refusal_dispatch_alone_makes_is_fatal_and_writes_nothing_to_stdout() {
     let path = PathBuf::from("/lib/original.pdf");
     let library = FakeLibrary::new().with_file(
         &path,
@@ -1966,9 +1990,6 @@ fn a_diagnostic_from_events_for_returns_fatal_writes_to_err_and_nothing_to_stdou
         paths: vec![path],
         apply: true,
     };
-    let expected: Diagnostic =
-        events_for(&command, &Configs::uniform(effective.clone()), &adapters).unwrap_err();
-
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut streams = Streams {
@@ -1991,8 +2012,12 @@ fn a_diagnostic_from_events_for_returns_fatal_writes_to_err_and_nothing_to_stdou
     );
     let err_text = String::from_utf8(err).unwrap();
     assert!(
-        err_text.contains(&expected.to_string()),
-        "expected {err_text:?} to contain {expected}"
+        err_text.starts_with("error: "),
+        "expected a refusal on stderr, got {err_text:?}"
+    );
+    assert!(
+        err_text.contains("record the run so it can be undone"),
+        "expected {err_text:?} to say why the run was refused"
     );
     assert!(filesystem.renames().is_empty());
 }

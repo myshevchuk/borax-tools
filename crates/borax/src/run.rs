@@ -17,7 +17,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use borax_core::content::ContentHash;
 use borax_core::ledger::Index;
 use borax_core::record::{EntryType, Record};
 use borax_core::template::{Template, TemplateTable};
@@ -40,13 +39,13 @@ use crate::config::{
     layer_from_toml, nearest_override, resolve,
 };
 use crate::event::{Counts, Diagnostic, Event, Format, Level, render};
-use crate::journal::{Entry, FileJournal, Journal, RunId, undo_last};
+use crate::journal::{FileJournal, Journal, undo_last};
 use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
     resolve_file_checking_ledger,
 };
-use crate::renaming::{Applying, Filesystem, LogFailure, MoveLog, Planning, RealFilesystem};
+use crate::renaming::{Applying, Filesystem, Planning, RealFilesystem};
 use crate::session::{Outcome, outcome_for};
 
 /// The extension a file needs to be picked up from a directory.
@@ -413,10 +412,11 @@ pub struct Adapters<'a, C: Cache> {
     /// What a run records as the time it happened.
     ///
     /// Asked once for the whole batch, never once per file: its value
-    /// timestamps every entry the run journals and admits and, as a
-    /// [`RunId`](crate::journal::RunId), is what makes them one run.
-    /// `undo` reverts a run rather than a file, so entries that moved
-    /// together have to be identified together.
+    /// timestamps every entry the run admits to the ledger and, as a
+    /// [`RunId`](borax_core::ledger::RunId), is what makes them one
+    /// run. A run is admitted or reverted whole rather than a file at a
+    /// time, so entries that moved together have to be identified
+    /// together.
     ///
     /// Naming the run's log is a second reading, taken before the batch
     /// begins. Nothing joins a log to a run by its name — the log's
@@ -549,12 +549,12 @@ pub struct Group {
 /// What a run's fallible checks produced.
 ///
 /// Every way a run can end before it starts — a template that will not
-/// compile, `--apply` with nowhere to journal, `cache` on a system that
-/// names no cache directory — is settled by [`preflight`], which runs
+/// compile, `cache` on a system that names no cache directory — is
+/// settled by [`preflight`], which runs
 /// before the first event is written. What it hands back is what those
 /// checks yielded, which is why [`emit_events`] has no failure left to
 /// report and a [`Diagnostic`] can still mean that nothing was emitted.
-pub enum Prepared<'a> {
+pub enum Prepared {
     /// A command with nothing that could fail: `config`, `resolve`,
     /// `undo`.
     Unchecked,
@@ -575,9 +575,6 @@ pub enum Prepared<'a> {
     /// a file without already holding the tables for its directory.
     Grouped {
         groups: Vec<Group>,
-        /// Where an applying rename records its moves. `None` for a
-        /// preview and for `bib`, neither of which moves anything.
-        journal: Option<&'a dyn Journal>,
         /// What the collection has admitted already, keyed for the
         /// duplicate checks. Empty whenever detection is off — the
         /// setting says so, there is no collection, or the ledger could
@@ -603,21 +600,23 @@ pub enum Prepared<'a> {
 /// of it is reported.
 ///
 /// Returns a [`Diagnostic`] for the failures that are about the run
-/// rather than about a file, all three of which are the same shape —
+/// rather than about a file, all of which are the same shape —
 /// something the whole invocation needs is missing, so there is no
 /// per-file verdict to report:
 ///
 /// - a template that will not compile, which is wrong for every file in
 ///   the batch;
-/// - an applying rename with no journal to record it in, since an
-///   unjournaled rename cannot be undone and being undoable is the
-///   promise that makes renaming safe to offer;
 /// - `cache` with no cache directory, or with one that cannot be read,
 ///   because reporting an empty cache would answer a question that was
 ///   never asked;
 /// - `ledger rebuild` outside any collection, or over a ledger that
 ///   cannot be written, since a rebuild reported but not written would
 ///   leave the user believing the accounting was put right.
+///
+/// An applying rename with nowhere to record itself is not among them:
+/// what an apply run has to be able to write is its run log, and
+/// [`dispatch`] settles that — before the first event, and equally
+/// before anything moves.
 ///
 /// For a command that works on files, nothing here reads one, queries a
 /// source, or moves anything, so a run refused at this point costs no
@@ -632,11 +631,11 @@ pub enum Prepared<'a> {
 /// Nothing about it can refuse a run: whatever reading it had to say
 /// comes back as a [`Diagnostic`] alongside the groups, for the caller
 /// to write out, and the run proceeds with duplicate detection off.
-pub fn preflight<'a, C: Cache>(
+pub fn preflight<C: Cache>(
     command: &Command,
     configs: &Configs,
-    adapters: &'a Adapters<'a, C>,
-) -> Result<Prepared<'a>, Diagnostic> {
+    adapters: &Adapters<C>,
+) -> Result<Prepared, Diagnostic> {
     match command {
         Command::Config | Command::Resolve { .. } | Command::Undo => Ok(Prepared::Unchecked),
         // The root and the ledger are discovered together, so a run
@@ -656,38 +655,19 @@ pub fn preflight<'a, C: Cache>(
             }),
             None => Err(error("this system names no cache directory".to_string())),
         },
-        Command::Rename { paths, apply } => {
-            // An invocation missing both a journal and a compilable
-            // template is told about the journal. Nothing is touched
-            // either way, so the order decides only which of the two
-            // refusals the user reads first.
-            let journal = match (*apply, adapters.journal) {
-                (true, None) => {
-                    return Err(error(
-                        "--apply needs a journal to record the moves in, and this system names no \
-                         state directory"
-                            .to_string(),
-                    ));
-                }
-                (true, journal) => journal,
-                (false, _) => None,
-            };
+        Command::Rename { paths, .. } => {
             let groups = compiled_groups(paths, configs)?;
             let prepared = crate::ledger::prepare(configs.run().config().ledger, adapters.ledger);
             Ok(Prepared::Grouped {
                 groups,
-                journal,
                 ledger: prepared.index,
                 warning: prepared.diagnostic,
             })
         }
         Command::Bib { paths } => Ok(Prepared::Grouped {
             groups: compiled_groups(paths, configs)?,
-            // A bibliography run moves nothing, so it has nothing to
-            // record and needs no journal to record it in.
-            journal: None,
-            // Nor does it admit anything, so it neither consults the
-            // ledger nor has cause to complain about not finding one.
+            // A bibliography run admits nothing, so it neither consults
+            // the ledger nor has cause to complain about not finding one.
             ledger: Index::build(&[]),
             warning: None,
         }),
@@ -735,7 +715,7 @@ fn compiled_groups(paths: &[PathBuf], configs: &Configs) -> Result<Vec<Group>, D
 /// rather than about a file, and because it is only known when the last
 /// file has been checked.
 pub fn emit_events<C: Cache>(
-    prepared: &Prepared<'_>,
+    prepared: &Prepared,
     command: &Command,
     configs: &Configs,
     adapters: &Adapters<'_, C>,
@@ -757,15 +737,9 @@ pub fn emit_events<C: Cache>(
             resolve_events(paths, configs, adapters, sink);
             None
         }
-        (
-            Command::Rename { apply, .. },
-            Prepared::Grouped {
-                groups,
-                journal,
-                ledger,
-                ..
-            },
-        ) => rename_events(groups, *apply, *journal, ledger, configs, adapters, sink),
+        (Command::Rename { apply, .. }, Prepared::Grouped { groups, ledger, .. }) => {
+            rename_events(groups, *apply, ledger, configs, adapters, sink)
+        }
         (Command::Bib { .. }, Prepared::Grouped { groups, .. }) => {
             bib_events(groups, configs, adapters, sink);
             None
@@ -907,10 +881,9 @@ fn resolving(config: &Config) -> ResolveConfig {
 ///
 /// `groups` is what [`preflight`] made of the run's paths: each
 /// directory the run spans, the files in it, and the template tables its
-/// configuration compiled to. `journal` is where an applying run records
-/// its moves, and is `None` for a preview, which makes none. `admitted`
-/// is what the collection has admitted already, which every file in the
-/// batch is checked against and which an applied move adds to.
+/// configuration compiled to. `admitted` is what the collection has
+/// admitted already, which every file in the batch is checked against
+/// and which an applied move adds to.
 ///
 /// A group is worked under its own directory's configuration — its
 /// templates, its collision policy, its bibliography destination — since
@@ -934,7 +907,6 @@ fn resolving(config: &Config) -> ResolveConfig {
 fn rename_events<C: Cache>(
     groups: &[Group],
     apply: bool,
-    journal: Option<&dyn Journal>,
     admitted: &Index,
     configs: &Configs,
     adapters: &Adapters<C>,
@@ -984,9 +956,6 @@ fn rename_events<C: Cache>(
             effective.config().collision,
             adapters.filesystem,
         );
-        // A halt needs no separate report: every move it abandoned is
-        // already an `Unjournalable` skip carrying the reason, so the run
-        // says what happened through the same stream as everything else.
         let mut applying = Applying::new(adapters.filesystem, apply);
         let mut cited = Citations::default();
 
@@ -995,15 +964,10 @@ fn rename_events<C: Cache>(
                 continue;
             };
 
-            let log = journal.map(|journal| JournalLog {
-                journal,
-                hash: file.hash.clone(),
-                at: at.clone(),
-            });
-            let event = applying.carry_out(
-                &planning.plan(path, &file),
-                log.as_ref().map(|log| log as &dyn MoveLog),
-            );
+            // The hash goes to the move rather than to a log beside
+            // it: it travels on the `Renamed` event, which is what the
+            // run's log records and what `borax undo` reads back.
+            let event = applying.carry_out(&planning.plan(path, &file), file.hash.clone());
             // A sidecar goes beside the name the file now carries rather
             // than beside the one it has just lost, so where it lands is
             // where the move that just happened put it.
@@ -1113,46 +1077,6 @@ fn by_directory(paths: &[PathBuf]) -> Vec<(PathBuf, Vec<PathBuf>)> {
         }
     }
     groups
-}
-
-/// The [`MoveLog`] recording one file's move in the run's journal.
-///
-/// Every entry a run appends carries the same `at`, which is what makes
-/// them one run for [`crate::journal::undo_last`]. `hash` is what was
-/// resolved for the file this log is about, since `undo` verifies by
-/// content and an entry without a hash names a move nothing could
-/// reverse.
-struct JournalLog<'a> {
-    journal: &'a dyn Journal,
-    hash: Option<ContentHash>,
-    at: String,
-}
-
-impl MoveLog for JournalLog<'_> {
-    /// Append one entry for the move of `from` to `to`.
-    ///
-    /// A file whose content hash is unknown is a
-    /// [`LogFailure::Move`]: `undo` verifies by hash, so an entry
-    /// without one could never be acted on, and moving the file anyway
-    /// would put it beyond reach of the command meant to bring it back.
-    /// An append that fails is a [`LogFailure::Journal`], since a
-    /// journal that would not take this entry will not take the next.
-    fn record(&self, from: &Path, to: &Path) -> Result<(), LogFailure> {
-        let hash = self
-            .hash
-            .clone()
-            .ok_or_else(|| LogFailure::Move("the file's content hash is unknown".to_string()))?;
-
-        self.journal
-            .append(&[Entry {
-                run: RunId::new(self.at.clone()),
-                from: from.to_path_buf(),
-                to: to.to_path_buf(),
-                hash,
-                at: self.at.clone(),
-            }])
-            .map_err(|error| LogFailure::Journal(error.to_string()))
-    }
 }
 
 /// Whether `filesystem` reports a file at `path`.
@@ -1413,7 +1337,12 @@ fn log_failure(mandatory: bool, message: String) -> Opened {
 /// with neither a collection nor a state directory has nowhere to
 /// record itself, and a rename nothing recorded is a rename `borax
 /// undo` cannot see.
-fn open_log<C: Cache>(cli: &Cli, configs: &Configs, adapters: &Adapters<C>) -> Opened {
+fn open_log<C: Cache>(
+    cli: &Cli,
+    configs: &Configs,
+    adapters: &Adapters<C>,
+    started: &Event,
+) -> Opened {
     let destination = crate::runlog::destination(
         &cli.command,
         applying(&cli.command),
@@ -1435,16 +1364,32 @@ fn open_log<C: Cache>(cli: &Cli, configs: &Configs, adapters: &Adapters<C>) -> O
         };
     };
 
-    match crate::runlog::create(&destination) {
+    let opened = crate::runlog::create(&destination)
+        .and_then(|mut file| write_event(&mut file, started).map(|()| file));
+
+    match opened {
         Ok(file) => Opened::Log(Some(file)),
         Err(failure) => log_failure(
             destination.mandatory,
             format!(
-                "the run log \"{}\" could not be created: {failure}",
+                "the run log \"{}\" could not be written: {failure}",
                 destination.path.display()
             ),
         ),
     }
+}
+
+/// Write `event` to `log` as a line of JSON and flush it.
+///
+/// The one write of a run log that is allowed to fail loudly. Creating
+/// a file says almost nothing about being able to fill it — a full
+/// filesystem, a quota, a read-only mount noticed late — so the run's
+/// first event is written while there is still nothing to undo, and an
+/// applying run that cannot get that far is refused rather than left
+/// moving files into a record that will not take them.
+fn write_event(log: &mut fs::File, event: &Event) -> io::Result<()> {
+    writeln!(log, "{}", crate::event::json_line(event))?;
+    log.flush()
 }
 
 /// Carry out `cli` against `adapters`, writing to `streams`.
@@ -1499,11 +1444,17 @@ pub fn dispatch<C: Cache>(
         let _ = writeln!(streams.err, "{warning}");
     }
 
-    // Before the first event and so before any file is touched: an
-    // applying run whose log cannot be created is a run that would move
-    // files it could not record, and it is refused while there is still
-    // nothing to regret.
-    let log = match open_log(cli, configs, adapters) {
+    let started = Event::RunStarted {
+        command: cli.command.name().to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        applying: applying(&cli.command),
+    };
+
+    // Before the first event reaches the terminal, and so before any
+    // file is touched: opening the log writes `started` into it, so an
+    // applying run that cannot record itself is refused while there is
+    // still nothing to regret and `streams.out` is still untouched.
+    let log = match open_log(cli, configs, adapters, &started) {
         Opened::Log(log) => log,
         Opened::Failed {
             diagnostic,
@@ -1525,11 +1476,9 @@ pub fn dispatch<C: Cache>(
         },
         log,
     };
-    sink.emit(Event::RunStarted {
-        command: cli.command.name().to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        applying: applying(&cli.command),
-    });
+    // Through the terminal alone: the log has `started` already, from
+    // the write that proved it writable.
+    sink.terminal.emit(started);
     let discovered = emit_events(&prepared, &cli.command, configs, adapters, &mut sink);
 
     // Read before the last event is emitted, so what `RunFinished`

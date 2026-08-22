@@ -461,31 +461,36 @@ fn every_renamed_event_names_a_file_that_is_really_there() {
 // The journal
 // ---------------------------------------------------------------------
 
+/// design "retires the journal from the write path": nothing appends
+/// to the journal any more, even on a real applying run — the record a
+/// move needs now travels on the run log instead.
 #[test]
-fn the_journal_holds_one_entry_per_move_all_in_one_run() {
+fn the_journal_holds_nothing_now_that_writing_moved_to_the_run_log() {
     let ran = run_the_batch();
     let journal = FileJournal::new(ran.state.path().join("renames.jsonl"));
-    let entries = journal.read();
 
-    assert_eq!(entries.len(), 4, "journalled {entries:?}");
-    for entry in &entries {
-        assert_eq!(entry.run.as_str(), "e2e-run");
-        assert!(entry.to.is_file(), "{} is not there", entry.to.display());
-        assert!(!entry.hash.as_str().is_empty());
-    }
+    assert_eq!(journal.read(), Vec::new());
 }
 
-// The journal describes the moves the stream reported, so `undo` and the
-// event consumer agree about what happened.
+// The run log describes the moves the stream reported, so `undo` (once
+// rewired onto it) and the event consumer agree about what happened.
 #[test]
-fn the_journal_and_the_event_stream_describe_the_same_moves() {
+fn the_run_log_and_the_event_stream_describe_the_same_moves() {
     let ran = run_the_batch();
-    let journal = FileJournal::new(ran.state.path().join("renames.jsonl"));
+    let log_path = borax::runlog::latest_apply_log(None, Some(ran.state.path()))
+        .expect("an apply run outside a collection must leave a run log under the state root");
+    let log_text = fs::read_to_string(&log_path).unwrap();
 
-    let mut journalled: Vec<(PathBuf, PathBuf)> = journal
-        .read()
-        .into_iter()
-        .map(|entry| (entry.from, entry.to))
+    let mut logged: Vec<(PathBuf, PathBuf)> = log_text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| event["event"] == "renamed")
+        .map(|event| {
+            (
+                PathBuf::from(event["path"].as_str().unwrap()),
+                PathBuf::from(event["target"].as_str().unwrap()),
+            )
+        })
         .collect();
     let mut reported: Vec<(PathBuf, PathBuf)> = ran
         .tagged("renamed")
@@ -498,9 +503,49 @@ fn the_journal_and_the_event_stream_describe_the_same_moves() {
         })
         .collect();
 
-    journalled.sort();
+    logged.sort();
     reported.sort();
-    assert_eq!(journalled, reported);
+    assert_eq!(logged, reported);
+}
+
+/// The record part B will replay from: each `renamed` line in the run
+/// log round-trips the same hash the stdout stream reported for that
+/// move, and it is never empty.
+#[test]
+fn the_run_logs_renamed_lines_carry_the_same_hash_the_stream_reported() {
+    let ran = run_the_batch();
+    let log_path = borax::runlog::latest_apply_log(None, Some(ran.state.path()))
+        .expect("an apply run outside a collection must leave a run log under the state root");
+    let log_text = fs::read_to_string(&log_path).unwrap();
+
+    let stream_hashes: BTreeMap<String, Value> = ran
+        .tagged("renamed")
+        .into_iter()
+        .map(|event| {
+            (
+                event["path"].as_str().unwrap().to_string(),
+                event["hash"].clone(),
+            )
+        })
+        .collect();
+
+    let mut checked = 0;
+    for logged in log_text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event: &Value| event["event"] == "renamed")
+    {
+        let path = logged["path"].as_str().unwrap().to_string();
+        let hash = logged["hash"].as_str().unwrap();
+        assert!(!hash.is_empty(), "empty hash for {path}");
+        assert_eq!(
+            Some(&logged["hash"]),
+            stream_hashes.get(&path),
+            "the run log and the stream must agree on {path}'s hash"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 4, "expected to check all four renamed files");
 }
 
 // ---------------------------------------------------------------------

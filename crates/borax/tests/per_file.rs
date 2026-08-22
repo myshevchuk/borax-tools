@@ -25,7 +25,7 @@ use borax::bib::BibFiles;
 use borax::cli::Command;
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
 use borax::event::{Event, SkipReason};
-use borax::journal::{Entry, Journal, RunId};
+use borax::journal::{Entry, Journal};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, events_for};
@@ -632,7 +632,7 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_in_preview() {
 }
 
 #[test]
-fn the_same_mixed_batch_keeps_its_names_suffix_and_journal_entries_when_applied() {
+fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
     let (blank, paper1, paper2, already, library, crossref) = mixed_batch();
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
@@ -687,6 +687,7 @@ fn the_same_mixed_batch_keeps_its_names_suffix_and_journal_entries_when_applied(
             Event::Renamed {
                 path: paper1.clone(),
                 target: target1.clone(),
+                hash: hash_for("per-file-paper1"),
             },
             resolved_event(
                 &paper2,
@@ -696,6 +697,7 @@ fn the_same_mixed_batch_keeps_its_names_suffix_and_journal_entries_when_applied(
             Event::Renamed {
                 path: paper2.clone(),
                 target: target2.clone(),
+                hash: hash_for("per-file-paper2"),
             },
             resolved_event(
                 &already,
@@ -717,24 +719,11 @@ fn the_same_mixed_batch_keeps_its_names_suffix_and_journal_entries_when_applied(
         ],
         "only the two renamed files must be moved, in plan order"
     );
-    assert_eq!(
-        journal.appended(),
-        vec![
-            Entry {
-                run: RunId::new(fixed_now()),
-                from: paper1,
-                to: target1,
-                hash: hash_for("per-file-paper1"),
-                at: fixed_now(),
-            },
-            Entry {
-                run: RunId::new(fixed_now()),
-                from: paper2,
-                to: target2,
-                hash: hash_for("per-file-paper2"),
-                at: fixed_now(),
-            },
-        ],
+    // design "retires the journal from the write path": the hash each
+    // move needs for undo now travels on its own `Event::Renamed`, so
+    // nothing appends to the journal here, even though one is wired in.
+    assert!(
+        journal.appended().is_empty(),
         "got {:?}",
         journal.appended()
     );

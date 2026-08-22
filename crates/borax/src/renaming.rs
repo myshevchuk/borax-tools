@@ -64,44 +64,6 @@ pub struct RenameError {
     pub message: String,
 }
 
-/// Recording a move so it can be reversed.
-///
-/// A rename nothing recorded is a rename `borax undo` cannot see, and
-/// being undoable is the promise that makes renaming safe to offer. So
-/// recording comes first and a move that cannot be recorded is not
-/// made — the opposite order from the obvious one, and the only order
-/// where a process killed mid-run leaves nothing unaccounted for.
-///
-/// The cost is entries for moves that did not happen. That cost is
-/// already paid: [`crate::journal::undo_last`] verifies each entry
-/// against the file it names before touching it, and reports the ones
-/// that do not check out rather than guessing.
-pub trait MoveLog {
-    /// Record that the file at `from` is about to move to `to`.
-    fn record(&self, from: &Path, to: &Path) -> Result<(), LogFailure>;
-}
-
-/// Why a move could not be recorded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LogFailure {
-    /// This move cannot be recorded, but the log is fine and later
-    /// moves still can be. The file is left alone and the batch goes on.
-    Move(String),
-    /// The log itself is unusable, so no later move could be recorded
-    /// either. Every remaining move is abandoned.
-    Journal(String),
-}
-
-/// What applying a plan did.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Applied {
-    /// One event per decision, in plan order — including for the moves
-    /// abandoned after a halt, which are reported rather than dropped.
-    pub events: Vec<Event>,
-    /// Why the run stopped early, or `None` when it ran to the end.
-    pub halted: Option<String>,
-}
-
 /// What the planner decided for one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannedRename {
@@ -351,53 +313,47 @@ pub fn plan_renames(
 /// reports the same way in both modes, since a preview has nothing to
 /// add about a file nothing will happen to.
 ///
+/// `hashes` pairs with `plan` by position and carries the content hash
+/// of the file each decision is about. A decision with no hash is not
+/// applied ([`Applying::carry_out`]); a position `hashes` does not
+/// reach counts as having none.
+///
 /// An [`Applying`] driven across `plan`, so a caller feeding one
-/// decision at a time acts the same way. The halt [`Applied::halted`]
-/// reports spans this call and no more: a later call starts unhalted.
+/// decision at a time acts the same way.
 pub fn apply_renames(
     plan: &[PlannedRename],
     filesystem: &dyn Filesystem,
     apply: bool,
-    log: Option<&dyn MoveLog>,
-) -> Applied {
+    hashes: &[Option<ContentHash>],
+) -> Vec<Event> {
     let mut applying = Applying::new(filesystem, apply);
-    let events = plan
-        .iter()
-        .map(|decision| applying.carry_out(decision, log))
-        .collect();
-
-    Applied {
-        events,
-        halted: applying.halted,
-    }
+    plan.iter()
+        .enumerate()
+        .map(|(position, decision)| {
+            applying.carry_out(decision, hashes.get(position).cloned().flatten())
+        })
+        .collect()
 }
 
 /// Carrying out a plan, a decision at a time.
 ///
-/// Holds the halt: once a log has refused an entry because the log
-/// itself is unusable, no later move could be recorded either, so every
-/// decision reached afterwards is abandoned and reported as
-/// [`crate::event::SkipReason::Unjournalable`] carrying the reason the
-/// first one gave. The halt reaches exactly as far as this value lives.
+/// A caller feeding decisions in one at a time and one handing over the
+/// whole plan ([`apply_renames`]) get the same treatment of each, since
+/// nothing a decision does carries over to the next.
 pub struct Applying<'a> {
     filesystem: &'a dyn Filesystem,
     apply: bool,
-    halted: Option<String>,
 }
 
 impl<'a> Applying<'a> {
     /// A run over `filesystem` that moves files when `apply` is set and
     /// otherwise only says what it would move.
     pub fn new(filesystem: &'a dyn Filesystem, apply: bool) -> Applying<'a> {
-        Applying {
-            filesystem,
-            apply,
-            halted: None,
-        }
+        Applying { filesystem, apply }
     }
 
     /// Carry out `decision`, or report what it would do, and say what
-    /// happened. `log` is where the move is recorded before it is made.
+    /// happened. `hash` is the content hash of the file it is about.
     ///
     /// [`PlannedRename::Rename`] is [`Event::Planned`] while previewing
     /// and [`Event::Renamed`] once carried out; a move the filesystem
@@ -407,38 +363,37 @@ impl<'a> Applying<'a> {
     /// both modes, since a preview has nothing to add about a file
     /// nothing will happen to.
     ///
-    /// Recording comes before moving, and a move that cannot be recorded
-    /// is not made ([`MoveLog`]). A [`LogFailure::Journal`] halts this
-    /// value as well as skipping the file.
-    pub fn carry_out(&mut self, decision: &PlannedRename, log: Option<&dyn MoveLog>) -> Event {
+    /// An applying rename of a file whose `hash` is `None` is not made,
+    /// and reports [`crate::event::SkipReason::Unrecordable`]: the hash
+    /// is what `borax undo` verifies a file by before moving it back, so
+    /// a move recorded without one could never be reversed, and moving
+    /// the file anyway would put it beyond reach of the command meant to
+    /// bring it back. The batch goes on — one file borax cannot describe
+    /// says nothing about the next. A preview never looks at `hash`,
+    /// having no move to describe.
+    pub fn carry_out(&mut self, decision: &PlannedRename, hash: Option<ContentHash>) -> Event {
         match decision {
             PlannedRename::Rename { path, target } if self.apply => {
-                match self.record_move(path, target, log) {
-                    Ok(()) => match self.filesystem.rename(path, target) {
-                        Ok(()) => Event::Renamed {
-                            path: path.clone(),
-                            target: target.clone(),
+                let Some(hash) = hash else {
+                    return Event::Skipped {
+                        path: path.clone(),
+                        reason: SkipReason::Unrecordable {
+                            message: "the file's content hash is unknown".to_string(),
                         },
-                        Err(error) => Event::Skipped {
-                            path: path.clone(),
-                            reason: SkipReason::RenameFailed {
-                                message: error.message,
-                            },
+                    };
+                };
+                match self.filesystem.rename(path, target) {
+                    Ok(()) => Event::Renamed {
+                        path: path.clone(),
+                        target: target.clone(),
+                        hash,
+                    },
+                    Err(error) => Event::Skipped {
+                        path: path.clone(),
+                        reason: SkipReason::RenameFailed {
+                            message: error.message,
                         },
                     },
-                    Err(failure) => {
-                        let message = match failure {
-                            LogFailure::Move(message) => message,
-                            LogFailure::Journal(message) => {
-                                self.halted.get_or_insert(message.clone());
-                                message
-                            }
-                        };
-                        Event::Skipped {
-                            path: path.clone(),
-                            reason: SkipReason::Unjournalable { message },
-                        }
-                    }
                 }
             }
             PlannedRename::Rename { path, target } => Event::Planned {
@@ -459,29 +414,6 @@ impl<'a> Applying<'a> {
                 path: path.clone(),
                 reason: SkipReason::Unnameable,
             },
-        }
-    }
-
-    /// Record the move of `path` to `target`, or say why it cannot be.
-    ///
-    /// A halted run records nothing further and reports the failure that
-    /// halted it, so every move the halt abandoned carries the reason the
-    /// first one did. A run with no log at all records nothing and
-    /// succeeds: `--apply` is refused without a journal long before here
-    /// ([`crate::run::preflight`]), so the only caller reaching this with
-    /// `None` is one that is not moving anything.
-    fn record_move(
-        &self,
-        path: &Path,
-        target: &Path,
-        log: Option<&dyn MoveLog>,
-    ) -> Result<(), LogFailure> {
-        if let Some(message) = &self.halted {
-            return Err(LogFailure::Journal(message.clone()));
-        }
-        match log {
-            Some(log) => log.record(path, target),
-            None => Ok(()),
         }
     }
 }
