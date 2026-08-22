@@ -86,18 +86,13 @@ is red.
       errors naming the key and expected type (`deny_unknown_fields`
       over typed TOML should already give this); implement only what
       the tests show missing
-- [ ] 5.2 Tests + implementation: `--no-` negation for every
-      config-settable boolean, last-one-wins, including the `ledger`
-      and `run-log` booleans this change adds.
-
-      Partly done: `ledger` and `run-log` have their negations and the
-      command line overrides configuration in both directions. What
-      remains is a conflict to settle rather than code to write — the
-      `cli` spec says the last of a pair given wins, while shipped
-      `--cache`/`--no-cache` and `--sidecars`/`--no-sidecars` make
-      passing both a parse error, which the new pair was built to
-      match. Either the spec follows the shipped convention or all four
-      pairs change together; the latter alters v0.1.0 public surface
+- [x] 5.2 Tests + implementation: `--no-` negation for every
+      config-settable boolean, including the `ledger` and `run-log`
+      booleans this change adds. All four — `sidecars`, `cache`,
+      `ledger`, `run-log` — reject an invocation giving both forms
+      rather than resolving to the last one given; the spec was
+      reworded to the shipped convention rather than v0.1.0's public
+      surface changed under it
 - [ ] 5.3 Tests: `apply = true` in a config file is a load-time error;
       implement the message naming it as command-line-only if the
       shipped unknown-key wording does not already say so

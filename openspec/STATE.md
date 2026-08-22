@@ -85,13 +85,6 @@ finding it first.
   path.
 - **Whether `pdfium` is ever worth it.** See above; the decision is
   evidence-gated rather than open in the usual sense.
-- **Whether a boolean and its `--no-` form conflict or the last wins.**
-  Shipped `--cache`/`--no-cache` and `--sidecars`/`--no-sidecars` reject
-  an invocation giving both; the `cli` spec delta on the ledger branch
-  says the last one given wins, and `--ledger`/`--run-log` were built to
-  the shipped convention so all four behave alike. Settling it either
-  rewords the spec or changes v0.1.0 public surface, so it is a decision
-  rather than a bug.
 
 ## Live risks
 

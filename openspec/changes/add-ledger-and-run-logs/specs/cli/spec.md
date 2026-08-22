@@ -50,13 +50,21 @@ config-key table.
 ### Requirement: Boolean options are negatable from the command line
 Every config-settable boolean option SHALL have a `--no-<option>`
 command-line negation, so the command line can override a configured
-`true` as well as a configured `false`. Between the pair, the last one
-given wins.
+`true` as well as a configured `false`. Giving both forms in one
+invocation SHALL be a usage error rather than resolving to either: the
+pair states two incompatible intentions, and a run that picks one of
+them silently acts on a setting nobody chose.
 
 #### Scenario: CLI overrides a configured true
 - **WHEN** configuration enables an option and its `--no-` form is
   passed on the command line
 - **THEN** the option is off for that run
+
+#### Scenario: Both forms of a pair
+- **WHEN** an option and its `--no-` form are both passed on one
+  command line
+- **THEN** the invocation is rejected as a usage error naming the two
+  flags, and nothing is read, resolved, or moved
 
 ### Requirement: The apply gate is never configurable
 Configuration SHALL NOT be able to set the `--apply` flag or any one-off
