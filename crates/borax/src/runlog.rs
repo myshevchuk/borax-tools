@@ -10,6 +10,7 @@
 //! where it lands, and which run cannot go ahead without one — be
 //! settled before the first event exists.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,62 @@ pub const RUNS_DIR: &str = "runs";
 /// The extension every run log carries, naming the format its lines
 /// are in.
 const LOG_EXTENSION: &str = "jsonl";
+
+/// The on-disk layout version, used as the last path segment of the
+/// state directory.
+///
+/// Everything borax keeps outside a collection lives under it, so
+/// bumping it is how a layout change leaves the old one where it lies
+/// rather than reading it as the new one.
+pub const FORMAT_VERSION: &str = "v1";
+
+/// The borax state directory implied by `lookup`, which answers the way
+/// [`std::env::var_os`] does.
+///
+/// The candidates are tried in order and the first whose value is a
+/// non-empty absolute path is taken: on Unix `XDG_STATE_HOME`, then
+/// `HOME` (as `HOME/.local/state`); on Windows `LOCALAPPDATA`, then
+/// `XDG_STATE_HOME`. A variable that is unset, empty, or relative is
+/// skipped rather than fatal.
+///
+/// The returned path ends in `borax/<FORMAT_VERSION>` and is neither
+/// created nor checked for existence. `None` when no candidate
+/// qualifies, which is the signal that a run outside a collection has
+/// nowhere to record itself — and so cannot apply, since a rename
+/// nothing recorded is not reversible.
+pub fn state_root(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let mut root = CANDIDATES.iter().find_map(|(name, suffix)| {
+        let base = PathBuf::from(lookup(name)?);
+        if !base.is_absolute() {
+            return None;
+        }
+
+        Some(match suffix {
+            Some(suffix) => base.join(suffix),
+            None => base,
+        })
+    })?;
+
+    root.push("borax");
+    root.push(FORMAT_VERSION);
+    Some(root)
+}
+
+/// The variables that may name a state directory, in the order they are
+/// tried, each with what to append to its value.
+#[cfg(not(windows))]
+const CANDIDATES: &[(&str, Option<&str>)] =
+    &[("XDG_STATE_HOME", None), ("HOME", Some(".local/state"))];
+
+/// The variables that may name a state directory, in the order they are
+/// tried, each with what to append to its value.
+#[cfg(windows)]
+const CANDIDATES: &[(&str, Option<&str>)] = &[("LOCALAPPDATA", None), ("XDG_STATE_HOME", None)];
+
+/// [`state_root`] applied to this process's environment.
+pub fn default_state_root() -> Option<PathBuf> {
+    state_root(|name| std::env::var_os(name))
+}
 
 /// The name a run log carries: `<stamp>-<command>-<dry|apply>.jsonl`.
 ///

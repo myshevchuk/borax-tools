@@ -12,9 +12,9 @@
 //! Tasks 3.1 and 3.3 pin ordering by mapping each event to a `(path,
 //! kind)` pair and comparing the sequence, which proves adjacency and
 //! group separation without pinning every field of every event. Task 3.2
-//! pins the same batch's names, suffix, and journal entries by full
-//! equality, so an ordering fix that also changes a decision fails here
-//! even where it might pass 3.1.
+//! pins the same batch's names and suffix by full equality, so an
+//! ordering fix that also changes a decision fails here even where it
+//! might pass 3.1.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -25,7 +25,6 @@ use borax::bib::BibFiles;
 use borax::cli::Command;
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
 use borax::event::{Event, SkipReason};
-use borax::journal::{Entry, Journal};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, events_for};
@@ -212,36 +211,6 @@ impl Filesystem for FakeFilesystem {
     }
 }
 
-/// A [`Journal`] fake that records every append and reads back as
-/// empty, following the shape of the one in `dispatch.rs` trimmed to
-/// what this file needs: no test here seeds pre-existing entries.
-struct FakeJournal {
-    appended: RefCell<Vec<Entry>>,
-}
-
-impl FakeJournal {
-    fn new() -> FakeJournal {
-        FakeJournal {
-            appended: RefCell::new(Vec::new()),
-        }
-    }
-
-    fn appended(&self) -> Vec<Entry> {
-        self.appended.borrow().clone()
-    }
-}
-
-impl Journal for FakeJournal {
-    fn append(&self, entries: &[Entry]) -> io::Result<()> {
-        self.appended.borrow_mut().extend_from_slice(entries);
-        Ok(())
-    }
-
-    fn read(&self) -> Vec<Entry> {
-        Vec::new()
-    }
-}
-
 /// A [`BibFiles`] fake that reads as empty and discards every write,
 /// following the shape of the one in `streaming.rs` — no test here
 /// inspects what was written, only that a sidecar was.
@@ -301,8 +270,8 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
 }
 
 /// The `now` every fixture in this file uses: a fixed string, so a
-/// journaled entry's timestamp and run identifier are pinned rather than
-/// depending on the clock.
+/// run's timestamp and identifier are pinned rather than depending on
+/// the clock.
 fn fixed_now() -> String {
     "2024-01-01T00:00:00Z".to_string()
 }
@@ -457,7 +426,6 @@ fn each_files_resolution_plan_and_sidecar_are_adjacent_in_input_order() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -500,7 +468,7 @@ fn each_files_resolution_plan_and_sidecar_are_adjacent_in_input_order() {
 }
 
 // ---------------------------------------------------------------------
-// 3.2: ordering does not move a name, a suffix, or a journal entry
+// 3.2: ordering does not move a name or a suffix
 // ---------------------------------------------------------------------
 
 /// The same four-file batch [`each_files_resolution_plan_and_sidecar_are_adjacent_in_input_order`]
@@ -565,7 +533,6 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_in_preview() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -637,7 +604,6 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
@@ -645,7 +611,6 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -718,14 +683,6 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
             (paper2.clone(), target2.clone()),
         ],
         "only the two renamed files must be moved, in plan order"
-    );
-    // design "retires the journal from the write path": the hash each
-    // move needs for undo now travels on its own `Event::Renamed`, so
-    // nothing appends to the journal here, even though one is wired in.
-    assert!(
-        journal.appended().is_empty(),
-        "got {:?}",
-        journal.appended()
     );
 }
 
@@ -811,7 +768,6 @@ fn a_parent_and_its_subdirectory_report_as_two_uninterleaved_groups_each_under_i
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -933,7 +889,6 @@ fn master_bib_entries_trail_every_files_resolve_plan_and_sidecar_block_in_input_
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,

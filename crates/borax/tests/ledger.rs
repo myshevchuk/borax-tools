@@ -8,7 +8,6 @@ use borax::bib::BibFiles;
 use borax::cli::{Cli, Command, LedgerAction, Settings};
 use borax::config::{Layer, Origin, resolve};
 use borax::event::{Event, Level, SkipReason};
-use borax::journal::{Entry as JournalEntry, Journal};
 use borax::ledger::{
     ACCOUNTING_DIR, FileLedger, LEDGER_FILE, Ledger, LedgerWarning, Loaded, Scanned,
     admission_entry, duplicate_is_live, prepare, rebuild, relative_to, scan_collection,
@@ -378,31 +377,6 @@ impl Filesystem for FakeFilesystem {
             .borrow_mut()
             .push((from.to_path_buf(), to.to_path_buf()));
         Ok(())
-    }
-}
-
-/// A [`Journal`] fake recording every append, following the shape of the
-/// one in `dispatch.rs`. Nothing in this file reads a journal back.
-struct FakeJournal {
-    appended: RefCell<Vec<JournalEntry>>,
-}
-
-impl FakeJournal {
-    fn new() -> FakeJournal {
-        FakeJournal {
-            appended: RefCell::new(Vec::new()),
-        }
-    }
-}
-
-impl Journal for FakeJournal {
-    fn append(&self, entries: &[JournalEntry]) -> std::io::Result<()> {
-        self.appended.borrow_mut().extend_from_slice(entries);
-        Ok(())
-    }
-
-    fn read(&self) -> Vec<JournalEntry> {
-        Vec::new()
     }
 }
 
@@ -1155,7 +1129,6 @@ fn a_content_duplicate_is_skipped_with_the_existing_files_full_path_and_the_sour
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1221,7 +1194,6 @@ fn a_work_duplicate_is_skipped_with_the_work_reason() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1287,7 +1259,6 @@ fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1360,7 +1331,6 @@ fn a_stale_duplicate_warns_that_the_ledger_holds_stale_entries() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1447,7 +1417,6 @@ fn a_live_duplicate_emits_no_stale_warning() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1512,7 +1481,6 @@ fn no_match_emits_no_stale_warning() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1588,7 +1556,6 @@ fn several_stale_duplicates_in_one_run_still_produce_exactly_one_warning() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1661,7 +1628,6 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles;
     let ledger = FakeLedger::new(Loaded {
         index: Index::build(&[]),
@@ -1673,7 +1639,6 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1758,7 +1723,6 @@ fn a_preview_run_appends_nothing_to_the_ledger_even_when_it_plans_a_rename() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1807,7 +1771,6 @@ fn a_disabled_ledger_neither_checks_nor_appends() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles;
     // The incoming file's hash is already in the ledger — if duplicate
     // detection ran despite being disabled, this would be reported as a
@@ -1828,7 +1791,6 @@ fn a_disabled_ledger_neither_checks_nor_appends() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1884,7 +1846,6 @@ fn outside_a_collection_the_run_checks_nothing_appends_nothing_and_warns_nothing
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1947,7 +1908,6 @@ fn an_absent_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2025,7 +1985,6 @@ fn an_unparsable_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2103,7 +2062,6 @@ fn a_content_duplicate_skip_counts_toward_a_partial_outcome() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2179,7 +2137,6 @@ fn rebuild_replaces_the_ledger_with_one_entry_per_scanned_file_and_reports_the_c
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2244,7 +2201,6 @@ fn rebuild_compacts_away_entries_for_files_no_longer_on_disk() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2306,7 +2262,6 @@ fn rebuilding_an_unchanged_collection_twice_through_dispatch_is_byte_identical()
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2367,7 +2322,6 @@ fn rebuild_skips_files_scan_collection_would_not_count() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2426,7 +2380,6 @@ fn rebuild_outside_a_collection_is_refused_and_writes_nothing() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2498,7 +2451,6 @@ fn a_failing_replace_refuses_the_run_rather_than_reporting_a_clean_rebuild() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2566,7 +2518,6 @@ fn a_disabled_ledger_setting_does_not_prevent_a_rebuild() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2626,7 +2577,6 @@ fn dispatching_a_rebuild_writes_ledger_rebuilt_on_stdout_carrying_the_schema_fie
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,

@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The `renamed` event carries the content hash of the file it moved,
+  which is what lets the run log stand in for the journal undo used to
+  read. The `unjournalable` skip reason is now `unrecordable`, naming
+  what it always meant rather than the component that has been
+  removed.
 - Citation keys now come from their own `[citation-keys]` table
   instead of the `[templates]` table that names files, and their
   built-in default is `[auth:lower][year]`, so a 2024 paper by Smith is
@@ -74,6 +79,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is unchanged and still follows the files of its directory. No file
   receives a different name for this: collision suffixes stay
   deterministic and a preview stays identical to what `--apply` does.
+
+### Removed
+
+- The rename journal is gone. `borax undo` now reads the most recent
+  apply-run log instead, which records the same moves with the same
+  content hashes and is verified the same way, so undo behaves as it
+  did — it simply reads the record every run already writes rather
+  than a second file kept only for it. One consequence is worth
+  stating plainly: an undo spanning the upgrade will not find its run.
+  If you applied a rename with 0.1.0 and upgrade before undoing it,
+  that run is not recoverable through borax. A `renames.jsonl` written
+  by 0.1.0 is left exactly where it lies — not read, not converted,
+  and not deleted behind your back.
 
 ## [0.1.0] - 2026-08-17
 

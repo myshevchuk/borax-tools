@@ -16,8 +16,8 @@ plan. That covers the whole path from a file to a renamed file: tiered
 PDF extraction, identifier normalization, resolution against Crossref,
 OpenAlex and arXiv with on-disk caching and per-service pacing, the
 CSL-JSON record model, the template engine, collision-aware rename
-planning with a journal that `borax undo` reads, and BibTeX output to a
-master file or to sidecars.
+planning with an undo that reverses an applied run, and BibTeX output
+to a master file or to sidecars.
 
 `stream-per-file-events` is implemented on top of that. A
 run writes each event when it happens rather than assembling the whole
@@ -52,16 +52,13 @@ finding it first.
   Named out of scope in the `add-core-pipeline` proposal. Today such a
   file is reported unresolvable and skipped, which is correct but leaves
   a class of documents borax cannot help with.
-- **The journal's removal.** The `change/add-ledger-and-run-logs`
-  branch has built the ledger and the run logs: the pure ledger core,
-  the on-disk adapter, `borax ledger rebuild`, duplicate checking in
-  `rename`, and a run log persisting each run's event stream, mandatory
-  for `rename --apply` and falling back to the XDG state directory
-  outside a collection. What remains is group 4 — pointing `borax undo`
-  at the latest apply-run log and deleting `journal.rs`. Until then a
-  run writes both records, and the journal is still what `undo` reads.
-  The change imports ideas from the `accession.py` prototype with a
-  critique recorded in its `design.md`.
+- **Nothing from this change.** `add-ledger-and-run-logs` is
+  implemented bar its integration tests: the ledger, `borax ledger
+  rebuild`, duplicate checking in `rename`, run logs, and `borax undo`
+  reading the latest apply-run log. `journal.rs` is deleted and
+  nothing reads a v0.1.0 `renames.jsonl`. What is left is group 6 —
+  end-to-end tests and Windows CI coverage — and tasks 5.1 and 5.3,
+  which are verification-first and may need no code at all.
 - **Everything the design names as a later change**: no library index,
   search or watch mode; no OCR or interactive candidate picker; no XMP
   write-back, Zotero interop or Emacs package; no bibliography format
@@ -79,11 +76,6 @@ finding it first.
   buffer completions to restore input order — which is the buffering
   that change removed. Nothing is broken today, and the answer is not
   obvious enough to guess at.
-- **Whether the cache and the journal share one on-disk store.** They
-  are separate flat files today. The specifications constrain behaviour
-  and not storage, so this stays open — and the ledger change would
-  answer it by replacing the journal outright, which is the more likely
-  path.
 - **Whether `pdfium` is ever worth it.** See above; the decision is
   evidence-gated rather than open in the usual sense.
 

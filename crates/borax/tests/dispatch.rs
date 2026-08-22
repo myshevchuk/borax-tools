@@ -10,7 +10,6 @@ use borax::cache::{cleared_event, inspect, status_event};
 use borax::cli::{Cli, Command, Settings};
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
 use borax::event::{Event, Level, SkipReason};
-use borax::journal::{Entry, Journal, RunId};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError, counts_for};
 use borax::run::{Adapters, Configs, Streams, dispatch, entry_type, events_for, templates};
@@ -124,24 +123,6 @@ impl FakeLibrary {
         );
         self
     }
-
-    /// A file whose hash is known but which fails to open — used to
-    /// prove a content-verified move never opens the file it verifies.
-    fn with_open_error(
-        mut self,
-        path: impl Into<PathBuf>,
-        hash: ContentHash,
-        error: ExtractionError,
-    ) -> FakeLibrary {
-        self.entries.insert(
-            path.into(),
-            LibraryEntry {
-                hash: Ok(hash),
-                pdf: Err(error),
-            },
-        );
-        self
-    }
 }
 
 impl Library for FakeLibrary {
@@ -226,43 +207,6 @@ impl Filesystem for FakeFilesystem {
             .borrow_mut()
             .push((from.to_path_buf(), to.to_path_buf()));
         Ok(())
-    }
-}
-
-/// A [`Journal`] fake that reads back a fixed set of entries and records
-/// every append, following the shape of the one in `journal.rs` plus the
-/// recording `renames.rs` fakes do for moves.
-struct FakeJournal {
-    entries: Vec<Entry>,
-    appended: RefCell<Vec<Entry>>,
-}
-
-impl FakeJournal {
-    fn new() -> FakeJournal {
-        FakeJournal {
-            entries: Vec::new(),
-            appended: RefCell::new(Vec::new()),
-        }
-    }
-
-    fn with_entries(mut self, entries: Vec<Entry>) -> FakeJournal {
-        self.entries = entries;
-        self
-    }
-
-    fn appended(&self) -> Vec<Entry> {
-        self.appended.borrow().clone()
-    }
-}
-
-impl Journal for FakeJournal {
-    fn append(&self, entries: &[Entry]) -> std::io::Result<()> {
-        self.appended.borrow_mut().extend_from_slice(entries);
-        Ok(())
-    }
-
-    fn read(&self) -> Vec<Entry> {
-        self.entries.clone()
     }
 }
 
@@ -368,8 +312,8 @@ fn bib_entry_event(path: &Path, outcome: &MergeOutcome) -> Event {
 }
 
 /// The `now` every fixture in this file uses: a fixed string, so a
-/// journaled entry's timestamp and run identifier are pinned rather than
-/// depending on the clock.
+/// run's timestamp and identifier are pinned rather than depending
+/// on the clock.
 fn fixed_now() -> String {
     "2024-01-01T00:00:00Z".to_string()
 }
@@ -672,7 +616,6 @@ fn config_emits_one_config_setting_event_per_setting_matching_effective_events()
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -714,7 +657,6 @@ fn cache_status_without_clear_emits_a_single_cache_status_event() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: Some(root.clone()),
         now: fixed_now,
@@ -753,7 +695,6 @@ fn cache_clear_emits_a_single_cache_cleared_event_and_empties_the_directory() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: Some(root.clone()),
         now: fixed_now,
@@ -792,7 +733,6 @@ fn cache_with_no_cache_root_is_a_diagnostic() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -844,7 +784,6 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -901,7 +840,6 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
@@ -909,7 +847,6 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -978,7 +915,6 @@ fn rename_preview_with_no_journal_succeeds() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1033,7 +969,6 @@ fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
@@ -1041,7 +976,6 @@ fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1081,95 +1015,13 @@ fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
         "got {events:?}"
     );
     assert_eq!(filesystem.renames(), vec![(path.clone(), target.clone())]);
-    // design "retires the journal from the write path": the record a
-    // rename needs now travels on `Event::Renamed` itself, so nothing
-    // appends to the journal here any more, even though one is wired
-    // in.
-    assert!(
-        journal.appended().is_empty(),
-        "got {:?}",
-        journal.appended()
-    );
 }
 
 /// A [`FakeLibrary`] with one file whose embedded DOI is `doi_value`,
 /// factored out because the apply test needs the hash again to build its
-/// expected journal entry.
+/// expected `Renamed` event.
 fn library_with_resolvable(path: &Path, hash: ContentHash, doi_value: &str) -> FakeLibrary {
     FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi(doi_value))
-}
-
-/// design: "retires the journal from the write path" — `adapters.journal`
-/// gates nothing about `--apply` any more; what protects an apply run
-/// with nowhere to record itself is the run-log destination check in
-/// `dispatch`'s `open_log` (see `runlog.rs`'s
-/// `an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving_anything`),
-/// which `events_for` — a value-collecting convenience that never calls
-/// `dispatch` — does not run. So `events_for` alone still moves the
-/// file, exactly as `dispatch` would were the run log writable.
-#[test]
-fn events_for_moves_the_file_on_apply_even_with_no_journal_since_that_gate_lives_in_dispatch() {
-    let path = PathBuf::from("/lib/original.pdf");
-    let hash = hash_for("events-for-rename-apply-no-journal");
-    let library = FakeLibrary::new().with_file(
-        &path,
-        hash.clone(),
-        pdf_with_embedded_doi("10.1000/rename-apply-no-journal"),
-    );
-    let crossref = fake_source(
-        SourceName::Crossref,
-        Ok(record_by("Smith", 2024, "10.1000/rename-apply-no-journal")),
-    );
-    let sources: Vec<&dyn Source> = vec![&crossref];
-    let index = ContentIndex::new(MemoryCache::new());
-    let filesystem = FakeFilesystem::new();
-    let bib_files = FakeBibFiles::new();
-    let effective = effective_with_default_template("[auth][year]");
-    let adapters = Adapters {
-        library: &library,
-        sources: &sources,
-        index: &index,
-        filesystem: &filesystem,
-        journal: None,
-        bib_files: &bib_files,
-        cache_root: None,
-        now: fixed_now,
-        ledger: None,
-        collection_root: None,
-        state_root: None,
-    };
-    let target = PathBuf::from("/lib/Smith2024.pdf");
-
-    let events = events_for(
-        &Command::Rename {
-            paths: vec![path.clone()],
-            apply: true,
-        },
-        &Configs::uniform(effective.clone()),
-        &adapters,
-    )
-    .unwrap();
-
-    assert_eq!(
-        events,
-        vec![
-            resolved_event(
-                &path,
-                "doi:10.1000/rename-apply-no-journal",
-                &record_by("Smith", 2024, "10.1000/rename-apply-no-journal"),
-                "crossref",
-                Some("embedded-metadata"),
-                false,
-            ),
-            Event::Renamed {
-                path: path.clone(),
-                target: target.clone(),
-                hash,
-            },
-        ],
-        "got {events:?}"
-    );
-    assert_eq!(filesystem.renames(), vec![(path, target)]);
 }
 
 // ---------------------------------------------------------------------
@@ -1206,7 +1058,6 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1246,68 +1097,8 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
     );
 }
 
-// ---------------------------------------------------------------------
-// events_for: Command::Undo
-// ---------------------------------------------------------------------
-
-#[test]
-fn undo_emits_reverted_for_a_journaled_entry_whose_file_verifies() {
-    let from = PathBuf::from("/lib/original.pdf");
-    let to = PathBuf::from("/lib/Smith2024.pdf");
-    let hash = hash_for("events-for-undo");
-    let entry = Entry {
-        run: RunId::new("r1"),
-        from: from.clone(),
-        to: to.clone(),
-        hash: hash.clone(),
-        at: "2024-01-01T00:00:00Z".to_string(),
-    };
-    let journal = FakeJournal::new().with_entries(vec![entry]);
-    // Undo verifies by hash, never opens the file: an open error here
-    // would only surface if the implementation opened it regardless.
-    let library = FakeLibrary::new().with_open_error(
-        &to,
-        hash,
-        ExtractionError::Unreadable {
-            message: "must never be opened".to_string(),
-        },
-    );
-    let sources: Vec<&dyn Source> = Vec::new();
-    let index = ContentIndex::new(MemoryCache::new());
-    let filesystem = FakeFilesystem::new();
-    let bib_files = FakeBibFiles::new();
-    let effective = resolve(Vec::new()).unwrap();
-    let adapters = Adapters {
-        library: &library,
-        sources: &sources,
-        index: &index,
-        filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
-        bib_files: &bib_files,
-        cache_root: None,
-        now: fixed_now,
-        ledger: None,
-        collection_root: None,
-        state_root: None,
-    };
-
-    let events = events_for(
-        &Command::Undo,
-        &Configs::uniform(effective.clone()),
-        &adapters,
-    )
-    .unwrap();
-
-    assert_eq!(
-        events,
-        vec![Event::Reverted {
-            path: to.clone(),
-            target: from.clone(),
-        }],
-        "got {events:?}"
-    );
-    assert_eq!(filesystem.renames(), vec![(to, from)]);
-}
+// design: `borax undo` moved onto the run log — see `tests/undo.rs`,
+// which supersedes the journal-backed tests that used to live here.
 
 // ---------------------------------------------------------------------
 // events_for: an uncompilable template propagates as a Diagnostic
@@ -1328,7 +1119,6 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[nonexistentfield]");
     let adapters = Adapters {
@@ -1336,7 +1126,6 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1380,7 +1169,6 @@ fn bib_with_an_uncompilable_template_propagates_the_diagnostic() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1423,7 +1211,6 @@ fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic()
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_citation_key_template("[nonexistentfield]");
     let adapters = Adapters {
@@ -1431,7 +1218,6 @@ fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic()
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1483,7 +1269,6 @@ fn bib_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1542,7 +1327,6 @@ fn bib_with_a_citation_key_naming_no_entry_type_propagates_the_diagnostic() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1582,7 +1366,6 @@ fn json_format_opens_with_run_started_and_closes_with_run_finished_and_every_lin
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1661,7 +1444,6 @@ fn json_stdout_is_entirely_well_formed_json_lines_and_nothing_else() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1726,7 +1508,6 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1797,7 +1578,6 @@ fn run_finished_counts_match_counts_for_over_the_body_events() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1863,7 +1643,6 @@ fn a_clean_run_returns_success() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1917,7 +1696,6 @@ fn a_run_with_a_skip_returns_partial() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1978,7 +1756,6 @@ fn a_refusal_dispatch_alone_makes_is_fatal_and_writes_nothing_to_stdout() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -2036,7 +1813,6 @@ fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() 
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,

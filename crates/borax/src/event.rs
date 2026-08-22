@@ -184,10 +184,10 @@ pub enum SkipReason {
     /// could never reverse, and being reversible is the promise that
     /// makes renaming safe to offer.
     Unrecordable { message: String },
-    /// Nothing is at the path the journal says a file was moved to, so
+    /// Nothing is at the path the run log says a file was moved to, so
     /// there is nothing to move back.
     Missing,
-    /// Something is at the journaled path, but not the file that was
+    /// Something is at the recorded path, but not the file that was
     /// moved there — reverting it would move a stranger.
     ContentChanged,
     /// The path a file would be moved back to is occupied, so

@@ -3,8 +3,8 @@
 //! borax renames files, so a path is not a stable name for one. The
 //! content hash is: it survives renaming, tells two files with the same
 //! name apart, and lets a second run recognise a file it has already
-//! resolved. It is what the cache's content index and the rename
-//! journal both key on.
+//! resolved. It is what the cache's content index, the collection's
+//! ledger, and the record of an applied rename all key on.
 
 use std::fmt;
 
@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 /// compared.
 ///
 /// Serialized as the bare string, so a stored hash is legible in a
-/// journal or cache entry. Deserialization does not re-validate the
+/// ledger entry, a run log, or a cache entry. Deserialization does not re-validate the
 /// shape: a hash read back from a mangled file simply equals nothing
 /// that was actually hashed, which is the answer callers already
 /// handle.

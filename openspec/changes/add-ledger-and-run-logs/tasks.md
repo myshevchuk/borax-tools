@@ -62,15 +62,15 @@ TDD throughout: red test first for every pure behaviour.
 
 ## 4. Undo rewiring (borax), replacing the shipped journal
 
-- [ ] 4.1 Tests + implementation: replace journal reads with
+- [x] 4.1 Tests + implementation: replace journal reads with
       latest-apply-log discovery (collection first, then XDG state)
-- [ ] 4.2 Tests + implementation: reverse replay with per-entry hash
+- [x] 4.2 Tests + implementation: reverse replay with per-entry hash
       verification (carried over from the journal, behaviour unchanged)
       and schema-version refusal
 - [ ] 4.3 Carry over the journal's apply gate: `--apply` aborts before
       touching anything when the apply-run log cannot be created or
       written, with a message naming the log rather than the journal
-- [ ] 4.4 Delete `crates/borax/src/journal.rs`, its tests, and the
+- [x] 4.4 Delete `crates/borax/src/journal.rs`, its tests, and the
       `Journal`/`FileJournal` adapter wiring in `run.rs`; port the
       cases in `crates/borax/tests/journal.rs` that still describe
       wanted behaviour onto the run-log path and drop the rest. Nothing

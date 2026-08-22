@@ -6,10 +6,9 @@
 //! Every other test in this workspace exercises a seam against a fake.
 //! This one wires the real adapters — the pure-Rust PDF backend reading
 //! the committed fixture corpus, the real Crossref and arXiv clients,
-//! the real filesystem, the real journal, the real bibliography
-//! writer — and asserts what a user would see: the JSON stream, the
-//! files on disk afterwards, the journal, the master `.bib`, and the
-//! sidecars.
+//! the real filesystem, the real bibliography writer — and asserts what
+//! a user would see: the JSON stream, the files on disk afterwards, the
+//! run log, the master `.bib`, and the sidecars.
 //!
 //! What is faked is [`Transport`], which is the one thing a test may
 //! not do for real. Requests are routed to the cassettes in
@@ -24,7 +23,6 @@ use std::sync::Mutex;
 use borax::bib::{RealBibFiles, sidecar_path};
 use borax::cli::{Cli, Command, Settings};
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
-use borax::journal::{FileJournal, Journal};
 use borax::pipeline::RealLibrary;
 use borax::renaming::RealFilesystem;
 use borax::run::{Adapters, Configs, Streams, dispatch};
@@ -228,7 +226,6 @@ fn run_the_batch() -> Ran {
     let sources: Vec<&dyn Source> = vec![&crossref, &arxiv];
 
     let index = ContentIndex::new(MemoryCache::new());
-    let journal = FileJournal::new(state.path().join("renames.jsonl"));
 
     let paths: Vec<PathBuf> = BATCH
         .iter()
@@ -252,16 +249,14 @@ fn run_the_batch() -> Ran {
             sources: &sources,
             index: &index,
             filesystem: &RealFilesystem,
-            journal: Some(&journal),
             bib_files: &RealBibFiles,
             cache_root: None,
             now: || "e2e-run".to_string(),
             ledger: None,
             collection_root: None,
             // This apply run's mandatory run log needs somewhere to
-            // land now that there is no collection root; `state`
-            // already stands in for the XDG state directory for the
-            // journal above, so it does the same job here.
+            // land now that there is no collection root; `state` is
+            // the stand-in for the XDG state directory.
             state_root: Some(state.path().to_path_buf()),
         },
         &mut Streams {
@@ -458,22 +453,11 @@ fn every_renamed_event_names_a_file_that_is_really_there() {
 }
 
 // ---------------------------------------------------------------------
-// The journal
+// The run log — undo's record now that the journal is gone
 // ---------------------------------------------------------------------
 
-/// design "retires the journal from the write path": nothing appends
-/// to the journal any more, even on a real applying run — the record a
-/// move needs now travels on the run log instead.
-#[test]
-fn the_journal_holds_nothing_now_that_writing_moved_to_the_run_log() {
-    let ran = run_the_batch();
-    let journal = FileJournal::new(ran.state.path().join("renames.jsonl"));
-
-    assert_eq!(journal.read(), Vec::new());
-}
-
-// The run log describes the moves the stream reported, so `undo` (once
-// rewired onto it) and the event consumer agree about what happened.
+// The run log describes the moves the stream reported, so `undo` and
+// the event consumer agree about what happened.
 #[test]
 fn the_run_log_and_the_event_stream_describe_the_same_moves() {
     let ran = run_the_batch();
@@ -546,6 +530,73 @@ fn the_run_logs_renamed_lines_carry_the_same_hash_the_stream_reported() {
         checked += 1;
     }
     assert_eq!(checked, 4, "expected to check all four renamed files");
+}
+
+// ---------------------------------------------------------------------
+// borax undo, replaying the run log
+// ---------------------------------------------------------------------
+
+/// design behaviour pin 1: a real apply run followed by a real `borax
+/// undo` restores every file — the four renamed and the four left
+/// alone — to the name it had before the batch ran.
+#[test]
+fn undo_after_the_batch_restores_every_file_to_its_original_name() {
+    let ran = run_the_batch();
+
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let effective = resolve(Vec::new()).unwrap();
+    let cli = Cli {
+        command: Command::Undo,
+        settings: Settings::default(),
+        json: true,
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let mut err: Vec<u8> = Vec::new();
+    let outcome = dispatch(
+        &cli,
+        &Configs::uniform(effective),
+        &Adapters {
+            library: &RealLibrary,
+            sources: &sources,
+            index: &index,
+            filesystem: &RealFilesystem,
+            bib_files: &RealBibFiles,
+            cache_root: None,
+            now: || "e2e-undo".to_string(),
+            ledger: None,
+            collection_root: None,
+            state_root: Some(ran.state.path().to_path_buf()),
+        },
+        &mut Streams {
+            out: &mut out,
+            err: &mut err,
+        },
+    );
+
+    assert_eq!(
+        outcome,
+        Outcome::Success,
+        "got {outcome:?}, stderr: {}",
+        String::from_utf8_lossy(&err)
+    );
+
+    // The PDFs alone: undo reverses the moves a run made, and the
+    // sidecars written beside the renamed files are not moves. Nothing
+    // has ever removed them, and this is not the change that starts.
+    let mut names: Vec<String> = fs::read_dir(ran.library.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".pdf"))
+        .collect();
+    names.sort();
+    let mut expected: Vec<String> = BATCH.iter().map(|(name, _)| (*name).to_string()).collect();
+    expected.sort();
+    assert_eq!(
+        names, expected,
+        "every file must be back under its original name"
+    );
 }
 
 // ---------------------------------------------------------------------

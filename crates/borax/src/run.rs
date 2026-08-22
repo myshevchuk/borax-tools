@@ -39,7 +39,6 @@ use crate::config::{
     layer_from_toml, nearest_override, resolve,
 };
 use crate::event::{Counts, Diagnostic, Event, Format, Level, render};
-use crate::journal::{FileJournal, Journal, undo_last};
 use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
@@ -47,6 +46,7 @@ use crate::pipeline::{
 };
 use crate::renaming::{Applying, Filesystem, Planning, RealFilesystem};
 use crate::session::{Outcome, outcome_for};
+use crate::undo::{Move, undo_moves};
 
 /// The extension a file needs to be picked up from a directory.
 pub const PDF_EXTENSION: &str = "pdf";
@@ -382,10 +382,6 @@ pub struct Adapters<'a, C: Cache> {
     pub sources: &'a [&'a dyn Source],
     pub index: &'a ContentIndex<C>,
     pub filesystem: &'a dyn Filesystem,
-    /// Where applied renames are recorded, or `None` when there is
-    /// nowhere to record them — no state directory, on a system that
-    /// names none.
-    pub journal: Option<&'a dyn Journal>,
     pub bib_files: &'a dyn BibFiles,
     /// The response cache's directory, or `None` when the system names
     /// no cache directory.
@@ -555,9 +551,19 @@ pub struct Group {
 /// checks yielded, which is why [`emit_events`] has no failure left to
 /// report and a [`Diagnostic`] can still mean that nothing was emitted.
 pub enum Prepared {
-    /// A command with nothing that could fail: `config`, `resolve`,
-    /// `undo`.
+    /// A command with nothing that could fail: `config` and
+    /// `resolve`.
     Unchecked,
+    /// `undo`, with the moves the run it reverses recorded, in the
+    /// order that run applied them.
+    ///
+    /// Reading the log happens in [`preflight`] because a log that
+    /// cannot be replayed has to stop the run while nothing has been
+    /// touched: undo's whole work is moving files, and a half-read
+    /// record is the one input that must never reach it. Empty when
+    /// there is no log to read, which is a run with nothing to undo
+    /// rather than a failure.
+    Undoing { moves: Vec<Move> },
     /// `cache`, with the report inspecting or clearing produced.
     ///
     /// This command's whole work is the one event, and that work is
@@ -611,7 +617,10 @@ pub enum Prepared {
 ///   never asked;
 /// - `ledger rebuild` outside any collection, or over a ledger that
 ///   cannot be written, since a rebuild reported but not written would
-///   leave the user believing the accounting was put right.
+///   leave the user believing the accounting was put right;
+/// - `undo` over a run log this build cannot replay, because undo's
+///   whole work is moving files and a record read only in part is the
+///   one input it must never act on.
 ///
 /// An applying rename with nowhere to record itself is not among them:
 /// what an apply run has to be able to write is its run log, and
@@ -637,7 +646,10 @@ pub fn preflight<C: Cache>(
     adapters: &Adapters<C>,
 ) -> Result<Prepared, Diagnostic> {
     match command {
-        Command::Config | Command::Resolve { .. } | Command::Undo => Ok(Prepared::Unchecked),
+        Command::Config | Command::Resolve { .. } => Ok(Prepared::Unchecked),
+        Command::Undo => Ok(Prepared::Undoing {
+            moves: recorded_moves(adapters)?,
+        }),
         // The root and the ledger are discovered together, so a run
         // holding one holds the other; either being absent is the one
         // situation of being outside a collection.
@@ -744,8 +756,8 @@ pub fn emit_events<C: Cache>(
             bib_events(groups, configs, adapters, sink);
             None
         }
-        (Command::Undo, _) => {
-            undo_events(adapters, sink);
+        (Command::Undo, Prepared::Undoing { moves }) => {
+            undo_events(moves, adapters, sink);
             None
         }
         // A `Prepared` that does not go with the command could only
@@ -792,6 +804,52 @@ fn cache_report(clear: bool, root: &Path) -> Result<Event, Diagnostic> {
         false => crate::cache::inspect(root).map(|stats| crate::cache::status_event(&stats)),
     }
     .map_err(|failure| error(format!("\"{}\": {failure}", root.display())))
+}
+
+/// The moves `borax undo` would reverse: the most recent apply-run
+/// log's, in the order that run applied them.
+///
+/// The log is the one [`crate::runlog::latest_apply_log`] finds — the
+/// collection's before the state root's. Empty when there is none
+/// anywhere, or when the one there is has no moves in it: a run with
+/// nothing to undo is not a failed run.
+///
+/// A log that is there and cannot be replayed is a [`Diagnostic`]: a
+/// schema this build does not understand, or a line that is not the
+/// JSON every line of a log is ([`crate::undo::moves_in`]). Both end
+/// the run before a file is touched, since undo has no verdict to
+/// report per file — its whole work is the moving, and a record borax
+/// cannot read whole is one it must not act on part of. A log that
+/// cannot be read from disk at all is treated as absent, the way an
+/// unreadable ledger is: accounting borax cannot reach says nothing
+/// about what is on disk.
+fn recorded_moves<C: Cache>(adapters: &Adapters<C>) -> Result<Vec<Move>, Diagnostic> {
+    let found = crate::runlog::latest_apply_log(
+        adapters.collection_root.as_deref(),
+        adapters.state_root.as_deref(),
+    );
+    let Some(path) = found else {
+        return Ok(Vec::new());
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(Vec::new());
+    };
+
+    crate::undo::moves_in(&text).map_err(|refusal| {
+        error(match refusal {
+            crate::undo::Refusal::Schema { found } => format!(
+                "the run log \"{}\" is written in schema {found}, which this borax \
+                 ({}) does not understand",
+                path.display(),
+                env!("CARGO_PKG_VERSION")
+            ),
+            crate::undo::Refusal::Unreadable { message } => format!(
+                "the run log \"{}\" could not be read ({message}), so there is nothing \
+                 safe to undo",
+                path.display()
+            ),
+        })
+    })
 }
 
 /// Regenerate the ledger of the collection at `root` and report what it
@@ -1231,15 +1289,12 @@ fn bib_config(config: &Config) -> BibConfig {
 
 /// Write the events `borax undo` produces into `sink`.
 ///
-/// A run with no journal reverts nothing and reports nothing, which is
-/// what an absent journal means: there is no move on record to undo.
-fn undo_events<C: Cache>(adapters: &Adapters<C>, sink: &mut dyn Sink) {
-    let Some(journal) = adapters.journal else {
-        return;
-    };
-
-    for reversal in undo_last(journal, adapters.library, adapters.filesystem) {
-        sink.emit(crate::journal::event_for(&reversal));
+/// `moves` is what [`preflight`] read back from the run being reverted.
+/// An empty one reverts nothing and reports nothing, which is what
+/// having found no apply log means: there is no move on record to undo.
+fn undo_events<C: Cache>(moves: &[Move], adapters: &Adapters<C>, sink: &mut dyn Sink) {
+    for reversal in undo_moves(moves, adapters.library, adapters.filesystem) {
+        sink.emit(crate::undo::event_for(&reversal));
     }
 }
 
@@ -1556,7 +1611,6 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
     let sources: Vec<&dyn Source> = owned.iter().map(Box::as_ref).collect();
 
     let index = ContentIndex::new(response_cache());
-    let journal = FileJournal::open_default();
     // The collection the run sits in decides where its accounting
     // goes, so it is discovered from the same directory the
     // configuration was, under the `collection-root` that configuration
@@ -1582,13 +1636,12 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
             sources: &sources,
             index: &index,
             filesystem: &RealFilesystem,
-            journal: journal.as_ref().map(|journal| journal as &dyn Journal),
             bib_files: &RealBibFiles,
             cache_root: default_cache_root(),
             now: timestamp,
             ledger: ledger.as_ref().map(|ledger| ledger as &dyn Ledger),
             collection_root,
-            state_root: crate::journal::default_state_root(),
+            state_root: crate::runlog::default_state_root(),
         },
         streams,
     )

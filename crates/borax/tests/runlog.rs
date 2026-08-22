@@ -2,17 +2,17 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use borax::bib::BibFiles;
 use borax::cli::{Cli, Command, LedgerAction, Settings};
 use borax::config::{Layer, Origin, resolve};
-use borax::journal::{Entry as JournalEntry, Journal};
 use borax::ledger::ACCOUNTING_DIR;
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Streams, dispatch};
-use borax::runlog::{RUNS_DIR, destination, latest_apply_log, log_name};
+use borax::runlog::{RUNS_DIR, destination, latest_apply_log, log_name, state_root};
 use borax::session::Outcome;
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -168,33 +168,6 @@ impl Filesystem for FakeFilesystem {
             .borrow_mut()
             .push((from.to_path_buf(), to.to_path_buf()));
         Ok(())
-    }
-}
-
-struct FakeJournal {
-    appended: RefCell<Vec<JournalEntry>>,
-}
-
-impl FakeJournal {
-    fn new() -> FakeJournal {
-        FakeJournal {
-            appended: RefCell::new(Vec::new()),
-        }
-    }
-
-    fn appended(&self) -> Vec<JournalEntry> {
-        self.appended.borrow().clone()
-    }
-}
-
-impl Journal for FakeJournal {
-    fn append(&self, entries: &[JournalEntry]) -> std::io::Result<()> {
-        self.appended.borrow_mut().extend_from_slice(entries);
-        Ok(())
-    }
-
-    fn read(&self) -> Vec<JournalEntry> {
-        Vec::new()
     }
 }
 
@@ -615,7 +588,7 @@ fn latest_apply_log_is_none_when_the_runs_directory_does_not_exist() {
 // ---------------------------------------------------------------------
 // 3.1-3.3: dispatched end to end, against a real collection-root
 // tempdir (the log write is real disk I/O, unlike the ledger's Adapter
-// seam) with fake resolution/filesystem/journal underneath.
+// seam) with fake resolution/filesystem underneath.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -641,7 +614,6 @@ fn run_log_contains_exactly_the_json_stdout_stream_including_framing_events() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -706,7 +678,6 @@ fn a_human_format_run_still_writes_a_json_run_log_identical_to_the_json_runs() {
             sources: &sources,
             index: &index,
             filesystem: &filesystem,
-            journal: None,
             bib_files: &bib_files,
             cache_root: None,
             now: fixed_now,
@@ -766,7 +737,6 @@ fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
 
@@ -775,7 +745,6 @@ fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: || "20240101T000000Z".to_string(),
@@ -807,7 +776,6 @@ fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: || "20240101T000100Z".to_string(),
@@ -866,7 +834,6 @@ fn an_unwritable_mandatory_log_aborts_before_any_rename() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
@@ -874,7 +841,6 @@ fn an_unwritable_mandatory_log_aborts_before_any_rename() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -908,10 +874,6 @@ fn an_unwritable_mandatory_log_aborts_before_any_rename() {
         filesystem.renames().is_empty(),
         "no file may be renamed when the mandatory log cannot be created"
     );
-    assert!(
-        journal.appended().is_empty(),
-        "nothing may be journaled either, since nothing moved"
-    );
 }
 
 #[test]
@@ -930,7 +892,6 @@ fn no_run_log_with_apply_still_writes_the_mandatory_log() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles;
     let effective = effective_with(|layer| {
         layer.run_log = Some(false);
@@ -944,7 +905,6 @@ fn no_run_log_with_apply_still_writes_the_mandatory_log() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1008,7 +968,6 @@ fn no_run_log_on_a_preview_writes_nothing_and_the_run_still_succeeds() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1074,7 +1033,6 @@ fn a_failed_optional_log_warns_but_the_run_still_succeeds() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: None,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1124,7 +1082,6 @@ fn an_apply_rename_outside_a_collection_writes_its_log_under_the_state_root() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
@@ -1132,7 +1089,6 @@ fn an_apply_rename_outside_a_collection_writes_its_log_under_the_state_root() {
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1182,7 +1138,6 @@ fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
-    let journal = FakeJournal::new();
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
@@ -1190,7 +1145,6 @@ fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
-        journal: Some(&journal as &dyn Journal),
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
@@ -1222,4 +1176,231 @@ fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving
     assert!(!err.is_empty());
     assert!(filesystem.renames().is_empty());
     assert!(out.is_empty(), "a refused run must write no event stream");
+}
+
+// ---------------------------------------------------------------------
+// state_root(): ported from `tests/journal.rs` — moved here with the
+// function itself, since run logs are now its only consumer. The
+// produced path is unchanged (".../borax/v1"), so logs written before
+// this change are still found; "v1" is asserted as a literal here
+// rather than through a re-exported constant, so these tests do not
+// depend on whatever the implementer renames it to.
+// ---------------------------------------------------------------------
+
+/// A `lookup` that answers from `entries` and knows nothing else, so a
+/// test states the whole environment it depends on.
+#[cfg(any(unix, windows))]
+fn env(entries: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+    move |name| {
+        entries
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| OsString::from(*value))
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn state_root_honors_xdg_state_home_on_unix() {
+    let root = state_root(env(&[
+        ("XDG_STATE_HOME", "/base/home/.local/state"),
+        ("HOME", "/base/home"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from("/base/home/.local/state")
+                .join("borax")
+                .join("v1")
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_root_falls_back_to_home_dot_local_state_on_unix() {
+    let root = state_root(env(&[("HOME", "/base/home")]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from("/base/home")
+                .join(".local")
+                .join("state")
+                .join("borax")
+                .join("v1")
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_root_prefers_xdg_state_home_over_home_on_unix() {
+    let root = state_root(env(&[
+        ("XDG_STATE_HOME", "/xdg/state"),
+        ("HOME", "/base/home"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(PathBuf::from("/xdg/state").join("borax").join("v1"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_root_skips_an_empty_xdg_state_home_on_unix() {
+    let root = state_root(env(&[("XDG_STATE_HOME", ""), ("HOME", "/base/home")]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from("/base/home")
+                .join(".local")
+                .join("state")
+                .join("borax")
+                .join("v1")
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_root_skips_a_relative_xdg_state_home_on_unix() {
+    let root = state_root(env(&[
+        ("XDG_STATE_HOME", "relative/state"),
+        ("HOME", "/base/home"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from("/base/home")
+                .join(".local")
+                .join("state")
+                .join("borax")
+                .join("v1")
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_root_is_none_when_nothing_qualifies_on_unix() {
+    assert_eq!(state_root(env(&[])), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn state_root_is_none_for_an_empty_home_with_no_xdg_state_home_on_unix() {
+    assert_eq!(state_root(env(&[("HOME", "")])), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn state_root_is_none_for_a_relative_home_with_no_xdg_state_home_on_unix() {
+    assert_eq!(state_root(env(&[("HOME", "relative")])), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn state_root_honors_localappdata_on_windows() {
+    let root = state_root(env(&[("LOCALAPPDATA", r"C:\Users\test\AppData\Local")]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\AppData\Local")
+                .join("borax")
+                .join("v1")
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn state_root_falls_back_to_xdg_state_home_on_windows() {
+    let root = state_root(env(&[("XDG_STATE_HOME", r"C:\Users\test\.state")]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\.state")
+                .join("borax")
+                .join("v1")
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn state_root_prefers_localappdata_over_xdg_state_home_on_windows() {
+    let root = state_root(env(&[
+        ("LOCALAPPDATA", r"C:\Users\test\AppData\Local"),
+        ("XDG_STATE_HOME", r"C:\Users\test\.state"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\AppData\Local")
+                .join("borax")
+                .join("v1")
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn state_root_skips_an_empty_localappdata_on_windows() {
+    let root = state_root(env(&[
+        ("LOCALAPPDATA", ""),
+        ("XDG_STATE_HOME", r"C:\Users\test\.state"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\.state")
+                .join("borax")
+                .join("v1")
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn state_root_skips_a_relative_localappdata_on_windows() {
+    let root = state_root(env(&[
+        ("LOCALAPPDATA", r"AppData\Local"),
+        ("XDG_STATE_HOME", r"C:\Users\test\.state"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\.state")
+                .join("borax")
+                .join("v1")
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn state_root_is_none_when_nothing_qualifies_on_windows() {
+    assert_eq!(state_root(env(&[])), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn state_root_is_none_for_an_empty_xdg_state_home_with_no_localappdata_on_windows() {
+    assert_eq!(state_root(env(&[("XDG_STATE_HOME", "")])), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn state_root_is_none_for_a_relative_xdg_state_home_with_no_localappdata_on_windows() {
+    assert_eq!(state_root(env(&[("XDG_STATE_HOME", "relative")])), None);
 }
