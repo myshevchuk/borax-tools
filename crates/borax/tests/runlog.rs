@@ -481,6 +481,120 @@ fn destination_of_undo_is_optional_not_mandatory() {
 }
 
 // ---------------------------------------------------------------------
+// destination() on Windows path shapes
+//
+// The cases above spell their roots POSIX-style (`/collection`,
+// `/state`). Windows accepts those — rooted, merely drive-less — so
+// they pass there without the composed path ever being one a Windows
+// user would have. These are the same compositions over the roots
+// Windows really produces: a drive-rooted collection, a
+// `LOCALAPPDATA`-shaped state root, a collection on a UNC share, and
+// a root that already ends in a separator — which is what
+// `collection_root` hands back for a collection anchored at a drive
+// root or a share root.
+//
+// Asserted as the whole string a user would see in an error message
+// rather than through `join`, which would reproduce whatever separator
+// the code chose and so agree with it either way.
+//
+// `latest_apply_log` needs no counterpart: its cases below run over
+// real `tempdir()` paths, which are already the platform's own shape.
+// ---------------------------------------------------------------------
+
+#[cfg(windows)]
+#[test]
+fn destination_in_a_drive_rooted_collection_is_under_that_drive_on_windows() {
+    let root = PathBuf::from(r"C:\collection");
+    let command = Command::Rename {
+        paths: vec![],
+        apply: true,
+    };
+
+    let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
+        .unwrap_or_else(|| panic!("expected a destination"));
+
+    assert_eq!(
+        found.path.to_string_lossy(),
+        r"C:\collection\.borax\runs\20240101T000000Z-rename-apply.jsonl"
+    );
+    assert!(
+        found.path.is_absolute(),
+        "an apply log must not depend on the working directory"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn destination_outside_a_collection_lands_under_the_local_appdata_state_root_on_windows() {
+    // The shape `state_root` builds from `LOCALAPPDATA` on Windows.
+    let state_root = PathBuf::from(r"C:\Users\example\AppData\Local\borax\v1");
+    let command = Command::Rename {
+        paths: vec![],
+        apply: true,
+    };
+
+    let found = destination(
+        &command,
+        true,
+        true,
+        "20240101T000000Z",
+        None,
+        Some(&state_root),
+    )
+    .unwrap_or_else(|| panic!("expected a destination"));
+
+    assert_eq!(
+        found.path.to_string_lossy(),
+        r"C:\Users\example\AppData\Local\borax\v1\runs\20240101T000000Z-rename-apply.jsonl"
+    );
+}
+
+/// A collection on a network share keeps its accounting on the share,
+/// beside the files it is about, rather than anywhere local.
+#[cfg(windows)]
+#[test]
+fn destination_in_a_collection_on_a_unc_share_stays_on_the_share_on_windows() {
+    let root = PathBuf::from(r"\\server\share\collection");
+    let command = Command::Rename {
+        paths: vec![],
+        apply: true,
+    };
+
+    let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
+        .unwrap_or_else(|| panic!("expected a destination"));
+
+    assert_eq!(
+        found.path.to_string_lossy(),
+        r"\\server\share\collection\.borax\runs\20240101T000000Z-rename-apply.jsonl"
+    );
+    assert!(
+        found.path.is_absolute(),
+        "a UNC path is absolute; an apply log on a share must not depend on the working directory"
+    );
+}
+
+/// A collection anchored at a drive root: the root already ends in a
+/// separator, and the composition must not double it. `\\server\share\`
+/// is the same shape and the same risk.
+#[cfg(windows)]
+#[test]
+fn destination_in_a_collection_at_a_drive_root_does_not_double_the_separator_on_windows() {
+    let root = PathBuf::from(r"C:\");
+    let command = Command::Rename {
+        paths: vec![],
+        apply: true,
+    };
+
+    let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
+        .unwrap_or_else(|| panic!("expected a destination"));
+
+    assert_eq!(
+        found.path.to_string_lossy(),
+        r"C:\.borax\runs\20240101T000000Z-rename-apply.jsonl"
+    );
+}
+
+// ---------------------------------------------------------------------
 // 3.3: latest_apply_log() — real filesystem, collection first then XDG
 // ---------------------------------------------------------------------
 

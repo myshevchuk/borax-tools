@@ -101,15 +101,31 @@ is red.
 
 ## 6. Integration
 
-- [ ] 6.1 End-to-end test: batch with a content duplicate and a work
-      duplicate — skip reasons, untouched sources, ledger unchanged
-- [ ] 6.2 End-to-end test: apply run → ledger append + apply log →
+- [x] 6.1 End-to-end test: batch with a content duplicate and a work
+      duplicate — skip reasons, untouched sources, ledger unchanged.
+      Over real PDFs and the cassette transport, whose recorded request
+      list is asserted too: the content duplicate costs no request and
+      the work duplicate exactly one, which is what makes the two kinds
+      observably different rather than differently labelled
+- [x] 6.2 End-to-end test: apply run → ledger append + apply log →
       `borax undo` → files restored, ledger state after undo defined
-      and tested
-- [ ] 6.3 End-to-end test: rebuild determinism on a fixture collection
-      (byte-identical double rebuild; compaction after deletion)
-- [ ] 6.4 Windows CI coverage for collection-root discovery and run-log
-      paths
-- [ ] 6.5 `CHANGELOG.md` entry under `[Unreleased]` stating plainly
+      and tested — the ledger is byte-identical across the undo and a
+      rerun re-admits the restored files. The sidecar undo orphans is
+      pinned as it behaves today, naming the defect `STATE.md` records
+- [x] 6.3 End-to-end test: rebuild determinism on a fixture collection
+      (byte-identical double rebuild; compaction after deletion) — over
+      a collection a real apply run wrote, sidecars and all
+- [x] 6.4 Windows CI coverage for collection-root discovery and run-log
+      paths — no workflow change: `ci.yml` already runs fmt, clippy and
+      the whole suite on `windows-latest`, and `log_name` and
+      `state_root` already had their `#[cfg(windows)]` cases. What was
+      missing was path *shapes*, since the pure-function tests spelled
+      their paths POSIX-style and so passed on Windows vacuously: added
+      `#[cfg(windows)]` counterparts for `collection_root` (drive root,
+      cross-drive override, UNC share and share root) and for
+      `destination` (drive-rooted collection, `LOCALAPPDATA` state
+      root, UNC share, and a root already ending in a separator)
+- [x] 6.5 `CHANGELOG.md` entry under `[Unreleased]` stating plainly
       that the journal is gone and an undo spanning the upgrade will
-      not find its run
+      not find its run — written with the removal itself, under
+      `### Removed`; no further entry needed

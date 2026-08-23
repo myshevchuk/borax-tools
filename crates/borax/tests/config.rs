@@ -1354,6 +1354,113 @@ fn collection_root_configured_wins_even_with_no_override_file_anywhere() {
     assert_eq!(root, Some(PathBuf::from("/archive")));
 }
 
+// --- collection_root() on Windows path shapes ---
+//
+// The cases above spell their paths POSIX-style. Windows accepts those
+// — `/proj/sub` is rooted, just drive-less — and the ancestors walk
+// terminates on them, so they pass there without the discovery loop
+// ever meeting a drive letter or a UNC share, which are the two shapes
+// a Windows collection actually has. These are the same cases in those
+// shapes; they are gated because `\` separates components only on
+// Windows, so on Unix `C:\proj\sub` is one filename and every
+// assertion below would be about nothing.
+
+/// The drive-rooted counterpart of
+/// `collection_root_is_the_directory_holding_the_nearest_override_file`.
+#[cfg(windows)]
+#[test]
+fn collection_root_is_the_directory_holding_the_nearest_override_file_on_windows() {
+    let root = collection_root(
+        Path::new(r"C:\proj\sub\deeper"),
+        None,
+        exists_at(&[r"C:\proj\.borax.toml"]),
+    );
+    assert_eq!(root, Some(PathBuf::from(r"C:\proj")));
+}
+
+#[cfg(windows)]
+#[test]
+fn collection_root_prefers_the_nearest_override_file_on_windows() {
+    let root = collection_root(
+        Path::new(r"C:\proj\sub"),
+        None,
+        exists_at(&[r"C:\proj\sub\.borax.toml", r"C:\proj\.borax.toml"]),
+    );
+    assert_eq!(root, Some(PathBuf::from(r"C:\proj\sub")));
+}
+
+/// The walk stops at the drive root rather than running past it: with
+/// no override file anywhere above, the answer is `None`, and the fact
+/// that there is an answer at all is what says `Path::ancestors` ends
+/// at `C:\` instead of spinning on the prefix.
+#[cfg(windows)]
+#[test]
+fn collection_root_is_none_up_to_the_drive_root_on_windows() {
+    let root = collection_root(Path::new(r"C:\proj\sub"), None, exists_at(&[]));
+    assert_eq!(root, None);
+}
+
+/// An override file at the drive root still yields a root. Worth its
+/// own case because the answer is `nearest_override(..)?.parent()?`,
+/// and a `parent()` that gave `None` for `C:\.borax.toml` would turn a
+/// collection anchored at the drive root into no collection at all.
+#[cfg(windows)]
+#[test]
+fn collection_root_can_be_the_drive_root_itself_on_windows() {
+    let root = collection_root(Path::new(r"C:\proj"), None, exists_at(&[r"C:\.borax.toml"]));
+    assert_eq!(root, Some(PathBuf::from(r"C:\")));
+}
+
+/// The configured root replaces the search, so it may name a different
+/// drive from the one the files are on — which is what an "unusual
+/// layout" usually is on Windows.
+#[cfg(windows)]
+#[test]
+fn collection_root_configured_may_be_on_another_drive_on_windows() {
+    let root = collection_root(
+        Path::new(r"C:\proj\sub"),
+        Some(Path::new(r"D:\archive\unusual-layout")),
+        exists_at(&[r"C:\proj\.borax.toml"]),
+    );
+    assert_eq!(root, Some(PathBuf::from(r"D:\archive\unusual-layout")));
+}
+
+/// A collection on a network share: the walk climbs it the same way it
+/// climbs a local tree.
+#[cfg(windows)]
+#[test]
+fn collection_root_climbs_a_unc_share_on_windows() {
+    let root = collection_root(
+        Path::new(r"\\server\share\proj\sub"),
+        None,
+        exists_at(&[r"\\server\share\proj\.borax.toml"]),
+    );
+    assert_eq!(root, Some(PathBuf::from(r"\\server\share\proj")));
+}
+
+/// The share root is where a UNC walk ends: `Path::ancestors` stops at
+/// `\\server\share\` rather than climbing into the prefix, so nothing
+/// above the share is ever tried and the search terminates.
+#[cfg(windows)]
+#[test]
+fn collection_root_is_none_up_to_the_unc_share_root_on_windows() {
+    let root = collection_root(Path::new(r"\\server\share\proj\sub"), None, exists_at(&[]));
+    assert_eq!(root, None);
+}
+
+/// The share-root counterpart of the drive-root case: an override file
+/// directly under the share anchors the collection at the share.
+#[cfg(windows)]
+#[test]
+fn collection_root_can_be_a_unc_share_root_itself_on_windows() {
+    let root = collection_root(
+        Path::new(r"\\server\share\proj"),
+        None,
+        exists_at(&[r"\\server\share\.borax.toml"]),
+    );
+    assert_eq!(root, Some(PathBuf::from(r"\\server\share\")));
+}
+
 // --- global_config_path() ---
 
 #[cfg(unix)]
