@@ -983,10 +983,101 @@ fn an_unwritable_mandatory_log_aborts_before_any_rename() {
     );
 
     assert_eq!(outcome, Outcome::Fatal, "got {outcome:?}");
-    assert!(!err.is_empty(), "expected a clear error naming the run log");
     assert!(
         filesystem.renames().is_empty(),
         "no file may be renamed when the mandatory log cannot be created"
+    );
+
+    // The message has to name the thing that failed, and the thing that
+    // failed is the run log. The journal it replaced is gone; a message
+    // still naming it would send a user looking for a file this build
+    // never writes.
+    let message = String::from_utf8(err).unwrap();
+    assert!(message.contains("run log"), "got {message:?}");
+    assert!(message.contains(".jsonl"), "got {message:?}");
+    assert!(
+        !message.to_lowercase().contains("journal"),
+        "the message must not name the removed journal: {message:?}"
+    );
+    assert!(
+        out.is_empty(),
+        "a refused run must write no event stream: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+/// The other way a mandatory log fails to open: the directories above
+/// it are made without trouble and the file itself cannot be created,
+/// because a directory already holds the name. Distinct from the case
+/// above, where `.borax` is a file and nothing beneath it can be made
+/// at all — this one gets as far as `File::create` and is refused
+/// there, and must abort just as completely.
+#[test]
+fn a_mandatory_log_whose_own_name_is_taken_by_a_directory_aborts_before_any_rename() {
+    let dir = tempdir().unwrap();
+    // `fixed_now` is what the run stamps its log with, so the name is
+    // known ahead of the run and can be occupied before it starts.
+    let runs = dir.path().join(ACCOUNTING_DIR).join(RUNS_DIR);
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::create_dir(runs.join(log_name(&fixed_now(), "rename", true))).unwrap();
+
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("occupied-log"),
+        pdf_with_embedded_doi("10.1000/occupied-log"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/occupied-log")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![path],
+                apply: true,
+            },
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Fatal, "got {outcome:?}");
+    assert!(
+        filesystem.renames().is_empty(),
+        "no file may be renamed when the mandatory log cannot be created"
+    );
+    let message = String::from_utf8(err).unwrap();
+    assert!(message.contains("run log"), "got {message:?}");
+    assert!(
+        !message.to_lowercase().contains("journal"),
+        "the message must not name the removed journal: {message:?}"
     );
 }
 
@@ -1287,9 +1378,19 @@ fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving
     );
 
     assert_eq!(outcome, Outcome::Fatal, "got {outcome:?}");
-    assert!(!err.is_empty());
     assert!(filesystem.renames().is_empty());
     assert!(out.is_empty(), "a refused run must write no event stream");
+
+    // This refusal is about placement rather than a failed write, so it
+    // names no path — but it still has to say what was wanted and why,
+    // and still must not name the journal that used to serve undo.
+    let message = String::from_utf8(err).unwrap();
+    assert!(message.contains("--apply"), "got {message:?}");
+    assert!(message.contains("undone"), "got {message:?}");
+    assert!(
+        !message.to_lowercase().contains("journal"),
+        "the message must not name the removed journal: {message:?}"
+    );
 }
 
 // ---------------------------------------------------------------------
