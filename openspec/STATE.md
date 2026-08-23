@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-08-23, when orphaned sidecars were written down.
+Last reviewed: 2026-08-23, when the last of the change's tasks closed.
 
 ## What is built
 
@@ -53,12 +53,13 @@ finding it first.
   file is reported unresolvable and skipped, which is correct but leaves
   a class of documents borax cannot help with.
 - **Nothing from this change.** `add-ledger-and-run-logs` is
-  implemented bar its integration tests: the ledger, `borax ledger
-  rebuild`, duplicate checking in `rename`, run logs, and `borax undo`
-  reading the latest apply-run log. `journal.rs` is deleted and
-  nothing reads a v0.1.0 `renames.jsonl`. What is left is group 6 —
-  end-to-end tests and Windows CI coverage — and tasks 5.1 and 5.3,
-  which are verification-first and may need no code at all.
+  implemented and all twenty-six of its tasks are closed: the
+  ledger, `borax ledger rebuild`, duplicate checking in `rename`, run
+  logs, `borax undo` reading the latest apply-run log, the integration
+  tests over real PDFs, and Windows coverage of the path shapes
+  discovery and run-log placement depend on. `journal.rs` is deleted
+  and nothing reads a v0.1.0 `renames.jsonl`. The change is ready to
+  archive.
 - **Everything the design names as a later change**: no library index,
   search or watch mode; no OCR or interactive candidate picker; no XMP
   write-back, Zotero interop or Emacs package; no bibliography format

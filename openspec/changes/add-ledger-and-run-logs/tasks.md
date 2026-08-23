@@ -67,9 +67,16 @@ TDD throughout: red test first for every pure behaviour.
 - [x] 4.2 Tests + implementation: reverse replay with per-entry hash
       verification (carried over from the journal, behaviour unchanged)
       and schema-version refusal
-- [ ] 4.3 Carry over the journal's apply gate: `--apply` aborts before
+- [x] 4.3 Carry over the journal's apply gate: `--apply` aborts before
       touching anything when the apply-run log cannot be created or
-      written, with a message naming the log rather than the journal
+      written, with a message naming the log rather than the journal —
+      the gate itself shipped with 3.2 (`open_log` writes the first
+      event before any file moves, and a mandatory failure is `Fatal`).
+      What was missing was the assertion: both refusal tests checked
+      only that stderr was non-empty. They now pin the wording — the
+      run log by name and extension, and no mention of the journal —
+      and a second create failure is covered, where the directories
+      are made and the log's own name is already a directory
 - [x] 4.4 Delete `crates/borax/src/journal.rs`, its tests, and the
       `Journal`/`FileJournal` adapter wiring in `run.rs`; port the
       cases in `crates/borax/tests/journal.rs` that still describe
@@ -82,10 +89,14 @@ Verification-first: 5.1 and 5.3 are largely shipped, so each starts by
 writing the test that proves it and only then changes code if the test
 is red.
 
-- [ ] 5.1 Tests: unknown key and wrongly typed value are load-time
+- [x] 5.1 Tests: unknown key and wrongly typed value are load-time
       errors naming the key and expected type (`deny_unknown_fields`
       over typed TOML should already give this); implement only what
-      the tests show missing
+      the tests show missing — nothing was missing. The unknown-key
+      tests asserted only the error variant, so they now assert the
+      message names the offending key; added typed-value refusals for
+      one setting of each shape the schema has (`usize`, `u64`,
+      boolean, sequence, map). No source change
 - [x] 5.2 Tests + implementation: `--no-` negation for every
       config-settable boolean, including the `ledger` and `run-log`
       booleans this change adds. All four — `sidecars`, `cache`,
@@ -93,9 +104,15 @@ is red.
       rather than resolving to the last one given; the spec was
       reworded to the shipped convention rather than v0.1.0's public
       surface changed under it
-- [ ] 5.3 Tests: `apply = true` in a config file is a load-time error;
+- [x] 5.3 Tests: `apply = true` in a config file is a load-time error;
       implement the message naming it as command-line-only if the
-      shipped unknown-key wording does not already say so
+      shipped unknown-key wording does not already say so — it did not.
+      `deny_unknown_fields` refused it as `unknown field \`apply\``,
+      which satisfies "is an error" but not the cli spec's "stating the
+      key must be passed on the command line". Added
+      `ConfigError::CommandLineOnly`, raised from a second parse taken
+      only on the error path, covering the top level and every table
+      under it, and refusing the key whatever value it is given
 - [x] 5.4 Tests + implementation: the `collection-root` key overriding
       discovery, with `borax config` reporting its origin
 
