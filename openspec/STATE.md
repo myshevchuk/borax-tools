@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-08-23, when the last of the change's tasks closed.
+Last reviewed: 2026-08-23, when the ledger change was archived.
 
 ## What is built
 
@@ -89,6 +89,28 @@ finding it first.
   output regenerated per run, or a companion that follows its file —
   and the answer governs undo, re-renames and `ledger rebuild`'s scan
   alike. That is a change of its own, not a patch.
+
+- **Every capability spec opens with a placeholder Purpose.** All nine
+  files in `openspec/specs/` carry the same line the archive tool
+  writes and asks to have replaced:
+
+  ```markdown
+  ## Purpose
+  TBD - created by archiving change <name>. Update Purpose after archive.
+  ```
+
+  It has been there since `add-core-pipeline` was archived and has
+  never been filled in for any capability. Nothing depends on it and
+  no behaviour is wrong; the cost is that each spec states what it
+  requires without ever saying what the capability is *for*, so a
+  reader infers the scope from the requirements and can only guess
+  where a new requirement belongs.
+
+  Worth one sweep across all nine rather than a line at a time. Filling
+  in only the specs a change happens to touch is what has kept it
+  outstanding: it makes the newly written ones the odd files out, which
+  is a worse state than uniform placeholders, so each change has
+  reasonably left it alone.
 
 ## Open decisions
 
