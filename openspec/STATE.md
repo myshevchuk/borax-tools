@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-08-23, when the ledger change was archived.
+Last reviewed: 2026-08-24, before cutting 0.2.0.
 
 ## What is built
 
@@ -27,9 +27,20 @@ file's verdict and its fate are adjacent. The decisions are unchanged:
 drivable one input at a time, and the batch entry point is a fold over
 it.
 
-Tests run green on Linux, macOS and Windows. A scheduled job exercises
-the real APIs, so schema drift at a source surfaces without a user
-finding it first.
+`add-ledger-and-run-logs` is implemented and archived on top of both. A
+collection now keeps account of what it has admitted: a ledger at
+`.borax/ledger.jsonl` beside the nearest `.borax.toml`, duplicate
+checking in `rename` by content and by work, `borax ledger rebuild` to
+derive the ledger back from the files and sidecars themselves, a run
+log per run, and a `borax undo` that reverses the latest applied run by
+reading that log rather than a journal of its own. `journal.rs` is
+deleted and nothing reads a v0.1.0 `renames.jsonl`.
+
+Tests run green on Linux, macOS and Windows, including integration
+tests over real PDFs and Windows coverage of the path shapes discovery
+and run-log placement depend on. A scheduled job exercises the real
+APIs, so schema drift at a source surfaces without a user finding it
+first.
 
 ## Not built yet
 
@@ -52,14 +63,6 @@ finding it first.
   Named out of scope in the `add-core-pipeline` proposal. Today such a
   file is reported unresolvable and skipped, which is correct but leaves
   a class of documents borax cannot help with.
-- **Nothing from this change.** `add-ledger-and-run-logs` is
-  implemented and all twenty-six of its tasks are closed: the
-  ledger, `borax ledger rebuild`, duplicate checking in `rename`, run
-  logs, `borax undo` reading the latest apply-run log, the integration
-  tests over real PDFs, and Windows coverage of the path shapes
-  discovery and run-log placement depend on. `journal.rs` is deleted
-  and nothing reads a v0.1.0 `renames.jsonl`. The change is ready to
-  archive.
 - **Everything the design names as a later change**: no library index,
   search or watch mode; no OCR or interactive candidate picker; no XMP
   write-back, Zotero interop or Emacs package; no bibliography format
