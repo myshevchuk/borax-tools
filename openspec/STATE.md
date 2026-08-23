@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-08-22, when the ledger was wired into `rename`.
+Last reviewed: 2026-08-23, when orphaned sidecars were written down.
 
 ## What is built
 
@@ -64,6 +64,30 @@ finding it first.
   write-back, Zotero interop or Emacs package; no bibliography format
   other than BibTeX. The file's bytes are never modified — borax renames
   and never edits.
+
+## Known defects
+
+- **A sidecar is never moved with its file, so a rename can orphan
+  one.** `write_sidecar` writes beside the path the file has when it is
+  reached, and no code path renames or removes an existing sidecar when
+  its file's name changes. Two ways in:
+
+  - `borax undo` moves `smith2024.pdf` back to `original.pdf` and
+    leaves `smith2024.pdf.bib` sitting there, describing a file no
+    longer under that name.
+  - Renaming an already-renamed file — a template change, say — writes
+    the new sidecar and leaves the old one beside the vacated name.
+
+  Neither loses data: the orphan is borax's own output and its content
+  is still correct about the record, only about a path nothing occupies.
+  It predates `add-ledger-and-run-logs`, which changed where undo reads
+  its moves from and not what it does with them, so it is not a
+  regression from the run-log work.
+
+  Fixing it properly means deciding what a sidecar's identity is — an
+  output regenerated per run, or a companion that follows its file —
+  and the answer governs undo, re-renames and `ledger rebuild`'s scan
+  alike. That is a change of its own, not a patch.
 
 ## Open decisions
 
