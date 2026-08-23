@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-24
+
 ### Added
 
 - `rename` now checks each file against the collection's ledger and
@@ -218,5 +220,6 @@ that development.
   which drops the archive that is part of such an identifier, so every
   pre-2007 preprint failed with a malformed-response error.
 
-[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/myshevchuk/borax-tools/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/myshevchuk/borax-tools/releases/tag/v0.1.0
