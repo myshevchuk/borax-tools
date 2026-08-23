@@ -1,15 +1,20 @@
 # rename — delta for add-ledger-and-run-logs
 
+## RENAMED Requirements
+
+- FROM: `### Requirement: Applied renames are journaled`
+- TO: `### Requirement: Applied renames are recorded in the run log`
+
 ## MODIFIED Requirements
 
-### Requirement: Applied renames are journaled
+### Requirement: Applied renames are recorded in the run log
 Every applied rename SHALL be recorded as a rename event (original path,
 new path, file content hash, timestamp, run identifier) in the run's
 apply-run log — the mandatory, pre-flushed record defined by the
 `run-logs` capability. The events for the whole plan are flushed to the
 log before the first rename executes; there is no separate journal file.
 
-#### Scenario: Journal written on apply
+#### Scenario: Rename events written on apply
 - **WHEN** a run applies three renames
 - **THEN** the apply-run log contains three rename events sharing one
   run identifier, flushed before any file was renamed

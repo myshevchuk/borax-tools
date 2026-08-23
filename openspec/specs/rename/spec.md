@@ -54,39 +54,27 @@ for the same name in different subdirectories do not collide.
 - **THEN** it is suffixed or skipped by the collision policy, exactly as
   it would be in the file's own directory
 
-### Requirement: Applied renames are journaled
-Every applied rename SHALL append a journal entry (original path, new
-path, file content hash, timestamp, run identifier) to an append-only
-journal in the XDG state directory **before the file is moved**, so no
-move can exist that the journal does not describe. A move that cannot be
-appended SHALL NOT be made. A file whose content hash is unknown cannot
-be journaled in a form `undo` could act on, so it SHALL NOT be moved
-either; the batch continues. A failure of the journal itself SHALL
-abandon every remaining move in the run, each reported with its reason.
+### Requirement: Applied renames are recorded in the run log
+Every applied rename SHALL be recorded as a rename event (original path,
+new path, file content hash, timestamp, run identifier) in the run's
+apply-run log — the mandatory, pre-flushed record defined by the
+`run-logs` capability. The events for the whole plan are flushed to the
+log before the first rename executes; there is no separate journal file.
 
-Entries for moves that did not complete are the accepted cost of this
-order, and are handled by the verification `undo` already performs.
-
-#### Scenario: Journal written on apply
+#### Scenario: Rename events written on apply
 - **WHEN** a run applies three renames
-- **THEN** the journal gains three entries sharing one run identifier
-
-#### Scenario: The run dies partway through a batch
-- **WHEN** a run applying a batch is killed after some files have moved
-- **THEN** the journal holds an entry for every file that moved, and
-  `borax undo` reverts all of them
-
-#### Scenario: The journal cannot be appended to
-- **WHEN** appending an entry fails partway through an applying run
-- **THEN** that file and every remaining one are left where they are and
-  reported, and the moves already made are still reported and undoable
+- **THEN** the apply-run log contains three rename events sharing one
+  run identifier, flushed before any file was renamed
 
 ### Requirement: Undo reverts the last applied run safely
-`borax undo` SHALL revert the renames of the most recent applied run in
-reverse order. Before reverting each entry it SHALL verify the file still
-exists at the journaled new path with the journaled content hash; entries
-failing verification are reported and left untouched rather than guessed
-at.
+`borax undo` SHALL revert the renames of the most recent apply-run log —
+searching the current collection's `.borax/runs/` first, then the XDG
+state fallback — replaying its rename events in reverse order. Before
+reverting each entry it SHALL verify the file still exists at the
+recorded new path with the recorded content hash; entries failing
+verification are reported and left untouched rather than guessed at.
+Undo SHALL refuse, with a clear error, a run log whose event-schema
+version it does not understand.
 
 #### Scenario: Clean undo
 - **WHEN** `borax undo` runs after an applied run and no files were
@@ -97,6 +85,12 @@ at.
 - **WHEN** one renamed file was moved away before `borax undo`
 - **THEN** that entry is reported as unrevertible and all other entries
   are still reverted
+
+#### Scenario: Unknown schema version
+- **WHEN** the latest apply-run log carries an event-schema version
+  newer than the running binary understands
+- **THEN** undo aborts with an error naming the version mismatch and
+  reverts nothing
 
 ### Requirement: A run reports one file at a time
 A run SHALL report each file completely before it begins the next: the
