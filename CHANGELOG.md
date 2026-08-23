@@ -57,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read. The `unjournalable` skip reason is now `unrecordable`, naming
   what it always meant rather than the component that has been
   removed.
+- `apply = true` in a configuration file is refused by name. It was
+  already an error, as every key borax does not know is, but the
+  message listed the keys it expected instead — which reads as a
+  misspelling when the key is spelled correctly and simply may not be
+  there. The refusal now says the flag must be passed on the command
+  line, and says it wherever the key appears, including under
+  `[rename]` where a reader who found `collision` would look for it
+  next. The value makes no difference: `apply = false` is refused too,
+  because what is refused is the file having an opinion about the
+  apply gate at all.
 - Citation keys now come from their own `[citation-keys]` table
   instead of the `[templates]` table that names files, and their
   built-in default is `[auth:lower][year]`, so a 2024 paper by Smith is

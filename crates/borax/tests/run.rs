@@ -674,6 +674,37 @@ fn an_environment_variable_beats_a_directory_override_in_configs_resolve() {
     );
 }
 
+/// cli spec "The apply gate is never configurable", through the path a
+/// user actually reaches it by: an override file discovered next to the
+/// input, not a string handed straight to the parser. The run ends at
+/// config load, before a single file has been looked at, and the error
+/// names the file it came from so the user knows which one to edit.
+#[test]
+fn an_override_file_setting_apply_ends_the_run_at_config_load() {
+    let input = PathBuf::from("/library/alpha/paper.pdf");
+    let read = fake_read(&[("/library/alpha/.borax.toml", "apply = true")]);
+
+    let error = Configs::resolve(
+        slice::from_ref(&input),
+        Path::new("/elsewhere"),
+        vec![],
+        &[],
+        &read,
+    )
+    .unwrap_err();
+
+    match &error {
+        ConfigError::CommandLineOnly { path, key } => {
+            assert_eq!(path, Path::new("/library/alpha/.borax.toml"));
+            assert_eq!(key, "apply");
+        }
+        other => panic!("expected CommandLineOnly, got {other:?}"),
+    }
+    let message = error.to_string();
+    assert!(message.contains("command line"), "got {message:?}");
+    assert!(message.contains(".borax.toml"), "got {message:?}");
+}
+
 #[test]
 fn a_flag_beats_a_directory_override_in_configs_resolve() {
     let input = PathBuf::from("/library/alpha/paper.pdf");

@@ -334,6 +334,13 @@ pub enum ConfigError {
     /// follows it. `name` is the variable without its [`ENV_PREFIX`],
     /// as [`Origin::Env`] holds it.
     UnknownEnv { name: String },
+    /// A file sets a key that exists only as a command-line flag.
+    ///
+    /// Distinct from [`ConfigError::Unreadable`]'s unknown key: this is
+    /// not a setting borax failed to recognise but one it recognises
+    /// and refuses, so the message says where the flag belongs instead
+    /// of listing the keys that were expected in its place.
+    CommandLineOnly { path: PathBuf, key: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -350,6 +357,12 @@ impl fmt::Display for ConfigError {
             ConfigError::UnknownEnv { name } => {
                 write!(f, "{ENV_PREFIX}{name} names no setting")
             }
+            ConfigError::CommandLineOnly { path, key } => write!(
+                f,
+                "{}: `{key}` must be passed on the command line and cannot be set in a \
+                 configuration file",
+                path.display()
+            ),
         }
     }
 }
@@ -581,10 +594,46 @@ fn parse_duplicates(value: &str) -> Option<DuplicatePolicy> {
 /// know — a misspelled setting is a configuration error, never a
 /// silently ignored one.
 pub fn layer_from_toml(text: &str, path: &Path) -> Result<Layer, ConfigError> {
-    toml::from_str(text).map_err(|error| ConfigError::Unreadable {
-        path: path.to_path_buf(),
-        message: error.to_string(),
+    toml::from_str(text).map_err(|error| match command_line_only_key(text) {
+        Some(key) => ConfigError::CommandLineOnly {
+            path: path.to_path_buf(),
+            key: key.to_string(),
+        },
+        None => ConfigError::Unreadable {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        },
     })
+}
+
+/// The flags a configuration file may not set, whatever value it gives
+/// them.
+///
+/// `apply` is the whole of it. What it selects is destructive and
+/// meant to be chosen once, for one invocation: a file that could turn
+/// it on would make every run beneath that file a live one, and the
+/// preview a user gets by not having asked to apply would be gone
+/// without their having said anything.
+const COMMAND_LINE_ONLY: &[&str] = &["apply"];
+
+/// The [`COMMAND_LINE_ONLY`] flag `text` sets, if it sets one.
+///
+/// Consulted only after `text` has already failed to deserialize, so
+/// the second parse costs nothing to a file that was going to load.
+/// The top level and every table under it are searched, because
+/// `[rename]` is where a reader who found `collision` there would look
+/// for `apply` next, and being refused for the right reason should not
+/// depend on having guessed the right table.
+fn command_line_only_key(text: &str) -> Option<&'static str> {
+    let document: toml::Table = text.parse().ok()?;
+    std::iter::once(&document)
+        .chain(document.values().filter_map(toml::Value::as_table))
+        .find_map(|table| {
+            COMMAND_LINE_ONLY
+                .iter()
+                .copied()
+                .find(|key| table.contains_key(*key))
+        })
 }
 
 /// Read a layer from environment variables.

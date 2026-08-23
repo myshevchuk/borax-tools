@@ -270,17 +270,37 @@ fn layer_from_toml_of_malformed_text_is_unreadable_with_the_given_path() {
     }
 }
 
+/// Refusing a misspelled setting is only half of it: the message has to
+/// say which key was refused, or the user is left diffing their file
+/// against the documentation to find out.
 #[test]
-fn layer_from_toml_rejects_an_unknown_top_level_key() {
+fn layer_from_toml_rejects_an_unknown_top_level_key_naming_it() {
     let err = layer_from_toml("bogus = 1", Path::new("/unknown.toml")).unwrap_err();
-    assert!(matches!(err, ConfigError::Unreadable { .. }));
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("bogus"), "got {message:?}");
+            assert!(message.contains("unknown field"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
 }
 
+/// The same inside a table, where the message can do better still: the
+/// keys it lists as expected are that table's, so a user who put a
+/// top-level key under `[network]` is shown where they are.
 #[test]
-fn layer_from_toml_rejects_an_unknown_key_inside_a_table() {
-    let text = "[network]\nbogus = 1\n";
-    let err = layer_from_toml(text, Path::new("/unknown-nested.toml")).unwrap_err();
-    assert!(matches!(err, ConfigError::Unreadable { .. }));
+fn layer_from_toml_rejects_an_unknown_key_inside_a_table_naming_it() {
+    let err =
+        layer_from_toml("[network]\nbogus = 1\n", Path::new("/unknown-nested.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("bogus"), "got {message:?}");
+            assert!(message.contains("concurrency"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
 }
 
 /// A typo of one of the two keys this change adds is still an unknown
@@ -288,7 +308,14 @@ fn layer_from_toml_rejects_an_unknown_key_inside_a_table() {
 #[test]
 fn layer_from_toml_rejects_a_typo_of_the_new_ledger_key() {
     let err = layer_from_toml("ledgerz = true", Path::new("/unknown-ledger.toml")).unwrap_err();
-    assert!(matches!(err, ConfigError::Unreadable { .. }));
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("ledgerz"), "got {message:?}");
+            assert!(message.contains("ledger"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
 }
 
 /// cli spec 5.1 / design "one schema, typed values": `ledger` takes a
@@ -319,6 +346,146 @@ fn layer_from_toml_rejects_run_log_set_to_a_non_boolean_value() {
         }
         other => panic!("expected Unreadable, got {other:?}"),
     }
+}
+
+/// Every setting is typed, and a value of the wrong type is refused at
+/// load rather than coerced. The tests below cover one setting of each
+/// shape the schema has — a whole number, a boolean, a list, a table —
+/// since the type is what the deserializer checks and the key is what
+/// the reader needs told.
+#[test]
+fn layer_from_toml_rejects_a_whole_number_setting_given_a_string() {
+    let err = layer_from_toml(
+        "[extraction]\npage-limit = \"ten\"\n",
+        Path::new("/bad-page-limit.toml"),
+    )
+    .unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("page-limit"), "got {message:?}");
+            assert!(message.contains("invalid type"), "got {message:?}");
+            assert!(message.contains("usize"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+/// `min-interval-ms` is a `u64` rather than a `usize`, so its refusal
+/// names a different type than `page-limit`'s — the message reports the
+/// schema, not a single catch-all "number".
+#[test]
+fn layer_from_toml_rejects_min_interval_ms_given_a_string() {
+    let err = layer_from_toml(
+        "[network]\nmin-interval-ms = \"slow\"\n",
+        Path::new("/bad-interval.toml"),
+    )
+    .unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("min-interval-ms"), "got {message:?}");
+            assert!(message.contains("u64"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+/// `1` is not `true`. TOML has a boolean and the schema asks for one,
+/// so the C habit of spelling it as an integer is an error rather than
+/// a value quietly taken to mean what it looks like.
+#[test]
+fn layer_from_toml_rejects_a_boolean_setting_given_an_integer() {
+    let err =
+        layer_from_toml("[bib]\nsidecars = 1\n", Path::new("/bad-sidecars.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("sidecars"), "got {message:?}");
+            assert!(message.to_lowercase().contains("bool"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+/// `sources` is a list even when one service is wanted, and a bare
+/// string is refused rather than read as a list of one.
+#[test]
+fn layer_from_toml_rejects_sources_given_a_bare_string() {
+    let err =
+        layer_from_toml(r#"sources = "crossref""#, Path::new("/bad-sources.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("sources"), "got {message:?}");
+            assert!(message.contains("sequence"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+/// `templates` is a table of named patterns, so a scalar in its place
+/// is refused rather than taken as the default pattern.
+#[test]
+fn layer_from_toml_rejects_templates_given_a_scalar() {
+    let err = layer_from_toml("templates = 5", Path::new("/bad-templates.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("templates"), "got {message:?}");
+            assert!(message.contains("map"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+/// cli spec "The apply gate is never configurable": `apply` is not
+/// merely a key borax does not know. It is one it knows and refuses,
+/// because a configuration file that could turn `--apply` on would
+/// make a destructive run the default for every invocation beneath it,
+/// and a preview is what a user who has not asked to apply must get.
+/// So the error says where the flag belongs instead of listing the
+/// keys that were expected in its place.
+#[test]
+fn layer_from_toml_refuses_apply_as_command_line_only() {
+    let err = layer_from_toml("apply = true", Path::new("/apply.toml")).unwrap_err();
+    let message = err.to_string();
+
+    match err {
+        ConfigError::CommandLineOnly { key, path } => {
+            assert_eq!(key, "apply");
+            assert_eq!(path, Path::new("/apply.toml"));
+        }
+        other => panic!("expected CommandLineOnly, got {other:?}"),
+    }
+    assert!(message.contains("apply"), "got {message:?}");
+    assert!(message.contains("command line"), "got {message:?}");
+}
+
+/// The key is what is refused, not the value it was given: `false` is
+/// the default already, but accepting it would mean the file is a
+/// place the apply gate can be spoken about at all.
+#[test]
+fn layer_from_toml_refuses_apply_even_when_it_is_false() {
+    let err = layer_from_toml("apply = false", Path::new("/apply.toml")).unwrap_err();
+
+    assert!(
+        matches!(err, ConfigError::CommandLineOnly { .. }),
+        "got {err:?}"
+    );
+}
+
+/// `[rename]` is where a user would most plausibly look for it, having
+/// found `collision` there, so it is refused with the same message
+/// rather than as an unknown key of that table.
+#[test]
+fn layer_from_toml_refuses_apply_inside_the_rename_table() {
+    let err = layer_from_toml("[rename]\napply = true\n", Path::new("/apply.toml")).unwrap_err();
+
+    assert!(
+        matches!(err, ConfigError::CommandLineOnly { .. }),
+        "got {err:?}"
+    );
 }
 
 // --- layer_from_env() ---
