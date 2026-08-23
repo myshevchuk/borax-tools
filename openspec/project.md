@@ -37,6 +37,24 @@ that order of scrutiny but with error-free winning any conflict.
   real-PDF fixture corpus; a scheduled CI job runs live contract tests.
 - Windows is first-class: filename semantics, path handling, and CI all
   treat it as a primary platform.
+- A `## MODIFIED Requirements` block replaces a living requirement
+  wholesale and is matched by title alone, so it is a snapshot of that
+  requirement as it read when the delta was written. If a sibling
+  change archives first and edits the same requirement, archiving this
+  one reverts the sibling's edit and says nothing.
+  `scripts/check-spec-deltas.py` fails when a delta drops a scenario or
+  a paragraph the living spec still carries; CI runs it. Deliberate
+  removals — usually the point of the change — are declared with a
+  marker above the requirement:
+
+  ```markdown
+  <!-- drops: why this content is going away -->
+  ```
+
+  Re-copy the requirement from `openspec/specs/` and re-apply the edit
+  when the check fires on something you meant to keep. After archiving,
+  `git diff openspec/specs` should show no deletion you cannot account
+  for.
 
 ## Conventions
 
