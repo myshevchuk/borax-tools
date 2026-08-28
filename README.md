@@ -4,7 +4,7 @@ A fast, error-free CLI suite for bibliography work. The core job: given a
 file (typically a PDF), resolve its bibliographic metadata from online
 sources (Crossref, OpenAlex, arXiv) and rename the file by configurable
 template rules — as a stateless pipeline that previews by default, never
-overwrites, never guesses, and can undo.
+overwrites, and never guesses.
 
 Status: pre-release. The architecture and behaviour are specified in
 `openspec/` (see the `add-core-pipeline` change); implementation is in
@@ -266,6 +266,83 @@ citation-keys.thesis: unknown field "titel"
 
 Rendering itself cannot fail. Once a template compiles, the same record
 and the same configuration always produce the same name.
+
+## Run logs: what a run leaves behind
+
+Every run can write down what it did, as a *run log*: one JSON object per
+line, in the same schema `--json` prints to your terminal. The difference
+is only that the log stays after the process exits.
+
+Where the log goes depends on where you are working. Inside a
+*collection* — any directory with a `.borax.toml` in it, or under one —
+logs are kept in `.borax/runs/` beside that file, so a collection's
+records travel with the files they are about. Outside a collection,
+borax falls back to your platform's state directory (on Linux, usually
+`~/.local/state/borax/v1/runs/`).
+
+Logs are named so that a listing sorts usefully:
+
+```text
+20240419T101500Z-rename-dry.jsonl
+20240419T101642Z-rename-apply.jsonl
+```
+
+The timestamp leads, so the newest run sorts last; the `dry` or `apply`
+suffix trails, so a preview sorts directly above the run that applied it.
+
+A preview writes a log by default and you can turn that off with
+`--no-run-log`. **A `rename --apply` always writes one, and cannot be
+talked out of it.** If borax has nowhere to put that log — you are
+outside a collection and your system names no state directory — it
+refuses to run at all rather than move files it cannot account for
+afterwards.
+
+### Recovering the names a run replaced
+
+Renaming is the one thing borax does that leaves no trace in the files
+themselves. A bibliography file can be written again, and the ledger can
+be rebuilt from the collection with `borax ledger rebuild`, but the name
+a file used to carry is nowhere except the log of the run that changed
+it.
+
+Each rename appears in the log as one line like this:
+
+```json
+{
+  "schema": 1,
+  "event": "renamed",
+  "path": "/papers/reviewed-final.pdf",
+  "target": "/papers/smith2024_AwesomePaperBorax.pdf",
+  "hash": "sha256-2f0a…"
+}
+```
+
+Three fields carry the whole of what happened. `path` is where the file
+was before the run, `target` is where the run put it, and `hash` is the
+content hash it had when it moved. That hash is the important one: it
+identifies the file independently of whatever name it now carries, so you
+can confirm that the file sitting at `target` today is still the one the
+line describes, and has not been replaced by something else since.
+
+So if a run named files in a way you did not want, you have two ways
+forward, and usually the first is the one you want:
+
+1. **Correct the template and run `rename --apply` again.** borax
+   identifies files by their contents, not their names, so it finds them
+   wherever the previous run left them — including in subdirectories a
+   template created. You do not need to put anything back first.
+
+2. **Read the log**, when what you actually lost was information that was
+   in the old names and is not in the metadata: which of three copies was
+   the annotated one, which draft was which. Filter the log for lines
+   whose `event` is `"renamed"` and you have the complete old-to-new
+   mapping for that run.
+
+Before moving any file back by hand, hash what is currently at `target`
+and check it against the line's `hash`. If they differ, the file there is
+not the one the run moved — something has replaced it since — and moving
+it would put a stranger under the old name. Check also that nothing
+already occupies `path`, or you would overwrite it.
 
 ## Layout
 

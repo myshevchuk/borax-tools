@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-08-24, before cutting 0.2.0.
+Last reviewed: 2026-08-29, before cutting 0.3.0.
 
 ## What is built
 
@@ -16,8 +16,7 @@ plan. That covers the whole path from a file to a renamed file: tiered
 PDF extraction, identifier normalization, resolution against Crossref,
 OpenAlex and arXiv with on-disk caching and per-service pacing, the
 CSL-JSON record model, the template engine, collision-aware rename
-planning with an undo that reverses an applied run, and BibTeX output
-to a master file or to sidecars.
+planning, and BibTeX output to a master file or to sidecars.
 
 `stream-per-file-events` is implemented on top of that. A
 run writes each event when it happens rather than assembling the whole
@@ -32,9 +31,16 @@ collection now keeps account of what it has admitted: a ledger at
 `.borax/ledger.jsonl` beside the nearest `.borax.toml`, duplicate
 checking in `rename` by content and by work, `borax ledger rebuild` to
 derive the ledger back from the files and sidecars themselves, a run
-log per run, and a `borax undo` that reverses the latest applied run by
-reading that log rather than a journal of its own. `journal.rs` is
-deleted and nothing reads a v0.1.0 `renames.jsonl`.
+log per run. `journal.rs` is deleted and nothing reads a v0.1.0
+`renames.jsonl`.
+
+`remove-undo` is implemented on top of all three. `borax undo` is gone,
+along with its engine, its event vocabulary, and the latest-apply-log
+selector that fed it. Nothing replays a run any more: an applied rename
+is undone, when it has to be, by reading the run log, which is unchanged
+and still mandatory and pre-flushed for `rename --apply`. Re-running a
+corrected template is the ordinary answer, since files are identified by
+content rather than by name.
 
 Tests run green on Linux, macOS and Windows, including integration
 tests over real PDFs and Windows coverage of the path shapes discovery
@@ -74,24 +80,20 @@ first.
 - **A sidecar is never moved with its file, so a rename can orphan
   one.** `write_sidecar` writes beside the path the file has when it is
   reached, and no code path renames or removes an existing sidecar when
-  its file's name changes. Two ways in:
+  its file's name changes. So renaming an already-renamed file — a
+  template change, say — writes the new sidecar and leaves the old one
+  beside the vacated name.
 
-  - `borax undo` moves `smith2024.pdf` back to `original.pdf` and
-    leaves `smith2024.pdf.bib` sitting there, describing a file no
-    longer under that name.
-  - Renaming an already-renamed file — a template change, say — writes
-    the new sidecar and leaves the old one beside the vacated name.
-
-  Neither loses data: the orphan is borax's own output and its content
-  is still correct about the record, only about a path nothing occupies.
-  It predates `add-ledger-and-run-logs`, which changed where undo reads
-  its moves from and not what it does with them, so it is not a
-  regression from the run-log work.
+  It loses no data: the orphan is borax's own output and its content is
+  still correct about the record, only about a path nothing occupies.
+  It predates the ledger and run-log work and is not a regression from
+  it. `remove-undo` closed the second way in, where a file moved back to
+  its original name left its sidecar behind under the vacated one.
 
   Fixing it properly means deciding what a sidecar's identity is — an
   output regenerated per run, or a companion that follows its file —
-  and the answer governs undo, re-renames and `ledger rebuild`'s scan
-  alike. That is a change of its own, not a patch.
+  and the answer governs re-renames and `ledger rebuild`'s scan alike.
+  That is a change of its own, not a patch.
 
 - **Every capability spec opens with a placeholder Purpose.** All nine
   files in `openspec/specs/` carry the same line the archive tool
