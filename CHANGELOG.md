@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-29
+
+### Removed
+
+- **BREAKING:** `borax undo` is gone. It restored the exact names a run
+  replaced, which is rarely the state you want: if a run named your
+  files badly, what you want is a better name, not the old one. borax
+  identifies files by their contents rather than their names, so the
+  ordinary fix is to correct your template or the metadata and run
+  `rename --apply` again — it finds the files wherever the previous run
+  left them, including in subdirectories a template created, and you do
+  not have to put anything back first.
+
+  Reverting was also the less tidy of the two recoveries. It never
+  corrected the ledger, so every file it moved back left an entry
+  pointing at a path that no longer existed until the next
+  `borax ledger rebuild`; and it never moved the sidecar, which had been
+  written beside the new name, so it left a stray `.bib` next to the
+  restored file. Re-running has neither problem: it re-admits to the
+  ledger and writes the sidecar beside the name the file now carries.
+
+  What undo read is unchanged and still written. Run logs still record
+  every applied rename with the original path, the new path, and the
+  content hash the file had when it moved, so the old-to-new mapping for
+  any run is still there to read. The apply-run log is still mandatory,
+  still flushed before the first file moves, and still cannot be
+  suppressed with `--no-run-log`; `rename --apply` still refuses to run
+  when it has nowhere to write one. The README now explains where the
+  logs are and how to read a mapping back out of one.
+
+  There is no migration and no shim: logs written by 0.2.0 are in the
+  same format and stay readable. If you were relying on `undo`, the
+  replacement is a corrected re-run for a naming mistake, and the run
+  log for anything the names themselves were carrying.
+
 ## [0.2.0] - 2026-08-24
 
 ### Added
@@ -220,6 +255,7 @@ that development.
   which drops the archive that is part of such an identifier, so every
   pre-2007 preprint failed with a malformed-response error.
 
-[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/myshevchuk/borax-tools/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/myshevchuk/borax-tools/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/myshevchuk/borax-tools/releases/tag/v0.1.0
