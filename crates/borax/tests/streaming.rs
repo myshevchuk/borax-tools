@@ -478,10 +478,10 @@ fn an_uncompilable_template_is_fatal_and_opens_no_stream() {
     );
 }
 
-/// design "retires the journal from the write path" / tasks.md 4.3:
-/// the message names the run log rather than the journal, since nothing
-/// checks for a journal here any more — a run with neither a collection
-/// nor a state directory has nowhere to record itself for `undo`.
+/// design "retires the journal from the write path": the message names
+/// the run log rather than the journal, since nothing checks for a
+/// journal here any more — a run with neither a collection nor a state
+/// directory has nowhere to record what it moves.
 #[test]
 fn apply_with_nowhere_to_record_itself_is_fatal_and_opens_no_stream() {
     let path = PathBuf::from("/lib/paper.pdf");

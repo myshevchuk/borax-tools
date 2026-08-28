@@ -1097,9 +1097,6 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
     );
 }
 
-// design: `borax undo` moved onto the run log — see `tests/undo.rs`,
-// which supersedes the journal-backed tests that used to live here.
-
 // ---------------------------------------------------------------------
 // events_for: an uncompilable template propagates as a Diagnostic
 // ---------------------------------------------------------------------
@@ -1793,7 +1790,7 @@ fn a_refusal_dispatch_alone_makes_is_fatal_and_writes_nothing_to_stdout() {
         "expected a refusal on stderr, got {err_text:?}"
     );
     assert!(
-        err_text.contains("record the run so it can be undone"),
+        err_text.contains("record what it moves"),
         "expected {err_text:?} to say why the run was refused"
     );
     assert!(filesystem.renames().is_empty());

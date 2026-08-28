@@ -12,7 +12,7 @@ use borax::ledger::ACCOUNTING_DIR;
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Streams, dispatch};
-use borax::runlog::{RUNS_DIR, destination, latest_apply_log, log_name, state_root};
+use borax::runlog::{RUNS_DIR, destination, log_name, state_root};
 use borax::session::Outcome;
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -444,8 +444,8 @@ fn destination_of_a_preview_rename_in_a_collection_is_optional_with_the_dry_suff
 }
 
 /// design: mandatory means exactly `rename --apply`, not "the run
-/// mutates something" — `ledger rebuild` mutates the ledger but is not
-/// undoable, so its log stays best-effort.
+/// mutates something" — `ledger rebuild` mutates the ledger, but the
+/// ledger is derived and rebuildable, so its log stays best-effort.
 #[test]
 fn destination_of_ledger_rebuild_is_optional_not_mandatory() {
     let root = PathBuf::from("/collection");
@@ -467,19 +467,6 @@ fn destination_of_ledger_rebuild_is_optional_not_mandatory() {
     );
 }
 
-/// Same point as above, for `undo`: it changes the filesystem but
-/// nothing here reverts *it*, so its log is best-effort too.
-#[test]
-fn destination_of_undo_is_optional_not_mandatory() {
-    let root = PathBuf::from("/collection");
-    let command = Command::Undo;
-
-    let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
-        .unwrap_or_else(|| panic!("expected a destination"));
-
-    assert!(!found.mandatory);
-}
-
 // ---------------------------------------------------------------------
 // destination() on Windows path shapes
 //
@@ -496,9 +483,6 @@ fn destination_of_undo_is_optional_not_mandatory() {
 // Asserted as the whole string a user would see in an error message
 // rather than through `join`, which would reproduce whatever separator
 // the code chose and so agree with it either way.
-//
-// `latest_apply_log` needs no counterpart: its cases below run over
-// real `tempdir()` paths, which are already the platform's own shape.
 // ---------------------------------------------------------------------
 
 #[cfg(windows)]
@@ -592,111 +576,6 @@ fn destination_in_a_collection_at_a_drive_root_does_not_double_the_separator_on_
         found.path.to_string_lossy(),
         r"C:\.borax\runs\20240101T000000Z-rename-apply.jsonl"
     );
-}
-
-// ---------------------------------------------------------------------
-// 3.3: latest_apply_log() — real filesystem, collection first then XDG
-// ---------------------------------------------------------------------
-
-#[test]
-fn latest_apply_log_prefers_the_most_recent_apply_log_in_one_directory() {
-    let dir = tempdir().unwrap();
-    let runs = dir.path().join(ACCOUNTING_DIR).join(RUNS_DIR);
-    std::fs::create_dir_all(&runs).unwrap();
-    std::fs::write(runs.join("20240101T000000Z-rename-apply.jsonl"), "").unwrap();
-    std::fs::write(runs.join("20240102T000000Z-rename-apply.jsonl"), "").unwrap();
-    std::fs::write(runs.join("20240103T000000Z-rename-dry.jsonl"), "").unwrap();
-
-    let found = latest_apply_log(Some(dir.path()), None);
-
-    assert_eq!(
-        found,
-        Some(runs.join("20240102T000000Z-rename-apply.jsonl")),
-        "got {found:?}"
-    );
-}
-
-#[test]
-fn latest_apply_log_ignores_dry_logs_entirely() {
-    let dir = tempdir().unwrap();
-    let runs = dir.path().join(ACCOUNTING_DIR).join(RUNS_DIR);
-    std::fs::create_dir_all(&runs).unwrap();
-    std::fs::write(runs.join("20240101T000000Z-rename-dry.jsonl"), "").unwrap();
-    std::fs::write(runs.join("20240102T000000Z-rename-dry.jsonl"), "").unwrap();
-
-    assert_eq!(latest_apply_log(Some(dir.path()), None), None);
-}
-
-#[test]
-fn latest_apply_log_prefers_the_collection_over_xdg_state_even_when_state_is_newer() {
-    let collection = tempdir().unwrap();
-    let state = tempdir().unwrap();
-    let collection_runs = collection.path().join(ACCOUNTING_DIR).join(RUNS_DIR);
-    let state_runs = state.path().join(RUNS_DIR);
-    std::fs::create_dir_all(&collection_runs).unwrap();
-    std::fs::create_dir_all(&state_runs).unwrap();
-    std::fs::write(
-        collection_runs.join("20240101T000000Z-rename-apply.jsonl"),
-        "",
-    )
-    .unwrap();
-    std::fs::write(state_runs.join("20240201T000000Z-rename-apply.jsonl"), "").unwrap();
-
-    let found = latest_apply_log(Some(collection.path()), Some(state.path()));
-
-    assert_eq!(
-        found,
-        Some(collection_runs.join("20240101T000000Z-rename-apply.jsonl")),
-        "the collection is searched first and wins outright, not the newer file overall; got {found:?}"
-    );
-}
-
-#[test]
-fn latest_apply_log_falls_back_to_xdg_state_when_the_collection_has_no_apply_log() {
-    let collection = tempdir().unwrap();
-    let state = tempdir().unwrap();
-    let collection_runs = collection.path().join(ACCOUNTING_DIR).join(RUNS_DIR);
-    let state_runs = state.path().join(RUNS_DIR);
-    std::fs::create_dir_all(&collection_runs).unwrap();
-    std::fs::create_dir_all(&state_runs).unwrap();
-    std::fs::write(
-        collection_runs.join("20240101T000000Z-rename-dry.jsonl"),
-        "",
-    )
-    .unwrap();
-    std::fs::write(state_runs.join("20240201T000000Z-rename-apply.jsonl"), "").unwrap();
-
-    let found = latest_apply_log(Some(collection.path()), Some(state.path()));
-
-    assert_eq!(
-        found,
-        Some(state_runs.join("20240201T000000Z-rename-apply.jsonl")),
-        "got {found:?}"
-    );
-}
-
-#[test]
-fn latest_apply_log_finds_an_apply_log_under_state_root_when_there_is_no_collection() {
-    let state = tempdir().unwrap();
-    let state_runs = state.path().join(RUNS_DIR);
-    std::fs::create_dir_all(&state_runs).unwrap();
-    std::fs::write(state_runs.join("20240101T000000Z-rename-apply.jsonl"), "").unwrap();
-
-    assert_eq!(
-        latest_apply_log(None, Some(state.path())),
-        Some(state_runs.join("20240101T000000Z-rename-apply.jsonl"))
-    );
-}
-
-#[test]
-fn latest_apply_log_is_none_when_nothing_is_anywhere() {
-    assert_eq!(latest_apply_log(None, None), None);
-}
-
-#[test]
-fn latest_apply_log_is_none_when_the_runs_directory_does_not_exist() {
-    let dir = tempdir().unwrap();
-    assert_eq!(latest_apply_log(Some(dir.path()), None), None);
 }
 
 // ---------------------------------------------------------------------
@@ -1382,11 +1261,10 @@ fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving
     assert!(out.is_empty(), "a refused run must write no event stream");
 
     // This refusal is about placement rather than a failed write, so it
-    // names no path — but it still has to say what was wanted and why,
-    // and still must not name the journal that used to serve undo.
+    // names no path — but it still has to say what was wanted and why.
     let message = String::from_utf8(err).unwrap();
     assert!(message.contains("--apply"), "got {message:?}");
-    assert!(message.contains("undone"), "got {message:?}");
+    assert!(message.contains("record"), "got {message:?}");
     assert!(
         !message.to_lowercase().contains("journal"),
         "the message must not name the removed journal: {message:?}"

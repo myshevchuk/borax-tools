@@ -673,7 +673,7 @@ fn duplicate_is_live_when_the_recorded_path_still_exists() {
     assert!(live);
 }
 
-/// ledger spec scenario "Duplicate of an undone admission": disk is
+/// ledger spec scenario "Duplicate of a vanished admission": disk is
 /// the source of truth, so a recorded path that no longer exists never
 /// vetoes re-admission.
 #[test]
@@ -685,7 +685,7 @@ fn duplicate_is_stale_when_the_recorded_path_is_gone() {
 
     let live = duplicate_is_live(&duplicate, Path::new("/collection"), &exists_at(&[]));
 
-    assert!(!live, "an undone admission must not veto re-admission");
+    assert!(!live, "a vanished admission must not veto re-admission");
 }
 
 // ---------------------------------------------------------------------
@@ -1225,7 +1225,7 @@ fn a_work_duplicate_is_skipped_with_the_work_reason() {
     );
 }
 
-/// ledger spec scenario "Duplicate of an undone admission", exercised
+/// ledger spec scenario "Duplicate of a vanished admission", exercised
 /// through a whole `rename` run rather than at `duplicate_is_live`'s own
 /// level: a ledger entry whose file is no longer on disk must not keep a
 /// re-admission out, so the file is resolved and planned exactly as it
@@ -1293,11 +1293,11 @@ fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
                 target: PathBuf::from("/lib/Smith2024.pdf"),
             },
         ],
-        "an undone admission must not veto re-admission, got {events:?}"
+        "a vanished admission must not veto re-admission, got {events:?}"
     );
 }
 
-/// ledger spec scenario "Duplicate of an undone admission", the warning
+/// ledger spec scenario "Duplicate of a vanished admission", the warning
 /// half: "the run warns that the ledger holds stale entries" and the
 /// warning suggests `borax ledger rebuild`. `events_for` cannot observe
 /// this — the warning is a stderr [`borax::event::Diagnostic`], never an

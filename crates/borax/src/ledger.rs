@@ -283,8 +283,8 @@ pub fn relative_to(collection_root: &Path, relative: &str) -> PathBuf {
 /// Whether the file `duplicate` names is still in the collection.
 ///
 /// `exists` answers whether a path is there, and disk is what decides:
-/// an entry whose file was undone, deleted, or moved away records an
-/// admission that no longer holds, and a false duplicate report would
+/// an entry whose file was deleted or moved away records an admission
+/// that no longer holds, and a false duplicate report would
 /// keep a file out of a collection that does not have it.
 pub fn duplicate_is_live(
     duplicate: &Duplicate,

@@ -206,8 +206,8 @@ trait EventStream {
 ///
 /// What [`run_the_batch`] hands back: a run with nothing before it and
 /// nothing after, over its own fresh copies. A test that runs more than
-/// once against the same collection — priming a ledger, undoing,
-/// rebuilding — keeps its own directories alive across several calls to
+/// once against the same collection — priming a ledger, rebuilding it —
+/// keeps its own directories alive across several calls to
 /// [`invoke`] instead of asking for a second `Ran`, which could not own
 /// them without double-owning what the first already does.
 struct Ran {
@@ -268,8 +268,8 @@ impl EventStream for Invocation {
 /// `Some` gets a real [`FileLedger`] rooted there, `None` is a run
 /// outside any collection. [`run_the_batch`] is this with a fixed
 /// command and no collection; every test that exercises the ledger —
-/// priming it, undoing over it, rebuilding it — calls this directly,
-/// more than once, over directories it keeps alive itself.
+/// priming it, rebuilding it — calls this directly, more than once,
+/// over directories it keeps alive itself.
 fn invoke(
     command: Command,
     master: &Path,
@@ -531,15 +531,32 @@ fn every_renamed_event_names_a_file_that_is_really_there() {
 }
 
 // ---------------------------------------------------------------------
-// The run log — undo's record now that the journal is gone
+// The run log — the record an applied run leaves behind
 // ---------------------------------------------------------------------
 
-// The run log describes the moves the stream reported, so `undo` and
-// the event consumer agree about what happened.
+/// The apply run's log under `state`, whose `runs` directory holds one
+/// per run of a test that applies exactly once.
+///
+/// The name ends `-apply.jsonl` ([`borax::runlog::log_name`]) and leads
+/// with a timestamp, so the greatest name is the most recent run.
+fn apply_log_under(state: &Path) -> Option<PathBuf> {
+    fs::read_dir(state.join(borax::runlog::RUNS_DIR))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with("-apply.jsonl"))
+        })
+        .max()
+}
+
+// The run log describes the moves the stream reported, so a reader of
+// the log and a reader of the stream agree about what happened.
 #[test]
 fn the_run_log_and_the_event_stream_describe_the_same_moves() {
     let ran = run_the_batch();
-    let log_path = borax::runlog::latest_apply_log(None, Some(ran.state.path()))
+    let log_path = apply_log_under(ran.state.path())
         .expect("an apply run outside a collection must leave a run log under the state root");
     let log_text = fs::read_to_string(&log_path).unwrap();
 
@@ -576,7 +593,7 @@ fn the_run_log_and_the_event_stream_describe_the_same_moves() {
 #[test]
 fn the_run_logs_renamed_lines_carry_the_same_hash_the_stream_reported() {
     let ran = run_the_batch();
-    let log_path = borax::runlog::latest_apply_log(None, Some(ran.state.path()))
+    let log_path = apply_log_under(ran.state.path())
         .expect("an apply run outside a collection must leave a run log under the state root");
     let log_text = fs::read_to_string(&log_path).unwrap();
 
@@ -608,73 +625,6 @@ fn the_run_logs_renamed_lines_carry_the_same_hash_the_stream_reported() {
         checked += 1;
     }
     assert_eq!(checked, 4, "expected to check all four renamed files");
-}
-
-// ---------------------------------------------------------------------
-// borax undo, replaying the run log
-// ---------------------------------------------------------------------
-
-/// design behaviour pin 1: a real apply run followed by a real `borax
-/// undo` restores every file — the four renamed and the four left
-/// alone — to the name it had before the batch ran.
-#[test]
-fn undo_after_the_batch_restores_every_file_to_its_original_name() {
-    let ran = run_the_batch();
-
-    let sources: Vec<&dyn Source> = Vec::new();
-    let index = ContentIndex::new(MemoryCache::new());
-    let effective = resolve(Vec::new()).unwrap();
-    let cli = Cli {
-        command: Command::Undo,
-        settings: Settings::default(),
-        json: true,
-    };
-    let mut out: Vec<u8> = Vec::new();
-    let mut err: Vec<u8> = Vec::new();
-    let outcome = dispatch(
-        &cli,
-        &Configs::uniform(effective),
-        &Adapters {
-            library: &RealLibrary,
-            sources: &sources,
-            index: &index,
-            filesystem: &RealFilesystem,
-            bib_files: &RealBibFiles,
-            cache_root: None,
-            now: || "e2e-undo".to_string(),
-            ledger: None,
-            collection_root: None,
-            state_root: Some(ran.state.path().to_path_buf()),
-        },
-        &mut Streams {
-            out: &mut out,
-            err: &mut err,
-        },
-    );
-
-    assert_eq!(
-        outcome,
-        Outcome::Success,
-        "got {outcome:?}, stderr: {}",
-        String::from_utf8_lossy(&err)
-    );
-
-    // The PDFs alone: undo reverses the moves a run made, and the
-    // sidecars written beside the renamed files are not moves. Nothing
-    // has ever removed them, and this is not the change that starts.
-    let mut names: Vec<String> = fs::read_dir(ran.library.path())
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with(".pdf"))
-        .collect();
-    names.sort();
-    let mut expected: Vec<String> = BATCH.iter().map(|(name, _)| (*name).to_string()).collect();
-    expected.sort();
-    assert_eq!(
-        names, expected,
-        "every file must be back under its original name"
-    );
 }
 
 // ---------------------------------------------------------------------
@@ -794,8 +744,7 @@ fn two_runs_over_the_same_batch_produce_the_same_events() {
 }
 
 // ---------------------------------------------------------------------
-// The ledger — duplicate detection, undo, and rebuild over a real
-// collection
+// The ledger — duplicate detection and rebuild over a real collection
 //
 // Every test above runs through `run_the_batch`, which is deliberately
 // outside any collection, so nothing above exercises the ledger. These
@@ -970,158 +919,6 @@ fn a_batch_with_a_content_duplicate_and_a_work_duplicate_skips_both_and_leaves_t
         after_batch.lines().count(),
         2,
         "duplicates must not add ledger entries"
-    );
-}
-
-/// design behaviour pin 2: `borax undo` never touches the ledger, per
-/// the ledger spec's "Stale entries never block re-admission" — disk is
-/// the source of truth, so an entry whose recorded file was undone is
-/// stale rather than binding. A rerun over the restored files is
-/// admitted normally, appending fresh entries alongside the stale ones,
-/// and the run warns that a rebuild is due.
-#[test]
-fn undo_leaves_the_ledger_alone_and_a_rerun_re_admits_the_restored_files() {
-    let collection = tempdir().unwrap();
-    let state = tempdir().unwrap();
-    let master = state.path().join("refs.bib");
-    let embedded = duplicate_of(
-        collection.path(),
-        "publisher-info-doi.pdf",
-        "publisher-info-doi.pdf",
-    );
-    let text_layer = duplicate_of(
-        collection.path(),
-        "publisher-xmp-doi.pdf",
-        "publisher-xmp-doi.pdf",
-    );
-
-    let applied = invoke(
-        Command::Rename {
-            paths: vec![embedded, text_layer],
-            apply: true,
-        },
-        &master,
-        state.path(),
-        Some(collection.path()),
-    );
-    assert_eq!(
-        applied.outcome,
-        Outcome::Success,
-        "apply run: {}",
-        applied.stderr
-    );
-    let after_apply = ledger_text(collection.path());
-    assert_eq!(
-        after_apply.lines().count(),
-        2,
-        "one entry per admitted file"
-    );
-
-    let log_path = borax::runlog::latest_apply_log(Some(collection.path()), None)
-        .expect("an apply run in a collection must leave its log there");
-    assert!(
-        log_path.starts_with(collection.path().join(".borax/runs")),
-        "got {}",
-        log_path.display()
-    );
-
-    let undone = invoke(
-        Command::Undo,
-        &master,
-        state.path(),
-        Some(collection.path()),
-    );
-    assert_eq!(undone.outcome, Outcome::Success, "undo: {}", undone.stderr);
-
-    let mut names: Vec<String> = fs::read_dir(collection.path())
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with(".pdf"))
-        .collect();
-    names.sort();
-    assert_eq!(
-        names,
-        vec![
-            "publisher-info-doi.pdf".to_string(),
-            "publisher-xmp-doi.pdf".to_string(),
-        ],
-        "every file must be back under its original name"
-    );
-
-    // Ledger state after undo: untouched, byte for byte.
-    let after_undo = ledger_text(collection.path());
-    assert_eq!(after_apply, after_undo, "undo must not modify the ledger");
-
-    // The known defect recorded in `openspec/STATE.md` under "Known
-    // defects": a sidecar is never moved with its file. `write_sidecar`
-    // writes beside the path the file has when it is reached, and no
-    // code path renames or removes an existing sidecar when its file's
-    // name changes — so undo moves `ashby2024.pdf` back and leaves
-    // `ashby2024.pdf.bib` sitting there, describing a name nothing
-    // occupies. Nothing is lost: the orphan is borax's own output and
-    // is still correct about the record, only about a path.
-    //
-    // Pinned as it is rather than as it should be, so that whoever
-    // fixes it meets a failing test naming the defect instead of
-    // silence. Invert both loops then: the orphan should be gone and a
-    // sidecar should sit beside each restored name.
-    for vacated in ["ashby2024.pdf", "brandt2024.pdf"] {
-        let vacated = collection.path().join(vacated);
-        assert!(
-            !vacated.exists(),
-            "{} is the name undo vacated",
-            vacated.display()
-        );
-        assert!(
-            sidecar_path(&vacated).is_file(),
-            "expected {} to be orphaned by undo",
-            sidecar_path(&vacated).display()
-        );
-    }
-    for restored in ["publisher-info-doi.pdf", "publisher-xmp-doi.pdf"] {
-        let beside = sidecar_path(&collection.path().join(restored));
-        assert!(
-            !beside.exists(),
-            "undo does not carry a sidecar back, so {} must not exist",
-            beside.display()
-        );
-    }
-
-    // A rerun over the restored files: their recorded paths no longer
-    // exist, so the entries are stale rather than binding, and the
-    // files are admitted normally instead of skipped as duplicates.
-    let rerun = invoke(
-        Command::Rename {
-            paths: vec![
-                collection.path().join("publisher-info-doi.pdf"),
-                collection.path().join("publisher-xmp-doi.pdf"),
-            ],
-            apply: true,
-        },
-        &master,
-        state.path(),
-        Some(collection.path()),
-    );
-    assert_eq!(rerun.outcome, Outcome::Success, "rerun: {}", rerun.stderr);
-    assert_eq!(
-        rerun.tagged("skipped").len(),
-        0,
-        "the restored files must not be skipped as duplicates, got {:?}",
-        rerun.tagged("skipped")
-    );
-    assert_eq!(rerun.tagged("renamed").len(), 2);
-    assert!(
-        rerun.stderr.contains("stale entries"),
-        "expected the stale-entries warning, got: {}",
-        rerun.stderr
-    );
-
-    let after_rerun = ledger_text(collection.path());
-    assert_eq!(
-        after_rerun.lines().count(),
-        4,
-        "the rerun's admissions append fresh entries alongside the stale ones"
     );
 }
 

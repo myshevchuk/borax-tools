@@ -1048,7 +1048,7 @@ fn rename_into_a_new_subdirectory_still_refuses_to_overwrite_an_existing_destina
 // Applying::carry_out: the hash gate an applying rename cannot skip
 //
 // `MoveLog`/`LogFailure`/`JournalLog` and the halt they drove are gone:
-// the record undo needs now travels on `Event::Renamed` itself, and
+// the record of a move now travels on `Event::Renamed` itself, and
 // `carry_out` takes the hash directly rather than a place to log it.
 // ---------------------------------------------------------------------
 
@@ -1082,7 +1082,7 @@ fn carry_out_of_an_applying_rename_with_a_known_hash_moves_the_file_and_reports_
 
 /// The one thing in this change that protects a file, carried over
 /// unchanged from the journal's write-ahead gate: a hash borax cannot
-/// record for undo is a move borax does not make.
+/// identifiable record is a move borax does not make.
 #[test]
 fn carry_out_of_an_applying_rename_with_no_hash_skips_it_unrecordable_and_moves_nothing() {
     let filesystem = FakeFilesystem::new();

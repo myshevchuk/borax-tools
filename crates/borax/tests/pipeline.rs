@@ -1627,7 +1627,7 @@ fn a_live_content_duplicate_is_skipped_before_any_network_work() {
     );
 }
 
-/// ledger spec scenario "Duplicate of an undone admission".
+/// ledger spec scenario "Duplicate of a vanished admission".
 #[test]
 fn a_stale_content_duplicate_does_not_block_re_admission() {
     let path = Path::new("incoming.pdf");

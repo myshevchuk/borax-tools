@@ -208,8 +208,8 @@ pub fn resolve_file<C: Cache>(
 /// A match is [`SkipReason::Duplicate`] carrying the reason and the
 /// existing file's full path; the incoming file is left where it is.
 /// Only a match whose recorded file is still in the collection counts,
-/// so an entry left behind by an undone or deleted admission does not
-/// keep the file out. Everything else — a skip, an unhashable file, a
+/// so an entry left behind by a deleted or moved file does not keep the
+/// incoming one out. Everything else — a skip, an unhashable file, a
 /// ledger with no entries — is [`resolve_file`]'s outcome unchanged.
 pub fn resolve_file_checking_ledger<C: Cache>(
     path: &Path,

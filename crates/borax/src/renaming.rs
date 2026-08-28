@@ -365,12 +365,12 @@ impl<'a> Applying<'a> {
     ///
     /// An applying rename of a file whose `hash` is `None` is not made,
     /// and reports [`crate::event::SkipReason::Unrecordable`]: the hash
-    /// is what `borax undo` verifies a file by before moving it back, so
-    /// a move recorded without one could never be reversed, and moving
-    /// the file anyway would put it beyond reach of the command meant to
-    /// bring it back. The batch goes on — one file borax cannot describe
-    /// says nothing about the next. A preview never looks at `hash`,
-    /// having no move to describe.
+    /// is what identifies the file a recorded move was about, so a line
+    /// written without one would name two paths and nothing that ties
+    /// them to a file. Moving anyway would leave the collection with a
+    /// rename its own log cannot account for. The batch goes on — one
+    /// file borax cannot describe says nothing about the next. A
+    /// preview never looks at `hash`, having no move to describe.
     pub fn carry_out(&mut self, decision: &PlannedRename, hash: Option<ContentHash>) -> Event {
         match decision {
             PlannedRename::Rename { path, target } if self.apply => {
@@ -503,7 +503,7 @@ impl Filesystem for RealFilesystem {
 
         fs::hard_link(from, to).map_err(failed)?;
         // An unlink that fails leaves the file under both names rather
-        // than undoing the link: removing `to` would be the only link
+        // than backing the link out: removing `to` would be the only link
         // left if `from` disappeared under us, and a duplicate costs a
         // second run where that would cost the file.
         fs::remove_file(from).map_err(failed)

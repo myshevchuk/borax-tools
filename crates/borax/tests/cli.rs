@@ -113,12 +113,6 @@ fn bib_with_no_paths_is_a_parse_error() {
 }
 
 #[test]
-fn undo_takes_no_arguments() {
-    let cli = parse(&["undo"]);
-    assert_eq!(cli.command, Command::Undo, "got {:?}", cli.command);
-}
-
-#[test]
 fn config_takes_no_arguments() {
     let cli = parse(&["config"]);
     assert_eq!(cli.command, Command::Config, "got {:?}", cli.command);
@@ -203,13 +197,13 @@ fn an_unknown_flag_is_a_parse_error() {
 
 #[test]
 fn format_is_json_when_the_json_flag_is_given() {
-    let cli = parse(&["--json", "undo"]);
+    let cli = parse(&["--json", "config"]);
     assert_eq!(cli.format(), Format::Json);
 }
 
 #[test]
 fn format_is_human_without_the_json_flag() {
-    let cli = parse(&["undo"]);
+    let cli = parse(&["config"]);
     assert_eq!(cli.format(), Format::Human);
 }
 
@@ -229,13 +223,12 @@ fn each_command_variant_reports_its_own_name() {
         "rename"
     );
     assert_eq!(Command::Bib { paths: vec![] }.name(), "bib");
-    assert_eq!(Command::Undo.name(), "undo");
     assert_eq!(Command::Config.name(), "config");
     assert_eq!(Command::Cache { clear: false }.name(), "cache");
 }
 
 #[test]
-fn the_six_command_names_are_pairwise_distinct() {
+fn the_command_names_are_pairwise_distinct() {
     let names = [
         Command::Resolve { paths: vec![] }.name(),
         Command::Rename {
@@ -244,9 +237,12 @@ fn the_six_command_names_are_pairwise_distinct() {
         }
         .name(),
         Command::Bib { paths: vec![] }.name(),
-        Command::Undo.name(),
         Command::Config.name(),
         Command::Cache { clear: false }.name(),
+        Command::Ledger {
+            action: LedgerAction::Rebuild,
+        }
+        .name(),
     ];
 
     let unique: std::collections::BTreeSet<_> = names.iter().collect();
@@ -259,7 +255,6 @@ fn name_reports_the_subcommand_as_the_user_typed_it() {
     assert_eq!(parse(&["resolve", "f.pdf"]).command.name(), "resolve");
     assert_eq!(parse(&["rename", "f.pdf"]).command.name(), "rename");
     assert_eq!(parse(&["bib", "f.pdf"]).command.name(), "bib");
-    assert_eq!(parse(&["undo"]).command.name(), "undo");
     assert_eq!(parse(&["config"]).command.name(), "config");
     assert_eq!(parse(&["cache"]).command.name(), "cache");
 }
@@ -300,8 +295,7 @@ fn paths_returns_the_bib_variants_paths() {
 }
 
 #[test]
-fn paths_is_empty_for_undo_config_and_cache() {
-    assert!(Command::Undo.paths().is_empty());
+fn paths_is_empty_for_config_and_cache() {
     assert!(Command::Config.paths().is_empty());
     assert!(Command::Cache { clear: false }.paths().is_empty());
 }
@@ -332,7 +326,7 @@ fn flag_layers_of_default_settings_is_empty() {
 
 #[test]
 fn template_alone_sets_the_default_template_key() {
-    let layers = flag_layers(&parse(&["--template", "[auth][year]", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--template", "[auth][year]", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -352,7 +346,7 @@ fn template_alone_sets_the_default_template_key() {
 
 #[test]
 fn sources_alone_sets_the_sources_list() {
-    let layers = flag_layers(&parse(&["--sources", "crossref,arxiv", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--sources", "crossref,arxiv", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -369,7 +363,7 @@ fn sources_alone_sets_the_sources_list() {
 
 #[test]
 fn mailto_alone_sets_mailto() {
-    let layers = flag_layers(&parse(&["--mailto", "me@example.org", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--mailto", "me@example.org", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -386,7 +380,7 @@ fn mailto_alone_sets_mailto() {
 
 #[test]
 fn collision_alone_sets_rename_collision() {
-    let layers = flag_layers(&parse(&["--collision", "skip", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--collision", "skip", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -405,7 +399,7 @@ fn collision_alone_sets_rename_collision() {
 
 #[test]
 fn bib_alone_sets_bib_path() {
-    let layers = flag_layers(&parse(&["--bib", "refs.bib", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--bib", "refs.bib", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -425,7 +419,7 @@ fn bib_alone_sets_bib_path() {
 
 #[test]
 fn duplicates_alone_sets_bib_duplicates() {
-    let layers = flag_layers(&parse(&["--duplicates", "update", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--duplicates", "update", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -445,7 +439,7 @@ fn duplicates_alone_sets_bib_duplicates() {
 
 #[test]
 fn sidecars_alone_sets_bib_sidecars_true() {
-    let layers = flag_layers(&parse(&["--sidecars", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--sidecars", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -465,7 +459,7 @@ fn sidecars_alone_sets_bib_sidecars_true() {
 
 #[test]
 fn no_sidecars_alone_sets_bib_sidecars_false() {
-    let layers = flag_layers(&parse(&["--no-sidecars", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--no-sidecars", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -485,7 +479,7 @@ fn no_sidecars_alone_sets_bib_sidecars_false() {
 
 #[test]
 fn page_limit_alone_sets_extraction_page_limit() {
-    let layers = flag_layers(&parse(&["--page-limit", "3", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--page-limit", "3", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -504,7 +498,7 @@ fn page_limit_alone_sets_extraction_page_limit() {
 
 #[test]
 fn concurrency_alone_sets_network_concurrency() {
-    let layers = flag_layers(&parse(&["--concurrency", "2", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--concurrency", "2", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -524,7 +518,7 @@ fn concurrency_alone_sets_network_concurrency() {
 
 #[test]
 fn min_interval_ms_alone_sets_network_min_interval_ms() {
-    let layers = flag_layers(&parse(&["--min-interval-ms", "500", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--min-interval-ms", "500", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -544,7 +538,7 @@ fn min_interval_ms_alone_sets_network_min_interval_ms() {
 
 #[test]
 fn cache_alone_sets_network_cache_true() {
-    let layers = flag_layers(&parse(&["--cache", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--cache", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -564,7 +558,7 @@ fn cache_alone_sets_network_cache_true() {
 
 #[test]
 fn no_cache_alone_sets_network_cache_false() {
-    let layers = flag_layers(&parse(&["--no-cache", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--no-cache", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -592,7 +586,7 @@ fn several_flags_together_each_produce_their_own_single_setting_layer() {
         "--page-limit",
         "3",
         "--cache",
-        "undo",
+        "config",
     ])
     .settings;
 
@@ -659,7 +653,7 @@ fn flags_from_flag_layers_outrank_a_toml_layer_and_report_the_flag_origin() {
         "flag@example.org",
         "--collision",
         "skip",
-        "undo",
+        "config",
     ])
     .settings;
     let file_layer = layer_from_toml(
@@ -698,13 +692,14 @@ fn flags_from_flag_layers_outrank_a_toml_layer_and_report_the_flag_origin() {
 
 #[test]
 fn sidecars_and_no_sidecars_together_is_a_parse_error() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "--sidecars", "--no-sidecars", "undo"]);
+    let result =
+        <Cli as Parser>::try_parse_from(["borax", "--sidecars", "--no-sidecars", "config"]);
     assert!(result.is_err(), "got {result:?}");
 }
 
 #[test]
 fn cache_and_no_cache_together_is_a_parse_error() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "--cache", "--no-cache", "undo"]);
+    let result = <Cli as Parser>::try_parse_from(["borax", "--cache", "--no-cache", "config"]);
     assert!(result.is_err(), "got {result:?}");
 }
 
@@ -718,7 +713,7 @@ fn cache_and_no_cache_together_is_a_parse_error() {
 
 #[test]
 fn ledger_alone_sets_ledger_true() {
-    let layers = flag_layers(&parse(&["--ledger", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--ledger", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -735,7 +730,7 @@ fn ledger_alone_sets_ledger_true() {
 
 #[test]
 fn no_ledger_alone_sets_ledger_false() {
-    let layers = flag_layers(&parse(&["--no-ledger", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--no-ledger", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -752,13 +747,13 @@ fn no_ledger_alone_sets_ledger_false() {
 
 #[test]
 fn ledger_and_no_ledger_together_is_a_parse_error() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "--ledger", "--no-ledger", "undo"]);
+    let result = <Cli as Parser>::try_parse_from(["borax", "--ledger", "--no-ledger", "config"]);
     assert!(result.is_err(), "got {result:?}");
 }
 
 #[test]
 fn run_log_alone_sets_run_log_true() {
-    let layers = flag_layers(&parse(&["--run-log", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--run-log", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -775,7 +770,7 @@ fn run_log_alone_sets_run_log_true() {
 
 #[test]
 fn no_run_log_alone_sets_run_log_false() {
-    let layers = flag_layers(&parse(&["--no-run-log", "undo"]).settings);
+    let layers = flag_layers(&parse(&["--no-run-log", "config"]).settings);
 
     assert_eq!(
         layers,
@@ -792,7 +787,7 @@ fn no_run_log_alone_sets_run_log_false() {
 
 #[test]
 fn run_log_and_no_run_log_together_is_a_parse_error() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "--run-log", "--no-run-log", "undo"]);
+    let result = <Cli as Parser>::try_parse_from(["borax", "--run-log", "--no-run-log", "config"]);
     assert!(result.is_err(), "got {result:?}");
 }
 
@@ -802,7 +797,7 @@ fn run_log_and_no_run_log_together_is_a_parse_error() {
 
 #[test]
 fn no_ledger_flag_overrides_a_configured_ledger_true() {
-    let settings = parse(&["--no-ledger", "undo"]).settings;
+    let settings = parse(&["--no-ledger", "config"]).settings;
     let file_layer = layer_from_toml("ledger = true", Path::new("/config.toml")).unwrap();
 
     let mut layers = vec![(
@@ -822,7 +817,7 @@ fn no_ledger_flag_overrides_a_configured_ledger_true() {
 
 #[test]
 fn ledger_flag_overrides_a_configured_ledger_false() {
-    let settings = parse(&["--ledger", "undo"]).settings;
+    let settings = parse(&["--ledger", "config"]).settings;
     let file_layer = layer_from_toml("ledger = false", Path::new("/config.toml")).unwrap();
 
     let mut layers = vec![(
@@ -842,7 +837,7 @@ fn ledger_flag_overrides_a_configured_ledger_false() {
 
 #[test]
 fn no_run_log_flag_overrides_a_configured_run_log_true() {
-    let settings = parse(&["--no-run-log", "undo"]).settings;
+    let settings = parse(&["--no-run-log", "config"]).settings;
     let file_layer = layer_from_toml("run-log = true", Path::new("/config.toml")).unwrap();
 
     let mut layers = vec![(
@@ -862,7 +857,7 @@ fn no_run_log_flag_overrides_a_configured_run_log_true() {
 
 #[test]
 fn run_log_flag_overrides_a_configured_run_log_false() {
-    let settings = parse(&["--run-log", "undo"]).settings;
+    let settings = parse(&["--run-log", "config"]).settings;
     let file_layer = layer_from_toml("run-log = false", Path::new("/config.toml")).unwrap();
 
     let mut layers = vec![(

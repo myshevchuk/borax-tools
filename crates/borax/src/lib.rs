@@ -16,4 +16,3 @@ pub mod renaming;
 pub mod run;
 pub mod runlog;
 pub mod session;
-pub mod undo;

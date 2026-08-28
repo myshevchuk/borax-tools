@@ -46,7 +46,6 @@ use crate::pipeline::{
 };
 use crate::renaming::{Applying, Filesystem, Planning, RealFilesystem};
 use crate::session::{Outcome, outcome_for};
-use crate::undo::{Move, undo_moves};
 
 /// The extension a file needs to be picked up from a directory.
 pub const PDF_EXTENSION: &str = "pdf";
@@ -410,9 +409,9 @@ pub struct Adapters<'a, C: Cache> {
     /// Asked once for the whole batch, never once per file: its value
     /// timestamps every entry the run admits to the ledger and, as a
     /// [`RunId`](borax_core::ledger::RunId), is what makes them one
-    /// run. A run is admitted or reverted whole rather than a file at a
-    /// time, so entries that moved together have to be identified
-    /// together.
+    /// run. The files a batch admitted are one act of accounting rather
+    /// than a series of them, so entries that entered together have to
+    /// be identifiable together afterwards.
     ///
     /// Naming the run's log is a second reading, taken before the batch
     /// begins. Nothing joins a log to a run by its name — the log's
@@ -554,16 +553,6 @@ pub enum Prepared {
     /// A command with nothing that could fail: `config` and
     /// `resolve`.
     Unchecked,
-    /// `undo`, with the moves the run it reverses recorded, in the
-    /// order that run applied them.
-    ///
-    /// Reading the log happens in [`preflight`] because a log that
-    /// cannot be replayed has to stop the run while nothing has been
-    /// touched: undo's whole work is moving files, and a half-read
-    /// record is the one input that must never reach it. Empty when
-    /// there is no log to read, which is a run with nothing to undo
-    /// rather than a failure.
-    Undoing { moves: Vec<Move> },
     /// `cache`, with the report inspecting or clearing produced.
     ///
     /// This command's whole work is the one event, and that work is
@@ -617,10 +606,7 @@ pub enum Prepared {
 ///   never asked;
 /// - `ledger rebuild` outside any collection, or over a ledger that
 ///   cannot be written, since a rebuild reported but not written would
-///   leave the user believing the accounting was put right;
-/// - `undo` over a run log this build cannot replay, because undo's
-///   whole work is moving files and a record read only in part is the
-///   one input it must never act on.
+///   leave the user believing the accounting was put right.
 ///
 /// An applying rename with nowhere to record itself is not among them:
 /// what an apply run has to be able to write is its run log, and
@@ -647,9 +633,6 @@ pub fn preflight<C: Cache>(
 ) -> Result<Prepared, Diagnostic> {
     match command {
         Command::Config | Command::Resolve { .. } => Ok(Prepared::Unchecked),
-        Command::Undo => Ok(Prepared::Undoing {
-            moves: recorded_moves(adapters)?,
-        }),
         // The root and the ledger are discovered together, so a run
         // holding one holds the other; either being absent is the one
         // situation of being outside a collection.
@@ -756,10 +739,6 @@ pub fn emit_events<C: Cache>(
             bib_events(groups, configs, adapters, sink);
             None
         }
-        (Command::Undo, Prepared::Undoing { moves }) => {
-            undo_events(moves, adapters, sink);
-            None
-        }
         // A `Prepared` that does not go with the command could only
         // come of pairing one command's preflight with another's
         // emission, which no caller does: `events_for` and `dispatch`
@@ -804,52 +783,6 @@ fn cache_report(clear: bool, root: &Path) -> Result<Event, Diagnostic> {
         false => crate::cache::inspect(root).map(|stats| crate::cache::status_event(&stats)),
     }
     .map_err(|failure| error(format!("\"{}\": {failure}", root.display())))
-}
-
-/// The moves `borax undo` would reverse: the most recent apply-run
-/// log's, in the order that run applied them.
-///
-/// The log is the one [`crate::runlog::latest_apply_log`] finds — the
-/// collection's before the state root's. Empty when there is none
-/// anywhere, or when the one there is has no moves in it: a run with
-/// nothing to undo is not a failed run.
-///
-/// A log that is there and cannot be replayed is a [`Diagnostic`]: a
-/// schema this build does not understand, or a line that is not the
-/// JSON every line of a log is ([`crate::undo::moves_in`]). Both end
-/// the run before a file is touched, since undo has no verdict to
-/// report per file — its whole work is the moving, and a record borax
-/// cannot read whole is one it must not act on part of. A log that
-/// cannot be read from disk at all is treated as absent, the way an
-/// unreadable ledger is: accounting borax cannot reach says nothing
-/// about what is on disk.
-fn recorded_moves<C: Cache>(adapters: &Adapters<C>) -> Result<Vec<Move>, Diagnostic> {
-    let found = crate::runlog::latest_apply_log(
-        adapters.collection_root.as_deref(),
-        adapters.state_root.as_deref(),
-    );
-    let Some(path) = found else {
-        return Ok(Vec::new());
-    };
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Ok(Vec::new());
-    };
-
-    crate::undo::moves_in(&text).map_err(|refusal| {
-        error(match refusal {
-            crate::undo::Refusal::Schema { found } => format!(
-                "the run log \"{}\" is written in schema {found}, which this borax \
-                 ({}) does not understand",
-                path.display(),
-                env!("CARGO_PKG_VERSION")
-            ),
-            crate::undo::Refusal::Unreadable { message } => format!(
-                "the run log \"{}\" could not be read ({message}), so there is nothing \
-                 safe to undo",
-                path.display()
-            ),
-        })
-    })
 }
 
 /// Regenerate the ledger of the collection at `root` and report what it
@@ -1023,8 +956,8 @@ fn rename_events<C: Cache>(
             };
 
             // The hash goes to the move rather than to a log beside
-            // it: it travels on the `Renamed` event, which is what the
-            // run's log records and what `borax undo` reads back.
+            // it: it travels on the `Renamed` event, so the run's log
+            // records what each file was when it moved.
             let event = applying.carry_out(&planning.plan(path, &file), file.hash.clone());
             // A sidecar goes beside the name the file now carries rather
             // than beside the one it has just lost, so where it lands is
@@ -1287,17 +1220,6 @@ fn bib_config(config: &Config) -> BibConfig {
     }
 }
 
-/// Write the events `borax undo` produces into `sink`.
-///
-/// `moves` is what [`preflight`] read back from the run being reverted.
-/// An empty one reverts nothing and reports nothing, which is what
-/// having found no apply log means: there is no move on record to undo.
-fn undo_events<C: Cache>(moves: &[Move], adapters: &Adapters<C>, sink: &mut dyn Sink) {
-    for reversal in undo_moves(moves, adapters.library, adapters.filesystem) {
-        sink.emit(crate::undo::event_for(&reversal));
-    }
-}
-
 /// The sink a real run writes through: each event rendered in the run's
 /// format, written as its own line, and folded into the run's totals.
 ///
@@ -1390,8 +1312,8 @@ fn log_failure(mandatory: bool, message: String) -> Opened {
 /// only what to do about a destination that will not open, and the one
 /// case the placement rules express as a refusal: an applying rename
 /// with neither a collection nor a state directory has nowhere to
-/// record itself, and a rename nothing recorded is a rename `borax
-/// undo` cannot see.
+/// record itself, and a rename nothing recorded is a rename nothing can
+/// account for afterwards.
 fn open_log<C: Cache>(
     cli: &Cli,
     configs: &Configs,
@@ -1411,8 +1333,8 @@ fn open_log<C: Cache>(
         return match crate::runlog::mandatory(&cli.command) {
             true => log_failure(
                 true,
-                "--apply needs somewhere to record the run so it can be undone, and this is \
-                 neither in a collection nor on a system that names a state directory"
+                "--apply needs somewhere to record what it moves, and this is neither in a \
+                 collection nor on a system that names a state directory"
                     .to_string(),
             ),
             false => Opened::Log(None),
@@ -1439,9 +1361,9 @@ fn open_log<C: Cache>(
 /// The one write of a run log that is allowed to fail loudly. Creating
 /// a file says almost nothing about being able to fill it — a full
 /// filesystem, a quota, a read-only mount noticed late — so the run's
-/// first event is written while there is still nothing to undo, and an
-/// applying run that cannot get that far is refused rather than left
-/// moving files into a record that will not take them.
+/// first event is written while nothing has moved yet, and an applying
+/// run that cannot get that far is refused rather than left moving
+/// files into a record that will not take them.
 fn write_event(log: &mut fs::File, event: &Event) -> io::Result<()> {
     writeln!(log, "{}", crate::event::json_line(event))?;
     log.flush()
@@ -1556,7 +1478,7 @@ fn applying(command: &Command) -> bool {
     match command {
         Command::Rename { apply, .. } => *apply,
         Command::Cache { clear } => *clear,
-        Command::Bib { .. } | Command::Undo | Command::Ledger { .. } => true,
+        Command::Bib { .. } | Command::Ledger { .. } => true,
         Command::Resolve { .. } | Command::Config => false,
     }
 }
@@ -1738,9 +1660,7 @@ fn expanded(command: &Command) -> Command {
         Command::Bib { paths } => Command::Bib {
             paths: inputs(paths),
         },
-        Command::Undo | Command::Config | Command::Cache { .. } | Command::Ledger { .. } => {
-            command.clone()
-        }
+        Command::Config | Command::Cache { .. } | Command::Ledger { .. } => command.clone(),
     }
 }
 

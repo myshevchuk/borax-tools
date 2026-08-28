@@ -10,8 +10,9 @@
 //! The comparison is deliberately generous, because the two errors do
 //! not cost the same. A title the check wrongly calls a disagreement
 //! costs a correct rename on a file the caller named, silently. A
-//! disagreement it wrongly lets through costs a rename that `borax
-//! undo` reverses. So a file is cleared unless the titles are
+//! disagreement it wrongly lets through costs a wrong name the caller
+//! can correct by resolving again. So a file is cleared unless the
+//! titles are
 //! *materially* different, and the margin between "one letter a PDF
 //! producer could not encode" and "a different work" is wide enough to
 //! hold that.

@@ -70,24 +70,18 @@ pub enum Event {
     /// A rename that did happen, with the content hash of the file
     /// that moved.
     ///
-    /// The hash is what lets the move be reversed safely: `borax undo`
-    /// verifies that the file now at `target` is still the one this
-    /// event describes before moving it back. It is required rather
-    /// than optional because an applying rename refuses to move a file
-    /// whose hash it does not know
-    /// ([`SkipReason::Unrecordable`]), so a move that happened always
-    /// has one.
+    /// The hash is what identifies the file the move was about,
+    /// independently of the name it now carries: a reader of the run
+    /// log can tell whether what sits at `target` is still what this
+    /// event describes. It is required rather than optional because an
+    /// applying rename refuses to move a file whose hash it does not
+    /// know ([`SkipReason::Unrecordable`]), so a move that happened
+    /// always has one.
     Renamed {
         path: PathBuf,
         target: PathBuf,
         hash: ContentHash,
     },
-    /// A rename that was undone: `path` moved back to `target`.
-    ///
-    /// Distinct from [`Event::Renamed`] even though both describe a
-    /// move, because a consumer tracking a library needs to tell a file
-    /// arriving from a rename apart from one returning from an undo.
-    Reverted { path: PathBuf, target: PathBuf },
     /// A file the run declined to act on, and why.
     Skipped { path: PathBuf, reason: SkipReason },
     /// An entry written to the master bibliography.
@@ -179,20 +173,11 @@ pub enum SkipReason {
     /// Something borax did not write already sits where the file's
     /// sidecar would go, so the sidecar was not written.
     SidecarTaken { target: PathBuf },
-    /// The move could not be recorded well enough to be reversed, so
-    /// it was not made. A move nothing recorded is one `borax undo`
-    /// could never reverse, and being reversible is the promise that
-    /// makes renaming safe to offer.
+    /// The move could not be recorded identifiably, so it was not
+    /// made. Every rename in an apply-run log names the content that
+    /// moved, and a line that could not say which file it was about
+    /// would be a move the log cannot account for afterwards.
     Unrecordable { message: String },
-    /// Nothing is at the path the run log says a file was moved to, so
-    /// there is nothing to move back.
-    Missing,
-    /// Something is at the recorded path, but not the file that was
-    /// moved there — reverting it would move a stranger.
-    ContentChanged,
-    /// The path a file would be moved back to is occupied, so
-    /// reverting would overwrite whatever now holds it.
-    OriginalTaken,
     /// The collection has already admitted this file, by content or by
     /// work. `existing_path` is where the ledger says the file it
     /// duplicates sits, as a full path rather than the
@@ -332,11 +317,6 @@ pub fn human_line(event: &Event) -> Option<String> {
             path.display(),
             target.display()
         )),
-        Event::Reverted { path, target } => Some(format!(
-            "{}: moved back to {}",
-            path.display(),
-            target.display()
-        )),
         Event::Skipped { path, reason } => Some(format!(
             "{}: skipped, {}",
             path.display(),
@@ -406,9 +386,6 @@ fn skipped_because(reason: &SkipReason) -> String {
         SkipReason::AlreadyNamed => "already carries that name".to_string(),
         SkipReason::Unreadable { message } => format!("unreadable ({message})"),
         SkipReason::Unnameable => "the record renders an empty name".to_string(),
-        SkipReason::Missing => "nothing is there to move back".to_string(),
-        SkipReason::ContentChanged => "the file there is not the one that was moved".to_string(),
-        SkipReason::OriginalTaken => "its original name is taken".to_string(),
         SkipReason::RenameFailed { message } => format!("rename failed ({message})"),
         SkipReason::BibWriteFailed { message } => {
             format!("bibliography output failed ({message})")

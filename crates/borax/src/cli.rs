@@ -61,8 +61,6 @@ pub enum Command {
         #[arg(value_name = "PATH", required = true)]
         paths: Vec<PathBuf>,
     },
-    /// Move back everything the last applied run moved.
-    Undo,
     /// Print every setting, its value, and the layer it came from.
     Config,
     /// Report what the response cache holds.
@@ -164,8 +162,8 @@ pub struct Settings {
     #[arg(long, global = true)]
     pub run_log: bool,
 
-    /// Write no log for this run. An applying run writes one anyway,
-    /// since that log is what `borax undo` reads.
+    /// Write no log for this run. An applying rename writes one
+    /// anyway: that log is the only record of what it moved.
     #[arg(long, global = true, conflicts_with = "run_log")]
     pub no_run_log: bool,
 }
@@ -189,7 +187,6 @@ impl Command {
             Command::Resolve { .. } => "resolve",
             Command::Rename { .. } => "rename",
             Command::Bib { .. } => "bib",
-            Command::Undo => "undo",
             Command::Config => "config",
             Command::Cache { .. } => "cache",
             Command::Ledger {
@@ -205,7 +202,7 @@ impl Command {
             Command::Resolve { paths } | Command::Rename { paths, .. } | Command::Bib { paths } => {
                 paths
             }
-            Command::Undo | Command::Config | Command::Cache { .. } | Command::Ledger { .. } => &[],
+            Command::Config | Command::Cache { .. } | Command::Ledger { .. } => &[],
         }
     }
 }

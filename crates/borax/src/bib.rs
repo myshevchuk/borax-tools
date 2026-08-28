@@ -141,7 +141,8 @@ fn sidecar_is_ours(target: &Path, files: &dyn BibFiles) -> bool {
 /// A read or write that fails is
 /// [`crate::event::SkipReason::BibWriteFailed`] for the files it cost,
 /// and the run continues: bibliography output is the last thing a run
-/// does, and losing it does not undo the renames that preceded it.
+/// does, and losing it takes nothing away from the renames that
+/// preceded it.
 pub fn write_bib(
     resolved: &[(PathBuf, FileRecord)],
     citation_keys: &TemplateTable,

@@ -84,8 +84,8 @@ pub struct Config {
     /// accounting and reports none missing.
     pub ledger: bool,
     /// Whether a run writes its event stream to a run log. An applying
-    /// run writes one regardless, since that log is what `borax undo`
-    /// reads; this setting is what a preview run obeys.
+    /// rename writes one regardless, since that log is the only record
+    /// of what it moved; this setting is what a preview run obeys.
     pub run_log: bool,
 }
 
