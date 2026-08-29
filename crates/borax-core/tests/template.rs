@@ -191,6 +191,185 @@ fn missing_fields_render_empty_and_are_skipped_in_context() {
 }
 
 // ---------------------------------------------------------------------
+// Publication fields
+// ---------------------------------------------------------------------
+
+#[test]
+fn volume_field_renders_record_value() {
+    let mut r = record();
+    r.volume = Some("146".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[volume]", &input), "146");
+}
+
+#[test]
+fn spec_scenario_absent_volume_renders_empty() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[volume]", &input), "");
+}
+
+#[test]
+fn issue_field_renders_record_value() {
+    let mut r = record();
+    r.issue = Some("3".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[issue]", &input), "3");
+}
+
+#[test]
+fn issue_field_renders_empty_when_absent() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[issue]", &input), "");
+}
+
+#[test]
+fn pages_field_renders_record_value_verbatim() {
+    let mut r = record();
+    r.pages = Some("1234-1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[pages]", &input), "1234-1245");
+}
+
+#[test]
+fn pages_field_renders_empty_when_absent() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[pages]", &input), "");
+}
+
+#[test]
+fn publisher_field_renders_record_value() {
+    let mut r = record();
+    r.publisher = Some("ACS".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[publisher]", &input), "ACS");
+}
+
+#[test]
+fn publisher_field_renders_empty_when_absent() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[publisher]", &input), "");
+}
+
+#[test]
+fn firstpage_field_renders_before_a_hyphen() {
+    let mut r = record();
+    r.pages = Some("1234-1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[firstpage]", &input), "1234");
+}
+
+#[test]
+fn firstpage_field_renders_before_an_en_dash() {
+    let mut r = record();
+    r.pages = Some("1234–1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[firstpage]", &input), "1234");
+}
+
+#[test]
+fn firstpage_field_renders_before_an_em_dash() {
+    let mut r = record();
+    r.pages = Some("1234—1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[firstpage]", &input), "1234");
+}
+
+#[test]
+fn firstpage_field_trims_whitespace_around_the_separator() {
+    let mut r = record();
+    r.pages = Some("1234 - 1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[firstpage]", &input), "1234");
+}
+
+#[test]
+fn spec_scenario_article_number_is_not_a_range() {
+    let mut r = record();
+    r.pages = Some("e0123456".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[firstpage]", &input), "e0123456");
+}
+
+#[test]
+fn firstpage_field_passes_through_a_bare_numeric_article_number() {
+    let mut r = record();
+    r.pages = Some("045301".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[firstpage]", &input), "045301");
+}
+
+#[test]
+fn firstpage_field_renders_empty_when_pages_absent() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render("[firstpage]", &input), "");
+}
+
+#[test]
+fn spec_scenario_volume_and_first_page_render() {
+    let mut r = record();
+    r.volume = Some("146".to_string());
+    r.pages = Some("1234-1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(
+        render("[year]-[volume]-[firstpage]", &input),
+        "2024-146-1234"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Filters
 // ---------------------------------------------------------------------
 
@@ -357,6 +536,101 @@ fn regex_filter_pattern_may_contain_an_escaped_quote() {
     assert_eq!(
         render(r#"[title:regex("\"","")]"#, &input),
         "A Quoted Title"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Affix filters
+// ---------------------------------------------------------------------
+
+#[test]
+fn spec_scenario_suffix_on_present_value() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render(r#"[auth:suffix("-")]"#, &input), "Smith-");
+}
+
+#[test]
+fn prefix_filter_wraps_a_present_value() {
+    let mut r = record();
+    r.volume = Some("146".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render(r#"[volume:prefix("-")]"#, &input), "-146");
+}
+
+#[test]
+fn prefix_filter_leaves_the_empty_string_unchanged() {
+    // Load-bearing: a missing volume must contribute nothing, not a
+    // stray "-", so the separator belongs to the optional segment it
+    // separates rather than to the field.
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render(r#"[volume:prefix("-")]"#, &input), "");
+}
+
+#[test]
+fn suffix_filter_leaves_the_empty_string_unchanged() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render(r#"[volume:suffix("-")]"#, &input), "");
+}
+
+#[test]
+fn affix_filter_composes_to_the_right_of_another_filter() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(render(r#"[auth:lower:prefix("-")]"#, &input), "-smith");
+}
+
+#[test]
+fn spec_scenario_optional_segment_carries_its_separator() {
+    let mut r = record();
+    r.container_title = Some("J. Am. Chem. Soc.".to_string());
+    r.volume = Some("146".to_string());
+    r.pages = Some("1234-1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(
+        render(
+            r#"[year]-[journal:abbr][volume:prefix("-")]-[firstpage]"#,
+            &input
+        ),
+        "2024-JACS-146-1234"
+    );
+}
+
+#[test]
+fn spec_scenario_same_template_with_no_volume() {
+    let mut r = record();
+    r.container_title = Some("J. Am. Chem. Soc.".to_string());
+    r.pages = Some("1234-1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    assert_eq!(
+        render(
+            r#"[year]-[journal:abbr][volume:prefix("-")]-[firstpage]"#,
+            &input
+        ),
+        "2024-JACS-1234"
     );
 }
 
@@ -543,6 +817,18 @@ fn trunc_filter_with_zero_n_is_syntax_error() {
 fn malformed_regex_pattern_is_bad_regex() {
     let err = Template::compile(r#"[title:regex("(unclosed","x")]"#).unwrap_err();
     assert!(matches!(err, TemplateError::BadRegex { .. }));
+}
+
+#[test]
+fn affix_filter_unterminated_quoted_argument_is_syntax_error() {
+    let err = Template::compile(r#"[auth:prefix("-]"#).unwrap_err();
+    assert!(matches!(err, TemplateError::Syntax { .. }));
+}
+
+#[test]
+fn affix_filter_missing_closing_paren_is_syntax_error() {
+    let err = Template::compile(r#"[auth:prefix("-"]"#).unwrap_err();
+    assert!(matches!(err, TemplateError::Syntax { .. }));
 }
 
 // ---------------------------------------------------------------------
