@@ -65,26 +65,26 @@ and have no I/O; group 6 onward is the adapter.
 
 ## 4. The lookup filter and miss reporting
 
-- [ ] 4.1 Change `Template::render` to return `Rendered { text, misses }`
+- [x] 4.1 Change `Template::render` to return `Rendered { text, misses }`
       and add `tables: &LookupTables` to `RenderInput`; update the
       `TemplateTable::render` signature to match
-- [ ] 4.2 Update every existing `render` call site and test in
+- [x] 4.2 Update every existing `render` call site and test in
       `borax-core` to the new signature, asserting `misses` is empty
       where no lookup is involved — a mechanical commit of its own,
       landed before the lookup behaviour so the red tests in 4.3 are the
       only failing ones
-- [ ] 4.3 Red: lookup cases — a hit substituting the value, composing
+- [x] 4.3 Red: lookup cases — a hit substituting the value, composing
       with a following filter, a miss rendering empty, a miss falling
       through to a `||` alternative, a miss recorded in `misses` even
       when an alternative supplied the output, and misses appearing in
       template evaluation order
-- [ ] 4.4 Green: the `Lookup` filter variant, its parse arm, its apply
+- [x] 4.4 Green: the `Lookup` filter variant, its parse arm, its apply
       arm, and miss collection through `Chain` and `Segment`
-- [ ] 4.5 Red: `Template::tables` reporting the tables a compiled
+- [x] 4.5 Red: `Template::tables` reporting the tables a compiled
       template looks up, in order of first appearance and deduplicated,
       and load-time refusal of a template whose `lookup` names no
       declared table
-- [ ] 4.6 Green: `Template::tables`, and the check in `run::templates`
+- [x] 4.6 Green: `Template::tables`, and the check in `run::templates`
       that turns an undeclared name into
       `templates.<key>: unknown table "<name>"` — one accessor rather
       than a second `compile` signature, so no existing call site moves

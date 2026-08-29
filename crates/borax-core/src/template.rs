@@ -682,24 +682,33 @@ const ONE_ARGUMENT_FILTERS: [(&str, ArgumentBuilder); 3] = [
     ("lookup(", Filter::Lookup),
 ];
 
-/// What `table` holds for `value`, or the empty string, recording a
-/// miss when the table holds no such key.
+/// What the table called `name` holds for `value`, or the empty
+/// string, recording a miss when it holds no such key.
 ///
 /// A table the run never declared is not consulted and not recorded:
 /// configuration refuses that before the first file, so reaching it
 /// here would mean the check was skipped, and inventing a miss would
 /// report the wrong problem.
-// The stub uses none of its parameters and pushes into none of its
-// vectors; both expectations lapse once the body is written.
-#[expect(unused_variables, clippy::ptr_arg, reason = "unimplemented stub")]
 fn lookup(
     value: &str,
-    table: &str,
+    name: &str,
     input: &RenderInput<'_>,
     tables: &LookupTables,
     misses: &mut Vec<Miss>,
 ) -> String {
-    todo!("lookup")
+    let Some(table) = tables.get(name) else {
+        return String::new();
+    };
+    match table.get(value) {
+        Some(matched) => matched.render(input),
+        None => {
+            misses.push(Miss {
+                table: name.to_string(),
+                input: value.to_string(),
+            });
+            String::new()
+        }
+    }
 }
 
 /// `pages` up to its first dash of any width, trimmed.
@@ -771,7 +780,7 @@ impl Filter {
             Filter::Trunc(count) => value.chars().take(*count).collect(),
             Filter::Prefix(text) => affix(value, text, ""),
             Filter::Suffix(text) => affix(value, "", text),
-            Filter::Lookup(table) => lookup(value, table, input, tables, misses),
+            Filter::Lookup(name) => lookup(value, name, input, tables, misses),
             Filter::Regex { regex, replacement } => {
                 regex.replace_all(value, replacement.as_str()).into_owned()
             }
