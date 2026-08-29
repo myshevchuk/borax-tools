@@ -128,20 +128,24 @@ to end needs the filter that reaches it.
 ## 7. Wiring the run
 
 - [ ] 7.1 Load the declared tables in `preflight`, beside template
-      compilation, and pass the declared names into `run::templates` so
-      compilation can refuse an unknown one
+      compilation, and check each compiled template's `Template::tables`
+      against the declared names so an undeclared one ends the run
 - [ ] 7.2 Carry `LookupTables` in `Group` next to `filenames` and
-      `citation_keys`, and thread it into `RenderInput` in
-      `renaming.rs` and `bib.rs`
-- [ ] 7.3 Red: `crates/borax/tests/event.rs` cases for the lookup-miss
+      `citation_keys`
+- [ ] 7.3 Replace the `Lookups` built from `NoTables` in `rename_events`
+      and `bib_events` with one over the group's real tables, and delete
+      the two `drop(lookups.take())` that discard misses until then;
+      while there, bundle `Citations::add`'s arguments rather than
+      widening the `too_many_arguments` allow the migration had to add
+- [ ] 7.4 Red: `crates/borax/tests/event.rs` cases for the lookup-miss
       event and its summary count in both the human and JSON renderings
-- [ ] 7.4 Green: the event variant, its two rendering arms, and its
+- [ ] 7.5 Green: the event variant, its two rendering arms, and its
       `Counts` field
-- [ ] 7.5 Deduplicate misses across files within a run and emit one event
+- [ ] 7.6 Deduplicate misses across files within a run and emit one event
       per distinct table-and-input pair
-- [ ] 7.6 Name each loaded table's path and content digest in
+- [ ] 7.7 Name each loaded table's path and content digest in
       `RunStarted`, and update its two rendering arms
-- [ ] 7.7 Red: `crates/borax/tests/binary.rs` cases for the three fatal
+- [ ] 7.8 Red: `crates/borax/tests/binary.rs` cases for the three fatal
       table failures — a missing file, a header without a declared
       column, and two rows claiming one key — each ending the run with
       the fatal exit code, the reason on stderr, and neither

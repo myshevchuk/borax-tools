@@ -2,6 +2,7 @@
 
 use borax_core::identifier::{ArxivId, Doi};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record};
+use borax_core::tables::LookupTables;
 use borax_core::template::{RenderInput, Template, TemplateError, TemplateTable};
 
 /// Lowercase hex digest used as the `sha1` field across tests.
@@ -49,7 +50,10 @@ fn record() -> Record {
 }
 
 fn render(template: &str, input: &RenderInput<'_>) -> String {
-    Template::compile(template).unwrap().render(input)
+    Template::compile(template)
+        .unwrap()
+        .render(input, &LookupTables::new())
+        .text
 }
 
 // ---------------------------------------------------------------------
@@ -730,7 +734,10 @@ fn render_is_deterministic_across_repeated_calls() {
         sha1: Some(SHA1),
     };
     let template = Template::compile("[auth:lower][year]_[shorttitle3:camel]").unwrap();
-    assert_eq!(template.render(&input), template.render(&input));
+    assert_eq!(
+        template.render(&input, &LookupTables::new()).text,
+        template.render(&input, &LookupTables::new()).text
+    );
 }
 
 // Fail-fast contract: `Template::compile` performs all validation, so a
@@ -786,7 +793,10 @@ fn stray_closing_bracket_outside_token_is_literal() {
         record: &r,
         sha1: None,
     };
-    assert_eq!(template.render(&input), "hello ] world");
+    assert_eq!(
+        template.render(&input, &LookupTables::new()).text,
+        "hello ] world"
+    );
 }
 
 #[test]
@@ -872,7 +882,10 @@ fn template_table_render_dispatches_on_record_entry_type() {
         record: &article,
         sha1: Some(SHA1),
     };
-    assert_eq!(table.render(&article_input), "2024");
+    assert_eq!(
+        table.render(&article_input, &LookupTables::new()).text,
+        "2024"
+    );
 
     let mut thesis_record = record();
     thesis_record.entry_type = EntryType::Thesis;
@@ -880,5 +893,8 @@ fn template_table_render_dispatches_on_record_entry_type() {
         record: &thesis_record,
         sha1: Some(SHA1),
     };
-    assert_eq!(table.render(&thesis_input), "Smith");
+    assert_eq!(
+        table.render(&thesis_input, &LookupTables::new()).text,
+        "Smith"
+    );
 }

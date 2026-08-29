@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge, parse_sidecar_record, sidecar};
 use borax_core::content::ContentHash;
 use borax_core::record::Record;
+use borax_core::tables::Lookups;
 use borax_core::template::{RenderInput, TemplateTable};
 use borax_sources::store::write_atomically;
 
@@ -77,12 +78,21 @@ pub fn citation_key(
     record: &Record,
     hash: Option<&ContentHash>,
     citation_keys: &TemplateTable,
+    lookups: &mut Lookups<'_>,
 ) -> Option<String> {
-    let key: String = citation_keys
-        .render(&RenderInput {
+    let rendered = citation_keys.render(
+        &RenderInput {
             record,
             sha1: hash.map(ContentHash::as_str),
-        })
+        },
+        lookups.tables(),
+    );
+    for miss in rendered.misses {
+        lookups.record(miss);
+    }
+
+    let key: String = rendered
+        .text
         .chars()
         .filter(|character| !character.is_whitespace() && !FORBIDDEN_IN_KEY.contains(character))
         .collect();
@@ -143,17 +153,21 @@ fn sidecar_is_ours(target: &Path, files: &dyn BibFiles) -> bool {
 /// and the run continues: bibliography output is the last thing a run
 /// does, and losing it takes nothing away from the renames that
 /// preceded it.
+///
+/// `lookups` supplies the tables the citation keys' templates consult
+/// and collects the misses consulting them produced.
 pub fn write_bib(
     resolved: &[(PathBuf, FileRecord)],
     citation_keys: &TemplateTable,
     config: &BibConfig,
     files: &dyn BibFiles,
+    lookups: &mut Lookups<'_>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
     let mut keyed = Vec::new();
 
     for (path, file) in resolved {
-        let (key, event) = write_sidecar(path, file, citation_keys, config, files);
+        let (key, event) = write_sidecar(path, file, citation_keys, config, files, lookups);
         events.extend(event);
         if let Some(key) = key {
             keyed.push(Keyed {
@@ -185,14 +199,18 @@ pub fn write_bib(
 /// filesystem refuses is [`SkipReason::BibWriteFailed`]. The key comes
 /// back regardless, since the master file is a separate destination and
 /// losing one does not cost the other.
+///
+/// `lookups` supplies the tables the key's template consults and
+/// collects the misses consulting them produced.
 pub fn write_sidecar(
     path: &Path,
     file: &FileRecord,
     citation_keys: &TemplateTable,
     config: &BibConfig,
     files: &dyn BibFiles,
+    lookups: &mut Lookups<'_>,
 ) -> (Option<String>, Option<Event>) {
-    let Some(key) = citation_key(&file.record, file.hash.as_ref(), citation_keys) else {
+    let Some(key) = citation_key(&file.record, file.hash.as_ref(), citation_keys, lookups) else {
         return (
             None,
             Some(Event::Skipped {

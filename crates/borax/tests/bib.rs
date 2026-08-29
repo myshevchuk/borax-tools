@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use borax::bib::{BibConfig, BibFiles, citation_key, sidecar_path, write_bib};
 use borax::config::Config;
@@ -13,6 +14,7 @@ use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge, sidecar};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::Doi;
 use borax_core::record::{DateParts, EntryType, Name, Record};
+use borax_core::tables::{LookupTables, Lookups, NoTables};
 use borax_core::template::{RenderInput, Template, TemplateTable};
 
 // ---------------------------------------------------------------------
@@ -118,6 +120,13 @@ impl BibFiles for FakeBibFiles {
 // ---------------------------------------------------------------------
 // Other helpers
 // ---------------------------------------------------------------------
+
+/// A [`Lookups`] over no tables: nothing here declares one, and no
+/// template here looks one up.
+fn no_tables() -> Lookups<'static> {
+    static NONE: OnceLock<NoTables> = OnceLock::new();
+    NONE.get_or_init(NoTables::default).lookups()
+}
 
 fn doi(value: &str) -> Doi {
     Doi::parse(value).unwrap()
@@ -225,7 +234,7 @@ fn citation_key_renders_from_the_template_table() {
     let record = record("Smith", 2024, None);
     let templates = table("[auth][year]");
 
-    let key = citation_key(&record, None, &templates);
+    let key = citation_key(&record, None, &templates, &mut no_tables());
 
     assert_eq!(key, Some("Smith2024".to_string()));
 }
@@ -235,7 +244,7 @@ fn citation_key_is_none_for_a_record_too_sparse_to_render_anything() {
     let record = Record::new(EntryType::Article);
     let templates = table("[title]");
 
-    let key = citation_key(&record, None, &templates);
+    let key = citation_key(&record, None, &templates, &mut no_tables());
 
     assert_eq!(key, None);
 }
@@ -249,7 +258,7 @@ fn citation_key_strips_commas_braces_whitespace_and_percent_but_keeps_other_char
     let record = record("Smith", 2024, None);
     let templates = table("a,b{c}d%e f-g_h:i.j");
 
-    let key = citation_key(&record, None, &templates);
+    let key = citation_key(&record, None, &templates, &mut no_tables());
 
     assert_eq!(key, Some("abcdef-g_h:i.j".to_string()));
 }
@@ -259,7 +268,7 @@ fn citation_key_is_none_when_stripping_removes_everything_the_template_rendered(
     let record = record("Smith", 2024, None);
     let templates = table(" ,{}%\t");
 
-    let key = citation_key(&record, None, &templates);
+    let key = citation_key(&record, None, &templates, &mut no_tables());
 
     assert_eq!(key, None);
 }
@@ -270,7 +279,7 @@ fn citation_key_renders_the_sha1_field_from_the_supplied_hash() {
     let templates = table("[sha1]");
     let hash = hash_of("file contents");
 
-    let key = citation_key(&record, Some(&hash), &templates);
+    let key = citation_key(&record, Some(&hash), &templates, &mut no_tables());
 
     assert_eq!(key, Some(hash.as_str().to_string()));
 }
@@ -283,12 +292,17 @@ fn citation_key_renders_the_sha1_field_from_the_supplied_hash() {
 fn citation_key_matches_a_direct_template_render_when_nothing_needs_stripping() {
     let record = record("Doe", 2020, None);
     let templates = table("[auth][year]");
-    let direct = templates.render(&RenderInput {
-        record: &record,
-        sha1: None,
-    });
+    let direct = templates
+        .render(
+            &RenderInput {
+                record: &record,
+                sha1: None,
+            },
+            &LookupTables::new(),
+        )
+        .text;
 
-    let key = citation_key(&record, None, &templates);
+    let key = citation_key(&record, None, &templates, &mut no_tables());
 
     assert_eq!(key, Some(direct));
 }
@@ -307,7 +321,7 @@ fn citation_key_under_the_built_in_default_cites_a_2024_smith_record_as_smith202
         .expect("Config::default() must carry a citation-keys default");
     let templates = table(&default_template);
 
-    let key = citation_key(&record, None, &templates);
+    let key = citation_key(&record, None, &templates, &mut no_tables());
 
     assert_eq!(key, Some("smith2024".to_string()));
 }
@@ -326,11 +340,11 @@ fn citation_key_uses_a_per_entry_type_override_only_for_that_type() {
     let article = record("Smith", 2024, None);
 
     assert_eq!(
-        citation_key(&thesis, None, &templates),
+        citation_key(&thesis, None, &templates, &mut no_tables()),
         Some("AStudyofBorax".to_string())
     );
     assert_eq!(
-        citation_key(&article, None, &templates),
+        citation_key(&article, None, &templates, &mut no_tables()),
         Some("smith2024".to_string()),
         "an entry type with no override still falls back to the default"
     );
@@ -370,7 +384,13 @@ fn sidecars_off_and_no_master_path_performs_no_file_operations_and_produces_no_e
     let config = bib_config(None, DuplicatePolicy::Skip, false);
     let files = FakeBibFiles::new();
 
-    let events = write_bib(&resolved, &table("[auth][year]"), &config, &files);
+    let events = write_bib(
+        &resolved,
+        &table("[auth][year]"),
+        &config,
+        &files,
+        &mut no_tables(),
+    );
 
     assert_eq!(events, Vec::new());
     assert!(
@@ -396,7 +416,7 @@ fn sidecars_on_emits_one_sidecar_event_per_file_with_the_documented_content() {
     let config = bib_config(None, DuplicatePolicy::Skip, true);
     let files = FakeBibFiles::new();
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     let target1 = sidecar_path(&p1.0);
     let target2 = sidecar_path(&p2.0);
@@ -435,7 +455,7 @@ fn a_sidecar_target_holding_foreign_content_is_left_alone_and_reported() {
         "@article{mine2020, title = {Notes I keep by hand}}\n",
     );
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     assert_eq!(
         events,
@@ -464,7 +484,7 @@ fn a_sidecar_borax_wrote_before_is_overwritten() {
     let stale = record("Smith", 1999, Some("10.1000/a"));
     let files = FakeBibFiles::new().with_initial(target.clone(), sidecar(&stale, "Smith1999"));
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     assert_eq!(
         events,
@@ -492,7 +512,7 @@ fn master_path_set_merges_every_keyed_record_in_one_pass_and_writes_the_file_onc
     let config = bib_config(Some("refs.bib"), DuplicatePolicy::Skip, false);
     let files = FakeBibFiles::new();
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     let expected = merge(
         "",
@@ -527,7 +547,7 @@ fn master_duplicate_policy_skip_reports_already_present_against_an_existing_entr
     let config = bib_config(Some("refs.bib"), DuplicatePolicy::Skip, false);
     let files = FakeBibFiles::new().with_initial("refs.bib", seed.content.clone());
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     let expected = merge(
         &seed.content,
@@ -556,7 +576,7 @@ fn master_duplicate_policy_update_reports_updated_against_an_existing_entry() {
     let config = bib_config(Some("refs.bib"), DuplicatePolicy::Update, false);
     let files = FakeBibFiles::new().with_initial("refs.bib", seed.content.clone());
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     let expected = merge(
         &seed.content,
@@ -587,7 +607,7 @@ fn two_records_rendering_the_same_citation_key_leave_under_distinct_suffixed_key
     let config = bib_config(Some("refs.bib"), DuplicatePolicy::Skip, false);
     let files = FakeBibFiles::new();
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     let expected = merge(
         "",
@@ -626,7 +646,7 @@ fn a_record_with_no_citation_key_is_skipped_as_unciteable_and_touches_neither_de
     let config = bib_config(Some("refs.bib"), DuplicatePolicy::Skip, true);
     let files = FakeBibFiles::new();
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     let expected_merge = merge("", &[("Borax", &keyed.1.record)], DuplicatePolicy::Skip);
     assert_eq!(
@@ -672,7 +692,7 @@ fn events_come_back_as_every_sidecar_and_unciteable_event_in_input_order_then_ev
     let config = bib_config(Some("refs.bib"), DuplicatePolicy::Skip, true);
     let files = FakeBibFiles::new();
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     let expected_merge = merge(
         "",
@@ -718,7 +738,7 @@ fn a_sidecar_write_failure_is_skipped_for_that_file_alone_and_the_batch_continue
     let config = bib_config(None, DuplicatePolicy::Skip, true);
     let files = FakeBibFiles::new().with_write_failure(sidecar_path(&p1.0));
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     assert_eq!(events.len(), 2);
     assert!(
@@ -751,7 +771,7 @@ fn a_master_read_failure_skips_every_keyed_file_as_bib_write_failed_and_writes_n
     let config = bib_config(Some("refs.bib"), DuplicatePolicy::Skip, false);
     let files = FakeBibFiles::new().with_read_failure("refs.bib");
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     assert_eq!(
         events.len(),
@@ -786,7 +806,7 @@ fn a_master_write_failure_skips_every_keyed_file_as_bib_write_failed_after_one_a
     let config = bib_config(Some("refs.bib"), DuplicatePolicy::Skip, false);
     let files = FakeBibFiles::new().with_write_failure("refs.bib");
 
-    let events = write_bib(&resolved, &templates, &config, &files);
+    let events = write_bib(&resolved, &templates, &config, &files, &mut no_tables());
 
     assert_eq!(
         events.len(),

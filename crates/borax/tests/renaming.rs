@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use borax::event::{Counts, Event, SkipReason};
 use borax::pipeline::FileRecord;
@@ -14,6 +15,7 @@ use borax::renaming::{
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::record::{DateParts, EntryType, Name, Record};
 use borax_core::rename::CollisionPolicy;
+use borax_core::tables::{Lookups, NoTables};
 use borax_core::template::{Template, TemplateTable};
 use tempfile::tempdir;
 
@@ -99,6 +101,13 @@ impl Filesystem for FakeFilesystem {
 // ---------------------------------------------------------------------
 // Other helpers
 // ---------------------------------------------------------------------
+
+/// A [`Lookups`] over no tables: nothing here declares one, and no
+/// template here looks one up.
+fn no_tables() -> Lookups<'static> {
+    static NONE: OnceLock<NoTables> = OnceLock::new();
+    NONE.get_or_init(NoTables::default).lookups()
+}
 
 fn author(family: &str) -> Name {
     Name {
@@ -198,7 +207,7 @@ fn renders_through_the_template_sanitizes_and_reattaches_the_extension() {
     let record = record_by("Smith", 2024);
     let templates = table("[auth][year]");
 
-    let name = target_name(path, &record, None, &templates);
+    let name = target_name(path, &record, None, &templates, &mut no_tables());
 
     assert_eq!(name, Some("Smith2024.pdf".to_string()));
 }
@@ -209,7 +218,7 @@ fn a_record_whose_template_renders_empty_gives_none() {
     let record = empty_record();
     let templates = table("[title]");
 
-    let name = target_name(path, &record, None, &templates);
+    let name = target_name(path, &record, None, &templates, &mut no_tables());
 
     assert_eq!(name, None);
 }
@@ -220,7 +229,7 @@ fn an_uppercase_extension_is_preserved_exactly() {
     let record = record_by("Smith", 2024);
     let templates = table("[auth][year]");
 
-    let name = target_name(path, &record, None, &templates);
+    let name = target_name(path, &record, None, &templates, &mut no_tables());
 
     assert_eq!(name, Some("Smith2024.PDF".to_string()));
 }
@@ -231,7 +240,7 @@ fn a_file_with_no_extension_gets_none_added() {
     let record = record_by("Smith", 2024);
     let templates = table("[auth][year]");
 
-    let name = target_name(path, &record, None, &templates);
+    let name = target_name(path, &record, None, &templates, &mut no_tables());
 
     assert_eq!(name, Some("Smith2024".to_string()));
 }
@@ -244,7 +253,7 @@ fn a_per_entry_type_template_is_chosen_over_the_default() {
     record.title = Some("Borax Handbook".to_string());
     let templates = table_with("[auth][year]", EntryType::Book, "[title]");
 
-    let name = target_name(path, &record, None, &templates);
+    let name = target_name(path, &record, None, &templates, &mut no_tables());
 
     assert_eq!(name, Some("Borax Handbook.pdf".to_string()));
 }
@@ -255,7 +264,7 @@ fn the_default_template_still_applies_to_a_type_with_no_specific_one() {
     let record = record_by("Jones", 2020);
     let templates = table_with("[auth][year]", EntryType::Book, "[title]");
 
-    let name = target_name(path, &record, None, &templates);
+    let name = target_name(path, &record, None, &templates, &mut no_tables());
 
     assert_eq!(name, Some("Jones2020.pdf".to_string()));
 }
@@ -267,7 +276,7 @@ fn sha1_renders_from_the_supplied_hash() {
     let templates = table("sha[sha1]");
     let hash = hash_of("file contents");
 
-    let name = target_name(path, &record, Some(&hash), &templates);
+    let name = target_name(path, &record, Some(&hash), &templates, &mut no_tables());
 
     assert_eq!(name, Some(format!("sha{}.pdf", hash.as_str())));
 }
@@ -278,7 +287,7 @@ fn sha1_renders_empty_when_the_hash_is_none() {
     let record = empty_record();
     let templates = table("sha[sha1]");
 
-    let name = target_name(path, &record, None, &templates);
+    let name = target_name(path, &record, None, &templates, &mut no_tables());
 
     assert_eq!(name, Some("sha.pdf".to_string()));
 }
@@ -290,7 +299,7 @@ fn characters_the_sanitizer_strips_yield_the_sanitized_name() {
     let record = record_by("Smith", 2024);
     let templates = table("[auth]:[year]");
 
-    let name = target_name(path, &record, None, &templates);
+    let name = target_name(path, &record, None, &templates, &mut no_tables());
 
     assert_eq!(name, Some("Smith_2024.pdf".to_string()));
 }
@@ -308,7 +317,13 @@ fn distinct_names_in_one_directory_all_become_rename() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -329,7 +344,13 @@ fn a_file_already_carrying_its_target_name_is_already_named() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(plan, vec![already_named("/lib/Smith2024.pdf")]);
 }
@@ -347,7 +368,13 @@ fn two_files_wanting_the_same_name_are_suffixed_under_the_suffix_policy() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -367,7 +394,13 @@ fn two_files_wanting_the_same_name_are_target_taken_under_the_skip_policy() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Skip, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Skip,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -387,7 +420,13 @@ fn files_in_different_directories_wanting_the_same_name_do_not_collide() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -409,7 +448,13 @@ fn an_existing_file_occupying_the_target_is_suffixed_under_the_suffix_policy() {
     let filesystem =
         FakeFilesystem::new().with_existing("/lib", [("Smith2024.pdf", Some("other-hash"))]);
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -428,7 +473,13 @@ fn an_existing_file_occupying_the_target_is_target_taken_under_the_skip_policy()
     let filesystem =
         FakeFilesystem::new().with_existing("/lib", [("Smith2024.pdf", Some("other-hash"))]);
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Skip, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Skip,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -446,7 +497,13 @@ fn a_template_with_a_slash_plans_a_rename_into_a_subdirectory() {
     let templates = table("sub/[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(plan, vec![rename("/lib/a.pdf", "/lib/sub/Smith2024.pdf")]);
 }
@@ -458,7 +515,13 @@ fn a_file_occupying_the_target_subdirectory_is_suffixed_under_the_suffix_policy(
     let filesystem =
         FakeFilesystem::new().with_existing("/lib/sub", [("Smith2024.pdf", Some("other-hash"))]);
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(plan, vec![rename("/lib/a.pdf", "/lib/sub/Smith2024a.pdf")]);
 }
@@ -470,7 +533,13 @@ fn a_file_occupying_the_target_subdirectory_is_target_taken_under_the_skip_polic
     let filesystem =
         FakeFilesystem::new().with_existing("/lib/sub", [("Smith2024.pdf", Some("other-hash"))]);
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Skip, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Skip,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -487,7 +556,13 @@ fn two_files_in_one_directory_targeting_the_same_subdirectory_collide() {
     let templates = table("sub/[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -511,7 +586,13 @@ fn files_targeting_the_same_name_in_different_subdirectories_do_not_collide() {
     let templates = table_with("x/[auth][year]", EntryType::Book, "y/[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -530,7 +611,13 @@ fn an_absent_target_subdirectory_plans_normally() {
     // absent, not merely empty.
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(plan, vec![rename("/lib/a.pdf", "/lib/sub/Smith2024.pdf")]);
 }
@@ -541,7 +628,13 @@ fn a_target_subdirectory_explicitly_seeded_as_empty_plans_normally() {
     let templates = table("sub/[auth][year]");
     let filesystem = FakeFilesystem::new().with_existing("/lib/sub", []);
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(plan, vec![rename("/lib/a.pdf", "/lib/sub/Smith2024.pdf")]);
 }
@@ -559,7 +652,13 @@ fn a_relative_escape_in_the_template_sanitizes_to_a_literal_underscore_directory
     let templates = table("../[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -577,7 +676,13 @@ fn a_record_that_renders_no_name_is_unnameable() {
     let templates = table("[title]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(plan, vec![unnameable("/lib/mystery.pdf")]);
 }
@@ -596,7 +701,13 @@ fn an_unnameable_record_does_not_consume_a_collision_slot() {
     let templates = table_with("[title]", EntryType::Article, "[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -621,7 +732,13 @@ fn input_order_determines_which_file_gets_the_suffix() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let plan = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(
         plan,
@@ -642,8 +759,20 @@ fn the_plan_is_deterministic_across_repeated_calls() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
 
-    let first = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
-    let second = plan_renames(&resolved, &templates, CollisionPolicy::Suffix, &filesystem);
+    let first = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
+    let second = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
 
     assert_eq!(first, second);
 }

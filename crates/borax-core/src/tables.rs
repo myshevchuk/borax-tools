@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::template::{RenderInput, Template, TemplateError, slug};
+use crate::template::{Miss, RenderInput, Template, TemplateError, slug};
 
 /// What a table's value column holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -76,12 +76,14 @@ impl Value {
 
     /// Render this value against `input`.
     ///
-    /// A literal renders itself. A fragment renders as a template,
-    /// which cannot look anything up, so it produces no misses.
+    /// A literal renders itself. A fragment renders as a template
+    /// against no tables at all, which it can do because a fragment may
+    /// not contain `lookup`; it therefore produces no misses of its
+    /// own, and the text is the whole of its output.
     pub fn render(&self, input: &RenderInput<'_>) -> String {
         match self {
             Value::Text(text) => text.clone(),
-            Value::Fragment(fragment) => fragment.render(input),
+            Value::Fragment(fragment) => fragment.render(input, &LookupTables::new()).text,
         }
     }
 }
@@ -367,6 +369,66 @@ impl LookupTables {
     /// The declared names, in order.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tables.keys().map(String::as_str)
+    }
+}
+
+/// The tables a run may consult, and the misses consulting them
+/// produced.
+///
+/// One of these is built per run and passed to every render, so the
+/// misses accumulate in the order the run met them and are ready to be
+/// deduplicated and reported when it ends. Bundling the two is what
+/// keeps "which tables?" and "what did they fail to answer?" from
+/// drifting apart into separate parameters that a caller can pass
+/// inconsistently.
+#[derive(Debug)]
+pub struct Lookups<'a> {
+    tables: &'a LookupTables,
+    misses: Vec<Miss>,
+}
+
+impl<'a> Lookups<'a> {
+    /// Consult `tables`, recording misses.
+    pub fn new(tables: &'a LookupTables) -> Lookups<'a> {
+        Lookups {
+            tables,
+            misses: Vec::new(),
+        }
+    }
+
+    /// The tables to consult.
+    pub fn tables(&self) -> &LookupTables {
+        self.tables
+    }
+
+    /// Record `miss`.
+    pub fn record(&mut self, miss: Miss) {
+        self.misses.push(miss);
+    }
+
+    /// Take every miss recorded so far, leaving none.
+    pub fn take(&mut self) -> Vec<Miss> {
+        std::mem::take(&mut self.misses)
+    }
+
+    /// The misses recorded so far, in the order they happened.
+    pub fn misses(&self) -> &[Miss] {
+        &self.misses
+    }
+}
+
+/// Consulting no tables at all, for a caller that renders templates
+/// with no `lookup` in them.
+///
+/// The borrow it hands out lives as long as the value, so a caller
+/// binds it before rendering: `let none = NoTables::default();`.
+#[derive(Debug, Default)]
+pub struct NoTables(LookupTables);
+
+impl NoTables {
+    /// A [`Lookups`] over no tables.
+    pub fn lookups(&self) -> Lookups<'_> {
+        Lookups::new(&self.0)
     }
 }
 

@@ -19,6 +19,7 @@ use borax_core::content::ContentHash;
 use borax_core::record::Record;
 use borax_core::rename::{CollisionPolicy, PlanInput, PlannedAction, Planner};
 use borax_core::sanitize::sanitize;
+use borax_core::tables::Lookups;
 use borax_core::template::{RenderInput, TemplateTable};
 use borax_sources::store::hash_file;
 
@@ -116,18 +117,25 @@ pub fn target_name(
     record: &Record,
     hash: Option<&ContentHash>,
     templates: &TemplateTable,
+    lookups: &mut Lookups<'_>,
 ) -> Option<String> {
-    let rendered = templates.render(&RenderInput {
-        record,
-        sha1: hash.map(ContentHash::as_str),
-    });
-    if rendered.is_empty() {
+    let rendered = templates.render(
+        &RenderInput {
+            record,
+            sha1: hash.map(ContentHash::as_str),
+        },
+        lookups.tables(),
+    );
+    for miss in rendered.misses {
+        lookups.record(miss);
+    }
+    if rendered.text.is_empty() {
         return None;
     }
 
     let named = match path.extension() {
-        Some(extension) => format!("{rendered}.{}", extension.to_string_lossy()),
-        None => rendered,
+        Some(extension) => format!("{}.{}", rendered.text, extension.to_string_lossy()),
+        None => rendered.text,
     };
     Some(sanitize(&named))
 }
@@ -201,9 +209,17 @@ impl<'a> Planning<'a> {
     /// A record that renders no usable name is
     /// [`PlannedRename::Unnameable`] and never reaches the planner — it
     /// claims no name, so it cannot cost a later file its unsuffixed one.
-    pub fn plan(&mut self, path: &Path, file: &FileRecord) -> PlannedRename {
+    ///
+    /// `lookups` supplies the tables the name's template consults and
+    /// collects the misses consulting them produced.
+    pub fn plan(
+        &mut self,
+        path: &Path,
+        file: &FileRecord,
+        lookups: &mut Lookups<'_>,
+    ) -> PlannedRename {
         let path = path.to_path_buf();
-        let Some(input) = plan_input(&path, file, self.templates) else {
+        let Some(input) = plan_input(&path, file, self.templates, lookups) else {
             return PlannedRename::Unnameable { path };
         };
         self.reach(&input.target);
@@ -246,10 +262,15 @@ impl<'a> Planning<'a> {
 
 /// What the planner needs to know about one resolved file, or `None`
 /// when the file has no name to plan from.
-fn plan_input(path: &Path, file: &FileRecord, templates: &TemplateTable) -> Option<PlanInput> {
+fn plan_input(
+    path: &Path,
+    file: &FileRecord,
+    templates: &TemplateTable,
+    lookups: &mut Lookups<'_>,
+) -> Option<PlanInput> {
     Some(PlanInput {
         source: path.file_name()?.to_string_lossy().into_owned(),
-        target: target_name(path, &file.record, file.hash.as_ref(), templates)?,
+        target: target_name(path, &file.record, file.hash.as_ref(), templates, lookups)?,
         content_hash: file
             .hash
             .as_ref()
@@ -274,11 +295,15 @@ fn plan_input(path: &Path, file: &FileRecord, templates: &TemplateTable) -> Opti
 /// Everything a decision rests on — how a name is rendered, when a
 /// collision is suffixed, which subdirectories are looked at — is stated
 /// there.
+///
+/// `lookups` supplies the tables the names' templates consult and
+/// collects the misses consulting them produced.
 pub fn plan_renames(
     resolved: &[(PathBuf, FileRecord)],
     templates: &TemplateTable,
     policy: CollisionPolicy,
     filesystem: &dyn Filesystem,
+    lookups: &mut Lookups<'_>,
 ) -> Vec<PlannedRename> {
     let mut groups: BTreeMap<&Path, Vec<usize>> = BTreeMap::new();
     for (index, (path, _)) in resolved.iter().enumerate() {
@@ -293,7 +318,7 @@ pub fn plan_renames(
         let mut planning = Planning::new(directory, templates, policy, filesystem);
         for index in members {
             let (path, file) = &resolved[index];
-            decisions[index] = Some(planning.plan(path, file));
+            decisions[index] = Some(planning.plan(path, file, lookups));
         }
     }
 

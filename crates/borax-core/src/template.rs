@@ -21,8 +21,10 @@
 //! filter    := "lower" | "upper" | "capitalize" | "titlecase"
 //!            | "camel" | "slug" | "abbr" | "transliterate"
 //!            | "trunc" N | regex-filter | affix-filter
+//!            | lookup-filter
 //! regex-filter := "regex(" qstring "," qstring ")"
 //! affix-filter := ( "prefix" | "suffix" ) "(" qstring ")"
+//! lookup-filter := "lookup(" qstring ")"
 //! ```
 //!
 //! Literal text may contain any character except `[`, which always
@@ -89,6 +91,11 @@
 //!   empty is the point: it lets a separator belong to the optional
 //!   segment it separates, so `[volume:prefix("-")]` contributes `-146`
 //!   or nothing at all.
+//! - `lookup("table")` — replace the value with what the named table
+//!   holds for it, or with the empty string when the table holds no
+//!   such key. Matching folds both sides through [`slug`], and a miss
+//!   is recorded in [`Rendered::misses`] rather than failing. The
+//!   table must be declared in configuration; see [`crate::tables`].
 //! - `regex("pattern","replacement")` — replace every non-overlapping
 //!   match of the pattern ([`regex`] crate syntax; `$1` group
 //!   references work in the replacement). The pattern is compiled at
@@ -100,6 +107,7 @@ use std::fmt;
 use regex::Regex;
 
 use crate::record::{EntryType, Name, Record};
+use crate::tables::LookupTables;
 
 /// Why a template source failed to compile. Every variant names the
 /// offending token so a configuration layer can report "template X,
@@ -146,6 +154,32 @@ pub struct RenderInput<'a> {
     pub sha1: Option<&'a str>,
 }
 
+/// A lookup that found no row.
+///
+/// Carries what was asked rather than what folded, because the point of
+/// a miss is to tell the user which line to add to their file.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Miss {
+    /// The table's configured name.
+    pub table: String,
+    /// The value looked up, as the record held it.
+    pub input: String,
+}
+
+/// What rendering produced: the string, and every lookup that missed
+/// while producing it.
+///
+/// Misses are returned rather than logged so that the obligation to
+/// report them is visible at each call site. They are collected from
+/// every chain evaluated, including chains whose output an alternative
+/// replaced — a table lacking a journal is worth knowing about even
+/// when a fallback covered for it — and appear in evaluation order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rendered {
+    pub text: String,
+    pub misses: Vec<Miss>,
+}
+
 /// A compiled template. Compilation performs all validation; rendering
 /// cannot fail.
 #[derive(Debug)]
@@ -171,26 +205,43 @@ impl Template {
         &self.source
     }
 
+    /// The tables this template looks up, in order of first appearance
+    /// and without repeats.
+    ///
+    /// What lets a configuration layer refuse a `lookup` naming no
+    /// declared table before any file is processed, and what stops a
+    /// table's own fragment from looking anything up. Rendering never
+    /// consults it.
+    pub fn tables(&self) -> Vec<&str> {
+        todo!("Template::tables")
+    }
+
     /// Render the template. Within a token, chains are tried left to
     /// right and the first non-empty result (after its filters) wins;
     /// a token whose chains all render empty contributes nothing.
-    pub fn render(&self, input: &RenderInput<'_>) -> String {
-        let mut rendered = String::new();
+    ///
+    /// `tables` supplies what `lookup` consults; pass
+    /// [`LookupTables::new`] when the template has none. Rendering
+    /// cannot fail, and is a function of `self`, `input` and `tables`
+    /// alone.
+    pub fn render(&self, input: &RenderInput<'_>, tables: &LookupTables) -> Rendered {
+        let mut text = String::new();
+        let mut misses = Vec::new();
         for segment in &self.segments {
             match segment {
-                Segment::Literal(text) => rendered.push_str(text),
+                Segment::Literal(literal) => text.push_str(literal),
                 Segment::Token(chains) => {
                     for chain in chains {
-                        let value = chain.render(input);
+                        let value = chain.render(input, tables, &mut misses);
                         if !value.is_empty() {
-                            rendered.push_str(&value);
+                            text.push_str(&value);
                             break;
                         }
                     }
                 }
             }
         }
-        rendered
+        Rendered { text, misses }
     }
 }
 
@@ -211,10 +262,15 @@ struct Chain {
 }
 
 impl Chain {
-    fn render(&self, input: &RenderInput<'_>) -> String {
+    fn render(
+        &self,
+        input: &RenderInput<'_>,
+        tables: &LookupTables,
+        misses: &mut Vec<Miss>,
+    ) -> String {
         let mut value = self.field.render(input);
         for filter in &self.filters {
-            value = filter.apply(&value);
+            value = filter.apply(&value, tables, misses);
         }
         value
     }
@@ -258,6 +314,8 @@ enum Filter {
     Prefix(String),
     /// Identity on the empty string; otherwise wraps its input.
     Suffix(String),
+    /// The name of the table to consult.
+    Lookup(String),
     Regex {
         regex: Regex,
         replacement: String,
@@ -431,7 +489,7 @@ impl<'a> Parser<'a> {
             self.position += "regex(".len();
             return self.parse_regex();
         }
-        for (name, build) in AFFIXES {
+        for (name, build) in ONE_ARGUMENT_FILTERS {
             if self.rest().starts_with(name) {
                 self.position += name.len();
                 return Ok(build(self.parse_affix()?));
@@ -460,8 +518,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse the single quoted argument of a `prefix(` or `suffix(`
-    /// whose opening parenthesis has been consumed.
+    /// Parse the single quoted argument of a one-argument filter whose
+    /// opening parenthesis has been consumed, through its closing
+    /// parenthesis.
     fn parse_affix(&mut self) -> Result<String, TemplateError> {
         let text = self.parse_quoted()?;
         if self.peek() != Some(')') {
@@ -596,14 +655,31 @@ fn render_authors(authors: &[Name], limit: Option<usize>) -> String {
     families.join("-")
 }
 
-/// Builds an affix filter from the argument parsed after its opening
-/// parenthesis.
-type AffixBuilder = fn(String) -> Filter;
+/// Builds a filter from the single quoted argument parsed after its
+/// opening parenthesis.
+type ArgumentBuilder = fn(String) -> Filter;
 
-/// The prefixes that open an affix filter, each with what to build
-/// from the argument that follows.
-const AFFIXES: [(&str, AffixBuilder); 2] =
-    [("prefix(", Filter::Prefix), ("suffix(", Filter::Suffix)];
+/// The filters written as a name, one quoted argument and a closing
+/// parenthesis, each with what to build from that argument.
+const ONE_ARGUMENT_FILTERS: [(&str, ArgumentBuilder); 3] = [
+    ("prefix(", Filter::Prefix),
+    ("suffix(", Filter::Suffix),
+    ("lookup(", Filter::Lookup),
+];
+
+/// What `table` holds for `value`, or the empty string, recording a
+/// miss when the table holds no such key.
+///
+/// A table the run never declared is not consulted and not recorded:
+/// configuration refuses that before the first file, so reaching it
+/// here would mean the check was skipped, and inventing a miss would
+/// report the wrong problem.
+// The stub uses none of its parameters and pushes into none of its
+// vectors; both expectations lapse once the body is written.
+#[expect(unused_variables, clippy::ptr_arg, reason = "unimplemented stub")]
+fn lookup(value: &str, table: &str, tables: &LookupTables, misses: &mut Vec<Miss>) -> String {
+    todo!("lookup")
+}
 
 /// `pages` up to its first dash of any width, trimmed.
 ///
@@ -647,7 +723,7 @@ fn short_title(title: &str, words: usize) -> String {
 }
 
 impl Filter {
-    fn apply(&self, value: &str) -> String {
+    fn apply(&self, value: &str, tables: &LookupTables, misses: &mut Vec<Miss>) -> String {
         match self {
             Filter::Lower => value.to_lowercase(),
             Filter::Upper => value.to_uppercase(),
@@ -663,6 +739,7 @@ impl Filter {
             Filter::Trunc(count) => value.chars().take(*count).collect(),
             Filter::Prefix(text) => affix(value, text, ""),
             Filter::Suffix(text) => affix(value, "", text),
+            Filter::Lookup(table) => lookup(value, table, tables, misses),
             Filter::Regex { regex, replacement } => {
                 regex.replace_all(value, replacement.as_str()).into_owned()
             }
@@ -829,7 +906,7 @@ impl TemplateTable {
 
     /// Render `record` (plus per-file input) with the template its
     /// entry type selects.
-    pub fn render(&self, input: &RenderInput<'_>) -> String {
-        self.get(input.record.entry_type).render(input)
+    pub fn render(&self, input: &RenderInput<'_>, tables: &LookupTables) -> Rendered {
+        self.get(input.record.entry_type).render(input, tables)
     }
 }

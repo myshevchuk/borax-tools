@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use borax::bib::{BibFiles, citation_key};
 use borax::cache::{cleared_event, inspect, status_event};
@@ -18,6 +19,7 @@ use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
+use borax_core::tables::{LookupTables, Lookups, NoTables};
 use borax_core::template::RenderInput;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_sources::cache::MemoryCache;
@@ -252,6 +254,13 @@ impl BibFiles for FakeBibFiles {
 // Other helpers
 // ---------------------------------------------------------------------
 
+/// A [`Lookups`] over no tables: nothing here declares one, and no
+/// template here looks one up.
+fn no_tables() -> Lookups<'static> {
+    static NONE: OnceLock<NoTables> = OnceLock::new();
+    NONE.get_or_init(NoTables::default).lookups()
+}
+
 fn doi(value: &str) -> Doi {
     Doi::parse(value).unwrap()
 }
@@ -416,10 +425,15 @@ fn a_config_with_only_a_default_template_compiles_to_a_table_whose_default_rende
 
     let table = templates(&config.templates, "templates").unwrap();
     let record = record_by("Smith", 2024, "10.1000/templates-default");
-    let rendered = table.render(&RenderInput {
-        record: &record,
-        sha1: None,
-    });
+    let rendered = table
+        .render(
+            &RenderInput {
+                record: &record,
+                sha1: None,
+            },
+            &LookupTables::new(),
+        )
+        .text;
 
     assert_eq!(rendered, "Smith2024");
 }
@@ -439,18 +453,28 @@ fn a_specific_entry_type_overrides_the_default_and_other_types_still_use_it() {
     let mut thesis = record_by("Jones", 2020, "10.1000/templates-thesis");
     thesis.entry_type = EntryType::Thesis;
     thesis.title = Some("A Study of Borax".to_string());
-    let thesis_rendered = table.render(&RenderInput {
-        record: &thesis,
-        sha1: None,
-    });
+    let thesis_rendered = table
+        .render(
+            &RenderInput {
+                record: &thesis,
+                sha1: None,
+            },
+            &LookupTables::new(),
+        )
+        .text;
     assert_eq!(thesis_rendered, "A Study of Borax");
 
     let mut book = record_by("Jones", 2020, "10.1000/templates-book");
     book.entry_type = EntryType::Book;
-    let book_rendered = table.render(&RenderInput {
-        record: &book,
-        sha1: None,
-    });
+    let book_rendered = table
+        .render(
+            &RenderInput {
+                record: &book,
+                sha1: None,
+            },
+            &LookupTables::new(),
+        )
+        .text;
     assert_eq!(
         book_rendered, "Jones2020",
         "a type with no override still falls back to the default"
@@ -505,7 +529,7 @@ fn a_config_with_only_a_default_citation_key_template_compiles_to_a_table_whose_
     let table = templates(&config.citation_keys, "citation-keys").unwrap();
     let record = record_by("Smith", 2024, "10.1000/citation-keys-default");
 
-    let key = citation_key(&record, None, &table);
+    let key = citation_key(&record, None, &table, &mut no_tables());
 
     assert_eq!(key, Some("smith2024".to_string()));
 }
@@ -525,18 +549,28 @@ fn a_citation_key_override_for_one_entry_type_leaves_others_on_the_default() {
     let mut thesis = record_by("Jones", 2020, "10.1000/citation-keys-thesis");
     thesis.entry_type = EntryType::Thesis;
     thesis.title = Some("A Study of Borax".to_string());
-    let thesis_rendered = table.render(&RenderInput {
-        record: &thesis,
-        sha1: None,
-    });
+    let thesis_rendered = table
+        .render(
+            &RenderInput {
+                record: &thesis,
+                sha1: None,
+            },
+            &LookupTables::new(),
+        )
+        .text;
     assert_eq!(thesis_rendered, "A Study of Borax");
 
     let mut book = record_by("Jones", 2020, "10.1000/citation-keys-book");
     book.entry_type = EntryType::Book;
-    let book_rendered = table.render(&RenderInput {
-        record: &book,
-        sha1: None,
-    });
+    let book_rendered = table
+        .render(
+            &RenderInput {
+                record: &book,
+                sha1: None,
+            },
+            &LookupTables::new(),
+        )
+        .text;
     assert_eq!(
         book_rendered, "jones2020",
         "a type with no citation-key override still falls back to the default"
@@ -594,7 +628,7 @@ fn changing_templates_default_does_not_change_the_compiled_citation_key_table() 
     let citation_table = templates(&config.citation_keys, "citation-keys").unwrap();
     let record = record_by("Smith", 2024, "10.1000/templates-independent");
 
-    let key = citation_key(&record, None, &citation_table);
+    let key = citation_key(&record, None, &citation_table, &mut no_tables());
 
     assert_eq!(key, Some("smith2024".to_string()));
 }

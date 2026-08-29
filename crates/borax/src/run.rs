@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borax_core::ledger::Index;
 use borax_core::record::{EntryType, Record};
+use borax_core::tables::{Lookups, NoTables};
 use borax_core::template::{Template, TemplateTable};
 use borax_core::time::utc_basic;
 use borax_pdf::tiered::ExtractionConfig;
@@ -933,6 +934,11 @@ fn rename_events<C: Cache>(
     // miss.
     let checked = ledger.is_some().then_some(&collection);
 
+    // No tables are configured yet, so every template renders against
+    // none of them.
+    let none = NoTables::default();
+    let mut lookups = none.lookups();
+
     for group in groups {
         let effective = configs.for_directory(&group.directory);
         let config = bib_config(effective.config());
@@ -958,7 +964,8 @@ fn rename_events<C: Cache>(
             // The hash goes to the move rather than to a log beside
             // it: it travels on the `Renamed` event, so the run's log
             // records what each file was when it moved.
-            let event = applying.carry_out(&planning.plan(path, &file), file.hash.clone());
+            let event =
+                applying.carry_out(&planning.plan(path, &file, &mut lookups), file.hash.clone());
             // A sidecar goes beside the name the file now carries rather
             // than beside the one it has just lost, so where it lands is
             // where the move that just happened put it.
@@ -983,6 +990,7 @@ fn rename_events<C: Cache>(
                     &config,
                     adapters.bib_files,
                     sink,
+                    &mut lookups,
                 );
             }
         }
@@ -991,6 +999,10 @@ fn rename_events<C: Cache>(
             cited.merge(&config, adapters.bib_files, sink);
         }
     }
+
+    // Discarded until the run wiring that supplies real tables adds the
+    // event that reports them.
+    drop(lookups.take());
 
     stale.get().then(crate::ledger::stale_entries_warning)
 }
@@ -1010,6 +1022,14 @@ struct Citations {
 impl Citations {
     /// Write the sidecar for the file now at `path`, reporting it into
     /// `sink`, and keep `file` for the merge when it has a citation key.
+    ///
+    /// `lookups` supplies the tables the key's template consults and
+    /// collects the misses consulting them produced.
+    //
+    // Every parameter past the first two is forwarded to
+    // [`write_sidecar`] or to `sink` unchanged, so a struct bundling
+    // them would carry the same list one layer out and hide nothing.
+    #[allow(clippy::too_many_arguments)]
     fn add(
         &mut self,
         path: PathBuf,
@@ -1018,8 +1038,9 @@ impl Citations {
         config: &BibConfig,
         files: &dyn BibFiles,
         sink: &mut dyn Sink,
+        lookups: &mut Lookups<'_>,
     ) {
-        let (key, event) = write_sidecar(&path, &file, citation_keys, config, files);
+        let (key, event) = write_sidecar(&path, &file, citation_keys, config, files, lookups);
         if let Some(event) = event {
             sink.emit(event);
         }
@@ -1189,6 +1210,11 @@ fn bib_events<C: Cache>(
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
 ) {
+    // No tables are configured yet, so every template renders against
+    // none of them.
+    let none = NoTables::default();
+    let mut lookups = none.lookups();
+
     for group in groups {
         let effective = configs.for_directory(&group.directory);
         let config = bib_config(effective.config());
@@ -1203,12 +1229,17 @@ fn bib_events<C: Cache>(
                     &config,
                     adapters.bib_files,
                     sink,
+                    &mut lookups,
                 );
             }
         }
 
         cited.merge(&config, adapters.bib_files, sink);
     }
+
+    // Discarded until the run wiring that supplies real tables adds the
+    // event that reports them.
+    drop(lookups.take());
 }
 
 /// Where bibliography output goes, from `config`.
