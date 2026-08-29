@@ -602,10 +602,15 @@ pub enum Prepared {
         /// not be read — so the checks run against it either way and
         /// simply miss.
         ledger: Index,
-        /// The one thing the run has to say about its ledger: that
-        /// there was none to read, or that what there was could not be
-        /// trusted. `None` when there was nothing to report.
-        warning: Option<Diagnostic>,
+        /// What the run has to say, before it starts, about files that
+        /// are not its inputs: that there was no ledger to read or that
+        /// it could not be trusted, and every row a lookup table
+        /// dropped. Empty when there is nothing to report.
+        ///
+        /// A list rather than one slot because a table may drop several
+        /// rows and a run may read several tables, and a row silently
+        /// absent is the mistake external tables exist to prevent.
+        warnings: Vec<Diagnostic>,
     },
     /// `ledger rebuild`, with the report the regenerated ledger
     /// produced.
@@ -680,21 +685,28 @@ pub fn preflight<C: Cache>(
             None => Err(error("this system names no cache directory".to_string())),
         },
         Command::Rename { paths, .. } => {
-            let groups = compiled_groups(paths, configs)?;
+            let (groups, mut warnings) = compiled_groups(paths, configs)?;
             let prepared = crate::ledger::prepare(configs.run().config().ledger, adapters.ledger);
+            // After the tables', because a run that cannot trust its
+            // ledger should hear that before it hears about a row.
+            warnings.extend(prepared.diagnostic);
             Ok(Prepared::Grouped {
                 groups,
                 ledger: prepared.index,
-                warning: prepared.diagnostic,
+                warnings,
             })
         }
-        Command::Bib { paths } => Ok(Prepared::Grouped {
-            groups: compiled_groups(paths, configs)?,
-            // A bibliography run admits nothing, so it neither consults
-            // the ledger nor has cause to complain about not finding one.
-            ledger: Index::build(&[]),
-            warning: None,
-        }),
+        Command::Bib { paths } => {
+            let (groups, warnings) = compiled_groups(paths, configs)?;
+            Ok(Prepared::Grouped {
+                groups,
+                // A bibliography run admits nothing, so it neither
+                // consults the ledger nor has cause to complain about
+                // not finding one.
+                ledger: Index::build(&[]),
+                warnings,
+            })
+        }
     }
 }
 
@@ -707,14 +719,19 @@ pub fn preflight<C: Cache>(
 /// and a template that will not compile — filename or citation key, in
 /// any of the directories the run spans — each end the run before a
 /// single file is read.
-fn compiled_groups(paths: &[PathBuf], configs: &Configs) -> Result<Vec<Group>, Diagnostic> {
-    by_directory(paths)
+fn compiled_groups(
+    paths: &[PathBuf],
+    configs: &Configs,
+) -> Result<(Vec<Group>, Vec<Diagnostic>), Diagnostic> {
+    let mut warnings = Vec::new();
+    let groups = by_directory(paths)
         .into_iter()
         .map(|(directory, paths)| {
             let effective = configs.for_directory(&directory);
             // Before the templates, because compiling one is what
             // checks its `lookup` tokens against the declared names.
-            let (tables, used) = loaded_tables(effective)?;
+            let (tables, used, dropped) = loaded_tables(effective)?;
+            warnings.extend(dropped);
             let config = effective.config();
             Ok(Group {
                 filenames: templates(&config.templates, "templates", &tables)?,
@@ -725,7 +742,9 @@ fn compiled_groups(paths: &[PathBuf], configs: &Configs) -> Result<Vec<Group>, D
                 paths,
             })
         })
-        .collect()
+        .collect::<Result<Vec<Group>, Diagnostic>>()?;
+
+    Ok((groups, warnings))
 }
 
 /// The tables `effective` declares, read and loaded, with the record of
@@ -745,12 +764,17 @@ fn compiled_groups(paths: &[PathBuf], configs: &Configs) -> Result<Vec<Group>, D
 /// file syntax produces, only a test building a layer by hand — is read
 /// as given.
 ///
-/// The warnings [`Table::load`] produced — a row skipped for want of a
-/// key or a value cell — are discarded, there being nowhere yet in the
-/// run for a diagnostic about a file that is not one of its inputs.
-fn loaded_tables(effective: &Effective) -> Result<(LookupTables, Vec<TableUsed>), Diagnostic> {
+/// Every row [`Table::load`] drops — for want of a key cell or a value
+/// cell, or because its key folded to nothing — comes back as a warning
+/// naming the table, the file and the line. Dropping a row is not
+/// fatal, but a row silently absent from an abbreviation table is a
+/// wrong name nobody can account for, so it is said out loud.
+fn loaded_tables(
+    effective: &Effective,
+) -> Result<(LookupTables, Vec<TableUsed>, Vec<Diagnostic>), Diagnostic> {
     let mut tables = LookupTables::new();
     let mut used = Vec::new();
+    let mut warnings = Vec::new();
 
     for (name, declaration) in &effective.config().tables {
         let path = match effective.origin(&format!("tables.{name}.path")) {
@@ -776,8 +800,16 @@ fn loaded_tables(effective: &Effective) -> Result<(LookupTables, Vec<TableUsed>)
             value_column: declaration.value.clone(),
             values: declaration.values.kind(),
         };
-        let (table, _warnings) = Table::load(text, &spec)
+        let (table, dropped) = Table::load(text, &spec)
             .map_err(|failure| error(format!("tables.{name}: {failure}")))?;
+        warnings.extend(dropped.into_iter().map(|row| {
+            warning(format!(
+                "tables.{name}: \"{}\" line {}: {}",
+                path.display(),
+                row.line,
+                row.message
+            ))
+        }));
 
         used.push(TableUsed {
             name: name.clone(),
@@ -787,7 +819,7 @@ fn loaded_tables(effective: &Effective) -> Result<(LookupTables, Vec<TableUsed>)
         tables.insert(name.clone(), table);
     }
 
-    Ok((tables, used))
+    Ok((tables, used, warnings))
 }
 
 /// The tables every group of `prepared` read, by name and without
@@ -1626,14 +1658,11 @@ pub fn dispatch<C: Cache>(
     };
 
     // Before the stream opens, so what a `--json` consumer reads on
-    // stdout is the run and nothing else. One line: the ledger is read
-    // once for the whole run, so it has at most one thing to say.
-    if let Prepared::Grouped {
-        warning: Some(warning),
-        ..
-    } = &prepared
-    {
-        let _ = writeln!(streams.err, "{warning}");
+    // stdout is the run and nothing else.
+    if let Prepared::Grouped { warnings, .. } = &prepared {
+        for warning in warnings {
+            let _ = writeln!(streams.err, "{warning}");
+        }
     }
 
     let started = Event::RunStarted {
