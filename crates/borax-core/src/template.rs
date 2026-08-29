@@ -689,6 +689,11 @@ const ONE_ARGUMENT_FILTERS: [(&str, ArgumentBuilder); 3] = [
 /// configuration refuses that before the first file, so reaching it
 /// here would mean the check was skipped, and inventing a miss would
 /// report the wrong problem.
+///
+/// An empty `value` is likewise no miss. The record simply lacked the
+/// field, and a report exists to name a row the user should add — there
+/// is none to add for a work with no journal at all, and counting one
+/// would bury the real gaps among every thesis and preprint in a batch.
 fn lookup(
     value: &str,
     name: &str,
@@ -699,6 +704,12 @@ fn lookup(
     let Some(table) = tables.get(name) else {
         return String::new();
     };
+    // Nothing was looked up, so nothing is missing. A miss names a row
+    // the user should add, and there is none to add for a record that
+    // has no such field at all.
+    if value.is_empty() {
+        return String::new();
+    }
     match table.get(value) {
         Some(matched) => matched.render(input),
         None => {
