@@ -493,12 +493,22 @@ pub fn parse_tsv(text: &str) -> Result<(Vec<String>, Vec<Row>), TableError> {
 fn row_value(source: &str, kind: ValueKind, line: usize) -> Result<Value, TableError> {
     match kind {
         ValueKind::Text => Ok(Value::Text(source.to_string())),
-        ValueKind::Template => Template::compile(source)
-            .map(Value::Fragment)
-            .map_err(|error| TableError::BadFragment {
+        ValueKind::Template => {
+            let fragment = Template::compile(source).map_err(|error| TableError::BadFragment {
                 line,
                 source: source.to_string(),
                 error,
-            }),
+            })?;
+            // Indirection stops at one level, so this is a property of
+            // the compiled fragment rather than a guard at render time.
+            match fragment.tables().first() {
+                Some(table) => Err(TableError::NestedLookup {
+                    line,
+                    source: source.to_string(),
+                    table: table.to_string(),
+                }),
+                None => Ok(Value::Fragment(fragment)),
+            }
+        }
     }
 }

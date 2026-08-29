@@ -95,14 +95,14 @@ Deferred out of group 1: refusing a nested `lookup` needs the `lookup`
 filter and `Template::tables` from group 4, and rendering a fragment end
 to end needs the filter that reaches it.
 
-- [ ] 5.1 Red: a fragment containing `lookup` failing the load with the
+- [x] 5.1 Red: a fragment containing `lookup` failing the load with the
       table, the line and the refused table named
-- [ ] 5.2 Green: the `TableError::NestedLookup` check in `Table::load`
-- [ ] 5.3 Red: fragments rendering end to end — a flagged row giving
+- [x] 5.2 Green: the `TableError::NestedLookup` check in `Table::load`
+- [x] 5.3 Red: fragments rendering end to end — a flagged row giving
       `2024-ABB-146-1234`, an unflagged row in the same table giving
       `2024-AA-1234`, and a flagged row on a record with no volume
       giving `2024-ABB-1234` with no dangling separator
-- [ ] 5.4 Green: render a matched `Value::Fragment` against the same
+- [x] 5.4 Green: render a matched `Value::Fragment` against the same
       `RenderInput`, producing no misses of its own
 
 ## 6. Configuration
