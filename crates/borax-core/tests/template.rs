@@ -82,6 +82,27 @@ fn jcode_tables() -> LookupTables {
     tables
 }
 
+/// A `jcode` table over the real curated header plus a `code` column,
+/// valued on `code` rather than `abbreviation`, whose values are
+/// template fragments rather than literal text. One row is flagged with
+/// a volume-prefix fragment (`ABB[volume:prefix("-")]`); the other,
+/// `Amino Acids`, holds a plain `AA` with nothing to flag.
+fn jcode_fragment_tables() -> LookupTables {
+    let text = "abbreviation\ttitle\tshorttitle\tcode\n\
+                 AA\tAmino Acids\tAmino Acids\tAA\n\
+                 ABB-\tArchives of Biochemistry and Biophysics\tArch. Biochem. Biophys.\tABB[volume:prefix(\"-\")]\n";
+    let spec = TableSpec {
+        key_columns: vec!["title".to_string()],
+        value_column: "code".to_string(),
+        values: ValueKind::Template,
+    };
+    let (table, warnings) = Table::load(text, &spec).unwrap();
+    assert_eq!(warnings, Vec::new());
+    let mut tables = LookupTables::new();
+    tables.insert("jcode".to_string(), table);
+    tables
+}
+
 // ---------------------------------------------------------------------
 // Happy paths: literals, fields, alternatives, determinism
 // ---------------------------------------------------------------------
@@ -919,6 +940,89 @@ fn lookup_filter_misses_appear_in_template_evaluation_order() {
             },
         ]
     );
+}
+
+// ---------------------------------------------------------------------
+// 5.3 Fragments meet lookup: a matched fragment renders end to end
+// ---------------------------------------------------------------------
+
+#[test]
+fn spec_scenario_a_flagged_row_contributes_a_volume() {
+    let mut r = record();
+    r.container_title = Some("Archives of Biochemistry and Biophysics".to_string());
+    r.volume = Some("146".to_string());
+    r.pages = Some("1234-1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_fragment_tables();
+    let rendered = render_with_tables(
+        r#"[year]-[journal:lookup("jcode")]-[firstpage]"#,
+        &input,
+        &tables,
+    );
+    assert_eq!(rendered.text, "2024-ABB-146-1234");
+}
+
+#[test]
+fn spec_scenario_an_unflagged_row_in_the_same_table() {
+    let mut r = record();
+    r.container_title = Some("Amino Acids".to_string());
+    r.pages = Some("1234-1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_fragment_tables();
+    let rendered = render_with_tables(
+        r#"[year]-[journal:lookup("jcode")]-[firstpage]"#,
+        &input,
+        &tables,
+    );
+    assert_eq!(rendered.text, "2024-AA-1234");
+}
+
+#[test]
+fn spec_scenario_a_flagged_row_on_a_record_with_no_volume() {
+    // Load-bearing: the fragment's own `[volume:prefix("-")]` must
+    // contribute nothing, not a dangling separator, when the record has
+    // no volume.
+    let mut r = record();
+    r.container_title = Some("Archives of Biochemistry and Biophysics".to_string());
+    r.pages = Some("1234-1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_fragment_tables();
+    let rendered = render_with_tables(
+        r#"[year]-[journal:lookup("jcode")]-[firstpage]"#,
+        &input,
+        &tables,
+    );
+    assert_eq!(rendered.text, "2024-ABB-1234");
+}
+
+#[test]
+fn a_rendered_fragment_produces_no_misses_of_its_own() {
+    // The outer `lookup` hit, and a fragment cannot itself look
+    // anything up, so no miss is possible from inside it.
+    let mut r = record();
+    r.container_title = Some("Archives of Biochemistry and Biophysics".to_string());
+    r.volume = Some("146".to_string());
+    r.pages = Some("1234-1245".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_fragment_tables();
+    let rendered = render_with_tables(
+        r#"[year]-[journal:lookup("jcode")]-[firstpage]"#,
+        &input,
+        &tables,
+    );
+    assert_eq!(rendered.misses, Vec::new());
 }
 
 // ---------------------------------------------------------------------

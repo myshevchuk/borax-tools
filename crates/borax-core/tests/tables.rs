@@ -447,3 +447,58 @@ fn a_template_valued_cell_with_an_unclosed_bracket_fails_with_bad_fragment() {
         other => panic!("expected BadFragment, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------
+// 5.1 Nested lookup: a fragment may not contain `lookup`
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_fragment_containing_lookup_fails_to_load_with_nested_lookup() {
+    let text =
+        "abbreviation\ttitle\tshorttitle\n[journal:lookup(\"other\")]\tAmino Acids\tAmino Acids\n";
+    let err = Table::load(text, &title_to_fragment_abbreviation())
+        .expect_err("a fragment may not look up another table");
+    match err {
+        TableError::NestedLookup {
+            line,
+            source,
+            table,
+        } => {
+            assert_eq!(line, 2);
+            assert_eq!(source, "[journal:lookup(\"other\")]");
+            assert_eq!(table, "other");
+        }
+        other => panic!("expected NestedLookup, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_fragment_with_no_lookup_still_loads() {
+    // Guards against over-refusing: a fragment using other filters, with
+    // no `lookup` anywhere in it, is not caught by the same check.
+    let text =
+        "abbreviation\ttitle\tshorttitle\nABB[volume:prefix(\"-\")]\tAmino Acids\tAmino Acids\n";
+    let (table, warnings) = Table::load(text, &title_to_fragment_abbreviation()).expect("loads");
+    assert_eq!(warnings, Vec::new());
+    assert_eq!(
+        table.get("Amino Acids").expect("hit").source(),
+        "ABB[volume:prefix(\"-\")]"
+    );
+}
+
+#[test]
+fn a_text_valued_table_with_a_lookup_looking_cell_loads_and_substitutes_it_verbatim() {
+    // Literal values are data and are never inspected for `lookup`: the
+    // check only applies where `spec.values` is `ValueKind::Template`.
+    let text =
+        "abbreviation\ttitle\tshorttitle\n[journal:lookup(\"other\")]\tAmino Acids\tAmino Acids\n";
+    let (table, warnings) = Table::load(text, &title_to_abbreviation()).expect("loads");
+    assert_eq!(warnings, Vec::new());
+
+    let value = table.get("Amino Acids").expect("hit");
+    assert_eq!(value.source(), "[journal:lookup(\"other\")]");
+    assert_eq!(
+        value.render(&input(&record_with_year(2024))),
+        "[journal:lookup(\"other\")]"
+    );
+}
