@@ -172,8 +172,8 @@ to end needs the filter that reaches it.
 - [x] 8.5 `openspec/STATE.md`: record the new capability, and move book
       series from unstated to a named gap under "Not built yet" with
       `collection-title` as what it needs
-- [ ] 8.6 Full suite green on Linux, macOS and Windows; `cargo clippy`
+- [x] 8.6 Full suite green on Linux, macOS and Windows; `cargo clippy`
       clean; `openspec validate --specs` and
-      `scripts/check-spec-deltas.py` both pass. Green on Linux with
-      clippy, fmt and both spec checks clean; the other two platforms
-      are CI's to show, so this stays open until it has run
+      `scripts/check-spec-deltas.py` both pass. Confirmed by CI run
+      33255730279: all three platforms green, fmt and clippy clean on
+      each, spec deltas checked on Linux
