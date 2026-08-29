@@ -2,8 +2,8 @@
 
 use borax_core::identifier::{ArxivId, Doi};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record};
-use borax_core::tables::LookupTables;
-use borax_core::template::{RenderInput, Template, TemplateError, TemplateTable};
+use borax_core::tables::{LookupTables, Table, TableSpec, ValueKind};
+use borax_core::template::{Miss, RenderInput, Rendered, Template, TemplateError, TemplateTable};
 
 /// Lowercase hex digest used as the `sha1` field across tests.
 const SHA1: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
@@ -54,6 +54,32 @@ fn render(template: &str, input: &RenderInput<'_>) -> String {
         .unwrap()
         .render(input, &LookupTables::new())
         .text
+}
+
+/// Compile `template` and render it against `tables`, keeping the full
+/// [`Rendered`] (text and misses) rather than discarding the misses the
+/// way [`render`] does.
+fn render_with_tables(template: &str, input: &RenderInput<'_>, tables: &LookupTables) -> Rendered {
+    Template::compile(template).unwrap().render(input, tables)
+}
+
+/// A `jcode` table over one row of the real curated file
+/// (`journal_titles.tsv`): `JACS` maps `title` to `abbreviation`. Keyed
+/// on `title` alone, so the `shorttitle` column (`J. Am. Chem. Soc.`) is
+/// not a key of this table.
+fn jcode_tables() -> LookupTables {
+    let text = "abbreviation\ttitle\tshorttitle\n\
+                 JACS\tJournal of the American Chemical Society\tJ. Am. Chem. Soc.\n";
+    let spec = TableSpec {
+        key_columns: vec!["title".to_string()],
+        value_column: "abbreviation".to_string(),
+        values: ValueKind::Text,
+    };
+    let (table, warnings) = Table::load(text, &spec).unwrap();
+    assert_eq!(warnings, Vec::new());
+    let mut tables = LookupTables::new();
+    tables.insert("jcode".to_string(), table);
+    tables
 }
 
 // ---------------------------------------------------------------------
@@ -723,6 +749,179 @@ fn alternatives_compile_without_surrounding_whitespace() {
 }
 
 // ---------------------------------------------------------------------
+// Lookup filter and misses
+// ---------------------------------------------------------------------
+
+#[test]
+fn lookup_filter_hit_substitutes_the_tables_value() {
+    let mut r = record();
+    r.container_title = Some("Journal of the American Chemical Society".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_tables();
+    let rendered = render_with_tables(r#"[journal:lookup("jcode")]"#, &input, &tables);
+    assert_eq!(rendered.text, "JACS");
+}
+
+#[test]
+fn lookup_filter_hit_records_no_miss() {
+    let mut r = record();
+    r.container_title = Some("Journal of the American Chemical Society".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_tables();
+    let rendered = render_with_tables(r#"[journal:lookup("jcode")]"#, &input, &tables);
+    assert_eq!(rendered.misses, Vec::new());
+}
+
+#[test]
+fn lookup_filter_composes_with_a_following_filter() {
+    let mut r = record();
+    r.container_title = Some("Journal of the American Chemical Society".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_tables();
+    let rendered = render_with_tables(r#"[journal:lookup("jcode"):lower]"#, &input, &tables);
+    assert_eq!(rendered.text, "jacs");
+}
+
+#[test]
+fn lookup_filter_matching_folds_both_sides() {
+    // Differs from the table's key only by trailing punctuation and
+    // case; the fold that builds the table's keys is applied to the
+    // input too, so this still hits.
+    let mut r = record();
+    r.container_title = Some("journal of the american chemical society.".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_tables();
+    let rendered = render_with_tables(r#"[journal:lookup("jcode")]"#, &input, &tables);
+    assert_eq!(rendered.text, "JACS");
+    assert_eq!(rendered.misses, Vec::new());
+}
+
+#[test]
+fn lookup_filter_miss_renders_empty_and_records_a_miss() {
+    // The shared fixture's container title, "J. Chem. Ed.", is not a key
+    // of `jcode_tables`.
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_tables();
+    let rendered = render_with_tables(r#"[journal:lookup("jcode")]"#, &input, &tables);
+    assert_eq!(rendered.text, "");
+    assert_eq!(
+        rendered.misses,
+        vec![Miss {
+            table: "jcode".to_string(),
+            input: "J. Chem. Ed.".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn lookup_filter_miss_carries_the_input_as_the_record_held_it() {
+    // "J. Am. Chem. Soc." folds differently from the table's title-only
+    // key ("Journal of the American Chemical Society"), so it misses;
+    // the recorded miss carries the record's own spelling, not the
+    // folded form ("j-am-chem-soc").
+    let mut r = record();
+    r.container_title = Some("J. Am. Chem. Soc.".to_string());
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_tables();
+    let rendered = render_with_tables(r#"[journal:lookup("jcode")]"#, &input, &tables);
+    assert_eq!(
+        rendered.misses,
+        vec![Miss {
+            table: "jcode".to_string(),
+            input: "J. Am. Chem. Soc.".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn lookup_filter_miss_falls_through_to_an_alternative() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_tables();
+    let rendered = render_with_tables(
+        r#"[journal:lookup("jcode") || journal:abbr]"#,
+        &input,
+        &tables,
+    );
+    assert_eq!(rendered.text, "JCE");
+}
+
+#[test]
+fn lookup_filter_miss_is_recorded_even_when_an_alternative_supplied_the_output() {
+    // Load-bearing: the table lacking this journal is worth knowing
+    // about even though `abbr` covered for it in the rendered text.
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_tables();
+    let rendered = render_with_tables(
+        r#"[journal:lookup("jcode") || journal:abbr]"#,
+        &input,
+        &tables,
+    );
+    assert_eq!(rendered.text, "JCE");
+    assert_eq!(
+        rendered.misses,
+        vec![Miss {
+            table: "jcode".to_string(),
+            input: "J. Chem. Ed.".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn lookup_filter_misses_appear_in_template_evaluation_order() {
+    let r = record();
+    let input = RenderInput {
+        record: &r,
+        sha1: Some(SHA1),
+    };
+    let tables = jcode_tables();
+    let rendered = render_with_tables(
+        r#"[journal:lookup("jcode")]-[auth:lookup("jcode")]"#,
+        &input,
+        &tables,
+    );
+    assert_eq!(
+        rendered.misses,
+        vec![
+            Miss {
+                table: "jcode".to_string(),
+                input: "J. Chem. Ed.".to_string(),
+            },
+            Miss {
+                table: "jcode".to_string(),
+                input: "Smith".to_string(),
+            },
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------
 // Determinism
 // ---------------------------------------------------------------------
 
@@ -839,6 +1038,36 @@ fn affix_filter_unterminated_quoted_argument_is_syntax_error() {
 fn affix_filter_missing_closing_paren_is_syntax_error() {
     let err = Template::compile(r#"[auth:prefix("-"]"#).unwrap_err();
     assert!(matches!(err, TemplateError::Syntax { .. }));
+}
+
+// ---------------------------------------------------------------------
+// Template::tables
+// ---------------------------------------------------------------------
+
+#[test]
+fn template_tables_reports_tables_in_order_of_first_appearance() {
+    let template = Template::compile(r#"[journal:lookup("b")]-[auth:lookup("a")]"#).unwrap();
+    assert_eq!(template.tables(), vec!["b", "a"]);
+}
+
+#[test]
+fn template_tables_deduplicates_a_table_looked_up_twice() {
+    let template =
+        Template::compile(r#"[journal:lookup("jcode")]-[auth:lookup("jcode")]"#).unwrap();
+    assert_eq!(template.tables(), vec!["jcode"]);
+}
+
+#[test]
+fn template_tables_is_empty_when_the_template_has_no_lookup() {
+    let template = Template::compile("[journal:abbr]").unwrap();
+    assert_eq!(template.tables(), Vec::<&str>::new());
+}
+
+#[test]
+fn template_tables_reports_tables_from_every_alternative() {
+    let template =
+        Template::compile(r#"[journal:lookup("jcode") || auth:lookup("author-table")]"#).unwrap();
+    assert_eq!(template.tables(), vec!["jcode", "author-table"]);
 }
 
 // ---------------------------------------------------------------------
