@@ -42,6 +42,26 @@ and still mandatory and pre-flushed for `rename --apply`. Re-running a
 corrected template is the ordinary answer, since files are identified by
 content rather than by name.
 
+`add-external-tables` is implemented on top of all four, on its branch
+and not yet released. A template can now consult a file the user
+curates outside borax: configuration declares named lookup tables by
+path and by which of their columns supply keys and values, and a
+`lookup("<table>")` filter substitutes what one holds for whatever
+reached it. Matching goes through the fold `slug` always performed,
+now public and stated normatively, because the point of the change is
+that one curated file answers the same way for borax and for the other
+tool that reads it. A table's values are literal text, or template
+fragments compiled when the table loads, which is how a row rather
+than a template decides whether a journal's volume belongs in the
+name; a fragment may not itself look anything up, so rendering stays
+total and terminating. Five publication fields — `volume`, `issue`,
+`pages`, `firstpage`, `publisher` — and the two affix filters that
+keep an absent segment from leaving its separator behind arrived with
+it. The failures are all in preflight beside template compilation, a
+miss renders empty and is reported once per distinct table and input
+and counted in the summary, and `run-started` names every table read
+by path and content digest.
+
 Tests run green on Linux, macOS and Windows, including integration
 tests over real PDFs and Windows coverage of the path shapes discovery
 and run-log placement depend on. A scheduled job exercises the real
@@ -69,6 +89,18 @@ first.
   Named out of scope in the `add-core-pipeline` proposal. Today such a
   file is reported unresolvable and skipped, which is correct but leaves
   a class of documents borax cannot help with.
+- **Book series.** The pattern external tables were built for applies
+  to book series as much as to journals — a code for the series, the
+  volume within it, the first page — and nothing can render it, because
+  `Record` has no `collection-title`. There is no value for a
+  `[series]` field to read and so no string for a table to fold, which
+  is why the field does not exist rather than existing and rendering
+  empty. What it needs is that record field: `collection-title` on the
+  model, both source readers populating it with their cassettes
+  re-recorded to show they do, and then one field variant and one more
+  row in the user's table. `add-external-tables` was deliberately built
+  so that is the whole of the work, and deferred it because it reaches
+  into `record-model` and `resolution` rather than because it is hard.
 - **Everything the design names as a later change**: no library index,
   search or watch mode; no OCR or interactive candidate picker; no XMP
   write-back, Zotero interop or Emacs package; no bibliography format

@@ -153,23 +153,23 @@ to end needs the filter that reaches it.
 
 ## 8. End to end and documentation
 
-- [ ] 8.1 An integration case rendering the target pattern over a fixture
+- [x] 8.1 An integration case rendering the target pattern over a fixture
       table, all from the one template: an article with a volume giving
       `2024-JACS-146-1234`, one without giving `2024-JACS-1234`, a
       fragment-valued row giving `2024-ABB-146-1234`, and an unflagged
       row in the same table giving `2024-AA-1234`
-- [ ] 8.2 A fixture TSV under `crates/borax/tests/` carrying the real
+- [x] 8.2 A fixture TSV under `crates/borax/tests/` carrying the real
       file's header plus a `code` column and a handful of rows, including
       one whose `title` and `shorttitle` are identical, one flagged
       fragment row and one unflagged
-- [ ] 8.3 `README.md`: the five fields and three filters in their tables,
+- [x] 8.3 `README.md`: the five fields and three filters in their tables,
       a section on external tables covering declaration, the four fold
       steps stated normatively, template-fragment values with the
       volume-flag example worked through, misses and how they are
       reported, and the warning that editing a table changes keys
       already cited
-- [ ] 8.4 `CHANGELOG.md` entry under Unreleased
-- [ ] 8.5 `openspec/STATE.md`: record the new capability, and move book
+- [x] 8.4 `CHANGELOG.md` entry under Unreleased
+- [x] 8.5 `openspec/STATE.md`: record the new capability, and move book
       series from unstated to a named gap under "Not built yet" with
       `collection-title` as what it needs
 - [ ] 8.6 Full suite green on Linux, macOS and Windows; `cargo clippy`

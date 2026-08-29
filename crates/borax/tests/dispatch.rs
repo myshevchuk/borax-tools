@@ -2427,3 +2427,160 @@ fn a_header_without_the_declared_value_column_ends_the_run_naming_the_table() {
     assert!(error.message.contains("tables.jcode"), "got {error:?}");
     assert!(error.message.contains("abbreviation"), "got {error:?}");
 }
+
+// ---------------------------------------------------------------------
+// the target pattern, end to end
+// ---------------------------------------------------------------------
+
+/// The curated journal file: the header the other tool already reads —
+/// `abbreviation`, `title`, `shorttitle` — plus the `code` column borax
+/// adds beside it, so what this exercises is one shared file and not a
+/// format of borax's own.
+const JOURNAL_TITLES: &str = include_str!("journal_titles.tsv");
+
+/// An [`Effective`] declaring `jcode` over the curated file as a
+/// fragment-valued table keyed on both title columns, with the pattern
+/// this whole change exists to render as its filename template.
+fn effective_for_the_target_pattern(path: &Path) -> Effective {
+    effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[year]-[journal:lookup(\"jcode\")]-[firstpage]".to_string(),
+        )]));
+        layer.tables = Some(BTreeMap::from([(
+            "jcode".to_string(),
+            TableDeclaration {
+                path: path.to_path_buf(),
+                key: KeyColumns::Many(vec!["title".to_string(), "shorttitle".to_string()]),
+                value: "code".to_string(),
+                values: ValueKindName::Template,
+            },
+        )]));
+    })
+}
+
+/// A 2024 article in `journal` on pages `1234-1245`, in `volume` when
+/// the record has one.
+fn article_on_pages(journal: &str, volume: Option<&str>, doi_value: &str) -> Record {
+    Record {
+        volume: volume.map(str::to_string),
+        pages: Some("1234-1245".to_string()),
+        ..article_in(journal, doi_value)
+    }
+}
+
+/// One run, one template, four journals: the flag that decides whether
+/// a volume belongs in the name lives in the curated file, so
+/// `[year]-[journal:lookup("jcode")]-[firstpage]` renders every shape
+/// the pattern has without knowing which journal it is naming.
+#[test]
+fn the_target_pattern_names_every_journal_shape_from_one_template() {
+    let directory = tempdir().unwrap();
+    let table = directory.path().join("journal_titles.tsv");
+    fs::write(&table, JOURNAL_TITLES).unwrap();
+
+    // Two flagged journals with a volume and without — one of them
+    // reached by the abbreviated spelling its `shorttitle` column holds
+    // — and an unflagged row in the same table.
+    let batch = [
+        (
+            "/lib/jacs.pdf",
+            "10.1000/jacs",
+            "Journal of the American Chemical Society",
+            Some("146"),
+            "/lib/2024-JACS-146-1234.pdf",
+        ),
+        (
+            "/lib/jacs-no-volume.pdf",
+            "10.1000/jacs-no-volume",
+            "Journal of the American Chemical Society",
+            None,
+            "/lib/2024-JACS-1234.pdf",
+        ),
+        (
+            "/lib/abb.pdf",
+            "10.1000/abb",
+            "Arch. Biochem. Biophys.",
+            Some("146"),
+            "/lib/2024-ABB-146-1234.pdf",
+        ),
+        (
+            "/lib/abb-no-volume.pdf",
+            "10.1000/abb-no-volume",
+            "Archives of Biochemistry and Biophysics",
+            None,
+            "/lib/2024-ABB-1234.pdf",
+        ),
+        (
+            "/lib/aa.pdf",
+            "10.1000/aa",
+            "Amino Acids",
+            Some("46"),
+            "/lib/2024-AA-1234.pdf",
+        ),
+    ];
+
+    let mut library = FakeLibrary::new();
+    let mut crossref = KeyedSource::new(SourceName::Crossref);
+    for (path, doi_value, journal, volume, _) in &batch {
+        library = library.with_file(
+            PathBuf::from(path),
+            hash_for(doi_value),
+            pdf_with_embedded_doi(doi_value),
+        );
+        crossref = crossref.answering(
+            &format!("doi:{doi_value}"),
+            article_on_pages(journal, *volume, doi_value),
+        );
+    }
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: batch.iter().map(|(path, ..)| PathBuf::from(path)).collect(),
+            apply: false,
+        },
+        &Configs::uniform(effective_for_the_target_pattern(&table)),
+        &adapters,
+    )
+    .unwrap();
+
+    let planned: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Planned { .. }))
+        .collect();
+    let expected: Vec<Event> = batch
+        .iter()
+        .map(|(path, _, _, _, target)| Event::Planned {
+            path: PathBuf::from(path),
+            target: PathBuf::from(target),
+        })
+        .collect();
+
+    assert_eq!(
+        planned,
+        expected.iter().collect::<Vec<&Event>>(),
+        "got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::LookupMissed { .. })),
+        "every journal is in the table, got {events:?}"
+    );
+}

@@ -1,0 +1,5 @@
+abbreviation	title	shorttitle	code
+AA	Amino Acids	Amino Acids	AA
+ABB-	Archives of Biochemistry and Biophysics	Arch. Biochem. Biophys.	ABB[volume:prefix("-")]
+JACS-	Journal of the American Chemical Society	J. Am. Chem. Soc.	JACS[volume:prefix("-")]
+ZFC	Zeitschrift für Chemie	Z. Chem.	ZFC

@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Templates can look a value up in a table you maintain outside borax.
+  A table is a tab-separated file with a header row, declared in the
+  new `[tables]` section of a configuration file, which names the
+  column supplying its keys and the column supplying its values rather
+  than fixing their positions — so one curated file can serve borax and
+  whatever else already reads it, and borax asks it for no column and
+  no column order it does not already have. A `lookup("<table>")`
+  filter substitutes what the named table holds for its input, so
+  `[journal:lookup("jcode")]` names a paper by the journal code you
+  decided on rather than by anything a source reports. Both sides of
+  the comparison are folded by the four steps the `slug` filter already
+  performs — transliterate, lowercase, every run outside `a-z0-9` to a
+  single `-`, trim the leading and trailing `-` — so `J Am Chem Soc`
+  reaches a row keyed `J. Am. Chem. Soc.` and the punctuation the
+  sources disagree about stops deciding anything. The README states
+  those four steps normatively, because they are the contract any other
+  tool reading the same file has to implement to resolve it the same
+  way.
+
+  A table's values are literal text unless its declaration says
+  `values = "template"`, in which case each is compiled as a template
+  fragment when the table loads. That is how a row varies the shape of
+  what it contributes and not only its content: a journal cited with
+  its volume holds `ABB[volume:prefix("-")]` where one cited without
+  holds `AA`, and `[year]-[journal:lookup("jcode")]-[firstpage]` names
+  both without knowing which is which. A fragment may not itself
+  contain a `lookup`, so indirection stops at one level and recursion
+  is impossible by construction.
+
+  Nothing in the mechanism executes, and rendering stays total: a
+  lookup that finds no row renders the empty string, so a `||`
+  alternative supplies the fallback. It is never silent, though — a
+  miss is reported once per distinct table and value however many files
+  hit it, and counted in the run summary, which is what tells you which
+  row to add to your file. Everything that is a property of the
+  declaration or of the file ends the run before the first file is
+  touched: a path that cannot be read, a header without a declared
+  column, two rows folding to one key with different values, a fragment
+  that will not compile, and a template naming a table nothing
+  declared. A relative path resolves against the directory of the
+  configuration file that declared it rather than the working
+  directory, so a `.borax.toml` can ship a table beside itself; `~` is
+  expanded here no more than anywhere else in borax. Each run's opening
+  event names every table it read by path and by a digest of its
+  contents, because a table is a file that changes and the run log has
+  to be able to say why a file got the name it did afterwards. Editing
+  one changes names — and citation keys already typed into documents —
+  for every work it now answers for.
+
+- Five fields join the template vocabulary: `volume`, `issue`, `pages`,
+  `publisher`, and `firstpage`, which renders `pages` up to its first
+  dash of any width, trimmed, and the whole value when it holds none.
+  A page range therefore yields its first page and an article number
+  such as `e0123456` or `045301` comes through whole. All five were
+  already on the record, populated wherever the source supplies them;
+  only the template engine could not reach them.
+
+- `prefix("<text>")` and `suffix("<text>")` put text before or after a
+  value and leave the empty string alone, which is how an optional
+  segment takes its separator with it:
+  `[year]-[journal:abbr][volume:prefix("-")]-[firstpage]` renders
+  `2024-JACS-146-1234` for a paper with a volume and `2024-JACS-1234`
+  for one without, rather than leaving `2024-JACS--1234` behind.
+
 ## [0.3.0] - 2026-08-29
 
 ### Removed
