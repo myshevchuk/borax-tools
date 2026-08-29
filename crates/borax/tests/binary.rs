@@ -175,3 +175,31 @@ fn two_rows_claiming_one_key_with_different_values_end_the_run_before_the_stream
 
     assert_refused(&output, "JCHS");
 }
+
+/// Spec requirement: "Tab-separated format contract" — a row with no
+/// value cell "MUST be skipped and reported as a warning, without
+/// aborting the load".
+///
+/// The warning is the whole point of the row being dropped rather than
+/// refused: an abbreviation silently absent from the table is a wrong
+/// name nobody can account for. So the run goes ahead, framing and all,
+/// and says on stderr which line it did not use.
+#[test]
+fn a_dropped_row_warns_and_the_run_goes_on() {
+    let home = tempfile::tempdir().expect("a temporary directory");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    library_declaring(
+        home.path(),
+        "abbreviation\ttitle\nAA\tAmino Acids\n\tArchives of Biochemistry\n",
+    );
+
+    let output = rename_json(home.path(), config_home.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stderr.contains("tables.jcode"), "got {stderr:?}");
+    assert!(stderr.contains("line 3"), "got {stderr:?}");
+    // The run was not refused: a dropped row is a warning, not a fault.
+    assert!(stdout.contains("run-started"), "got {stdout:?}");
+    assert!(stdout.contains("run-finished"), "got {stdout:?}");
+}
