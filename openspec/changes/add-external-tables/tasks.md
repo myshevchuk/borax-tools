@@ -174,4 +174,6 @@ to end needs the filter that reaches it.
       `collection-title` as what it needs
 - [ ] 8.6 Full suite green on Linux, macOS and Windows; `cargo clippy`
       clean; `openspec validate --specs` and
-      `scripts/check-spec-deltas.py` both pass
+      `scripts/check-spec-deltas.py` both pass. Green on Linux with
+      clippy, fmt and both spec checks clean; the other two platforms
+      are CI's to show, so this stays open until it has run

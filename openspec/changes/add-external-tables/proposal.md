@@ -46,8 +46,9 @@ journal.
   in the run summary. This is what tells the user which row to add.
 - **Five fields join the template vocabulary**: `volume`, `issue`,
   `pages`, `firstpage`, and `publisher`. All five are already on the
-  record and populated by the Crossref and OpenAlex readers; only the
-  template engine could not reach them.
+  record and populated wherever a source supplies them — Crossref sets
+  every one, OpenAlex all but `publisher` — and only the template
+  engine could not reach them.
 - **Two affix filters join the filter set**: `prefix("<text>")` and
   `suffix("<text>")`, each the identity on the empty string. This is
   how an absent segment takes its separator with it —

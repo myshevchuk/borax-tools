@@ -800,8 +800,12 @@ fn loaded_tables(
             value_column: declaration.value.clone(),
             values: declaration.values.kind(),
         };
-        let (table, dropped) = Table::load(text, &spec)
-            .map_err(|failure| error(format!("tables.{name}: {failure}")))?;
+        // The path is named as well as the table: a declaration is one
+        // line and the file it points at may be anywhere, so "which
+        // file has the bad line?" should not need a second lookup.
+        let (table, dropped) = Table::load(text, &spec).map_err(|failure| {
+            error(format!("tables.{name}: \"{}\": {failure}", path.display()))
+        })?;
         warnings.extend(dropped.into_iter().map(|row| {
             warning(format!(
                 "tables.{name}: \"{}\" line {}: {}",
