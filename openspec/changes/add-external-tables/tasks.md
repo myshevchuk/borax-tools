@@ -9,20 +9,19 @@ them pass without touching them.
 Work on branch `change/add-external-tables`. Groups 1–5 are `borax-core`
 and have no I/O; group 6 onward is the adapter.
 
-## 1. Table loading and the matching fold
+## 1. Table loading, the matching fold, and fragment values
 
 - [ ] 1.1 Promote `slug` in `crates/borax-core/src/template.rs` to `pub`
       with a doc comment stating the four folding steps normatively, and
       say in it that the fold is the contract other tools reimplement
-- [ ] 1.2 Sketch `crates/borax-core/src/tables.rs`: `Table`,
-      `TableSpec { key_columns, value_column }`, `LookupTables`,
-      `TableError`, and `parse_tsv` / `Table::load` / `Table::get`
-      signatures with `todo!()` bodies and full doc contracts
+- [x] 1.2 Sketch `crates/borax-core/src/tables.rs`: `Table`, `TableSpec`,
+      `ValueKind`, `Value`, `LookupTables`, `TableError`, `TableWarning`
+      and `parse_tsv` with `todo!()` bodies and full doc contracts
 - [ ] 1.3 Red: `crates/borax-core/tests/tables.rs` covering the TSV
       contract — header discovery, BOM, CRLF, blank lines, ignored extra
       columns, a row with a missing or empty key or value cell warning
       and skipping, and a declared column absent from the header failing
-- [ ] 1.4 Green: implement the parser
+- [ ] 1.4 Green: implement `parse_tsv`
 - [ ] 1.5 Red: fold and lookup cases — punctuation and case differences
       matching, `J. Am. Chem. Soc.` matching `J Am Chem Soc`,
       `Zeitschrift für Chemie` folding to `zeitschrift-fuer-chemie`, a
@@ -34,66 +33,77 @@ and have no I/O; group 6 onward is the adapter.
       complaint, and two rows folding alike with different values
       failing with both values named
 - [ ] 1.8 Green: implement multi-column keys and conflict detection
+- [ ] 1.9 Red: value kinds — a `ValueKind::Template` table compiling its
+      values at load, a value with an unclosed `[` failing with the
+      table, line and syntax error named, and a `ValueKind::Text` table
+      substituting a bracketed value verbatim
+- [ ] 1.10 Green: compile fragments during `Table::load`
 
-## 2. Template-fragment values
+## 2. The publication fields
 
-- [ ] 2.1 Extend `TableSpec` with the value kind, defaulting to literal
-      text, and give `Table` a value that is either a literal or a
-      compiled `Template`
-- [ ] 2.2 Red: `crates/borax-core/tests/tables.rs` cases — a fragment
-      table compiling its values at load, a value with an unclosed `[`
-      failing with the table, line and syntax error named, a value
-      containing `lookup` being refused with the filter named, and a
-      literal-valued table substituting a bracketed value verbatim
-- [ ] 2.3 Green: compile fragments during `Table::load`, with the
-      no-`lookup` check as a property of compilation
-
-## 3. The publication fields
-
-- [ ] 3.1 Red: `crates/borax-core/tests/template.rs` cases for `volume`,
+- [ ] 2.1 Red: `crates/borax-core/tests/template.rs` cases for `volume`,
       `issue`, `pages` and `publisher` rendering their record values and
       rendering empty when absent
-- [ ] 3.2 Red: `firstpage` cases — `1234-1245` → `1234`, an en-dash and
+- [ ] 2.2 Red: `firstpage` cases — `1234-1245` → `1234`, an en-dash and
       an em-dash range, whitespace around the separator, the article
       numbers `e0123456` and `045301` passing through whole, and an
       absent page value rendering empty
-- [ ] 3.3 Green: five `Field` variants, their parse arms and their render
+- [ ] 2.3 Green: five `Field` variants, their parse arms and their render
       arms
 
-## 4. The affix filters
+## 3. The affix filters
 
-- [ ] 4.1 Red: `prefix` and `suffix` cases — wrapping a present value,
+- [ ] 3.1 Red: `prefix` and `suffix` cases — wrapping a present value,
       returning the empty string unchanged, composing to the right of
       another filter, and the two quoted-argument parse errors (an
       unterminated argument, a missing closing paren)
-- [ ] 4.2 Red: the optional-segment case end to end —
+- [ ] 3.2 Red: the optional-segment case end to end —
       `[year]-[journal:abbr][volume:prefix("-")]-[firstpage]` rendering
       `2024-JACS-146-1234` with a volume and `2024-JACS-1234` without
-- [ ] 4.3 Green: two `Filter` variants reusing the existing
+- [ ] 3.3 Green: two `Filter` variants reusing the existing
       `parse_quoted`, and their apply arms
 
-## 5. The lookup filter and miss reporting
+## 4. The lookup filter and miss reporting
 
-- [ ] 5.1 Change `Template::render` to return `Rendered { text, misses }`
+- [ ] 4.1 Change `Template::render` to return `Rendered { text, misses }`
       and add `tables: &LookupTables` to `RenderInput`; update the
       `TemplateTable::render` signature to match
-- [ ] 5.2 Update every existing `render` call site and test in
+- [ ] 4.2 Update every existing `render` call site and test in
       `borax-core` to the new signature, asserting `misses` is empty
       where no lookup is involved — a mechanical commit of its own,
-      landed before the lookup behaviour so the red tests in 5.3 are the
+      landed before the lookup behaviour so the red tests in 4.3 are the
       only failing ones
-- [ ] 5.3 Red: lookup cases — a hit substituting the value, composing
+- [ ] 4.3 Red: lookup cases — a hit substituting the value, composing
       with a following filter, a miss rendering empty, a miss falling
       through to a `||` alternative, a miss recorded in `misses` even
       when an alternative supplied the output, and misses appearing in
       template evaluation order
-- [ ] 5.4 Green: the `Lookup` filter variant, its parse arm, its apply
+- [ ] 4.4 Green: the `Lookup` filter variant, its parse arm, its apply
       arm, and miss collection through `Chain` and `Segment`
-- [ ] 5.5 Red: compile-time refusal — `Template::compile` given a
-      `lookup` naming no declared table yields the unknown-table error
-      naming the table
-- [ ] 5.6 Green: thread the declared table names into `compile` and add
-      the `TemplateError::UnknownTable` variant with its `Display` arm
+- [ ] 4.5 Red: `Template::tables` reporting the tables a compiled
+      template looks up, in order of first appearance and deduplicated,
+      and load-time refusal of a template whose `lookup` names no
+      declared table
+- [ ] 4.6 Green: `Template::tables`, and the check in `run::templates`
+      that turns an undeclared name into
+      `templates.<key>: unknown table "<name>"` — one accessor rather
+      than a second `compile` signature, so no existing call site moves
+
+## 5. Fragments meet lookup
+
+Deferred out of group 1: refusing a nested `lookup` needs the `lookup`
+filter and `Template::tables` from group 4, and rendering a fragment end
+to end needs the filter that reaches it.
+
+- [ ] 5.1 Red: a fragment containing `lookup` failing the load with the
+      table, the line and the refused table named
+- [ ] 5.2 Green: the `TableError::NestedLookup` check in `Table::load`
+- [ ] 5.3 Red: fragments rendering end to end — a flagged row giving
+      `2024-ABB-146-1234`, an unflagged row in the same table giving
+      `2024-AA-1234`, and a flagged row on a record with no volume
+      giving `2024-ABB-1234` with no dangling separator
+- [ ] 5.4 Green: render a matched `Value::Fragment` against the same
+      `RenderInput`, producing no misses of its own
 
 ## 6. Configuration
 

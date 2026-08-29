@@ -605,7 +605,34 @@ fn title_case(value: &str) -> String {
     cased
 }
 
-fn slug(value: &str) -> String {
+/// The canonical matching key of `value`: the fold behind both the
+/// `slug` filter and every comparison [`crate::tables`] makes.
+///
+/// Four steps, in this order and no others:
+///
+/// 1. [`transliterate`] — fold the Latin letters that table names to
+///    ASCII, leaving every other character as it stands.
+/// 2. Lowercase, by Unicode default case conversion.
+/// 3. Replace every maximal run of characters outside `a-z0-9` with a
+///    single `-`.
+/// 4. Trim leading and trailing `-`.
+///
+/// So `Journal of the American Chemical Society.` and
+/// `J. Am. Chem. Soc.` fold to `journal-of-the-american-chemical-society`
+/// and `j-am-chem-soc`, and `Zeitschrift für Chemie` folds to
+/// `zeitschrift-fuer-chemie`.
+///
+/// The result is empty when no character survives — a title written
+/// entirely in a script step 1 does not cover. An empty fold is not a
+/// key: [`crate::tables`] neither stores nor matches one, because
+/// every such title would otherwise match every other.
+///
+/// These four steps are the contract another tool reimplements to
+/// resolve the same curated table the same way, which is why they are
+/// stated here rather than left to the implementation. Step 1 in
+/// particular is a choice and not a standard: it expands `ä` to `ae`
+/// in the German manner where Unicode NFKD would strip the diaeresis.
+pub fn slug(value: &str) -> String {
     let folded = transliterate(value).to_lowercase();
     let mut slug = String::with_capacity(folded.len());
     for c in folded.chars() {

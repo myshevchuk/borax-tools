@@ -10,5 +10,6 @@ pub mod ledger;
 pub mod record;
 pub mod rename;
 pub mod sanitize;
+pub mod tables;
 pub mod template;
 pub mod time;
