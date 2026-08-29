@@ -32,7 +32,8 @@ grammar production and no control flow.
 - Render `2024-JACS-146-1234` from a resolved article, and
   `2024-JACS-1234` from one with no volume, with one template.
 - A general mechanism, of which journal abbreviations are one case: any
-  named map from string to string, applied to any field.
+  named map from string to string, applied to any field, with room for a
+  row to vary the shape of what it contributes and not only its content.
 - Every failure that is a property of the configuration — a missing
   file, a missing column, an undeclared table, ambiguous rows — reported
   before the first file is processed.
@@ -307,7 +308,7 @@ an applied rename, that gap is worth one line per table.
 ### D11. The mechanism stops at maps
 
 "Externally supplied configuration" could mean many things. It means
-exactly one here: a named map from string to string, declared in
+exactly one here: a named map from string to a value, declared in
 configuration, applied by one filter. That covers journal abbreviations,
 publisher codes, series codes once a series field exists, and canonical
 author names.
@@ -316,7 +317,86 @@ Everything else stays out, and for one reason each: list-shaped data
 needs different semantics; templates loaded from files are already
 configuration; and anything executable would end the property that makes
 this design acceptable — that rendering is a total function of the
-record, the template and a fixed set of strings.
+record, the template and a fixed set of compiled templates (see D12).
+
+### D12. A table's values may be template fragments
+
+Some rows need to vary the *shape* of what they contribute, not only its
+content. The curated file records this today with an in-band flag: 90 of
+its 507 abbreviations end in `-`, meaning "the volume belongs in the
+key", so `Archives of Biochemistry and Biophysics` cites as
+`2024-ABB-146-1234` while `Amino Acids` cites as `2024-AA-1234`. The
+character is overloaded — `AC-A-FC` and `BDCG-B-A` use interior dashes
+as separators within the abbreviation — so the flag is positional, and
+it is legible only to a program that knows the convention.
+
+A table declaration may therefore state that its values are template
+fragments rather than literal text:
+
+```toml
+[tables.jcode]
+path   = "/home/<user>/lib/journal_titles.tsv"
+key    = ["title", "shorttitle"]
+value  = "code"
+values = "template"
+```
+
+The file gains one column, which the other reader ignores — jcode's
+parser keys rows by every header column and requires only
+`abbreviation` and `title`, so an added column is invisible to it:
+
+```text
+abbreviation    title                     shorttitle          code
+AA              Amino Acids               Amino Acids         AA
+ABB-            Archives of Bioch...      Arch. Biochem...    ABB[volume:prefix("-")]
+```
+
+and the template stops caring which kind of journal it is rendering:
+
+```text
+[year]-[journal:lookup("jcode")]-[firstpage]
+```
+
+Note the fragment is `ABB[volume:prefix("-")]` and not `ABB-[volume]`.
+The affix filter of D8 is what keeps a volume-flagged journal that
+happens to have no volume from rendering a dangling `ABB-`. The two
+features are separately motivated and solve this jointly, which is the
+evidence that the mechanism is one and not two patches.
+
+Constraints, all of them checkable before the first file is processed:
+
+- A fragment is compiled when the table loads, so a malformed one is a
+  configuration error naming the file, the line, and the offending
+  token. D7's fail-fast contract extends unchanged.
+- A fragment MUST NOT contain `lookup`. Indirection stops at one level,
+  recursion is impossible by construction, and the restriction is a
+  compile-time check rather than a runtime guard.
+- A fragment renders against the same record and file hash as the
+  template that reached it, so rendering stays total and deterministic
+  and needs no new context.
+
+*Rejected:* parsing every value as a template, with a literal being the
+degenerate case. No value in the curated file contains `[`, so it would
+work today; but it makes a stray bracket in some future table a
+confusing compile error, and it quietly ends "a table is data". One
+declaration line is worth keeping the default honest.
+
+*Rejected:* selector templates — generalizing what chooses a template so
+that a table, not only the entry type, can select one. It is the better
+answer when the variation is *structural*, a journal that reorders the
+segments or parenthesizes its issue, and when the data file must stay
+free of borax syntax. It costs a second selection axis in configuration
+with its own precedence rules, and two near-identical templates per
+variant. For appending a segment, fragments are smaller and compose
+better. Hold this for the first journal that wants a genuinely different
+key shape.
+
+*Rejected:* teaching borax the trailing-dash convention directly, by
+stripping it and appending the volume. It is the tailored solution
+jcode is entitled to and borax is not: it hard-codes one table's
+private encoding into a general mechanism, and it answers only this
+question. `-[issue]`, `-[firstpage]` and `[volume]([issue])` all fall
+out of fragments and none of them falls out of a dash.
 
 ## Risks / Trade-offs
 

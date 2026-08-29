@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: A lookup table is a named external file with declared key and value columns
-Configuration SHALL be able to declare named lookup tables, each naming a file to read, one or more columns supplying that table's keys, and one column supplying its values. A table is a map from string to string and holds no other power: it cannot execute, and it cannot influence a run except by substituting one string for another.
+Configuration SHALL be able to declare named lookup tables, each naming a file to read, one or more columns supplying that table's keys, and one column supplying its values. A table is a map from a string to a value, and it holds no other power: it cannot execute, and it cannot influence a run except by substituting what its value column holds for the string that matched.
 
 Declaring the key and value columns by name, rather than by position, is what lets one externally maintained file serve borax and other tools that read it in a different direction.
 
@@ -101,6 +101,8 @@ Keeping one of two conflicting rows silently is how a collection acquires a syst
 ### Requirement: The lookup filter substitutes a value or renders empty
 A `lookup("<table>")` filter SHALL replace its input with the value the named table holds for that input's matching key, and SHALL render the empty string when the table holds no such key. Rendering MUST NOT fail on a miss.
 
+When the matched value is a template fragment, what replaces the input is the fragment rendered against the same record and file hash as the template that reached it.
+
 Rendering empty is what makes a miss composable: the alternatives mechanism already selects the first chain producing non-empty output, so a fallback needs no new syntax.
 
 #### Scenario: A hit substitutes the table's value
@@ -117,6 +119,48 @@ Rendering empty is what makes a miss composable: the alternatives mechanism alre
 - **WHEN** `[journal:lookup("jcode")]` renders a record whose container
   title the table does not hold
 - **THEN** the token contributes nothing and the run continues
+
+### Requirement: A table may hold template fragments instead of literal values
+A table declaration SHALL be able to state that its value column holds template source rather than literal text, and every value of such a table MUST then be compiled as a template when the table loads. This is how one row varies the shape of what it contributes and not only its content: a journal cited with its volume holds `ABB[volume:prefix("-")]` where one cited without holds `AA`, and the template that looks either up is the same.
+
+Literal text SHALL remain the default, so a table says it holds fragments rather than being discovered to.
+
+A fragment MUST NOT contain a `lookup` filter. Indirection therefore stops at one level and recursion is impossible by construction, which is a property of compilation rather than a guard at render time.
+
+A fragment that will not compile, and one containing `lookup`, SHALL each be a configuration error naming the table, the file, the line, and the offending token, reported before any file is processed.
+
+#### Scenario: A flagged row contributes a volume
+- **WHEN** a fragment-valued table maps a container title to
+  `ABB[volume:prefix("-")]` and `[year]-[journal:lookup("jcode")]-[firstpage]`
+  renders a 2024 record in volume 146 with pages `1234-1245`
+- **THEN** it produces `2024-ABB-146-1234`
+
+#### Scenario: An unflagged row in the same table
+- **WHEN** the same template renders a record whose container title that
+  table maps to the fragment `AA`
+- **THEN** it produces `2024-AA-1234`
+
+#### Scenario: A flagged row on a record with no volume
+- **WHEN** the same template renders a record mapped to
+  `ABB[volume:prefix("-")]` whose volume is absent
+- **THEN** it produces `2024-ABB-1234`, with no separator left where the
+  volume would have been
+
+#### Scenario: Literal values are the default
+- **WHEN** a table declaration does not say its values are templates and
+  a value contains bracket characters
+- **THEN** that value is substituted verbatim, with no token rendered
+
+#### Scenario: A fragment that will not compile
+- **WHEN** a fragment-valued table holds a value with an unclosed `[`
+- **THEN** the run ends as a configuration error naming the table, the
+  line, and the syntax error, before any file is processed
+
+#### Scenario: A fragment may not look up
+- **WHEN** a fragment-valued table holds a value containing
+  `[journal:lookup("other")]`
+- **THEN** the run ends as a configuration error naming the table, the
+  line, and the refused filter
 
 ### Requirement: Unmatched lookups are reported
 A run SHALL report every distinct table-and-input pair for which a lookup found no row, and SHALL count them in its summary. Reporting is per distinct pair rather than per occurrence: a hundred files in one journal produce one report.

@@ -28,6 +28,13 @@ journal.
   it composes with every existing field and filter and is not tied to
   journals: `[journal:lookup("jcode")]`,
   `[publisher:lookup("pubcodes")]`.
+- **A table's values may be template fragments.** A declaration may say
+  its value column holds template source rather than literal text, so a
+  row can vary the *shape* of what it contributes and not only its
+  content — `ABB[volume:prefix("-")]` for a journal cited with its
+  volume, `AA` for one cited without. Fragments compile when the table
+  loads and may not themselves look up, so indirection stops at one
+  level and rendering stays total and deterministic.
 - **Keys match after normalization.** Both sides of a lookup are folded
   to a canonical key by the rules the existing `slug` filter already
   defines. A table row may draw its keys from more than one column, so
@@ -83,7 +90,9 @@ journal.
   helper is promoted to the public normalization function both the
   filter and the table loader use.
 - `crates/borax-core/src/tables.rs` (new): the TSV parser and the
-  key-folding, duplicate detection and lookup, all pure.
+  key-folding, duplicate detection and lookup, all pure. A table holds
+  either literal values or compiled template fragments, and compiling
+  the fragments is part of loading.
 - `crates/borax/src/config.rs`: a `tables` map beside `templates`, its
   TOML shape, its per-name merging, its `borax config` rendering, and
   the resolution of a relative table path against the file that
