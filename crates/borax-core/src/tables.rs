@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::template::{RenderInput, Template, TemplateError};
+use crate::template::{RenderInput, Template, TemplateError, slug};
 
 /// What a table's value column holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -68,7 +68,10 @@ impl Value {
     /// Two values are the same value exactly when their sources are
     /// equal, which is what conflict detection compares.
     pub fn source(&self) -> &str {
-        todo!("Value::source")
+        match self {
+            Value::Text(text) => text,
+            Value::Fragment(fragment) => fragment.source(),
+        }
     }
 
     /// Render this value against `input`.
@@ -76,16 +79,21 @@ impl Value {
     /// A literal renders itself. A fragment renders as a template,
     /// which cannot look anything up, so it produces no misses.
     pub fn render(&self, input: &RenderInput<'_>) -> String {
-        todo!("Value::render")
+        match self {
+            Value::Text(text) => text.clone(),
+            Value::Fragment(fragment) => fragment.render(input),
+        }
     }
 }
 
 /// A row skipped, or a key dropped, while loading a table. Loading
 /// continues: a malformed row is not a reason to refuse the file.
 ///
-/// Warnings are ordered by the line they concern. A row producing
-/// several — no key cell for two named columns, say — yields one
-/// warning per cause.
+/// Warnings are ordered by the line they concern. One row may produce
+/// several — no key cell for either of two named columns, say — but a
+/// row that contributes nothing at all stops at the cause that decided
+/// it, so a row with no value cell is warned about once whatever else
+/// is wrong with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableWarning {
     /// The 1-based line of the file the warning is about.
@@ -139,7 +147,35 @@ pub enum TableError {
 
 impl fmt::Display for TableError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!("TableError::fmt")
+        match self {
+            TableError::NoHeader => write!(f, "the file has no header row"),
+            TableError::MissingColumn { column } => {
+                write!(f, "the header has no column {column:?}")
+            }
+            TableError::NoKeyColumn => write!(f, "no key column was declared"),
+            TableError::Conflict {
+                key,
+                first,
+                second,
+                line,
+            } => write!(
+                f,
+                "line {line}: the key {key:?} is claimed by both {first:?} and {second:?}"
+            ),
+            TableError::BadFragment {
+                line,
+                source,
+                error,
+            } => write!(f, "line {line}: {source:?} does not compile: {error}"),
+            TableError::NestedLookup {
+                line,
+                source,
+                table,
+            } => write!(
+                f,
+                "line {line}: {source:?} looks up the table {table:?}, which a fragment may not do"
+            ),
+        }
     }
 }
 
@@ -173,9 +209,104 @@ impl Table {
     ///
     /// When `spec.values` is [`ValueKind::Template`], every value cell
     /// is compiled; a cell that will not compile, or that uses the
-    /// `lookup` filter, fails the load.
+    /// `lookup` filter, fails the load. Every cell means every cell:
+    /// a row none of whose keys survived is still compiled and can
+    /// still fail the load, because whether the file is well formed is
+    /// a property of the file and not of which rows happen to be
+    /// reachable.
+    ///
+    /// A `spec` naming no key column at all is [`TableError::NoKeyColumn`]
+    /// and is reported before `text` is looked at, being a fault in the
+    /// declaration rather than in the file.
     pub fn load(text: &str, spec: &TableSpec) -> Result<(Table, Vec<TableWarning>), TableError> {
-        todo!("Table::load")
+        if spec.key_columns.is_empty() {
+            return Err(TableError::NoKeyColumn);
+        }
+
+        let (header, rows) = parse_tsv(text)?;
+        let column = |name: &String| {
+            header
+                .iter()
+                .position(|heading| heading == name)
+                .ok_or_else(|| TableError::MissingColumn {
+                    column: name.clone(),
+                })
+        };
+        let key_columns = spec
+            .key_columns
+            .iter()
+            .map(&column)
+            .collect::<Result<Vec<usize>, TableError>>()?;
+        let value_column = column(&spec.value_column)?;
+
+        let mut entries: BTreeMap<String, Value> = BTreeMap::new();
+        let mut warnings = Vec::new();
+
+        for (line, cells) in rows {
+            let source = &cells[value_column];
+            if source.is_empty() {
+                warnings.push(TableWarning {
+                    line,
+                    message: format!(
+                        "no {:?} cell: the row substitutes nothing",
+                        spec.value_column
+                    ),
+                });
+                continue;
+            }
+
+            let mut keys: Vec<String> = Vec::new();
+            for (name, index) in spec.key_columns.iter().zip(&key_columns) {
+                let cell = &cells[*index];
+                if cell.is_empty() {
+                    warnings.push(TableWarning {
+                        line,
+                        message: format!("no {name:?} cell: the row contributes no key for it"),
+                    });
+                    continue;
+                }
+                let key = slug(cell);
+                if key.is_empty() {
+                    warnings.push(TableWarning {
+                        line,
+                        message: format!("{cell:?} folds to nothing, so it is not a key"),
+                    });
+                    continue;
+                }
+                // Two of a row's cells folding alike are one key, held
+                // once and neither warned about nor a conflict.
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+
+            if keys.is_empty() {
+                // A cell that will not compile is a property of the
+                // file, so it is refused even where no key reaches it.
+                row_value(source, spec.values, line)?;
+                continue;
+            }
+
+            for key in keys {
+                // A compiled fragment is not shareable, so each of a
+                // row's keys holds its own value.
+                let value = row_value(source, spec.values, line)?;
+                if let Some(held) = entries.get(&key) {
+                    if held.source() != value.source() {
+                        return Err(TableError::Conflict {
+                            key,
+                            first: held.source().to_string(),
+                            second: value.source().to_string(),
+                            line,
+                        });
+                    }
+                    continue;
+                }
+                entries.insert(key, value);
+            }
+        }
+
+        Ok((Table { entries }, warnings))
     }
 
     /// The value `input` matches, or `None` when no row folds to the
@@ -185,7 +316,8 @@ impl Table {
     /// value as it stands. An input folding to the empty string matches
     /// nothing.
     pub fn get(&self, input: &str) -> Option<&Value> {
-        todo!("Table::get")
+        // An empty fold is never held, so it misses without a guard.
+        self.entries.get(&slug(input))
     }
 
     /// How many keys the table holds. Rows contributing several keys
@@ -238,6 +370,10 @@ impl LookupTables {
     }
 }
 
+/// One parsed row: the 1-based line it came from, and its cells padded
+/// to the header's width.
+pub type Row = (usize, Vec<String>);
+
 /// Parse the text of a tab-separated file into a header and its rows.
 ///
 /// The first non-blank line is the header, split on tabs. Each
@@ -246,12 +382,61 @@ impl LookupTables {
 /// the rest, and cells beyond the header's width are dropped.
 ///
 /// A leading byte-order mark is stripped from the header's first
-/// column. Blank lines are skipped everywhere and CRLF endings are
-/// accepted. Rows carry the 1-based line they came from, for
-/// diagnostics.
+/// column. Nothing else is: a header cell written `"title "` keeps its
+/// space and will not match a declaration naming `title`, because
+/// trimming silently would be its own surprise.
+///
+/// A line is blank when it holds nothing but whitespace, so a line of
+/// tabs alone is skipped rather than becoming a row of empty cells.
+/// CRLF endings are accepted. Rows carry the 1-based line they came
+/// from, counting blank lines, for diagnostics.
 ///
 /// Fails only when there is no header row at all; a malformed row is
 /// the caller's problem to warn about.
-pub fn parse_tsv(text: &str) -> Result<(Vec<String>, Vec<(usize, Vec<String>)>), TableError> {
-    todo!("parse_tsv")
+pub fn parse_tsv(text: &str) -> Result<(Vec<String>, Vec<Row>), TableError> {
+    let mut lines = text
+        .lines()
+        .enumerate()
+        .map(|(index, line)| (index + 1, line))
+        .filter(|(_, line)| !line.trim().is_empty());
+
+    let (_, heading) = lines.next().ok_or(TableError::NoHeader)?;
+    let header: Vec<String> = heading
+        .strip_prefix('\u{feff}')
+        .unwrap_or(heading)
+        .split('\t')
+        .map(str::to_string)
+        .collect();
+
+    let rows: Vec<(usize, Vec<String>)> = lines
+        .map(|(line, row)| {
+            (
+                line,
+                row.split('\t')
+                    .map(str::to_string)
+                    .chain(std::iter::repeat_with(String::new))
+                    .take(header.len())
+                    .collect(),
+            )
+        })
+        .collect();
+
+    Ok((header, rows))
+}
+
+/// The value a row's cell substitutes: the text itself, or the fragment
+/// compiled from it, which fails the load when it will not compile.
+///
+/// `line` is the row's, for the error.
+fn row_value(source: &str, kind: ValueKind, line: usize) -> Result<Value, TableError> {
+    match kind {
+        ValueKind::Text => Ok(Value::Text(source.to_string())),
+        ValueKind::Template => Template::compile(source)
+            .map(Value::Fragment)
+            .map_err(|error| TableError::BadFragment {
+                line,
+                source: source.to_string(),
+                error,
+            }),
+    }
 }

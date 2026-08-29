@@ -61,10 +61,7 @@ fn record_with_year(year: i32) -> Record {
 }
 
 fn input(record: &Record) -> RenderInput<'_> {
-    RenderInput {
-        record,
-        sha1: None,
-    }
+    RenderInput { record, sha1: None }
 }
 
 // ---------------------------------------------------------------------
@@ -190,7 +187,11 @@ fn a_row_with_an_empty_value_cell_is_skipped_and_warned_about() {
     // The malformed row is dropped; the well-formed one still loads.
     assert_eq!(table.len(), 1);
     assert_eq!(table.get("Amino Acids").expect("hit").source(), "AA");
-    assert!(table.get("Archives of Biochemistry and Biophysics").is_none());
+    assert!(
+        table
+            .get("Archives of Biochemistry and Biophysics")
+            .is_none()
+    );
 }
 
 #[test]
@@ -283,7 +284,10 @@ fn diacritics_fold_in_the_german_manner_and_the_lookup_matches() {
     let text = "abbreviation\ttitle\tshorttitle\nZFC\tZeitschrift für Chemie\tZ. Chem.\n";
     let (table, warnings) = Table::load(text, &title_to_abbreviation()).expect("loads");
     assert_eq!(warnings, Vec::new());
-    assert_eq!(table.get("Zeitschrift für Chemie").expect("hit").source(), "ZFC");
+    assert_eq!(
+        table.get("Zeitschrift für Chemie").expect("hit").source(),
+        "ZFC"
+    );
     // The already-folded spelling matches too.
     assert_eq!(
         table.get("zeitschrift-fuer-chemie").expect("hit").source(),

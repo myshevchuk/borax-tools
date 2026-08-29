@@ -11,33 +11,33 @@ and have no I/O; group 6 onward is the adapter.
 
 ## 1. Table loading, the matching fold, and fragment values
 
-- [ ] 1.1 Promote `slug` in `crates/borax-core/src/template.rs` to `pub`
+- [x] 1.1 Promote `slug` in `crates/borax-core/src/template.rs` to `pub`
       with a doc comment stating the four folding steps normatively, and
       say in it that the fold is the contract other tools reimplement
 - [x] 1.2 Sketch `crates/borax-core/src/tables.rs`: `Table`, `TableSpec`,
       `ValueKind`, `Value`, `LookupTables`, `TableError`, `TableWarning`
       and `parse_tsv` with `todo!()` bodies and full doc contracts
-- [ ] 1.3 Red: `crates/borax-core/tests/tables.rs` covering the TSV
+- [x] 1.3 Red: `crates/borax-core/tests/tables.rs` covering the TSV
       contract — header discovery, BOM, CRLF, blank lines, ignored extra
       columns, a row with a missing or empty key or value cell warning
       and skipping, and a declared column absent from the header failing
-- [ ] 1.4 Green: implement `parse_tsv`
-- [ ] 1.5 Red: fold and lookup cases — punctuation and case differences
+- [x] 1.4 Green: implement `parse_tsv`
+- [x] 1.5 Red: fold and lookup cases — punctuation and case differences
       matching, `J. Am. Chem. Soc.` matching `J Am Chem Soc`,
       `Zeitschrift für Chemie` folding to `zeitschrift-fuer-chemie`, a
       key folding to empty being dropped with a warning, and an input
       folding to empty matching nothing
-- [ ] 1.6 Green: implement folding and lookup over the parsed rows
-- [ ] 1.7 Red: multi-column keys — one row contributing a key per named
+- [x] 1.6 Green: implement folding and lookup over the parsed rows
+- [x] 1.7 Red: multi-column keys — one row contributing a key per named
       column, an identical pair of cells contributing one key without
       complaint, and two rows folding alike with different values
       failing with both values named
-- [ ] 1.8 Green: implement multi-column keys and conflict detection
-- [ ] 1.9 Red: value kinds — a `ValueKind::Template` table compiling its
+- [x] 1.8 Green: implement multi-column keys and conflict detection
+- [x] 1.9 Red: value kinds — a `ValueKind::Template` table compiling its
       values at load, a value with an unclosed `[` failing with the
       table, line and syntax error named, and a `ValueKind::Text` table
       substituting a bracketed value verbatim
-- [ ] 1.10 Green: compile fragments during `Table::load`
+- [x] 1.10 Green: compile fragments during `Table::load`
 
 ## 2. The publication fields
 
