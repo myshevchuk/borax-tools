@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use borax_core::bib_output::DuplicatePolicy;
 use borax_core::rename::CollisionPolicy;
+use borax_core::tables::ValueKind;
 use borax_pdf::tiered::DEFAULT_PAGE_LIMIT;
 use borax_sources::pace::{DEFAULT_CONCURRENCY, DEFAULT_MIN_INTERVAL};
 use borax_sources::source::SourceName;
@@ -50,6 +51,14 @@ pub struct Config {
     /// independently. `default` is always present, for the reason it is
     /// under `templates`.
     pub citation_keys: BTreeMap<String, String>,
+    /// External lookup tables by the name a template addresses them
+    /// by, in the same open-ended shape as `templates`. Empty when no
+    /// layer declared one, which is the configuration a run with no
+    /// `lookup` in any template uses. Values are declarations, not
+    /// loaded tables: reading the files is
+    /// [`borax_core::tables::Table::load`]'s job and reports its own
+    /// errors.
+    pub tables: BTreeMap<String, TableDeclaration>,
     /// Which services may be asked. The order within it carries no
     /// meaning: which candidate an identifier goes to first is
     /// [`borax_sources::dispatch::priority`]'s decision, and this set
@@ -114,6 +123,7 @@ impl Default for Config {
                 "default".to_string(),
                 "[auth:lower][year]".to_string(),
             )]),
+            tables: BTreeMap::new(),
             sources: SourceName::SUPPORTED.to_vec(),
             mailto: None,
             collection_root: None,
@@ -146,6 +156,8 @@ pub struct Layer {
     #[serde(default, rename = "citation-keys")]
     pub citation_keys: Option<BTreeMap<String, String>>,
     #[serde(default)]
+    pub tables: Option<BTreeMap<String, TableDeclaration>>,
+    #[serde(default)]
     pub sources: Option<Vec<String>>,
     #[serde(default)]
     pub mailto: Option<String>,
@@ -163,6 +175,92 @@ pub struct Layer {
     pub extraction: Option<ExtractionLayer>,
     #[serde(default)]
     pub network: Option<NetworkLayer>,
+}
+
+/// One `[tables.<name>]` declaration: the file to read and which of
+/// its columns mean what.
+///
+/// Named columns rather than positional ones, because the file is
+/// maintained for other readers too and borax must not require a
+/// column order of it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableDeclaration {
+    /// The file to read. A relative path is resolved against the
+    /// directory of the configuration file that declared it, not the
+    /// working directory, so a file may name a table beside itself.
+    pub path: PathBuf,
+    /// The column, or columns, supplying keys.
+    pub key: KeyColumns,
+    /// The column supplying values.
+    pub value: String,
+    /// Whether values are literal text or template fragments. Text
+    /// unless the declaration says otherwise, so a value containing
+    /// brackets is data until a file asks for it to be a template.
+    #[serde(default)]
+    pub values: ValueKindName,
+}
+
+/// The key columns of a declaration, written as one name or as a list
+/// of them.
+///
+/// A single name is by far the common case and `key = "title"` is what
+/// a person writes; the list exists so that one row can be reachable
+/// by both its full title and its abbreviation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum KeyColumns {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl KeyColumns {
+    /// The columns named, in the order given.
+    pub fn columns(&self) -> Vec<String> {
+        match self {
+            KeyColumns::One(column) => vec![column.clone()],
+            KeyColumns::Many(columns) => columns.clone(),
+        }
+    }
+}
+
+/// How a declaration spells [`borax_core::tables::ValueKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ValueKindName {
+    #[default]
+    Text,
+    Template,
+}
+
+impl ValueKindName {
+    /// The kind this names.
+    pub fn kind(self) -> ValueKind {
+        match self {
+            ValueKindName::Text => ValueKind::Text,
+            ValueKindName::Template => ValueKind::Template,
+        }
+    }
+
+    /// The word a configuration file writes for this kind, for
+    /// `borax config`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ValueKindName::Text => "text",
+            ValueKindName::Template => "template",
+        }
+    }
+}
+
+/// `declared` as the run should read it, given the configuration file
+/// that declared it.
+///
+/// An absolute path is its own answer. A relative one is taken from
+/// the directory holding `config_file`, so a configuration file and
+/// the data file beside it travel together and a run started anywhere
+/// reads the same table.
+pub fn table_path(declared: &Path, config_file: &Path) -> PathBuf {
+    todo!("table_path")
 }
 
 /// The `[rename]` table of a layer.
@@ -305,6 +403,31 @@ impl Effective {
         }
         for (entry_type, template) in &self.config.citation_keys {
             rendered.insert(format!("citation-keys.{entry_type}"), quote(template));
+        }
+        for (name, declaration) in &self.config.tables {
+            rendered.insert(
+                format!("tables.{name}.path"),
+                quote(&declaration.path.to_string_lossy()),
+            );
+            rendered.insert(
+                format!("tables.{name}.key"),
+                match &declaration.key {
+                    KeyColumns::One(column) => quote(column),
+                    KeyColumns::Many(columns) => format!(
+                        "[{}]",
+                        columns
+                            .iter()
+                            .map(|column| quote(column))
+                            .collect::<Vec<String>>()
+                            .join(", ")
+                    ),
+                },
+            );
+            rendered.insert(format!("tables.{name}.value"), quote(&declaration.value));
+            rendered.insert(
+                format!("tables.{name}.values"),
+                quote(declaration.values.as_str()),
+            );
         }
 
         rendered
@@ -466,6 +589,10 @@ const SETTINGS: &[Setting] = &[
         },
     },
 ];
+
+/// The keys one `[tables.<name>]` declaration is addressed by, for
+/// origins and for `borax config`.
+const TABLE_FIELDS: [&str; 4] = ["path", "key", "value", "values"];
 
 /// A mutable handle on one setting's place in a [`Layer`], carrying the
 /// type that setting's values take.
@@ -730,6 +857,13 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
         for (entry_type, template) in layer.citation_keys.take().unwrap_or_default() {
             origins.insert(format!("citation-keys.{entry_type}"), origin.clone());
             config.citation_keys.insert(entry_type, template);
+        }
+
+        for (name, declaration) in layer.tables.take().unwrap_or_default() {
+            for field in TABLE_FIELDS {
+                origins.insert(format!("tables.{name}.{field}"), origin.clone());
+            }
+            config.tables.insert(name, declaration);
         }
     }
 
