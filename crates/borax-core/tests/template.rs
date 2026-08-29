@@ -1231,3 +1231,32 @@ fn template_table_render_dispatches_on_record_entry_type() {
         "Smith"
     );
 }
+
+/// A record with nothing to look up produced no lookup, so it produced
+/// no miss.
+///
+/// A miss exists to name a row the user should add. There is no row to
+/// add for a work with no journal — a thesis, a preprint — so reporting
+/// one would ask for an impossible edit and inflate the count of real
+/// gaps with every record that was never a candidate.
+#[test]
+fn lookup_filter_records_no_miss_for_an_empty_input() {
+    let mut record = Record::new(EntryType::Article);
+    record.issued = Some(DateParts {
+        year: 2024,
+        month: None,
+        day: None,
+    });
+
+    let rendered = render_with_tables(
+        "[journal:lookup(\"jcode\")]",
+        &RenderInput {
+            record: &record,
+            sha1: None,
+        },
+        &jcode_tables(),
+    );
+
+    assert_eq!(rendered.text, "");
+    assert_eq!(rendered.misses, Vec::new());
+}
