@@ -213,7 +213,22 @@ impl Template {
     /// table's own fragment from looking anything up. Rendering never
     /// consults it.
     pub fn tables(&self) -> Vec<&str> {
-        todo!("Template::tables")
+        let mut tables: Vec<&str> = Vec::new();
+        for segment in &self.segments {
+            let Segment::Token(chains) = segment else {
+                continue;
+            };
+            for chain in chains {
+                for filter in &chain.filters {
+                    if let Filter::Lookup(table) = filter
+                        && !tables.contains(&table.as_str())
+                    {
+                        tables.push(table);
+                    }
+                }
+            }
+        }
+        tables
     }
 
     /// Render the template. Within a token, chains are tried left to
@@ -270,7 +285,7 @@ impl Chain {
     ) -> String {
         let mut value = self.field.render(input);
         for filter in &self.filters {
-            value = filter.apply(&value, tables, misses);
+            value = filter.apply(&value, input, tables, misses);
         }
         value
     }
@@ -677,7 +692,13 @@ const ONE_ARGUMENT_FILTERS: [(&str, ArgumentBuilder); 3] = [
 // The stub uses none of its parameters and pushes into none of its
 // vectors; both expectations lapse once the body is written.
 #[expect(unused_variables, clippy::ptr_arg, reason = "unimplemented stub")]
-fn lookup(value: &str, table: &str, tables: &LookupTables, misses: &mut Vec<Miss>) -> String {
+fn lookup(
+    value: &str,
+    table: &str,
+    input: &RenderInput<'_>,
+    tables: &LookupTables,
+    misses: &mut Vec<Miss>,
+) -> String {
     todo!("lookup")
 }
 
@@ -723,7 +744,18 @@ fn short_title(title: &str, words: usize) -> String {
 }
 
 impl Filter {
-    fn apply(&self, value: &str, tables: &LookupTables, misses: &mut Vec<Miss>) -> String {
+    /// Apply this filter to `value`.
+    ///
+    /// Most filters are a function of `value` alone. `lookup` is not:
+    /// a table's value may be a template fragment, and rendering one
+    /// needs the same `input` the surrounding template renders against.
+    fn apply(
+        &self,
+        value: &str,
+        input: &RenderInput<'_>,
+        tables: &LookupTables,
+        misses: &mut Vec<Miss>,
+    ) -> String {
         match self {
             Filter::Lower => value.to_lowercase(),
             Filter::Upper => value.to_uppercase(),
@@ -739,7 +771,7 @@ impl Filter {
             Filter::Trunc(count) => value.chars().take(*count).collect(),
             Filter::Prefix(text) => affix(value, text, ""),
             Filter::Suffix(text) => affix(value, "", text),
-            Filter::Lookup(table) => lookup(value, table, tables, misses),
+            Filter::Lookup(table) => lookup(value, table, input, tables, misses),
             Filter::Regex { regex, replacement } => {
                 regex.replace_all(value, replacement.as_str()).into_owned()
             }
