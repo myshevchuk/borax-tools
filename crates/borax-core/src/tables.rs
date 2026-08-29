@@ -82,10 +82,16 @@ impl Value {
 
 /// A row skipped, or a key dropped, while loading a table. Loading
 /// continues: a malformed row is not a reason to refuse the file.
+///
+/// Warnings are ordered by the line they concern. A row producing
+/// several — no key cell for two named columns, say — yields one
+/// warning per cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableWarning {
     /// The 1-based line of the file the warning is about.
     pub line: usize,
+    /// What was skipped and why, for a diagnostic. Prose, not a
+    /// contract: callers match on [`TableWarning::line`].
     pub message: String,
 }
 
@@ -103,6 +109,12 @@ pub enum TableError {
     /// The declaration named no key column at all.
     NoKeyColumn,
     /// Two rows fold to one key but substitute different values.
+    ///
+    /// `first` is the value already held when the clash was found and
+    /// `second` the one that clashed with it, so `line` is the later
+    /// row's — the one a reader edits to resolve it. Values are
+    /// compared by [`Value::source`], so two fragments differ exactly
+    /// when their source text does.
     Conflict {
         key: String,
         first: String,
