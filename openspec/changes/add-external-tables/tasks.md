@@ -107,22 +107,22 @@ to end needs the filter that reaches it.
 
 ## 6. Configuration
 
-- [ ] 6.1 Red: `crates/borax/tests/config.rs` cases for the `[tables]`
+- [x] 6.1 Red: `crates/borax/tests/config.rs` cases for the `[tables]`
       TOML shape — a table with a single key column and with an array of
       them, merging per table name across layers, an unknown field
       inside a table declaration failing, and a `BORAX_TABLES_*`
       variable being refused as naming no setting
-- [ ] 6.2 Green: a `tables` map on `Config` and `Layer`, its per-name
+- [x] 6.2 Green: a `tables` map on `Config` and `Layer`, its per-name
       merge in `resolve` beside `templates`, and its `Origin` keys
       `tables.<name>.path`, `.key` and `.value`
-- [ ] 6.3 Red: `borax config` renders each declared table's path, key
+- [x] 6.3 Red: `borax config` renders each declared table's path, key
       columns, value column and value kind, with the origin of each
-- [ ] 6.4 Green: extend `Effective::entries` the way it already extends
+- [x] 6.4 Green: extend `Effective::entries` the way it already extends
       over `templates`
-- [ ] 6.5 Red: a relative `path` resolving against the directory of the
+- [x] 6.5 Red: a relative `path` resolving against the directory of the
       declaring file, for both the global file and a `.borax.toml`, with
       an unrelated working directory
-- [ ] 6.6 Green: resolve the path when the layer is built, where the
+- [x] 6.6 Green: resolve the path when the layer is built, where the
       declaring file's path is still known
 
 ## 7. Wiring the run

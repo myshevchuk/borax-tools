@@ -259,11 +259,17 @@ impl ValueKindName {
 /// the directory holding `config_file`, so a configuration file and
 /// the data file beside it travel together and a run started anywhere
 /// reads the same table.
-// The stub reads neither argument; the expectation lapses once the
-// body is written.
-#[expect(unused_variables, reason = "unimplemented stub")]
+///
+/// Joining is lexical and nothing is normalized: a `..` survives into
+/// the result rather than being collapsed. Collapsing it without
+/// asking the filesystem is wrong wherever a symlink sits above it,
+/// and the path is about to be opened anyway, which resolves it
+/// correctly and reports what it could not find.
 pub fn table_path(declared: &Path, config_file: &Path) -> PathBuf {
-    todo!("table_path")
+    match declared.is_absolute() {
+        true => declared.to_path_buf(),
+        false => config_file.parent().unwrap_or(Path::new("")).join(declared),
+    }
 }
 
 /// The `[rename]` table of a layer.
