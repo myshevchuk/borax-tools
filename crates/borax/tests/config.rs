@@ -153,6 +153,7 @@ fn layer_from_toml_parses_a_full_document_into_the_expected_layer() {
         Layer {
             templates: Some(templates),
             citation_keys: Some(citation_keys),
+            tables: None,
             sources: Some(vec!["crossref".to_string(), "arxiv".to_string()]),
             mailto: Some("test@example.org".to_string()),
             collection_root: Some(PathBuf::from("/archive")),

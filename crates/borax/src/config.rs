@@ -259,6 +259,9 @@ impl ValueKindName {
 /// the directory holding `config_file`, so a configuration file and
 /// the data file beside it travel together and a run started anywhere
 /// reads the same table.
+// The stub reads neither argument; the expectation lapses once the
+// body is written.
+#[expect(unused_variables, reason = "unimplemented stub")]
 pub fn table_path(declared: &Path, config_file: &Path) -> PathBuf {
     todo!("table_path")
 }
