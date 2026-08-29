@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use borax::event::{
-    Attempt, Counts, Diagnostic, Event, Format, Level, SCHEMA, SkipReason, human_line, json_line,
-    render,
+    Attempt, Counts, Diagnostic, Event, Format, Level, SCHEMA, SkipReason, TableUsed, human_line,
+    json_line, render,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::record::{EntryType, Record};
@@ -17,6 +17,20 @@ fn run_started() -> Event {
         command: "rename".to_string(),
         version: "0.1.0".to_string(),
         applying: true,
+        tables: Vec::new(),
+    }
+}
+
+fn run_started_with_a_table() -> Event {
+    Event::RunStarted {
+        command: "rename".to_string(),
+        version: "0.1.0".to_string(),
+        applying: true,
+        tables: vec![TableUsed {
+            name: "jcode".to_string(),
+            path: PathBuf::from("/collection/journals.tsv"),
+            digest: "sha256-abc123".to_string(),
+        }],
     }
 }
 
@@ -97,6 +111,13 @@ fn cache_cleared() -> Event {
     }
 }
 
+fn lookup_missed() -> Event {
+    Event::LookupMissed {
+        table: "jcode".to_string(),
+        input: "Amino Acids".to_string(),
+    }
+}
+
 fn ledger_rebuilt() -> Event {
     Event::LedgerRebuilt {
         root: PathBuf::from("/collection"),
@@ -110,6 +131,7 @@ fn run_finished() -> Event {
             resolved: 3,
             renamed: 2,
             skipped: 1,
+            unmatched: 0,
         },
     }
 }
@@ -153,6 +175,7 @@ fn all_events() -> Vec<Event> {
         config_setting(),
         cache_status(),
         cache_cleared(),
+        lookup_missed(),
         ledger_rebuilt(),
         run_finished(),
     ]
@@ -234,6 +257,7 @@ fn json_line_event_tag_is_the_variant_name_in_kebab_case() {
         (config_setting(), "config-setting"),
         (cache_status(), "cache-status"),
         (cache_cleared(), "cache-cleared"),
+        (lookup_missed(), "lookup-missed"),
         (ledger_rebuilt(), "ledger-rebuilt"),
         (run_finished(), "run-finished"),
     ];
@@ -297,7 +321,7 @@ fn json_line_of_run_finished_has_exactly_the_documented_field_set() {
 
     assert_eq!(
         object["counts"],
-        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1})
+        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1, "unmatched": 0})
     );
 }
 
@@ -754,22 +778,132 @@ fn counts_default_is_all_zeroes() {
             resolved: 0,
             renamed: 0,
             skipped: 0,
+            unmatched: 0,
         }
     );
 }
 
 #[test]
-fn counts_serializes_with_all_three_fields() {
+fn counts_serializes_with_all_four_fields() {
     let counts = Counts {
         resolved: 1,
         renamed: 2,
         skipped: 3,
+        unmatched: 4,
     };
     let value: Value = serde_json::to_value(counts).unwrap();
     assert_eq!(
         value,
-        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3})
+        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "unmatched": 4})
     );
+}
+
+// --- Event::LookupMissed ---
+
+#[test]
+fn json_line_of_lookup_missed_has_exactly_the_documented_field_set() {
+    let value: Value = serde_json::from_str(&json_line(&lookup_missed())).unwrap();
+    let object = value.as_object().unwrap();
+
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["event", "input", "schema", "table"]);
+
+    assert_eq!(object["table"], Value::from("jcode"));
+    assert_eq!(object["input"], Value::from("Amino Acids"));
+}
+
+/// The point of the line is which line to add to which file, so it says
+/// both, and quotes the input so a title with trailing punctuation is
+/// legible.
+#[test]
+fn human_line_of_lookup_missed_names_the_table_and_the_input() {
+    let line = human_line(&lookup_missed()).unwrap();
+
+    assert!(!line.contains('\n'));
+    assert!(line.contains("jcode"), "got {line:?}");
+    assert!(line.contains("Amino Acids"), "got {line:?}");
+}
+
+#[test]
+fn counts_observe_counts_a_lookup_missed_as_unmatched() {
+    let mut counts = Counts::default();
+    counts.observe(&lookup_missed());
+    counts.observe(&lookup_missed());
+
+    assert_eq!(
+        counts,
+        Counts {
+            resolved: 0,
+            renamed: 0,
+            skipped: 0,
+            unmatched: 2,
+        }
+    );
+}
+
+/// Spec scenario: "An unmatched journal is named once" — the summary
+/// half of it.
+#[test]
+fn the_summary_line_names_unmatched_lookups_when_there_were_any() {
+    let line = human_line(&Event::RunFinished {
+        counts: Counts {
+            resolved: 12,
+            renamed: 12,
+            skipped: 0,
+            unmatched: 1,
+        },
+    })
+    .unwrap();
+
+    assert!(line.contains("1 unmatched"), "got {line:?}");
+}
+
+/// Spec scenario: "A run with no misses reports none" — a zero count is
+/// carried in the JSON summary and left out of the prose one, there
+/// being nothing for a person to do about it.
+#[test]
+fn the_summary_line_says_nothing_about_unmatched_lookups_when_there_were_none() {
+    let line = human_line(&Event::RunFinished {
+        counts: Counts {
+            resolved: 3,
+            renamed: 2,
+            skipped: 1,
+            unmatched: 0,
+        },
+    })
+    .unwrap();
+
+    assert_eq!(line, "3 resolved, 2 renamed, 1 skipped");
+}
+
+// --- the tables a run read, on Event::RunStarted ---
+
+/// Spec scenario: "The run log identifies the table".
+#[test]
+fn json_line_of_run_started_names_each_table_by_path_and_digest() {
+    let value: Value = serde_json::from_str(&json_line(&run_started_with_a_table())).unwrap();
+
+    assert_eq!(
+        value["tables"],
+        serde_json::json!([{
+            "name": "jcode",
+            "path": "/collection/journals.tsv",
+            "digest": "sha256-abc123",
+        }])
+    );
+}
+
+#[test]
+fn json_line_of_run_started_carries_an_empty_table_list_when_none_was_read() {
+    let value: Value = serde_json::from_str(&json_line(&run_started())).unwrap();
+
+    assert_eq!(value["tables"], serde_json::json!([]));
+}
+
+#[test]
+fn human_line_of_run_started_is_silent_even_with_tables() {
+    assert_eq!(human_line(&run_started_with_a_table()), None);
 }
 
 // --- Diagnostic Display and Level ordering ---
@@ -840,6 +974,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
                 resolved: 2,
                 renamed: 1,
                 skipped: 1,
+                unmatched: 0,
             },
         },
     ];

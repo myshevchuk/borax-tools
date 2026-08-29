@@ -10,17 +10,18 @@
 //! is what tests use; the second is what the binary calls.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use borax_core::content::hash_bytes;
 use borax_core::ledger::Index;
 use borax_core::record::{EntryType, Record};
-use borax_core::tables::{Lookups, NoTables};
-use borax_core::template::{Template, TemplateTable};
+use borax_core::tables::{LookupTables, Lookups, Table, TableSpec};
+use borax_core::template::{Miss, Template, TemplateTable};
 use borax_core::time::utc_basic;
 use borax_pdf::tiered::ExtractionConfig;
 use borax_sources::arxiv::ArxivClient;
@@ -37,9 +38,9 @@ use crate::bib::{BibConfig, BibFiles, Keyed, RealBibFiles, merge_master, write_s
 use crate::cli::{Cli, Command, flag_layers};
 use crate::config::{
     Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
-    layer_from_toml, nearest_override, resolve,
+    layer_from_toml, nearest_override, resolve, table_path,
 };
-use crate::event::{Counts, Diagnostic, Event, Format, Level, render};
+use crate::event::{Counts, Diagnostic, Event, Format, Level, TableUsed, render};
 use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
@@ -455,16 +456,35 @@ pub fn entry_type(name: &str) -> Option<EntryType> {
 /// built-in defaults supply it and merging removes no key. Every other
 /// key names an entry type and overrides the default for it.
 ///
-/// A key naming no entry type, and a template that will not compile,
-/// are both [`Diagnostic`]s rather than skips: a template is
-/// configuration, so a broken one is wrong for every file in the batch
-/// and there is nothing to be gained by finding that out once per file.
+/// `declared` is the run's loaded tables, and a template looking up a
+/// name it does not hold is `{prefix}.{key}: unknown table "<name>"`.
+/// The check belongs here rather than in `Template::compile` because
+/// which tables exist is the configuration's business and not the
+/// template grammar's, and it happens here rather than at render time
+/// because a `lookup` that could never resolve would otherwise render
+/// empty on every file without ever saying why.
+///
+/// A key naming no entry type, a template that will not compile, and a
+/// template looking up an undeclared table are all [`Diagnostic`]s
+/// rather than skips: a template is configuration, so a broken one is
+/// wrong for every file in the batch and there is nothing to be gained
+/// by finding that out once per file.
 pub fn templates(
     map: &BTreeMap<String, String>,
     prefix: &str,
+    declared: &LookupTables,
 ) -> Result<TemplateTable, Diagnostic> {
     let compile = |key: &str, source: &str| {
-        Template::compile(source).map_err(|failure| error(format!("{prefix}.{key}: {failure}")))
+        let template = Template::compile(source)
+            .map_err(|failure| error(format!("{prefix}.{key}: {failure}")))?;
+        match template
+            .tables()
+            .into_iter()
+            .find(|name| !declared.contains(name))
+        {
+            Some(name) => Err(error(format!("{prefix}.{key}: unknown table {name:?}"))),
+            None => Ok(template),
+        }
     };
 
     let Some(default) = map.get(DEFAULT_TEMPLATE) else {
@@ -529,8 +549,9 @@ impl Sink for Vec<Event> {
 /// One directory's share of a run: the files below it, and the
 /// compiled templates its configuration calls for.
 ///
-/// A run spanning two trees is a run under two configurations, so both
-/// tables are the ones that directory's own configuration resolved to.
+/// A run spanning two trees is a run under two configurations, so every
+/// table here is the one that directory's own configuration resolved
+/// to.
 pub struct Group {
     /// The directory the group's configuration was resolved for.
     pub directory: PathBuf,
@@ -540,6 +561,10 @@ pub struct Group {
     pub filenames: TemplateTable,
     /// The citation-key templates, which name a cited record.
     pub citation_keys: TemplateTable,
+    /// The external tables this directory's templates may look up.
+    pub tables: LookupTables,
+    /// Those same tables as the run log names them.
+    pub used: Vec<TableUsed>,
 }
 
 /// What a run's fallible checks produced.
@@ -600,8 +625,11 @@ pub enum Prepared {
 /// something the whole invocation needs is missing, so there is no
 /// per-file verdict to report:
 ///
-/// - a template that will not compile, which is wrong for every file in
-///   the batch;
+/// - a template that will not compile, or one looking up a table no
+///   configuration declares, which is wrong for every file in the
+///   batch;
+/// - a declared table that cannot be read or will not load, which is
+///   wrong for every file the templates reaching it would have named;
 /// - `cache` with no cache directory, or with one that cannot be read,
 ///   because reporting an empty cache would answer a question that was
 ///   never asked;
@@ -671,25 +699,119 @@ pub fn preflight<C: Cache>(
 }
 
 /// `paths` grouped by directory ([`by_directory`]), each group paired
-/// with the template tables its directory's configuration compiles to.
+/// with the template tables its directory's configuration compiles to
+/// and the lookup tables it declares.
 ///
-/// Every group is compiled before any of them is worked, and both of a
-/// group's tables before either is used, so a template that will not
-/// compile — filename or citation key, in any of the directories the
-/// run spans — ends the run before a single file is read.
+/// Every group's lookup tables are loaded and both its template tables
+/// compiled before any group is worked, so a table that will not load
+/// and a template that will not compile — filename or citation key, in
+/// any of the directories the run spans — each end the run before a
+/// single file is read.
 fn compiled_groups(paths: &[PathBuf], configs: &Configs) -> Result<Vec<Group>, Diagnostic> {
     by_directory(paths)
         .into_iter()
         .map(|(directory, paths)| {
-            let config = configs.for_directory(&directory).config();
+            let effective = configs.for_directory(&directory);
+            // Before the templates, because compiling one is what
+            // checks its `lookup` tokens against the declared names.
+            let (tables, used) = loaded_tables(effective)?;
+            let config = effective.config();
             Ok(Group {
-                filenames: templates(&config.templates, "templates")?,
-                citation_keys: templates(&config.citation_keys, "citation-keys")?,
+                filenames: templates(&config.templates, "templates", &tables)?,
+                citation_keys: templates(&config.citation_keys, "citation-keys", &tables)?,
+                tables,
+                used,
                 directory,
                 paths,
             })
         })
         .collect()
+}
+
+/// The tables `effective` declares, read and loaded, with the record of
+/// them [`Event::RunStarted`] carries.
+///
+/// Every failure is a [`Diagnostic`] naming the table under
+/// `tables.<name>`: a file that cannot be read, one that is not UTF-8
+/// text, and everything [`borax_core::tables::TableError`] covers — a
+/// header without a declared column, a key two rows claim with
+/// different values. All of them are properties of the declaration or
+/// of the file, so they are the same for every input file and are
+/// reported before any of them is touched.
+///
+/// A relative `path` is resolved with [`table_path`] against the
+/// configuration file that declared it, which [`Effective::origin`]
+/// names; a declaration from anywhere else — which no configuration
+/// file syntax produces, only a test building a layer by hand — is read
+/// as given.
+///
+/// The warnings [`Table::load`] produced — a row skipped for want of a
+/// key or a value cell — are discarded, there being nowhere yet in the
+/// run for a diagnostic about a file that is not one of its inputs.
+fn loaded_tables(effective: &Effective) -> Result<(LookupTables, Vec<TableUsed>), Diagnostic> {
+    let mut tables = LookupTables::new();
+    let mut used = Vec::new();
+
+    for (name, declaration) in &effective.config().tables {
+        let path = match effective.origin(&format!("tables.{name}.path")) {
+            Some(Origin::GlobalFile(file) | Origin::DirectoryFile(file)) => {
+                table_path(&declaration.path, file)
+            }
+            _ => declaration.path.clone(),
+        };
+        let bytes = fs::read(&path).map_err(|failure| {
+            error(format!(
+                "tables.{name}: \"{}\" could not be read: {failure}",
+                path.display()
+            ))
+        })?;
+        let text = std::str::from_utf8(&bytes).map_err(|failure| {
+            error(format!(
+                "tables.{name}: \"{}\" is not UTF-8 text: {failure}",
+                path.display()
+            ))
+        })?;
+        let spec = TableSpec {
+            key_columns: declaration.key.columns(),
+            value_column: declaration.value.clone(),
+            values: declaration.values.kind(),
+        };
+        let (table, _warnings) = Table::load(text, &spec)
+            .map_err(|failure| error(format!("tables.{name}: {failure}")))?;
+
+        used.push(TableUsed {
+            name: name.clone(),
+            path,
+            digest: hash_bytes(&bytes).as_str().to_string(),
+        });
+        tables.insert(name.clone(), table);
+    }
+
+    Ok((tables, used))
+}
+
+/// The tables every group of `prepared` read, by name and without
+/// repeats, in name order.
+///
+/// A run spanning two trees is a run under two configurations and so
+/// possibly two sets of tables; what it reports is their union, since
+/// the question the run log has to answer is which files were consulted
+/// at all. A name two groups declare differently is reported as the
+/// first group read it, there being one slot for it and no way to say
+/// that a run used two files under one name.
+///
+/// Empty for every command that groups nothing, which is every command
+/// that reads no table.
+fn tables_used(prepared: &Prepared) -> Vec<TableUsed> {
+    let Prepared::Grouped { groups, .. } = prepared else {
+        return Vec::new();
+    };
+
+    let mut by_name: BTreeMap<&str, &TableUsed> = BTreeMap::new();
+    for used in groups.iter().flat_map(|group| &group.used) {
+        by_name.entry(&used.name).or_insert(used);
+    }
+    by_name.into_values().cloned().collect()
 }
 
 /// Write the events `command` produces into `sink`, between the run's
@@ -891,6 +1013,11 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// and trails the group, being work about the whole of it rather than
 /// about any one file.
 ///
+/// The lookups that found no row trail the whole run, one event per
+/// distinct table and input: a miss is about the table rather than
+/// about the file that happened to reveal it, and however many files
+/// met it there is one line to add.
+///
 /// Returns a warning when any entry the run matched turned out to
 /// name a file that is no longer there. It comes back at the end
 /// rather than as an event because it is one fact about the ledger and
@@ -934,10 +1061,9 @@ fn rename_events<C: Cache>(
     // miss.
     let checked = ledger.is_some().then_some(&collection);
 
-    // No tables are configured yet, so every template renders against
-    // none of them.
-    let none = NoTables::default();
-    let mut lookups = none.lookups();
+    // Across groups, because a table is named once for the run however
+    // many directories consult one under that name.
+    let mut missed = Missed::default();
 
     for group in groups {
         let effective = configs.for_directory(&group.directory);
@@ -946,6 +1072,9 @@ fn rename_events<C: Cache>(
         // write, and citing anyway would report records too sparse to
         // cite as skipped in a run that was never going to cite them.
         let cites = config.path.is_some() || config.sidecars;
+        // A group's own tables, since a run spanning two trees is a run
+        // under two configurations.
+        let mut lookups = Lookups::new(&group.tables);
 
         let mut planning = Planning::new(
             &group.directory,
@@ -986,9 +1115,11 @@ fn rename_events<C: Cache>(
                 cited.add(
                     current,
                     file,
-                    &group.citation_keys,
-                    &config,
-                    adapters.bib_files,
+                    &Citing {
+                        citation_keys: &group.citation_keys,
+                        config: &config,
+                        files: adapters.bib_files,
+                    },
                     sink,
                     &mut lookups,
                 );
@@ -998,13 +1129,58 @@ fn rename_events<C: Cache>(
         if cites {
             cited.merge(&config, adapters.bib_files, sink);
         }
+
+        missed.absorb(lookups.take());
     }
 
-    // Discarded until the run wiring that supplies real tables adds the
-    // event that reports them.
-    drop(lookups.take());
+    missed.report(sink);
 
     stale.get().then(crate::ledger::stale_entries_warning)
+}
+
+/// What a group cites under: the same three things for every file in
+/// it, so they travel together rather than as three parameters a caller
+/// could pair with the wrong group.
+struct Citing<'a> {
+    /// The citation-key templates compiled for the group's directory.
+    citation_keys: &'a TemplateTable,
+    /// Where the group's bibliography output goes.
+    config: &'a BibConfig,
+    /// The filesystem the sidecars and the master file are written
+    /// through.
+    files: &'a dyn BibFiles,
+}
+
+/// The lookups a run found no row for, gathered across its groups.
+///
+/// A miss is reported once per distinct table and input however many
+/// files produced it: what it tells the user is which line to add to
+/// their table, and that is one line whether one document wanted it or
+/// a hundred. Sorted rather than kept in the order the run met them, so
+/// the same batch reports the same lines whatever order its files came
+/// in.
+#[derive(Default)]
+struct Missed(BTreeSet<Miss>);
+
+impl Missed {
+    /// Take in everything one group's rendering recorded.
+    fn absorb(&mut self, misses: Vec<Miss>) {
+        self.0.extend(misses);
+    }
+
+    /// Report one [`Event::LookupMissed`] per distinct miss into `sink`.
+    ///
+    /// Emitted after the per-file events and before the run's last, the
+    /// misses being about the run rather than about any one of the
+    /// files that met them.
+    fn report(self, sink: &mut dyn Sink) {
+        for miss in self.0 {
+            sink.emit(Event::LookupMissed {
+                table: miss.table,
+                input: miss.input,
+            });
+        }
+    }
 }
 
 /// A directory group's citable records, held from the file each was
@@ -1023,24 +1199,26 @@ impl Citations {
     /// Write the sidecar for the file now at `path`, reporting it into
     /// `sink`, and keep `file` for the merge when it has a citation key.
     ///
-    /// `lookups` supplies the tables the key's template consults and
-    /// collects the misses consulting them produced.
-    //
-    // Every parameter past the first two is forwarded to
-    // [`write_sidecar`] or to `sink` unchanged, so a struct bundling
-    // them would carry the same list one layer out and hide nothing.
-    #[allow(clippy::too_many_arguments)]
+    /// `citing` is what the group cites under, which is the same for
+    /// every file in it, and `lookups` supplies the tables the key's
+    /// template consults and collects the misses consulting them
+    /// produced.
     fn add(
         &mut self,
         path: PathBuf,
         file: FileRecord,
-        citation_keys: &TemplateTable,
-        config: &BibConfig,
-        files: &dyn BibFiles,
+        citing: &Citing<'_>,
         sink: &mut dyn Sink,
         lookups: &mut Lookups<'_>,
     ) {
-        let (key, event) = write_sidecar(&path, &file, citation_keys, config, files, lookups);
+        let (key, event) = write_sidecar(
+            &path,
+            &file,
+            citing.citation_keys,
+            citing.config,
+            citing.files,
+            lookups,
+        );
         if let Some(event) = event {
             sink.emit(event);
         }
@@ -1204,30 +1382,37 @@ fn resolved_record<C: Cache>(
 /// Nothing here admits a file to the collection, so the ledger has no
 /// say in it: every file is resolved with no collection to check
 /// against, exactly as a run with no ledger is.
+///
+/// The lookups that found no row trail the whole run, as they do for
+/// [`rename_events`] and for the same reason.
 fn bib_events<C: Cache>(
     groups: &[Group],
     configs: &Configs,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
 ) {
-    // No tables are configured yet, so every template renders against
-    // none of them.
-    let none = NoTables::default();
-    let mut lookups = none.lookups();
+    // Across groups, because a table is named once for the run however
+    // many directories consult one under that name.
+    let mut missed = Missed::default();
 
     for group in groups {
         let effective = configs.for_directory(&group.directory);
         let config = bib_config(effective.config());
         let mut cited = Citations::default();
+        // A group's own tables, since a run spanning two trees is a run
+        // under two configurations.
+        let mut lookups = Lookups::new(&group.tables);
 
         for path in &group.paths {
             if let Some(file) = resolved_record(path, effective, adapters, None, sink) {
                 cited.add(
                     path.clone(),
                     file,
-                    &group.citation_keys,
-                    &config,
-                    adapters.bib_files,
+                    &Citing {
+                        citation_keys: &group.citation_keys,
+                        config: &config,
+                        files: adapters.bib_files,
+                    },
                     sink,
                     &mut lookups,
                 );
@@ -1235,11 +1420,10 @@ fn bib_events<C: Cache>(
         }
 
         cited.merge(&config, adapters.bib_files, sink);
+        missed.absorb(lookups.take());
     }
 
-    // Discarded until the run wiring that supplies real tables adds the
-    // event that reports them.
-    drop(lookups.take());
+    missed.report(sink);
 }
 
 /// Where bibliography output goes, from `config`.
@@ -1456,6 +1640,7 @@ pub fn dispatch<C: Cache>(
         command: cli.command.name().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         applying: applying(&cli.command),
+        tables: tables_used(&prepared),
     };
 
     // Before the first event reaches the terminal, and so before any

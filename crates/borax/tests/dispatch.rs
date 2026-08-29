@@ -9,7 +9,9 @@ use std::sync::OnceLock;
 use borax::bib::{BibFiles, citation_key};
 use borax::cache::{cleared_event, inspect, status_event};
 use borax::cli::{Cli, Command, Settings};
-use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
+use borax::config::{
+    BibLayer, Effective, KeyColumns, Layer, Origin, TableDeclaration, ValueKindName, resolve,
+};
 use borax::event::{Event, Level, SkipReason};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError, counts_for};
@@ -19,7 +21,7 @@ use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
-use borax_core::tables::{LookupTables, Lookups, NoTables};
+use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
 use borax_core::template::RenderInput;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_sources::cache::MemoryCache;
@@ -177,6 +179,44 @@ fn fake_source(name: SourceName, response: Result<Record, SourceError>) -> FakeS
     FakeSource { name, response }
 }
 
+/// A [`Source`] answering per identifier, for a batch whose files must
+/// resolve to records that differ.
+struct KeyedSource {
+    name: SourceName,
+    answers: BTreeMap<String, Record>,
+}
+
+impl KeyedSource {
+    fn new(name: SourceName) -> KeyedSource {
+        KeyedSource {
+            name,
+            answers: BTreeMap::new(),
+        }
+    }
+
+    fn answering(mut self, identifier: &str, record: Record) -> KeyedSource {
+        self.answers.insert(identifier.to_string(), record);
+        self
+    }
+}
+
+impl Source for KeyedSource {
+    fn name(&self) -> SourceName {
+        self.name
+    }
+
+    fn supports(&self, _identifier: &Identifier) -> bool {
+        true
+    }
+
+    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+        match self.answers.get(&identifier.to_string()) {
+            Some(record) => Ok(record.clone()),
+            None => Err(SourceError::NotFound),
+        }
+    }
+}
+
 /// A [`Filesystem`] fake backed by a map from directory to the names
 /// present there, following the shape of the one in `renaming.rs`.
 /// Every [`Filesystem::rename`] call is recorded in order, so a test can
@@ -253,6 +293,22 @@ impl BibFiles for FakeBibFiles {
 // ---------------------------------------------------------------------
 // Other helpers
 // ---------------------------------------------------------------------
+
+/// A [`LookupTables`] holding one empty table under each of `names`,
+/// for the checks that only ask which names were declared.
+fn declaring(names: &[&str]) -> LookupTables {
+    let spec = TableSpec {
+        key_columns: vec!["title".to_string()],
+        value_column: "abbreviation".to_string(),
+        values: ValueKind::Text,
+    };
+    let mut tables = LookupTables::new();
+    for name in names {
+        let (table, _) = Table::load("title\tabbreviation\n", &spec).unwrap();
+        tables.insert((*name).to_string(), table);
+    }
+    tables
+}
 
 /// A [`Lookups`] over no tables: nothing here declares one, and no
 /// template here looks one up.
@@ -423,7 +479,7 @@ fn a_config_with_only_a_default_template_compiles_to_a_table_whose_default_rende
         ..borax::config::Config::default()
     };
 
-    let table = templates(&config.templates, "templates").unwrap();
+    let table = templates(&config.templates, "templates", &LookupTables::new()).unwrap();
     let record = record_by("Smith", 2024, "10.1000/templates-default");
     let rendered = table
         .render(
@@ -448,7 +504,7 @@ fn a_specific_entry_type_overrides_the_default_and_other_types_still_use_it() {
         ..borax::config::Config::default()
     };
 
-    let table = templates(&config.templates, "templates").unwrap();
+    let table = templates(&config.templates, "templates", &LookupTables::new()).unwrap();
 
     let mut thesis = record_by("Jones", 2020, "10.1000/templates-thesis");
     thesis.entry_type = EntryType::Thesis;
@@ -492,7 +548,7 @@ fn a_key_naming_no_entry_type_is_an_error_naming_the_offending_key() {
         ..borax::config::Config::default()
     };
 
-    let error = templates(&config.templates, "templates").unwrap_err();
+    let error = templates(&config.templates, "templates", &LookupTables::new()).unwrap_err();
 
     assert_eq!(error.level, Level::Error);
     assert!(error.message.contains("journal-article"), "got {error:?}");
@@ -508,7 +564,7 @@ fn a_template_that_will_not_compile_is_an_error_mentioning_the_problem() {
         ..borax::config::Config::default()
     };
 
-    let error = templates(&config.templates, "templates").unwrap_err();
+    let error = templates(&config.templates, "templates", &LookupTables::new()).unwrap_err();
 
     assert_eq!(error.level, Level::Error);
     assert!(error.message.contains("nonexistentfield"), "got {error:?}");
@@ -526,7 +582,7 @@ fn a_config_with_only_a_default_citation_key_template_compiles_to_a_table_whose_
         ..borax::config::Config::default()
     };
 
-    let table = templates(&config.citation_keys, "citation-keys").unwrap();
+    let table = templates(&config.citation_keys, "citation-keys", &LookupTables::new()).unwrap();
     let record = record_by("Smith", 2024, "10.1000/citation-keys-default");
 
     let key = citation_key(&record, None, &table, &mut no_tables());
@@ -544,7 +600,7 @@ fn a_citation_key_override_for_one_entry_type_leaves_others_on_the_default() {
         ..borax::config::Config::default()
     };
 
-    let table = templates(&config.citation_keys, "citation-keys").unwrap();
+    let table = templates(&config.citation_keys, "citation-keys", &LookupTables::new()).unwrap();
 
     let mut thesis = record_by("Jones", 2020, "10.1000/citation-keys-thesis");
     thesis.entry_type = EntryType::Thesis;
@@ -588,7 +644,8 @@ fn a_citation_key_naming_no_entry_type_is_an_error_naming_the_prefixed_key() {
         ..borax::config::Config::default()
     };
 
-    let error = templates(&config.citation_keys, "citation-keys").unwrap_err();
+    let error =
+        templates(&config.citation_keys, "citation-keys", &LookupTables::new()).unwrap_err();
 
     assert_eq!(error.level, Level::Error);
     assert!(
@@ -604,7 +661,8 @@ fn an_uncompilable_citation_key_template_is_an_error_naming_the_prefixed_key() {
         ..borax::config::Config::default()
     };
 
-    let error = templates(&config.citation_keys, "citation-keys").unwrap_err();
+    let error =
+        templates(&config.citation_keys, "citation-keys", &LookupTables::new()).unwrap_err();
 
     assert_eq!(error.level, Level::Error);
     assert!(
@@ -612,6 +670,69 @@ fn an_uncompilable_citation_key_template_is_an_error_naming_the_prefixed_key() {
         "expected the citation-keys prefix on the offending key, got {error:?}"
     );
     assert!(error.message.contains("nonexistentfield"), "got {error:?}");
+}
+
+/// Spec scenario: "Lookup names no declared table".
+#[test]
+fn a_template_looking_up_an_undeclared_table_is_an_error_naming_the_key_and_the_table() {
+    let config = borax::config::Config {
+        templates: BTreeMap::from([(
+            "default".to_string(),
+            "[journal:lookup(\"jcode\")]".to_string(),
+        )]),
+        ..borax::config::Config::default()
+    };
+
+    let error = templates(&config.templates, "templates", &LookupTables::new()).unwrap_err();
+
+    assert_eq!(error.level, Level::Error);
+    assert_eq!(
+        error.message, "templates.default: unknown table \"jcode\"",
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn a_citation_key_looking_up_an_undeclared_table_is_an_error_naming_the_prefixed_key() {
+    let config = borax::config::Config {
+        citation_keys: BTreeMap::from([
+            ("default".to_string(), "[auth:lower][year]".to_string()),
+            (
+                "article".to_string(),
+                "[journal:lookup(\"pubcodes\")]".to_string(),
+            ),
+        ]),
+        ..borax::config::Config::default()
+    };
+
+    let error = templates(
+        &config.citation_keys,
+        "citation-keys",
+        &declaring(&["jcode"]),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.level, Level::Error);
+    assert_eq!(
+        error.message, "citation-keys.article: unknown table \"pubcodes\"",
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn a_template_looking_up_a_declared_table_compiles() {
+    let config = borax::config::Config {
+        templates: BTreeMap::from([(
+            "default".to_string(),
+            "[journal:lookup(\"jcode\")]".to_string(),
+        )]),
+        ..borax::config::Config::default()
+    };
+
+    assert!(
+        templates(&config.templates, "templates", &declaring(&["jcode"])).is_ok(),
+        "a declared table should satisfy the lookup"
+    );
 }
 
 /// The regression this change exists to prevent, at the level the real
@@ -625,7 +746,8 @@ fn changing_templates_default_does_not_change_the_compiled_citation_key_table() 
         ..borax::config::Config::default()
     };
 
-    let citation_table = templates(&config.citation_keys, "citation-keys").unwrap();
+    let citation_table =
+        templates(&config.citation_keys, "citation-keys", &LookupTables::new()).unwrap();
     let record = record_by("Smith", 2024, "10.1000/templates-independent");
 
     let key = citation_key(&record, None, &citation_table, &mut no_tables());
@@ -1872,4 +1994,436 @@ fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() 
         String::from_utf8_lossy(&out)
     );
     assert!(!err.is_empty(), "expected the diagnostic on stderr");
+}
+
+// ---------------------------------------------------------------------
+// external tables: loading, misses, and the run's opening event
+// ---------------------------------------------------------------------
+
+/// The fixture table every test below declares: two journals, keyed on
+/// their title, valued by their abbreviation.
+const JOURNALS: &str = "\
+title\tabbreviation
+Amino Acids\tAA
+Journal of the American Chemical Society\tJACS
+";
+
+/// An [`Effective`] declaring a `jcode` table over `path`, with `[auth]
+/// [year]-[journal:lookup("jcode")]` as its filename template — a name
+/// a miss still produces, so a run is not curtailed by one.
+fn effective_looking_up(path: &Path) -> Effective {
+    effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]-[journal:lookup(\"jcode\")]".to_string(),
+        )]));
+        layer.tables = Some(BTreeMap::from([(
+            "jcode".to_string(),
+            TableDeclaration {
+                path: path.to_path_buf(),
+                key: KeyColumns::One("title".to_string()),
+                value: "abbreviation".to_string(),
+                values: ValueKindName::Text,
+            },
+        )]));
+    })
+}
+
+/// An article in `journal`: [`record_by`]'s record with a container
+/// title, which is what a `lookup` on `journal` reads.
+fn article_in(journal: &str, doi_value: &str) -> Record {
+    Record {
+        container_title: Some(journal.to_string()),
+        ..record_by("Smith", 2024, doi_value)
+    }
+}
+
+#[test]
+fn a_lookup_that_hits_names_the_file_with_the_table_value() {
+    let directory = tempdir().unwrap();
+    let table = directory.path().join("journals.tsv");
+    fs::write(&table, JOURNALS).unwrap();
+
+    let path = PathBuf::from("/lib/paper.pdf");
+    let record = article_in("Amino Acids", "10.1000/lookup-hit");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("lookup-hit"),
+        pdf_with_embedded_doi("10.1000/lookup-hit"),
+    );
+    let crossref = fake_source(SourceName::Crossref, Ok(record.clone()));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: vec![path.clone()],
+            apply: false,
+        },
+        &Configs::uniform(effective_looking_up(&table)),
+        &adapters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        events.last().unwrap(),
+        &Event::Planned {
+            path,
+            target: PathBuf::from("/lib/Smith2024-AA.pdf"),
+        },
+        "got {events:?}"
+    );
+}
+
+/// Spec scenario: "An unmatched journal is named once".
+#[test]
+fn two_files_in_one_unlisted_journal_produce_one_lookup_missed_event() {
+    let directory = tempdir().unwrap();
+    let table = directory.path().join("journals.tsv");
+    fs::write(&table, JOURNALS).unwrap();
+
+    let first = PathBuf::from("/lib/one.pdf");
+    let second = PathBuf::from("/lib/two.pdf");
+    let record = article_in("Journal of Unlisted Results", "10.1000/unlisted");
+    let library = FakeLibrary::new()
+        .with_file(
+            &first,
+            hash_for("unlisted-one"),
+            pdf_with_embedded_doi("10.1000/unlisted"),
+        )
+        .with_file(
+            &second,
+            hash_for("unlisted-two"),
+            pdf_with_embedded_doi("10.1000/unlisted"),
+        );
+    let crossref = fake_source(SourceName::Crossref, Ok(record.clone()));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: vec![first, second],
+            apply: false,
+        },
+        &Configs::uniform(effective_looking_up(&table)),
+        &adapters,
+    )
+    .unwrap();
+
+    let missed: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::LookupMissed { .. }))
+        .collect();
+    assert_eq!(
+        missed,
+        vec![&Event::LookupMissed {
+            table: "jcode".to_string(),
+            input: "Journal of Unlisted Results".to_string(),
+        }],
+        "got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(Event::LookupMissed { .. })),
+        "misses follow the per-file events, got {events:?}"
+    );
+}
+
+#[test]
+fn two_unlisted_journals_produce_one_event_each_in_input_order() {
+    let directory = tempdir().unwrap();
+    let table = directory.path().join("journals.tsv");
+    fs::write(&table, JOURNALS).unwrap();
+
+    let first = PathBuf::from("/lib/one.pdf");
+    let second = PathBuf::from("/lib/two.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &first,
+            hash_for("two-unlisted-one"),
+            pdf_with_embedded_doi("10.1000/unlisted-one"),
+        )
+        .with_file(
+            &second,
+            hash_for("two-unlisted-two"),
+            pdf_with_embedded_doi("10.1000/unlisted-two"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/unlisted-one",
+            article_in("Acta Obscura", "10.1000/unlisted-one"),
+        )
+        .answering(
+            "doi:10.1000/unlisted-two",
+            article_in("Zeitschrift Obskur", "10.1000/unlisted-two"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::Rename {
+            paths: vec![first, second],
+            apply: false,
+        },
+        &Configs::uniform(effective_looking_up(&table)),
+        &adapters,
+    )
+    .unwrap();
+
+    let missed: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::LookupMissed { .. }))
+        .collect();
+    assert_eq!(
+        missed,
+        vec![
+            &Event::LookupMissed {
+                table: "jcode".to_string(),
+                input: "Acta Obscura".to_string(),
+            },
+            &Event::LookupMissed {
+                table: "jcode".to_string(),
+                input: "Zeitschrift Obskur".to_string(),
+            },
+        ],
+        "got {events:?}"
+    );
+}
+
+/// Spec scenario: "The run log identifies the table".
+#[test]
+fn run_started_names_each_table_read_by_path_and_digest() {
+    let directory = tempdir().unwrap();
+    let table = directory.path().join("journals.tsv");
+    fs::write(&table, JOURNALS).unwrap();
+
+    let path = PathBuf::from("/lib/paper.pdf");
+    let record = article_in("Amino Acids", "10.1000/run-started-tables");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("run-started-tables"),
+        pdf_with_embedded_doi("10.1000/run-started-tables"),
+    );
+    let crossref = fake_source(SourceName::Crossref, Ok(record.clone()));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::Rename {
+                paths: vec![path],
+                apply: false,
+            },
+            true,
+        ),
+        &Configs::uniform(effective_looking_up(&table)),
+        &adapters,
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let started: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+
+    assert_eq!(started["event"], "run-started");
+    assert_eq!(
+        started["tables"],
+        serde_json::json!([{
+            "name": "jcode",
+            "path": table,
+            "digest": hash_bytes(JOURNALS.as_bytes()).as_str(),
+        }]),
+        "got {started}"
+    );
+}
+
+#[test]
+fn a_run_that_reads_no_table_opens_with_an_empty_table_list() {
+    let effective = resolve(Vec::new()).unwrap();
+    let library = FakeLibrary::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::Config, true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let started: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+
+    assert_eq!(started["tables"], serde_json::json!([]));
+}
+
+/// Spec scenario: "Declared table file is missing".
+#[test]
+fn a_declared_table_that_cannot_be_read_ends_the_run_naming_the_table_and_the_path() {
+    let directory = tempdir().unwrap();
+    let table = directory.path().join("absent.tsv");
+
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("table-missing"),
+        pdf_with_embedded_doi("10.1000/table-missing"),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let error = events_for(
+        &Command::Rename {
+            paths: vec![path],
+            apply: false,
+        },
+        &Configs::uniform(effective_looking_up(&table)),
+        &adapters,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.level, Level::Error);
+    assert!(error.message.contains("tables.jcode"), "got {error:?}");
+    assert!(
+        error.message.contains(&table.display().to_string()),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn a_header_without_the_declared_value_column_ends_the_run_naming_the_table() {
+    let directory = tempdir().unwrap();
+    let table = directory.path().join("journals.tsv");
+    fs::write(&table, "title\tshorttitle\nAmino Acids\tAmino Acids\n").unwrap();
+
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("table-column"),
+        pdf_with_embedded_doi("10.1000/table-column"),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let error = events_for(
+        &Command::Rename {
+            paths: vec![path],
+            apply: false,
+        },
+        &Configs::uniform(effective_looking_up(&table)),
+        &adapters,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.level, Level::Error);
+    assert!(error.message.contains("tables.jcode"), "got {error:?}");
+    assert!(error.message.contains("abbreviation"), "got {error:?}");
 }

@@ -40,7 +40,17 @@ pub enum Event {
         command: String,
         version: String,
         applying: bool,
+        /// The external lookup tables the run loaded, in name order.
+        /// Rendering is deterministic given a table, but a table is a
+        /// file that changes, so a run log without this says what a run
+        /// did and not why it did it.
+        tables: Vec<TableUsed>,
     },
+    /// A lookup found no row. Reported once per distinct table and
+    /// input however many files hit it, because what it tells the user
+    /// is which line to add to their file, and that is one line however
+    /// many documents wanted it.
+    LookupMissed { table: String, input: String },
     /// A file's identifier was found and a record fetched for it.
     Resolved {
         path: PathBuf,
@@ -196,12 +206,26 @@ pub struct Attempt {
     pub error: String,
 }
 
+/// One external table a run read, identified well enough to explain a
+/// name it produced after the file has been edited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableUsed {
+    /// The name templates address it by.
+    pub name: String,
+    /// The file it was read from, as the run resolved it.
+    pub path: PathBuf,
+    /// A digest of the bytes it was read with.
+    pub digest: String,
+}
+
 /// What the run did, in totals.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Counts {
     pub resolved: usize,
     pub renamed: usize,
     pub skipped: usize,
+    /// Distinct lookups that found no row.
+    pub unmatched: usize,
 }
 
 impl Counts {
@@ -216,6 +240,7 @@ impl Counts {
             Event::Resolved { .. } => self.resolved += 1,
             Event::Renamed { .. } => self.renamed += 1,
             Event::Skipped { .. } => self.skipped += 1,
+            Event::LookupMissed { .. } => self.unmatched += 1,
             _ => {}
         }
     }
@@ -348,13 +373,24 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: cleared {entries} entries, {bytes} bytes",
             root.display()
         )),
+        Event::LookupMissed { table, input } => Some(format!("{table}: no row for {input:?}")),
         Event::LedgerRebuilt { root, entries } => Some(format!(
             "{}: rebuilt with {entries} entries",
             root.display()
         )),
+        // A zero count of unmatched lookups is left out rather than
+        // written as a zero: the JSON summary carries it either way,
+        // and a run that looked nothing up has nothing to say about
+        // tables it never consulted.
         Event::RunFinished { counts } => Some(format!(
-            "{} resolved, {} renamed, {} skipped",
-            counts.resolved, counts.renamed, counts.skipped
+            "{} resolved, {} renamed, {} skipped{}",
+            counts.resolved,
+            counts.renamed,
+            counts.skipped,
+            match counts.unmatched {
+                0 => String::new(),
+                unmatched => format!(", {unmatched} unmatched"),
+            }
         )),
     }
 }
