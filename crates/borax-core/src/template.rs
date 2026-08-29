@@ -15,12 +15,14 @@
 //! token     := "[" chain ( "||" chain )* "]"
 //! chain     := field ( ":" filter )*
 //! field     := "auth" | "authors" N? | "year" | "title"
-//!            | "shorttitle" N? | "journal" | "doi" | "arxiv"
-//!            | "sha1" | "entrytype"
+//!            | "shorttitle" N? | "journal" | "volume" | "issue"
+//!            | "pages" | "firstpage" | "publisher" | "doi"
+//!            | "arxiv" | "sha1" | "entrytype"
 //! filter    := "lower" | "upper" | "capitalize" | "titlecase"
 //!            | "camel" | "slug" | "abbr" | "transliterate"
-//!            | "trunc" N | regex-filter
+//!            | "trunc" N | regex-filter | affix-filter
 //! regex-filter := "regex(" qstring "," qstring ")"
+//! affix-filter := ( "prefix" | "suffix" ) "(" qstring ")"
 //! ```
 //!
 //! Literal text may contain any character except `[`, which always
@@ -47,6 +49,11 @@
 //!   words, compared case-insensitively, are: a, an, the, of, on, in,
 //!   for, and, or, to, with, at, by, from, into, upon.
 //! - `journal` — the container title, verbatim.
+//! - `volume` / `issue` / `publisher` — the record's values, verbatim.
+//! - `pages` — the page value, verbatim (`1234-1245`).
+//! - `firstpage` — the part of `pages` before the first `-`, `–` or
+//!   `—`, trimmed; the whole value when it holds none, so an article
+//!   number such as `e0123456` survives intact.
 //! - `doi` — the normalized DOI.
 //! - `arxiv` — the bare arXiv id (no version).
 //! - `sha1` — the file hash supplied in [`RenderInput`].
@@ -76,6 +83,11 @@
 //!   accented vowels à á â ã è é ê ë ì í î ï ò ó ô õ ù ú û ý (and
 //!   uppercase forms) lose their accent. Characters without a folding
 //!   pass through unchanged.
+//! - `prefix("text")` / `suffix("text")` — put `text` before or after
+//!   the value, and leave the empty string alone. Being the identity on
+//!   empty is the point: it lets a separator belong to the optional
+//!   segment it separates, so `[volume:prefix("-")]` contributes `-146`
+//!   or nothing at all.
 //! - `regex("pattern","replacement")` — replace every non-overlapping
 //!   match of the pattern ([`regex`] crate syntax; `$1` group
 //!   references work in the replacement). The pattern is compiled at
@@ -217,6 +229,13 @@ enum Field {
     Title,
     ShortTitle(usize),
     Journal,
+    Volume,
+    Issue,
+    Pages,
+    /// The page value up to the first dash of any width; the whole of
+    /// it when there is none.
+    FirstPage,
+    Publisher,
     Doi,
     Arxiv,
     Sha1,
@@ -234,7 +253,14 @@ enum Filter {
     Abbr,
     Transliterate,
     Trunc(usize),
-    Regex { regex: Regex, replacement: String },
+    /// Identity on the empty string; otherwise wraps its input.
+    Prefix(String),
+    /// Identity on the empty string; otherwise wraps its input.
+    Suffix(String),
+    Regex {
+        regex: Regex,
+        replacement: String,
+    },
 }
 
 /// How many words `shorttitle` keeps when no count is given.
@@ -374,6 +400,11 @@ impl<'a> Parser<'a> {
             "title" => Ok(Field::Title),
             "shorttitle" => Ok(Field::ShortTitle(DEFAULT_SHORT_TITLE_WORDS)),
             "journal" => Ok(Field::Journal),
+            "volume" => Ok(Field::Volume),
+            "issue" => Ok(Field::Issue),
+            "pages" => Ok(Field::Pages),
+            "firstpage" => Ok(Field::FirstPage),
+            "publisher" => Ok(Field::Publisher),
             "doi" => Ok(Field::Doi),
             "arxiv" => Ok(Field::Arxiv),
             "sha1" => Ok(Field::Sha1),
@@ -399,6 +430,12 @@ impl<'a> Parser<'a> {
             self.position += "regex(".len();
             return self.parse_regex();
         }
+        for (name, build) in AFFIXES {
+            if self.rest().starts_with(name) {
+                self.position += name.len();
+                return Ok(build(self.parse_affix()?));
+            }
+        }
         let name = self.parse_name();
         if name.is_empty() {
             return self.syntax("expected a filter name");
@@ -420,6 +457,12 @@ impl<'a> Parser<'a> {
                 }),
             },
         }
+    }
+
+    /// Parse the single quoted argument of a `prefix(` or `suffix(`
+    /// whose opening parenthesis has been consumed.
+    fn parse_affix(&mut self) -> Result<String, TemplateError> {
+        todo!("Parser::parse_affix")
     }
 
     /// Parse the two quoted arguments of a `regex(` whose opening
@@ -513,6 +556,11 @@ impl Field {
                 short_title(record.title.as_deref().unwrap_or_default(), words)
             }
             Field::Journal => record.container_title.clone().unwrap_or_default(),
+            Field::Volume => record.volume.clone().unwrap_or_default(),
+            Field::Issue => record.issue.clone().unwrap_or_default(),
+            Field::Pages => record.pages.clone().unwrap_or_default(),
+            Field::FirstPage => first_page(record.pages.as_deref().unwrap_or_default()),
+            Field::Publisher => record.publisher.clone().unwrap_or_default(),
             Field::Doi => record
                 .doi
                 .as_ref()
@@ -540,6 +588,25 @@ fn render_authors(authors: &[Name], limit: Option<usize>) -> String {
         families.push("etal");
     }
     families.join("-")
+}
+
+/// The prefixes that open an affix filter, each with what to build
+/// from the argument that follows.
+const AFFIXES: [(&str, fn(String) -> Filter); 2] =
+    [("prefix(", Filter::Prefix), ("suffix(", Filter::Suffix)];
+
+/// `pages` up to its first dash of any width, trimmed.
+///
+/// A value with no dash is its own first page, which is what keeps an
+/// article number (`e0123456`, `045301`) whole.
+fn first_page(pages: &str) -> String {
+    todo!("first_page")
+}
+
+/// `value` wrapped in `before` and `after`, or the empty string
+/// unchanged.
+fn affix(value: &str, before: &str, after: &str) -> String {
+    todo!("affix")
 }
 
 fn short_title(title: &str, words: usize) -> String {
@@ -570,6 +637,8 @@ impl Filter {
                 .collect(),
             Filter::Transliterate => transliterate(value),
             Filter::Trunc(count) => value.chars().take(*count).collect(),
+            Filter::Prefix(text) => affix(value, text, ""),
+            Filter::Suffix(text) => affix(value, "", text),
             Filter::Regex { regex, replacement } => {
                 regex.replace_all(value, replacement.as_str()).into_owned()
             }
