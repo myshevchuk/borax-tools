@@ -5,9 +5,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use borax::config::{
-    BibLayer, Config, ConfigError, ExtractionLayer, Layer, NetworkLayer, OVERRIDE_FILE, Origin,
-    RenameLayer, collection_root, global_config_path, layer_from_env, layer_from_toml,
-    nearest_override, resolve,
+    BibLayer, Config, ConfigError, ExtractionLayer, KeyColumns, Layer, NetworkLayer, OVERRIDE_FILE,
+    Origin, RenameLayer, TableDeclaration, ValueKindName, collection_root, global_config_path,
+    layer_from_env, layer_from_toml, nearest_override, resolve, table_path,
 };
 use borax::event::Event;
 use borax_core::bib_output::DuplicatePolicy;
@@ -440,6 +440,121 @@ fn layer_from_toml_rejects_templates_given_a_scalar() {
     }
 }
 
+// --- table declarations ---
+
+#[test]
+fn layer_from_toml_parses_a_table_declaration_with_a_single_key_column() {
+    let text = r#"
+        [tables.jcode]
+        path = "journal_titles.tsv"
+        key = "title"
+        value = "abbreviation"
+    "#;
+
+    let layer = layer_from_toml(text, Path::new("/config/tables.toml")).unwrap();
+
+    let tables = layer.tables.unwrap();
+    assert_eq!(
+        tables.get("jcode"),
+        Some(&TableDeclaration {
+            path: PathBuf::from("journal_titles.tsv"),
+            key: KeyColumns::One("title".to_string()),
+            value: "abbreviation".to_string(),
+            values: ValueKindName::Text,
+        })
+    );
+}
+
+#[test]
+fn layer_from_toml_parses_a_table_declaration_with_an_array_of_key_columns() {
+    let text = r#"
+        [tables.jcode]
+        path = "journal_titles.tsv"
+        key = ["title", "shorttitle"]
+        value = "abbreviation"
+    "#;
+
+    let layer = layer_from_toml(text, Path::new("/config/tables.toml")).unwrap();
+
+    let tables = layer.tables.unwrap();
+    assert_eq!(
+        tables.get("jcode").map(|declaration| &declaration.key),
+        Some(&KeyColumns::Many(vec![
+            "title".to_string(),
+            "shorttitle".to_string(),
+        ]))
+    );
+}
+
+/// `values` is optional and defaults to [`ValueKindName::Text`], so a
+/// declaration that never mentions it still reads as literal text
+/// rather than as a table with no answer at all.
+#[test]
+fn layer_from_toml_table_declaration_values_defaults_to_text_when_omitted() {
+    let text = r#"
+        [tables.jcode]
+        path = "journal_titles.tsv"
+        key = "title"
+        value = "abbreviation"
+    "#;
+
+    let layer = layer_from_toml(text, Path::new("/config/tables.toml")).unwrap();
+
+    assert_eq!(
+        layer
+            .tables
+            .unwrap()
+            .get("jcode")
+            .map(|declaration| declaration.values),
+        Some(ValueKindName::Text)
+    );
+}
+
+#[test]
+fn layer_from_toml_table_declaration_values_template_parses_as_template() {
+    let text = r#"
+        [tables.jcode]
+        path = "journal_titles.tsv"
+        key = "title"
+        value = "abbreviation"
+        values = "template"
+    "#;
+
+    let layer = layer_from_toml(text, Path::new("/config/tables.toml")).unwrap();
+
+    assert_eq!(
+        layer
+            .tables
+            .unwrap()
+            .get("jcode")
+            .map(|declaration| declaration.values),
+        Some(ValueKindName::Template)
+    );
+}
+
+/// `TableDeclaration` is `deny_unknown_fields` like every other layer
+/// struct, so a misspelled or unsupported key inside `[tables.<name>]`
+/// is refused rather than silently ignored.
+#[test]
+fn layer_from_toml_rejects_an_unknown_field_inside_a_table_declaration() {
+    let text = r#"
+        [tables.jcode]
+        path = "journal_titles.tsv"
+        key = "title"
+        value = "abbreviation"
+        bogus = 1
+    "#;
+
+    let err = layer_from_toml(text, Path::new("/config/tables.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("bogus"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
 /// cli spec "The apply gate is never configurable": `apply` is not
 /// merely a key borax does not know. It is one it knows and refuses,
 /// because a configuration file that could turn `--apply` on would
@@ -639,6 +754,22 @@ fn layer_from_env_borax_templates_default_is_unknown_env() {
         err,
         ConfigError::UnknownEnv {
             name: "TEMPLATES_DEFAULT".to_string()
+        }
+    );
+}
+
+/// Tables are just as open-ended as templates and cannot be addressed
+/// by a single environment variable, so this name is unknown even
+/// though its prefix matches a real table — exactly as
+/// `layer_from_env_borax_templates_default_is_unknown_env` covers for
+/// `templates`.
+#[test]
+fn layer_from_env_borax_tables_jcode_is_unknown_env() {
+    let err = layer_from_env([("BORAX_TABLES_JCODE", "journal_titles.tsv")]).unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::UnknownEnv {
+            name: "TABLES_JCODE".to_string()
         }
     );
 }
@@ -1051,6 +1182,129 @@ fn overriding_templates_default_does_not_change_the_citation_keys_default() {
     );
 }
 
+// --- table merging ---
+
+/// cli spec scenario "Per-directory table added to the inherited set":
+/// merging is per table name, so a `.borax.toml` declaring `pubcodes`
+/// keeps the `jcode` table it inherits from the global file.
+#[test]
+fn table_merge_keeps_the_lower_layers_table_when_a_higher_layer_adds_another() {
+    let global_path = PathBuf::from("/base/home/.config/borax/config.toml");
+    let dir_path = PathBuf::from("/proj/.borax.toml");
+
+    let jcode = TableDeclaration {
+        path: PathBuf::from("journal_titles.tsv"),
+        key: KeyColumns::One("title".to_string()),
+        value: "abbreviation".to_string(),
+        values: ValueKindName::Text,
+    };
+    let pubcodes = TableDeclaration {
+        path: PathBuf::from("pubcodes.tsv"),
+        key: KeyColumns::One("name".to_string()),
+        value: "code".to_string(),
+        values: ValueKindName::Text,
+    };
+
+    let global = (
+        Origin::GlobalFile(global_path.clone()),
+        Layer {
+            tables: Some(BTreeMap::from([("jcode".to_string(), jcode.clone())])),
+            ..Layer::default()
+        },
+    );
+    let directory = (
+        Origin::DirectoryFile(dir_path.clone()),
+        Layer {
+            tables: Some(BTreeMap::from([("pubcodes".to_string(), pubcodes.clone())])),
+            ..Layer::default()
+        },
+    );
+
+    let effective = resolve(vec![global, directory]).unwrap();
+    let config = effective.config();
+
+    assert_eq!(config.tables.get("jcode"), Some(&jcode));
+    assert_eq!(config.tables.get("pubcodes"), Some(&pubcodes));
+    assert_eq!(
+        effective.origin("tables.jcode.path"),
+        Some(&Origin::GlobalFile(global_path))
+    );
+    assert_eq!(
+        effective.origin("tables.pubcodes.path"),
+        Some(&Origin::DirectoryFile(dir_path))
+    );
+}
+
+/// A higher layer redeclaring a table replaces only that table: the
+/// other one, inherited unchanged, keeps its own origin.
+#[test]
+fn table_merge_redeclaring_a_table_replaces_it_and_leaves_the_other_alone() {
+    let global_path = PathBuf::from("/base/home/.config/borax/config.toml");
+    let dir_path = PathBuf::from("/proj/.borax.toml");
+
+    let jcode = TableDeclaration {
+        path: PathBuf::from("journal_titles.tsv"),
+        key: KeyColumns::One("title".to_string()),
+        value: "abbreviation".to_string(),
+        values: ValueKindName::Text,
+    };
+    let pubcodes = TableDeclaration {
+        path: PathBuf::from("pubcodes.tsv"),
+        key: KeyColumns::One("name".to_string()),
+        value: "code".to_string(),
+        values: ValueKindName::Text,
+    };
+    let redefined_jcode = TableDeclaration {
+        path: PathBuf::from("journal_titles_v2.tsv"),
+        key: KeyColumns::Many(vec!["title".to_string(), "shorttitle".to_string()]),
+        value: "abbrev".to_string(),
+        values: ValueKindName::Template,
+    };
+
+    let global = (
+        Origin::GlobalFile(global_path.clone()),
+        Layer {
+            tables: Some(BTreeMap::from([
+                ("jcode".to_string(), jcode),
+                ("pubcodes".to_string(), pubcodes.clone()),
+            ])),
+            ..Layer::default()
+        },
+    );
+    let directory = (
+        Origin::DirectoryFile(dir_path.clone()),
+        Layer {
+            tables: Some(BTreeMap::from([(
+                "jcode".to_string(),
+                redefined_jcode.clone(),
+            )])),
+            ..Layer::default()
+        },
+    );
+
+    let effective = resolve(vec![global, directory]).unwrap();
+    let config = effective.config();
+
+    assert_eq!(config.tables.get("jcode"), Some(&redefined_jcode));
+    assert_eq!(config.tables.get("pubcodes"), Some(&pubcodes));
+    assert_eq!(
+        effective.origin("tables.jcode.path"),
+        Some(&Origin::DirectoryFile(dir_path))
+    );
+    assert_eq!(
+        effective.origin("tables.pubcodes.path"),
+        Some(&Origin::GlobalFile(global_path))
+    );
+}
+
+/// No layer declaring a table is the configuration a run with no
+/// `lookup` in any template uses.
+#[test]
+fn resolve_with_no_tables_declared_yields_an_empty_map() {
+    let effective = resolve(vec![]).unwrap();
+    assert!(effective.config().tables.is_empty());
+}
+
 // --- value validation at resolve time ---
 
 #[test]
@@ -1359,6 +1613,194 @@ fn events_reports_a_ledger_and_run_log_override_with_its_file_origin() {
         Event::ConfigSetting {
             key: "run-log".to_string(),
             value: "false".to_string(),
+            origin: Origin::DirectoryFile(config_path).to_string(),
+        }
+    );
+}
+
+// --- table declarations reported by `borax config` ---
+
+/// cli spec scenario "Table declaration reported with its origin": a
+/// global configuration file declaring a table has its path, key
+/// column, value column and value kind each reported with that file as
+/// their origin.
+#[test]
+fn entries_report_a_table_declarations_path_key_value_and_values_with_its_origin() {
+    let global_path = PathBuf::from("/base/home/.config/borax/config.toml");
+    let layers = vec![(
+        Origin::GlobalFile(global_path.clone()),
+        Layer {
+            tables: Some(BTreeMap::from([(
+                "jcode".to_string(),
+                TableDeclaration {
+                    path: PathBuf::from("journal_titles.tsv"),
+                    key: KeyColumns::One("title".to_string()),
+                    value: "abbreviation".to_string(),
+                    values: ValueKindName::Text,
+                },
+            )])),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+    let entries: BTreeMap<String, (String, Origin)> = effective
+        .entries()
+        .into_iter()
+        .map(|(key, value, origin)| (key, (value, origin)))
+        .collect();
+
+    assert_eq!(
+        entries.get("tables.jcode.path"),
+        Some(&(
+            "\"journal_titles.tsv\"".to_string(),
+            Origin::GlobalFile(global_path.clone())
+        ))
+    );
+    assert_eq!(
+        entries.get("tables.jcode.key"),
+        Some(&(
+            "\"title\"".to_string(),
+            Origin::GlobalFile(global_path.clone())
+        ))
+    );
+    assert_eq!(
+        entries.get("tables.jcode.value"),
+        Some(&(
+            "\"abbreviation\"".to_string(),
+            Origin::GlobalFile(global_path.clone())
+        ))
+    );
+    assert_eq!(
+        entries.get("tables.jcode.values"),
+        Some(&("\"text\"".to_string(), Origin::GlobalFile(global_path)))
+    );
+}
+
+/// A `key` given as an array renders as a TOML array rather than as a
+/// single quoted string, so a value pasted back into a configuration
+/// file reproduces the same declaration.
+#[test]
+fn entries_render_an_array_key_as_a_toml_array() {
+    let dir_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(dir_path.clone()),
+        Layer {
+            tables: Some(BTreeMap::from([(
+                "jcode".to_string(),
+                TableDeclaration {
+                    path: PathBuf::from("journal_titles.tsv"),
+                    key: KeyColumns::Many(vec!["title".to_string(), "shorttitle".to_string()]),
+                    value: "abbreviation".to_string(),
+                    values: ValueKindName::Template,
+                },
+            )])),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+    let (_, value, _) = effective
+        .entries()
+        .into_iter()
+        .find(|(key, _, _)| key == "tables.jcode.key")
+        .unwrap();
+
+    assert_eq!(value, "[\"title\", \"shorttitle\"]");
+}
+
+/// cli spec scenario "Per-directory table added to the inherited set":
+/// `borax config` reports each table with its own origin when one
+/// layer adds a table beside one it inherits from another.
+#[test]
+fn entries_report_each_declared_table_with_its_own_origin_when_layers_add_different_tables() {
+    let global_path = PathBuf::from("/base/home/.config/borax/config.toml");
+    let dir_path = PathBuf::from("/proj/.borax.toml");
+
+    let global = (
+        Origin::GlobalFile(global_path.clone()),
+        Layer {
+            tables: Some(BTreeMap::from([(
+                "jcode".to_string(),
+                TableDeclaration {
+                    path: PathBuf::from("journal_titles.tsv"),
+                    key: KeyColumns::One("title".to_string()),
+                    value: "abbreviation".to_string(),
+                    values: ValueKindName::Text,
+                },
+            )])),
+            ..Layer::default()
+        },
+    );
+    let directory = (
+        Origin::DirectoryFile(dir_path.clone()),
+        Layer {
+            tables: Some(BTreeMap::from([(
+                "pubcodes".to_string(),
+                TableDeclaration {
+                    path: PathBuf::from("pubcodes.tsv"),
+                    key: KeyColumns::One("name".to_string()),
+                    value: "code".to_string(),
+                    values: ValueKindName::Text,
+                },
+            )])),
+            ..Layer::default()
+        },
+    );
+
+    let effective = resolve(vec![global, directory]).unwrap();
+    let origins: BTreeMap<String, Origin> = effective
+        .entries()
+        .into_iter()
+        .map(|(key, _, origin)| (key, origin))
+        .collect();
+
+    assert_eq!(
+        origins.get("tables.jcode.path"),
+        Some(&Origin::GlobalFile(global_path))
+    );
+    assert_eq!(
+        origins.get("tables.pubcodes.path"),
+        Some(&Origin::DirectoryFile(dir_path))
+    );
+}
+
+/// `events` renders a table declaration through the same
+/// `Event::ConfigSetting` shape as every other setting, with the same
+/// key, rendered value and origin `entries` produces.
+#[test]
+fn events_reports_a_table_declaration_with_its_file_origin() {
+    let config_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(config_path.clone()),
+        Layer {
+            tables: Some(BTreeMap::from([(
+                "jcode".to_string(),
+                TableDeclaration {
+                    path: PathBuf::from("journal_titles.tsv"),
+                    key: KeyColumns::One("title".to_string()),
+                    value: "abbreviation".to_string(),
+                    values: ValueKindName::Text,
+                },
+            )])),
+            ..Layer::default()
+        },
+    )];
+    let effective = resolve(layers).unwrap();
+
+    let events = effective.events();
+    let event = events
+        .iter()
+        .find(
+            |event| matches!(event, Event::ConfigSetting { key, .. } if key == "tables.jcode.path"),
+        )
+        .unwrap_or_else(|| panic!("no ConfigSetting for tables.jcode.path in {events:?}"));
+
+    assert_eq!(
+        *event,
+        Event::ConfigSetting {
+            key: "tables.jcode.path".to_string(),
+            value: "\"journal_titles.tsv\"".to_string(),
             origin: Origin::DirectoryFile(config_path).to_string(),
         }
     );
@@ -1905,4 +2347,63 @@ fn an_unknown_source_name_is_still_a_configuration_error() {
         ..Layer::default()
     };
     assert!(resolve(vec![(Origin::Flag("sources".to_string()), layer)]).is_err());
+}
+
+// --- table_path() ---
+//
+// cli spec: "A `path` that is relative SHALL resolve against the
+// directory of the configuration file that declared it, rather than
+// the working directory, so a configuration file can name a data file
+// beside itself and stay correct wherever the run is started from."
+// These cases are pure `Path`/`PathBuf` values; nothing here touches
+// the filesystem.
+
+/// cli spec scenario "Relative path is read beside its declaring
+/// file", global-file case: a relative path resolves against the
+/// directory holding the global configuration file, not any working
+/// directory.
+#[test]
+fn table_path_resolves_a_relative_path_under_the_global_config_file() {
+    let resolved = table_path(
+        Path::new("journal_titles.tsv"),
+        Path::new("/base/home/.config/borax/config.toml"),
+    );
+    assert_eq!(
+        resolved,
+        PathBuf::from("/base/home/.config/borax/journal_titles.tsv")
+    );
+}
+
+/// The `.borax.toml` counterpart of the case above.
+#[test]
+fn table_path_resolves_a_relative_path_under_a_directory_override_file() {
+    let resolved = table_path(
+        Path::new("journal_titles.tsv"),
+        Path::new("/proj/.borax.toml"),
+    );
+    assert_eq!(resolved, PathBuf::from("/proj/journal_titles.tsv"));
+}
+
+/// An absolute `path` is its own answer, whatever file declared it.
+#[test]
+fn table_path_returns_an_absolute_path_unchanged() {
+    let resolved = table_path(
+        Path::new("/data/journal_titles.tsv"),
+        Path::new("/proj/.borax.toml"),
+    );
+    assert_eq!(resolved, PathBuf::from("/data/journal_titles.tsv"));
+}
+
+/// A relative path with a `..` component is joined onto the declaring
+/// file's directory like any other relative path, not normalized away.
+#[test]
+fn table_path_resolves_a_relative_path_with_a_parent_component() {
+    let resolved = table_path(
+        Path::new("../shared/journal_titles.tsv"),
+        Path::new("/proj/config/.borax.toml"),
+    );
+    assert_eq!(
+        resolved,
+        PathBuf::from("/proj/config/../shared/journal_titles.tsv")
+    );
 }
