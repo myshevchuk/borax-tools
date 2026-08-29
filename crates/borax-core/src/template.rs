@@ -53,7 +53,8 @@
 //! - `pages` — the page value, verbatim (`1234-1245`).
 //! - `firstpage` — the part of `pages` before the first `-`, `–` or
 //!   `—`, trimmed; the whole value when it holds none, so an article
-//!   number such as `e0123456` survives intact.
+//!   number such as `e0123456` survives intact. A value opening with a
+//!   dash has nothing before it and renders empty.
 //! - `doi` — the normalized DOI.
 //! - `arxiv` — the bare arXiv id (no version).
 //! - `sha1` — the file hash supplied in [`RenderInput`].
@@ -462,7 +463,12 @@ impl<'a> Parser<'a> {
     /// Parse the single quoted argument of a `prefix(` or `suffix(`
     /// whose opening parenthesis has been consumed.
     fn parse_affix(&mut self) -> Result<String, TemplateError> {
-        todo!("Parser::parse_affix")
+        let text = self.parse_quoted()?;
+        if self.peek() != Some(')') {
+            return self.syntax("expected ')' closing the affix argument");
+        }
+        self.bump(')');
+        Ok(text)
     }
 
     /// Parse the two quoted arguments of a `regex(` whose opening
@@ -590,23 +596,41 @@ fn render_authors(authors: &[Name], limit: Option<usize>) -> String {
     families.join("-")
 }
 
+/// Builds an affix filter from the argument parsed after its opening
+/// parenthesis.
+type AffixBuilder = fn(String) -> Filter;
+
 /// The prefixes that open an affix filter, each with what to build
 /// from the argument that follows.
-const AFFIXES: [(&str, fn(String) -> Filter); 2] =
+const AFFIXES: [(&str, AffixBuilder); 2] =
     [("prefix(", Filter::Prefix), ("suffix(", Filter::Suffix)];
 
 /// `pages` up to its first dash of any width, trimmed.
 ///
 /// A value with no dash is its own first page, which is what keeps an
-/// article number (`e0123456`, `045301`) whole.
+/// article number (`e0123456`, `045301`) whole. Trimming applies to
+/// whatever is returned, so a dashless value is trimmed exactly as a
+/// range's first page is.
+///
+/// A value opening with a dash has nothing before it and yields the
+/// empty string, rather than being read as a range missing its start.
 fn first_page(pages: &str) -> String {
-    todo!("first_page")
+    pages
+        .split(['-', '–', '—'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 /// `value` wrapped in `before` and `after`, or the empty string
 /// unchanged.
 fn affix(value: &str, before: &str, after: &str) -> String {
-    todo!("affix")
+    if value.is_empty() {
+        String::new()
+    } else {
+        format!("{before}{value}{after}")
+    }
 }
 
 fn short_title(title: &str, words: usize) -> String {

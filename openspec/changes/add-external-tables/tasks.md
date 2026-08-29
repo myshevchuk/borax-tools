@@ -41,26 +41,26 @@ and have no I/O; group 6 onward is the adapter.
 
 ## 2. The publication fields
 
-- [ ] 2.1 Red: `crates/borax-core/tests/template.rs` cases for `volume`,
+- [x] 2.1 Red: `crates/borax-core/tests/template.rs` cases for `volume`,
       `issue`, `pages` and `publisher` rendering their record values and
       rendering empty when absent
-- [ ] 2.2 Red: `firstpage` cases — `1234-1245` → `1234`, an en-dash and
+- [x] 2.2 Red: `firstpage` cases — `1234-1245` → `1234`, an en-dash and
       an em-dash range, whitespace around the separator, the article
       numbers `e0123456` and `045301` passing through whole, and an
       absent page value rendering empty
-- [ ] 2.3 Green: five `Field` variants, their parse arms and their render
+- [x] 2.3 Green: five `Field` variants, their parse arms and their render
       arms
 
 ## 3. The affix filters
 
-- [ ] 3.1 Red: `prefix` and `suffix` cases — wrapping a present value,
+- [x] 3.1 Red: `prefix` and `suffix` cases — wrapping a present value,
       returning the empty string unchanged, composing to the right of
       another filter, and the two quoted-argument parse errors (an
       unterminated argument, a missing closing paren)
-- [ ] 3.2 Red: the optional-segment case end to end —
+- [x] 3.2 Red: the optional-segment case end to end —
       `[year]-[journal:abbr][volume:prefix("-")]-[firstpage]` rendering
       `2024-JACS-146-1234` with a volume and `2024-JACS-1234` without
-- [ ] 3.3 Green: two `Filter` variants reusing the existing
+- [x] 3.3 Green: two `Filter` variants reusing the existing
       `parse_quoted`, and their apply arms
 
 ## 4. The lookup filter and miss reporting
