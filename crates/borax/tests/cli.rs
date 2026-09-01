@@ -42,9 +42,7 @@ fn resolve_parses_multiple_paths_in_order() {
 
     assert_eq!(
         cli.command,
-        Command::Resolve {
-            paths: vec![PathBuf::from("a.pdf"), PathBuf::from("b.pdf")],
-        },
+        Command::resolve(vec![PathBuf::from("a.pdf"), PathBuf::from("b.pdf")]),
         "got {:?}",
         cli.command
     );
@@ -62,10 +60,7 @@ fn rename_without_apply_parses_apply_as_false() {
 
     assert_eq!(
         cli.command,
-        Command::Rename {
-            paths: vec![PathBuf::from("f.pdf")],
-            apply: false,
-        },
+        Command::rename(vec![PathBuf::from("f.pdf")], false),
         "got {:?}",
         cli.command
     );
@@ -77,10 +72,7 @@ fn rename_with_apply_parses_apply_as_true() {
 
     assert_eq!(
         cli.command,
-        Command::Rename {
-            paths: vec![PathBuf::from("f.pdf")],
-            apply: true,
-        },
+        Command::rename(vec![PathBuf::from("f.pdf")], true),
         "got {:?}",
         cli.command
     );
@@ -98,9 +90,7 @@ fn bib_parses_multiple_paths_in_order() {
 
     assert_eq!(
         cli.command,
-        Command::Bib {
-            paths: vec![PathBuf::from("a.pdf"), PathBuf::from("b.pdf")],
-        },
+        Command::bib(vec![PathBuf::from("a.pdf"), PathBuf::from("b.pdf")]),
         "got {:?}",
         cli.command
     );
@@ -213,16 +203,9 @@ fn format_is_human_without_the_json_flag() {
 
 #[test]
 fn each_command_variant_reports_its_own_name() {
-    assert_eq!(Command::Resolve { paths: vec![] }.name(), "resolve");
-    assert_eq!(
-        Command::Rename {
-            paths: vec![],
-            apply: false,
-        }
-        .name(),
-        "rename"
-    );
-    assert_eq!(Command::Bib { paths: vec![] }.name(), "bib");
+    assert_eq!(Command::resolve(vec![]).name(), "resolve");
+    assert_eq!(Command::rename(vec![], false).name(), "rename");
+    assert_eq!(Command::bib(vec![]).name(), "bib");
     assert_eq!(Command::Config.name(), "config");
     assert_eq!(Command::Cache { clear: false }.name(), "cache");
 }
@@ -230,13 +213,9 @@ fn each_command_variant_reports_its_own_name() {
 #[test]
 fn the_command_names_are_pairwise_distinct() {
     let names = [
-        Command::Resolve { paths: vec![] }.name(),
-        Command::Rename {
-            paths: vec![],
-            apply: false,
-        }
-        .name(),
-        Command::Bib { paths: vec![] }.name(),
+        Command::resolve(vec![]).name(),
+        Command::rename(vec![], false).name(),
+        Command::bib(vec![]).name(),
         Command::Config.name(),
         Command::Cache { clear: false }.name(),
         Command::Ledger {
@@ -265,9 +244,7 @@ fn name_reports_the_subcommand_as_the_user_typed_it() {
 
 #[test]
 fn paths_returns_the_resolve_variants_paths() {
-    let command = Command::Resolve {
-        paths: vec![PathBuf::from("a.pdf"), PathBuf::from("b.pdf")],
-    };
+    let command = Command::resolve(vec![PathBuf::from("a.pdf"), PathBuf::from("b.pdf")]);
 
     assert_eq!(
         command.paths(),
@@ -277,19 +254,14 @@ fn paths_returns_the_resolve_variants_paths() {
 
 #[test]
 fn paths_returns_the_rename_variants_paths() {
-    let command = Command::Rename {
-        paths: vec![PathBuf::from("f.pdf")],
-        apply: true,
-    };
+    let command = Command::rename(vec![PathBuf::from("f.pdf")], true);
 
     assert_eq!(command.paths(), &[PathBuf::from("f.pdf")]);
 }
 
 #[test]
 fn paths_returns_the_bib_variants_paths() {
-    let command = Command::Bib {
-        paths: vec![PathBuf::from("f.pdf")],
-    };
+    let command = Command::bib(vec![PathBuf::from("f.pdf")]);
 
     assert_eq!(command.paths(), &[PathBuf::from("f.pdf")]);
 }

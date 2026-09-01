@@ -312,10 +312,7 @@ fn log_name_never_contains_a_character_windows_rejects_in_a_filename() {
 #[test]
 fn destination_of_an_apply_rename_in_a_collection_is_mandatory_under_the_collection_root() {
     let root = PathBuf::from("/collection");
-    let command = Command::Rename {
-        paths: vec![],
-        apply: true,
-    };
+    let command = Command::rename(vec![], true);
 
     let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
         .unwrap_or_else(|| panic!("expected a destination"));
@@ -332,10 +329,7 @@ fn destination_of_an_apply_rename_in_a_collection_is_mandatory_under_the_collect
 #[test]
 fn destination_of_an_apply_rename_outside_a_collection_falls_back_to_the_state_root() {
     let state_root = PathBuf::from("/state");
-    let command = Command::Rename {
-        paths: vec![],
-        apply: true,
-    };
+    let command = Command::rename(vec![], true);
 
     let found = destination(
         &command,
@@ -358,10 +352,7 @@ fn destination_of_an_apply_rename_outside_a_collection_falls_back_to_the_state_r
 
 #[test]
 fn destination_of_an_apply_rename_with_neither_root_is_none() {
-    let command = Command::Rename {
-        paths: vec![],
-        apply: true,
-    };
+    let command = Command::rename(vec![], true);
 
     assert!(destination(&command, true, true, "20240101T000000Z", None, None).is_none());
 }
@@ -369,10 +360,7 @@ fn destination_of_an_apply_rename_with_neither_root_is_none() {
 #[test]
 fn destination_of_an_apply_rename_is_written_even_when_run_log_is_disabled() {
     let root = PathBuf::from("/collection");
-    let command = Command::Rename {
-        paths: vec![],
-        apply: true,
-    };
+    let command = Command::rename(vec![], true);
 
     let found = destination(&command, true, false, "20240101T000000Z", Some(&root), None)
         .unwrap_or_else(|| panic!("an apply log cannot be disabled by the run-log setting"));
@@ -383,7 +371,7 @@ fn destination_of_an_apply_rename_is_written_even_when_run_log_is_disabled() {
 #[test]
 fn destination_of_a_non_apply_run_in_a_collection_with_run_log_on_is_optional() {
     let root = PathBuf::from("/collection");
-    let command = Command::Bib { paths: vec![] };
+    let command = Command::bib(vec![]);
 
     let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
         .unwrap_or_else(|| panic!("expected a destination"));
@@ -400,7 +388,7 @@ fn destination_of_a_non_apply_run_in_a_collection_with_run_log_on_is_optional() 
 #[test]
 fn destination_of_a_non_apply_run_with_run_log_off_is_none() {
     let root = PathBuf::from("/collection");
-    let command = Command::Bib { paths: vec![] };
+    let command = Command::bib(vec![]);
 
     assert!(destination(&command, true, false, "20240101T000000Z", Some(&root), None).is_none());
 }
@@ -408,7 +396,7 @@ fn destination_of_a_non_apply_run_with_run_log_off_is_none() {
 #[test]
 fn destination_of_a_non_apply_run_outside_a_collection_is_none_even_with_a_state_root() {
     let state_root = PathBuf::from("/state");
-    let command = Command::Bib { paths: vec![] };
+    let command = Command::bib(vec![]);
 
     assert!(
         destination(
@@ -427,10 +415,7 @@ fn destination_of_a_non_apply_run_outside_a_collection_is_none_even_with_a_state
 #[test]
 fn destination_of_a_preview_rename_in_a_collection_is_optional_with_the_dry_suffix() {
     let root = PathBuf::from("/collection");
-    let command = Command::Rename {
-        paths: vec![],
-        apply: false,
-    };
+    let command = Command::rename(vec![], false);
 
     let found = destination(&command, false, true, "20240101T000000Z", Some(&root), None)
         .unwrap_or_else(|| panic!("expected a destination"));
@@ -489,10 +474,7 @@ fn destination_of_ledger_rebuild_is_optional_not_mandatory() {
 #[test]
 fn destination_in_a_drive_rooted_collection_is_under_that_drive_on_windows() {
     let root = PathBuf::from(r"C:\collection");
-    let command = Command::Rename {
-        paths: vec![],
-        apply: true,
-    };
+    let command = Command::rename(vec![], true);
 
     let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
         .unwrap_or_else(|| panic!("expected a destination"));
@@ -512,10 +494,7 @@ fn destination_in_a_drive_rooted_collection_is_under_that_drive_on_windows() {
 fn destination_outside_a_collection_lands_under_the_local_appdata_state_root_on_windows() {
     // The shape `state_root` builds from `LOCALAPPDATA` on Windows.
     let state_root = PathBuf::from(r"C:\Users\example\AppData\Local\borax\v1");
-    let command = Command::Rename {
-        paths: vec![],
-        apply: true,
-    };
+    let command = Command::rename(vec![], true);
 
     let found = destination(
         &command,
@@ -539,10 +518,7 @@ fn destination_outside_a_collection_lands_under_the_local_appdata_state_root_on_
 #[test]
 fn destination_in_a_collection_on_a_unc_share_stays_on_the_share_on_windows() {
     let root = PathBuf::from(r"\\server\share\collection");
-    let command = Command::Rename {
-        paths: vec![],
-        apply: true,
-    };
+    let command = Command::rename(vec![], true);
 
     let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
         .unwrap_or_else(|| panic!("expected a destination"));
@@ -564,10 +540,7 @@ fn destination_in_a_collection_on_a_unc_share_stays_on_the_share_on_windows() {
 #[test]
 fn destination_in_a_collection_at_a_drive_root_does_not_double_the_separator_on_windows() {
     let root = PathBuf::from(r"C:\");
-    let command = Command::Rename {
-        paths: vec![],
-        apply: true,
-    };
+    let command = Command::rename(vec![], true);
 
     let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
         .unwrap_or_else(|| panic!("expected a destination"));
@@ -622,7 +595,7 @@ fn run_log_contains_exactly_the_json_stdout_stream_including_framing_events() {
     };
 
     dispatch(
-        &cli(Command::Bib { paths: vec![path] }, true),
+        &cli(Command::bib(vec![path]), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -686,12 +659,7 @@ fn a_human_format_run_still_writes_a_json_run_log_identical_to_the_json_runs() {
         };
 
         dispatch(
-            &cli(
-                Command::Bib {
-                    paths: vec![path.clone()],
-                },
-                json,
-            ),
+            &cli(Command::bib(vec![path.clone()]), json),
             &Configs::uniform(effective),
             &adapters,
             &mut streams,
@@ -752,13 +720,7 @@ fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
         err: &mut preview_err,
     };
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path.clone()],
-                apply: false,
-            },
-            false,
-        ),
+        &cli(Command::rename(vec![path.clone()], false), false),
         &Configs::uniform(effective.clone()),
         &preview_adapters,
         &mut preview_streams,
@@ -783,13 +745,7 @@ fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
         err: &mut apply_err,
     };
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: true,
-            },
-            false,
-        ),
+        &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &apply_adapters,
         &mut apply_streams,
@@ -849,13 +805,7 @@ fn an_unwritable_mandatory_log_aborts_before_any_rename() {
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: true,
-            },
-            false,
-        ),
+        &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -935,13 +885,7 @@ fn a_mandatory_log_whose_own_name_is_taken_by_a_directory_aborts_before_any_rena
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: true,
-            },
-            false,
-        ),
+        &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1004,13 +948,7 @@ fn no_run_log_with_apply_still_writes_the_mandatory_log() {
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: true,
-            },
-            false,
-        ),
+        &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1067,13 +1005,7 @@ fn no_run_log_on_a_preview_writes_nothing_and_the_run_still_succeeds() {
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: false,
-            },
-            false,
-        ),
+        &cli(Command::rename(vec![path], false), false),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1132,7 +1064,7 @@ fn a_failed_optional_log_warns_but_the_run_still_succeeds() {
     };
 
     let outcome = dispatch(
-        &cli(Command::Bib { paths: vec![path] }, true),
+        &cli(Command::bib(vec![path]), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1188,13 +1120,7 @@ fn an_apply_rename_outside_a_collection_writes_its_log_under_the_state_root() {
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: true,
-            },
-            false,
-        ),
+        &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1244,13 +1170,7 @@ fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: true,
-            },
-            false,
-        ),
+        &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,

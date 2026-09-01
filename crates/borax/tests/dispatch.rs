@@ -949,9 +949,7 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
     };
 
     let events = events_for(
-        &Command::Resolve {
-            paths: vec![good.clone(), bad.clone()],
-        },
+        &Command::resolve(vec![good.clone(), bad.clone()]),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1012,10 +1010,7 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path.clone()],
-            apply: false,
-        },
+        &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1080,10 +1075,7 @@ fn rename_preview_with_no_journal_succeeds() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path.clone()],
-            apply: false,
-        },
+        &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1142,10 +1134,7 @@ fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
     let target = PathBuf::from("/lib/Smith2024.pdf");
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path.clone()],
-            apply: true,
-        },
+        &Command::rename(vec![path.clone()], true),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1223,9 +1212,7 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
     };
 
     let events = events_for(
-        &Command::Bib {
-            paths: vec![path.clone()],
-        },
+        &Command::bib(vec![path.clone()]),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1288,10 +1275,7 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
     };
 
     let error = events_for(
-        &Command::Rename {
-            paths: vec![path],
-            apply: false,
-        },
+        &Command::rename(vec![path], false),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1331,7 +1315,7 @@ fn bib_with_an_uncompilable_template_propagates_the_diagnostic() {
     };
 
     let error = events_for(
-        &Command::Bib { paths: vec![path] },
+        &Command::bib(vec![path]),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1380,10 +1364,7 @@ fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic()
     };
 
     let error = events_for(
-        &Command::Rename {
-            paths: vec![path],
-            apply: false,
-        },
+        &Command::rename(vec![path], false),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1431,7 +1412,7 @@ fn bib_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
     };
 
     let error = events_for(
-        &Command::Bib { paths: vec![path] },
+        &Command::bib(vec![path]),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1489,7 +1470,7 @@ fn bib_with_a_citation_key_naming_no_entry_type_propagates_the_diagnostic() {
     };
 
     let error = events_for(
-        &Command::Bib { paths: vec![path] },
+        &Command::bib(vec![path]),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1612,12 +1593,7 @@ fn json_stdout_is_entirely_well_formed_json_lines_and_nothing_else() {
     };
 
     dispatch(
-        &cli(
-            Command::Resolve {
-                paths: vec![good, bad],
-            },
-            true,
-        ),
+        &cli(Command::resolve(vec![good, bad]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
@@ -1676,12 +1652,7 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
     };
 
     dispatch(
-        &cli(
-            Command::Resolve {
-                paths: vec![path.clone()],
-            },
-            false,
-        ),
+        &cli(Command::resolve(vec![path.clone()]), false),
         &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
@@ -1746,12 +1717,7 @@ fn run_finished_counts_match_counts_for_over_the_body_events() {
     };
 
     dispatch(
-        &cli(
-            Command::Resolve {
-                paths: vec![good, bad],
-            },
-            true,
-        ),
+        &cli(Command::resolve(vec![good, bad]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
@@ -1811,7 +1777,7 @@ fn a_clean_run_returns_success() {
     };
 
     let outcome = dispatch(
-        &cli(Command::Resolve { paths: vec![path] }, true),
+        &cli(Command::resolve(vec![path]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
@@ -1864,12 +1830,7 @@ fn a_run_with_a_skip_returns_partial() {
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Resolve {
-                paths: vec![good, bad],
-            },
-            true,
-        ),
+        &cli(Command::resolve(vec![good, bad]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
@@ -1916,10 +1877,7 @@ fn a_refusal_dispatch_alone_makes_is_fatal_and_writes_nothing_to_stdout() {
         collection_root: None,
         state_root: None,
     };
-    let command = Command::Rename {
-        paths: vec![path],
-        apply: true,
-    };
+    let command = Command::rename(vec![path], true);
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut streams = Streams {
@@ -1981,7 +1939,7 @@ fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() 
     };
 
     let outcome = dispatch(
-        &cli(Command::Bib { paths: vec![path] }, true),
+        &cli(Command::bib(vec![path]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
@@ -2070,10 +2028,7 @@ fn a_lookup_that_hits_names_the_file_with_the_table_value() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path.clone()],
-            apply: false,
-        },
+        &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
     )
@@ -2129,10 +2084,7 @@ fn two_files_in_one_unlisted_journal_produce_one_lookup_missed_event() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![first, second],
-            apply: false,
-        },
+        &Command::rename(vec![first, second], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
     )
@@ -2202,10 +2154,7 @@ fn two_unlisted_journals_produce_one_event_each_in_input_order() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![first, second],
-            apply: false,
-        },
+        &Command::rename(vec![first, second], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
     )
@@ -2270,13 +2219,7 @@ fn run_started_names_each_table_read_by_path_and_digest() {
     };
 
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: false,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
         &mut streams,
@@ -2367,10 +2310,7 @@ fn a_declared_table_that_cannot_be_read_ends_the_run_naming_the_table_and_the_pa
     };
 
     let error = events_for(
-        &Command::Rename {
-            paths: vec![path],
-            apply: false,
-        },
+        &Command::rename(vec![path], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
     )
@@ -2414,10 +2354,7 @@ fn a_header_without_the_declared_value_column_ends_the_run_naming_the_table() {
     };
 
     let error = events_for(
-        &Command::Rename {
-            paths: vec![path],
-            apply: false,
-        },
+        &Command::rename(vec![path], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
     )
@@ -2551,10 +2488,10 @@ fn the_target_pattern_names_every_journal_shape_from_one_template() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: batch.iter().map(|(path, ..)| PathBuf::from(path)).collect(),
-            apply: false,
-        },
+        &Command::rename(
+            batch.iter().map(|(path, ..)| PathBuf::from(path)).collect(),
+            false,
+        ),
         &Configs::uniform(effective_for_the_target_pattern(&table)),
         &adapters,
     )

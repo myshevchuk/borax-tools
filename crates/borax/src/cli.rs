@@ -179,6 +179,23 @@ impl Cli {
 }
 
 impl Command {
+    /// The `resolve` command over `paths`, with no setting overridden.
+    pub fn resolve(paths: Vec<PathBuf>) -> Command {
+        Command::Resolve { paths }
+    }
+
+    /// The `rename` command over `paths`, moving the files when `apply`
+    /// and reporting what it would move otherwise, with no setting
+    /// overridden.
+    pub fn rename(paths: Vec<PathBuf>, apply: bool) -> Command {
+        Command::Rename { paths, apply }
+    }
+
+    /// The `bib` command over `paths`, with no setting overridden.
+    pub fn bib(paths: Vec<PathBuf>) -> Command {
+        Command::Bib { paths }
+    }
+
     /// The subcommand's name, as [`crate::event::Event::RunStarted`]
     /// reports it and as the user typed it. A subcommand with an
     /// action of its own is named by both words, as `ledger rebuild`.

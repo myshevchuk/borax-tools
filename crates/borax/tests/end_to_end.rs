@@ -345,12 +345,7 @@ fn run_the_batch() -> Ran {
         .map(|(name, _)| library.path().join(name))
         .collect();
 
-    let invocation = invoke(
-        Command::Rename { paths, apply: true },
-        &master,
-        state.path(),
-        None,
-    );
+    let invocation = invoke(Command::rename(paths, true), &master, state.path(), None);
 
     Ran {
         outcome: invocation.outcome,
@@ -805,10 +800,7 @@ fn a_batch_with_a_content_duplicate_and_a_work_duplicate_skips_both_and_leaves_t
         "publisher-info-doi.pdf",
     );
     let priming = invoke(
-        Command::Rename {
-            paths: vec![seed],
-            apply: true,
-        },
+        Command::rename(vec![seed], true),
         &master,
         state.path(),
         Some(collection.path()),
@@ -839,10 +831,7 @@ fn a_batch_with_a_content_duplicate_and_a_work_duplicate_skips_both_and_leaves_t
     );
 
     let batch = invoke(
-        Command::Rename {
-            paths: vec![content_dup.clone(), work_dup.clone(), fresh],
-            apply: true,
-        },
+        Command::rename(vec![content_dup.clone(), work_dup.clone(), fresh], true),
         &master,
         state.path(),
         Some(collection.path()),
@@ -947,7 +936,7 @@ fn rebuilding_a_real_collection_twice_is_byte_identical_and_compacts_after_delet
         .collect();
 
     let applied = invoke(
-        Command::Rename { paths, apply: true },
+        Command::rename(paths, true),
         &master,
         state.path(),
         Some(collection.path()),

@@ -435,15 +435,15 @@ fn each_files_resolution_plan_and_sidecar_are_adjacent_in_input_order() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![
+        &Command::rename(
+            vec![
                 blank.clone(),
                 paper1.clone(),
                 paper2.clone(),
                 already.clone(),
             ],
-            apply: false,
-        },
+            false,
+        ),
         &Configs::uniform(effective),
         &adapters,
     )
@@ -542,15 +542,15 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_in_preview() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![
+        &Command::rename(
+            vec![
                 blank.clone(),
                 paper1.clone(),
                 paper2.clone(),
                 already.clone(),
             ],
-            apply: false,
-        },
+            false,
+        ),
         &Configs::uniform(effective),
         &adapters,
     )
@@ -620,15 +620,15 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![
+        &Command::rename(
+            vec![
                 blank.clone(),
                 paper1.clone(),
                 paper2.clone(),
                 already.clone(),
             ],
-            apply: true,
-        },
+            true,
+        ),
         &Configs::uniform(effective),
         &adapters,
     )
@@ -776,15 +776,7 @@ fn a_parent_and_its_subdirectory_report_as_two_uninterleaved_groups_each_under_i
         state_root: None,
     };
 
-    let events = events_for(
-        &Command::Rename {
-            paths: paths.clone(),
-            apply: false,
-        },
-        &configs,
-        &adapters,
-    )
-    .unwrap();
+    let events = events_for(&Command::rename(paths.clone(), false), &configs, &adapters).unwrap();
 
     // The parent group (first reached, through `a`) is reported whole
     // before the subdirectory group, and within each group `a` precedes
@@ -898,10 +890,7 @@ fn master_bib_entries_trail_every_files_resolve_plan_and_sidecar_block_in_input_
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![paper1.clone(), paper2.clone(), paper3.clone()],
-            apply: false,
-        },
+        &Command::rename(vec![paper1.clone(), paper2.clone(), paper3.clone()], false),
         &Configs::uniform(effective),
         &adapters,
     )

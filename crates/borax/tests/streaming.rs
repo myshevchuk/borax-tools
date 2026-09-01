@@ -376,10 +376,7 @@ fn rename_preview_writes_each_file_s_resolved_line_before_the_next_file_is_hashe
 
     dispatch(
         &cli(
-            Command::Rename {
-                paths: vec![a.clone(), b.clone(), c.clone()],
-                apply: false,
-            },
+            Command::rename(vec![a.clone(), b.clone(), c.clone()], false),
             true,
         ),
         &Configs::uniform(effective),
@@ -457,13 +454,7 @@ fn an_uncompilable_template_is_fatal_and_opens_no_stream() {
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: false,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -511,13 +502,7 @@ fn apply_with_nowhere_to_record_itself_is_fatal_and_opens_no_stream() {
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: true,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![path], true), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,

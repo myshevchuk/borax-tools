@@ -1138,10 +1138,7 @@ fn a_content_duplicate_is_skipped_with_the_existing_files_full_path_and_the_sour
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path.clone()],
-            apply: false,
-        },
+        &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective),
         &adapters,
     )
@@ -1203,10 +1200,7 @@ fn a_work_duplicate_is_skipped_with_the_work_reason() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path.clone()],
-            apply: false,
-        },
+        &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective),
         &adapters,
     )
@@ -1268,10 +1262,7 @@ fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path.clone()],
-            apply: false,
-        },
+        &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective),
         &adapters,
     )
@@ -1346,13 +1337,7 @@ fn a_stale_duplicate_warns_that_the_ledger_holds_stale_entries() {
     };
 
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path.clone()],
-                apply: false,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![path.clone()], false), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1432,13 +1417,7 @@ fn a_live_duplicate_emits_no_stale_warning() {
     };
 
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: false,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1496,13 +1475,7 @@ fn no_match_emits_no_stale_warning() {
     };
 
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: false,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1571,13 +1544,7 @@ fn several_stale_duplicates_in_one_run_still_produce_exactly_one_warning() {
     };
 
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![first, second],
-                apply: false,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![first, second], false), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1648,10 +1615,7 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path.clone()],
-            apply: true,
-        },
+        &Command::rename(vec![path.clone()], true),
         &Configs::uniform(effective),
         &adapters,
     )
@@ -1732,10 +1696,7 @@ fn a_preview_run_appends_nothing_to_the_ledger_even_when_it_plans_a_rename() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path],
-            apply: false,
-        },
+        &Command::rename(vec![path], false),
         &Configs::uniform(effective),
         &adapters,
     )
@@ -1800,10 +1761,7 @@ fn a_disabled_ledger_neither_checks_nor_appends() {
     };
 
     let events = events_for(
-        &Command::Rename {
-            paths: vec![path],
-            apply: true,
-        },
+        &Command::rename(vec![path], true),
         &Configs::uniform(effective),
         &adapters,
     )
@@ -1861,13 +1819,7 @@ fn outside_a_collection_the_run_checks_nothing_appends_nothing_and_warns_nothing
     };
 
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: false,
-            },
-            false,
-        ),
+        &cli(Command::rename(vec![path], false), false),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -1923,13 +1875,7 @@ fn an_absent_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
     };
 
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path.clone()],
-                apply: false,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![path.clone()], false), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -2000,13 +1946,7 @@ fn an_unparsable_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
     };
 
     dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path.clone()],
-                apply: false,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![path.clone()], false), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -2077,13 +2017,7 @@ fn a_content_duplicate_skip_counts_toward_a_partial_outcome() {
     };
 
     let outcome = dispatch(
-        &cli(
-            Command::Rename {
-                paths: vec![path],
-                apply: false,
-            },
-            true,
-        ),
+        &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
