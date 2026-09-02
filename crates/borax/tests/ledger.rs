@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use borax::bib::BibFiles;
-use borax::cli::{Cli, Command, LedgerAction, Settings};
+use borax::cli::{Cli, Command, LedgerAction};
 use borax::config::{Layer, Origin, resolve};
 use borax::event::{Event, Level, SkipReason};
 use borax::ledger::{
@@ -462,11 +462,7 @@ fn effective_with(customize: impl FnOnce(&mut Layer)) -> borax::config::Effectiv
 /// A [`Cli`] running `command` in the given output format, following the
 /// shape of the one in `dispatch.rs`.
 fn cli(command: Command, json: bool) -> Cli {
-    Cli {
-        command,
-        settings: Settings::default(),
-        json,
-    }
+    Cli { command, json }
 }
 
 // ---------------------------------------------------------------------
@@ -2081,7 +2077,7 @@ fn rebuild_replaces_the_ledger_with_one_entry_per_scanned_file_and_reports_the_c
 
     let events = events_for(
         &Command::Ledger {
-            action: LedgerAction::Rebuild,
+            action: LedgerAction::rebuild(),
         },
         &Configs::uniform(effective),
         &adapters,
@@ -2145,7 +2141,7 @@ fn rebuild_compacts_away_entries_for_files_no_longer_on_disk() {
 
     let events = events_for(
         &Command::Ledger {
-            action: LedgerAction::Rebuild,
+            action: LedgerAction::rebuild(),
         },
         &Configs::uniform(effective),
         &adapters,
@@ -2204,7 +2200,7 @@ fn rebuilding_an_unchanged_collection_twice_through_dispatch_is_byte_identical()
         state_root: None,
     };
     let command = Command::Ledger {
-        action: LedgerAction::Rebuild,
+        action: LedgerAction::rebuild(),
     };
 
     events_for(&command, &Configs::uniform(effective.clone()), &adapters).unwrap();
@@ -2266,7 +2262,7 @@ fn rebuild_skips_files_scan_collection_would_not_count() {
 
     let events = events_for(
         &Command::Ledger {
-            action: LedgerAction::Rebuild,
+            action: LedgerAction::rebuild(),
         },
         &Configs::uniform(effective),
         &adapters,
@@ -2331,7 +2327,7 @@ fn rebuild_outside_a_collection_is_refused_and_writes_nothing() {
     let outcome = dispatch(
         &cli(
             Command::Ledger {
-                action: LedgerAction::Rebuild,
+                action: LedgerAction::rebuild(),
             },
             false,
         ),
@@ -2402,7 +2398,7 @@ fn a_failing_replace_refuses_the_run_rather_than_reporting_a_clean_rebuild() {
     let outcome = dispatch(
         &cli(
             Command::Ledger {
-                action: LedgerAction::Rebuild,
+                action: LedgerAction::rebuild(),
             },
             false,
         ),
@@ -2462,7 +2458,7 @@ fn a_disabled_ledger_setting_does_not_prevent_a_rebuild() {
 
     let events = events_for(
         &Command::Ledger {
-            action: LedgerAction::Rebuild,
+            action: LedgerAction::rebuild(),
         },
         &Configs::uniform(effective),
         &adapters,
@@ -2528,7 +2524,7 @@ fn dispatching_a_rebuild_writes_ledger_rebuilt_on_stdout_carrying_the_schema_fie
     dispatch(
         &cli(
             Command::Ledger {
-                action: LedgerAction::Rebuild,
+                action: LedgerAction::rebuild(),
             },
             true,
         ),

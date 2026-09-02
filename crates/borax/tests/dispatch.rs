@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use borax::bib::{BibFiles, citation_key};
 use borax::cache::{cleared_event, inspect, status_event};
-use borax::cli::{Cli, Command, Settings};
+use borax::cli::{Cli, Command};
 use borax::config::{
     BibLayer, Effective, KeyColumns, Layer, Origin, TableDeclaration, ValueKindName, resolve,
 };
@@ -414,11 +414,7 @@ fn effective_with_default_citation_key_template(template: &str) -> Effective {
 }
 
 fn cli(command: Command, json: bool) -> Cli {
-    Cli {
-        command,
-        settings: Settings::default(),
-        json,
-    }
+    Cli { command, json }
 }
 
 // ---------------------------------------------------------------------
@@ -781,7 +777,7 @@ fn config_emits_one_config_setting_event_per_setting_matching_effective_events()
     };
 
     let events = events_for(
-        &Command::Config,
+        &Command::config(),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -822,7 +818,7 @@ fn cache_status_without_clear_emits_a_single_cache_status_event() {
     };
 
     let events = events_for(
-        &Command::Cache { clear: false },
+        &Command::cache(false),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -860,7 +856,7 @@ fn cache_clear_emits_a_single_cache_cleared_event_and_empties_the_directory() {
     };
 
     let events = events_for(
-        &Command::Cache { clear: true },
+        &Command::cache(true),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -898,7 +894,7 @@ fn cache_with_no_cache_root_is_a_diagnostic() {
     };
 
     let error = events_for(
-        &Command::Cache { clear: false },
+        &Command::cache(false),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
@@ -1515,7 +1511,7 @@ fn json_format_opens_with_run_started_and_closes_with_run_finished_and_every_lin
     };
 
     dispatch(
-        &cli(Command::Config, true),
+        &cli(Command::config(), true),
         &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,
@@ -2268,7 +2264,7 @@ fn a_run_that_reads_no_table_opens_with_an_empty_table_list() {
     };
 
     dispatch(
-        &cli(Command::Config, true),
+        &cli(Command::config(), true),
         &Configs::uniform(effective.clone()),
         &adapters,
         &mut streams,

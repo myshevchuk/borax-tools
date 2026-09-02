@@ -25,29 +25,29 @@ doing.
 
 ## 2. The option groups
 
-- [ ] 2.1 Red: `crates/borax/tests/cli.rs` cases for the accepted
+- [x] 2.1 Red: `crates/borax/tests/cli.rs` cases for the accepted
       surface — each of the six commands parsing every setting it
       consumes, asserting the resulting `Settings` field by field
-- [ ] 2.2 Red: cases for the refused surface — `cache --no-cache`,
+- [x] 2.2 Red: cases for the refused surface — `cache --no-cache`,
       `cache --mailto`, `rename --concurrency`, `bib --no-ledger`,
       `bib --collision`, `ledger rebuild --no-ledger`, and
       `resolve --bib`, each an unknown-argument error
-- [ ] 2.3 Red: replace `a_global_flag_before_the_subcommand_parses_…`
+- [x] 2.3 Red: replace `a_global_flag_before_the_subcommand_parses_…`
       with its inverse — `--mailto` before `rename` is an unknown
       argument — and keep a case pinning `--json` accepted on both sides
-- [ ] 2.4 Red: `--sidecars` and `--no-sidecars` together on `rename`
+- [x] 2.4 Red: `--sidecars` and `--no-sidecars` together on `rename`
       still a usage error naming both, and the same for the three other
       pairs on a command that offers them
-- [ ] 2.5 Green: declare `ResolutionOptions`, `RenameOptions`,
+- [x] 2.5 Green: declare `ResolutionOptions`, `RenameOptions`,
       `BibliographyOptions`, `AccountingOptions` and `RunLogOptions` as
       `Args` groups, each `Default`, and flatten them per `Command`
       variant as `design.md` D2 tabulates; `--concurrency` on `Resolve`
       and `Config` directly
-- [ ] 2.6 Green: `Settings` stops deriving `Args` and keeps
+- [x] 2.6 Green: `Settings` stops deriving `Args` and keeps
       `Default + Clone + Debug + PartialEq + Eq`; `Cli` loses its
       `settings` field and gains `fn settings(&self) -> Settings`
       assembling one from the chosen command's groups
-- [ ] 2.7 Rewrite the `cli.rs` module documentation: the
+- [x] 2.7 Rewrite the `cli.rs` module documentation: the
       position-independence promise is what this change spends, and the
       new paragraph says which settings a subcommand carries and why
       `--json` is the one that stays global
@@ -65,12 +65,16 @@ doing.
 
 ## 4. Wiring the run
 
-- [ ] 4.1 `execute` and `dispatch` in `crates/borax/src/run.rs` call
+Done with group 2: removing `Cli::settings` and giving each variant
+its option groups breaks `run.rs` and the five test `Cli` literals in
+the same edit, so the suite has no green state between the two groups.
+
+- [x] 4.1 `execute` and `dispatch` in `crates/borax/src/run.rs` call
       `cli.settings()` where they read `cli.settings`; drop
       `settings: Settings::default()` from the five test `Cli` literals
-- [ ] 4.2 `expanded` carries each variant's option groups through
+- [x] 4.2 `expanded` carries each variant's option groups through
       unchanged beside the expanded paths
-- [ ] 4.3 Move the `flag_layers` tests from `.settings` to
+- [x] 4.3 Move the `flag_layers` tests from `.settings` to
       `.settings()`; their subjects and assertions do not change, since
       they all parse against `config`, which keeps every flag. A test
       that needs more than that token is a surface mistake to fix in

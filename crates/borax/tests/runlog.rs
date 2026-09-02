@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use borax::bib::BibFiles;
-use borax::cli::{Cli, Command, LedgerAction, Settings};
+use borax::cli::{Cli, Command, LedgerAction};
 use borax::config::{Layer, Origin, resolve};
 use borax::ledger::ACCOUNTING_DIR;
 use borax::pipeline::Library;
@@ -239,11 +239,7 @@ fn effective_with_default_template(template: &str) -> borax::config::Effective {
 }
 
 fn cli(command: Command, json: bool) -> Cli {
-    Cli {
-        command,
-        settings: Settings::default(),
-        json,
-    }
+    Cli { command, json }
 }
 
 /// Every file directly under `runs`, by name, sorted.
@@ -435,7 +431,7 @@ fn destination_of_a_preview_rename_in_a_collection_is_optional_with_the_dry_suff
 fn destination_of_ledger_rebuild_is_optional_not_mandatory() {
     let root = PathBuf::from("/collection");
     let command = Command::Ledger {
-        action: LedgerAction::Rebuild,
+        action: LedgerAction::rebuild(),
     };
 
     let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use borax::bib::BibFiles;
-use borax::cli::{Cli, Command, Settings};
+use borax::cli::{Cli, Command};
 use borax::config::{Effective, Layer, Origin, resolve};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
@@ -274,11 +274,7 @@ fn effective_with_default_template(template: &str) -> Effective {
 }
 
 fn cli(command: Command, json: bool) -> Cli {
-    Cli {
-        command,
-        settings: Settings::default(),
-        json,
-    }
+    Cli { command, json }
 }
 
 /// The JSON lines `out` decodes to, one [`Value`] per line.
@@ -549,7 +545,7 @@ fn cache_with_no_cache_root_is_fatal_and_opens_no_stream() {
     };
 
     let outcome = dispatch(
-        &cli(Command::Cache { clear: false }, true),
+        &cli(Command::cache(false), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,
@@ -594,7 +590,7 @@ fn a_normal_json_run_emits_both_run_started_and_run_finished() {
     };
 
     let outcome = dispatch(
-        &cli(Command::Config, true),
+        &cli(Command::config(), true),
         &Configs::uniform(effective),
         &adapters,
         &mut streams,

@@ -666,7 +666,7 @@ pub fn preflight<C: Cache>(
     adapters: &Adapters<C>,
 ) -> Result<Prepared, Diagnostic> {
     match command {
-        Command::Config | Command::Resolve { .. } => Ok(Prepared::Unchecked),
+        Command::Config { .. } | Command::Resolve { .. } => Ok(Prepared::Unchecked),
         // The root and the ledger are discovered together, so a run
         // holding one holds the other; either being absent is the one
         // situation of being outside a collection.
@@ -678,7 +678,7 @@ pub fn preflight<C: Cache>(
                 "this directory is in no collection, so there is no ledger to rebuild".to_string(),
             )),
         },
-        Command::Cache { clear } => match adapters.cache_root.as_deref() {
+        Command::Cache { clear, .. } => match adapters.cache_root.as_deref() {
             Some(root) => Ok(Prepared::Cache {
                 report: cache_report(*clear, root)?,
             }),
@@ -696,7 +696,7 @@ pub fn preflight<C: Cache>(
                 warnings,
             })
         }
-        Command::Bib { paths } => {
+        Command::Bib { paths, .. } => {
             let (groups, warnings) = compiled_groups(paths, configs)?;
             Ok(Prepared::Grouped {
                 groups,
@@ -876,7 +876,7 @@ pub fn emit_events<C: Cache>(
     sink: &mut dyn Sink,
 ) -> Option<Diagnostic> {
     match (command, prepared) {
-        (Command::Config, _) => {
+        (Command::Config { .. }, _) => {
             for event in configs.run().events() {
                 sink.emit(event);
             }
@@ -887,7 +887,7 @@ pub fn emit_events<C: Cache>(
             sink.emit(report.clone());
             None
         }
-        (Command::Resolve { paths }, _) => {
+        (Command::Resolve { paths, .. }, _) => {
             resolve_events(paths, configs, adapters, sink);
             None
         }
@@ -1726,9 +1726,9 @@ pub fn dispatch<C: Cache>(
 fn applying(command: &Command) -> bool {
     match command {
         Command::Rename { apply, .. } => *apply,
-        Command::Cache { clear } => *clear,
+        Command::Cache { clear, .. } => *clear,
         Command::Bib { .. } | Command::Ledger { .. } => true,
-        Command::Resolve { .. } | Command::Config => false,
+        Command::Resolve { .. } | Command::Config { .. } => false,
     }
 }
 
@@ -1749,7 +1749,7 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
     // <dir>` is a run in `<dir>`, whatever depth its files sit at.
     let working = start_directory_for(&cli.command);
     let configs =
-        match configs_from_environment(command.paths(), &working, flag_layers(&cli.settings)) {
+        match configs_from_environment(command.paths(), &working, flag_layers(&cli.settings())) {
             Ok(configs) => configs,
             Err(failure) => {
                 let _ = writeln!(streams.err, "{}", error(failure.to_string()));
@@ -1798,7 +1798,6 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
     dispatch(
         &Cli {
             command,
-            settings: cli.settings.clone(),
             json: cli.json,
         },
         &configs,
@@ -1899,17 +1898,46 @@ fn start_directory_for(command: &Command) -> PathBuf {
 /// whoever decided which those are.
 fn expanded(command: &Command) -> Command {
     match command {
-        Command::Resolve { paths } => Command::Resolve {
+        Command::Resolve {
+            paths,
+            resolution,
+            concurrency,
+            run_log,
+        } => Command::Resolve {
             paths: inputs(paths),
+            resolution: resolution.clone(),
+            concurrency: *concurrency,
+            run_log: run_log.clone(),
         },
-        Command::Rename { paths, apply } => Command::Rename {
+        Command::Rename {
+            paths,
+            apply,
+            resolution,
+            rename,
+            bibliography,
+            accounting,
+            run_log,
+        } => Command::Rename {
             paths: inputs(paths),
             apply: *apply,
+            resolution: resolution.clone(),
+            rename: rename.clone(),
+            bibliography: bibliography.clone(),
+            accounting: accounting.clone(),
+            run_log: run_log.clone(),
         },
-        Command::Bib { paths } => Command::Bib {
+        Command::Bib {
+            paths,
+            resolution,
+            bibliography,
+            run_log,
+        } => Command::Bib {
             paths: inputs(paths),
+            resolution: resolution.clone(),
+            bibliography: bibliography.clone(),
+            run_log: run_log.clone(),
         },
-        Command::Config | Command::Cache { .. } | Command::Ledger { .. } => command.clone(),
+        Command::Config { .. } | Command::Cache { .. } | Command::Ledger { .. } => command.clone(),
     }
 }
 

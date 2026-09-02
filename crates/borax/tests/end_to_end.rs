@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use borax::bib::{RealBibFiles, sidecar_path};
-use borax::cli::{Cli, Command, LedgerAction, Settings};
+use borax::cli::{Cli, Command, LedgerAction};
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
 use borax::ledger::{FileLedger, Ledger};
 use borax::pipeline::RealLibrary;
@@ -287,7 +287,6 @@ fn invoke(
     let ledger = collection_root.map(FileLedger::at_collection_root);
     let cli = Cli {
         command,
-        settings: Settings::default(),
         json: true,
     };
 
@@ -951,7 +950,7 @@ fn rebuilding_a_real_collection_twice_is_byte_identical_and_compacts_after_delet
     let rebuild = || {
         invoke(
             Command::Ledger {
-                action: LedgerAction::Rebuild,
+                action: LedgerAction::rebuild(),
             },
             &master,
             state.path(),
