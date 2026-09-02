@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use borax::cli::{Cli, Command, LedgerAction, Settings, flag_layers};
@@ -303,8 +302,6 @@ fn bib_accepts_every_setting_it_consumes() {
 fn config_accepts_every_setting() {
     let cli = parse(&[
         "config",
-        "--template",
-        "[auth][year]",
         "--sources",
         "crossref,arxiv",
         "--mailto",
@@ -330,7 +327,6 @@ fn config_accepts_every_setting() {
     assert_eq!(
         cli.settings(),
         Settings {
-            template: Some("[auth][year]".to_string()),
             sources: Some(vec!["crossref".to_string(), "arxiv".to_string()]),
             mailto: Some("me@example.org".to_string()),
             page_limit: Some(3),
@@ -447,6 +443,25 @@ fn resolve_refuses_bib_as_an_unknown_argument() {
 
     let message = result.unwrap_err().to_string();
     assert!(message.contains("--bib"), "got {message:?}");
+}
+
+#[test]
+fn config_refuses_template_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "config", "--template", "[auth][year]"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--template"), "got {message:?}");
+}
+
+#[test]
+fn rename_refuses_template_as_an_unknown_argument() {
+    let result =
+        <Cli as Parser>::try_parse_from(["borax", "rename", "--template", "[auth][year]", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--template"), "got {message:?}");
 }
 
 // ---------------------------------------------------------------------
@@ -690,24 +705,46 @@ fn flag_layers_of_default_settings_is_empty() {
     assert!(layers.is_empty(), "got {layers:?}");
 }
 
+/// No flag reaches `templates`: `--template` is gone, and nothing else
+/// in the accepted surface can produce a layer that names it. This is
+/// the test that keeps the door shut if someone re-adds the flag.
 #[test]
-fn template_alone_sets_the_default_template_key() {
-    let layers = flag_layers(&parse(&["config", "--template", "[auth][year]"]).settings());
-
-    assert_eq!(
-        layers,
-        vec![(
-            Origin::Flag("template".to_string()),
-            Layer {
-                templates: Some(BTreeMap::from([(
-                    "default".to_string(),
-                    "[auth][year]".to_string(),
-                )])),
-                ..Layer::default()
-            },
-        )],
-        "got {layers:?}"
+fn no_flag_can_produce_a_templates_layer() {
+    let layers = flag_layers(
+        &parse(&[
+            "config",
+            "--sources",
+            "crossref,arxiv",
+            "--mailto",
+            "me@example.org",
+            "--page-limit",
+            "3",
+            "--min-interval-ms",
+            "500",
+            "--cache",
+            "--collision",
+            "suffix",
+            "--bib",
+            "refs.bib",
+            "--duplicates",
+            "skip",
+            "--sidecars",
+            "--concurrency",
+            "4",
+            "--ledger",
+            "--run-log",
+        ])
+        .settings(),
     );
+
+    for (origin, layer) in &layers {
+        assert!(layer.templates.is_none(), "got {layers:?}");
+        assert_ne!(
+            origin,
+            &Origin::Flag("template".to_string()),
+            "got {layers:?}"
+        );
+    }
 }
 
 #[test]

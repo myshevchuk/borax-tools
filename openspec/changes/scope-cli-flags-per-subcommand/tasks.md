@@ -54,12 +54,12 @@ doing.
 
 ## 3. `--template` is removed
 
-- [ ] 3.1 Red: `borax rename --template …` and `borax config --template
+- [x] 3.1 Red: `borax rename --template …` and `borax config --template
       …` are unknown-argument errors, and `flag_layers` has no arm that
       can produce a `templates` layer
-- [ ] 3.2 Green: delete the `template` field and its `flag_layers` arm;
+- [x] 3.2 Green: delete the `template` field and its `flag_layers` arm;
       confirm `Origin::Flag("template")` appears nowhere
-- [ ] 3.3 Check that no environment-variable path reaches `templates`,
+- [x] 3.3 Check that no environment-variable path reaches `templates`,
       so the config-file-only claim now holds for all three open-ended
       structures
 

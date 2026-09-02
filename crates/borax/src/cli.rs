@@ -15,7 +15,6 @@
 //! anywhere: it chooses the rendering of the event stream, which every
 //! subcommand honours and none of them interprets differently.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -186,10 +185,6 @@ pub enum Command {
     },
     /// Print every setting, its value, and the layer it came from.
     Config {
-        /// The filename template for entry types with none of their own.
-        #[arg(long, value_name = "TEMPLATE")]
-        template: Option<String>,
-
         /// How many files may be resolved at once.
         #[arg(long, value_name = "N")]
         concurrency: Option<usize>,
@@ -250,9 +245,6 @@ pub enum LedgerAction {
 /// is a parse error rather than a last-one-wins guess.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Settings {
-    /// The filename template for entry types with none of their own.
-    pub template: Option<String>,
-
     /// Which services may be asked.
     pub sources: Option<Vec<String>>,
 
@@ -402,7 +394,6 @@ impl Cli {
                 run_log.fill(&mut settings);
             }
             Command::Config {
-                template,
                 concurrency,
                 resolution,
                 rename,
@@ -410,7 +401,6 @@ impl Cli {
                 accounting,
                 run_log,
             } => {
-                settings.template = template.clone();
                 settings.concurrency = *concurrency;
                 resolution.fill(&mut settings);
                 rename.fill(&mut settings);
@@ -466,7 +456,6 @@ impl Command {
     /// The `config` command, with no setting overridden.
     pub fn config() -> Command {
         Command::Config {
-            template: None,
             concurrency: None,
             resolution: ResolutionOptions::default(),
             rename: RenameOptions::default(),
@@ -538,15 +527,6 @@ pub fn flag_layers(settings: &Settings) -> Vec<(Origin, Layer)> {
     let mut layers = Vec::new();
     let mut push = |name: &str, layer: Layer| layers.push((Origin::Flag(name.to_string()), layer));
 
-    if let Some(template) = &settings.template {
-        push(
-            "template",
-            Layer {
-                templates: Some(BTreeMap::from([("default".to_string(), template.clone())])),
-                ..Layer::default()
-            },
-        );
-    }
     if let Some(sources) = &settings.sources {
         push(
             "sources",

@@ -774,6 +774,23 @@ fn layer_from_env_borax_tables_jcode_is_unknown_env() {
     );
 }
 
+/// Citation-key templates are just as open-ended as templates and
+/// tables and cannot be addressed by a single environment variable, so
+/// this name is unknown even though its prefix matches a real table —
+/// exactly as `layer_from_env_borax_templates_default_is_unknown_env`
+/// and `layer_from_env_borax_tables_jcode_is_unknown_env` cover for
+/// `templates` and `tables`.
+#[test]
+fn layer_from_env_borax_citation_keys_default_is_unknown_env() {
+    let err = layer_from_env([("BORAX_CITATION_KEYS_DEFAULT", "[auth][year]")]).unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::UnknownEnv {
+            name: "CITATION_KEYS_DEFAULT".to_string()
+        }
+    );
+}
+
 #[test]
 fn layer_from_env_a_non_numeric_concurrency_is_invalid_naming_the_key() {
     let err = layer_from_env([("BORAX_NETWORK_CONCURRENCY", "many")]).unwrap_err();
