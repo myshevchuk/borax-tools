@@ -82,20 +82,20 @@ the same edit, so the suite has no green state between the two groups.
 
 ## 5. Templates compile where they are rendered
 
-- [ ] 5.1 Red: `crates/borax/tests/binary.rs` — a configuration whose
+- [x] 5.1 Red: `crates/borax/tests/binary.rs` — a configuration whose
       `templates.default` will not compile lets `borax bib` run to
       completion, and still ends `borax rename` with the fatal exit
       code, neither `run-started` nor `run-finished` on stdout
-- [ ] 5.2 Red: a configuration whose `citation-keys.default` will not
+- [x] 5.2 Red: a configuration whose `citation-keys.default` will not
       compile still ends `borax bib`, so the scoping cut in one
       direction only
-- [ ] 5.3 Red: a declared table that cannot be read still ends both, so
+- [x] 5.3 Red: a declared table that cannot be read still ends both, so
       table loading did not get scoped along with the templates
-- [ ] 5.4 Red: `borax config` reports a `templates.default` that will
+- [x] 5.4 Red: `borax config` reports a `templates.default` that will
       not compile as the source text it is, without refusing the run,
       as it does today — pinning that this change does not make `config`
       start validating
-- [ ] 5.5 Green: `compiled_groups` takes which template tables the
+- [x] 5.5 Green: `compiled_groups` takes which template tables the
       command needs — both for `Rename`, citation keys alone for `Bib`,
       and neither for `Config` and `Resolve`, which keep the
       `Prepared::Unchecked` path they have now

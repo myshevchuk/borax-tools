@@ -1237,7 +1237,8 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
 }
 
 // ---------------------------------------------------------------------
-// events_for: an uncompilable template propagates as a Diagnostic
+// events_for: an uncompilable filename template propagates as a
+// Diagnostic, for the commands that render a filename
 // ---------------------------------------------------------------------
 
 #[test]
@@ -1280,8 +1281,12 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
     assert_eq!(error.level, Level::Error);
 }
 
+/// The other side of the cut: `bib` renders no filename, so a filename
+/// template that will not compile is a value this run never reads and
+/// cannot be ended by. Its citation-key templates still compile, which
+/// is what `bib_with_an_uncompilable_citation_key_template_…` pins.
 #[test]
-fn bib_with_an_uncompilable_template_propagates_the_diagnostic() {
+fn bib_with_an_uncompilable_filename_template_runs_anyway() {
     let path = PathBuf::from("/lib/paper.pdf");
     let library = FakeLibrary::new().with_file(
         &path,
@@ -1310,14 +1315,14 @@ fn bib_with_an_uncompilable_template_propagates_the_diagnostic() {
         state_root: None,
     };
 
-    let error = events_for(
+    let events = events_for(
         &Command::bib(vec![path]),
         &Configs::uniform(effective.clone()),
         &adapters,
     )
-    .unwrap_err();
+    .expect("a filename template bib never renders cannot end it");
 
-    assert_eq!(error.level, Level::Error);
+    assert!(!events.is_empty(), "got {events:?}");
 }
 
 // ---------------------------------------------------------------------
@@ -1914,7 +1919,9 @@ fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() 
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
-    let effective = effective_with_default_template("[nonexistentfield]");
+    // A citation-key template, because that is the table `bib` renders
+    // from: the check has to be one this command actually makes.
+    let effective = effective_with_default_citation_key_template("[nonexistentfield]");
     let adapters = Adapters {
         library: &library,
         sources: &sources,

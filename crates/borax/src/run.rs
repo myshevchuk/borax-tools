@@ -552,13 +552,19 @@ impl Sink for Vec<Event> {
 /// A run spanning two trees is a run under two configurations, so every
 /// table here is the one that directory's own configuration resolved
 /// to.
+///
+/// Which template tables a group carries follows from what the command
+/// renders, which [`Renders`] names: a group built for a command that
+/// renders no filename holds `None` in [`Group::filenames`].
 pub struct Group {
     /// The directory the group's configuration was resolved for.
     pub directory: PathBuf,
     /// The files in it, in the order the run reached them.
     pub paths: Vec<PathBuf>,
-    /// The filename templates, which name a renamed file.
-    pub filenames: TemplateTable,
+    /// The filename templates, which name a renamed file, and
+    /// `None` for a command that renders no filename and so never
+    /// compiled them.
+    pub filenames: Option<TemplateTable>,
     /// The citation-key templates, which name a cited record.
     pub citation_keys: TemplateTable,
     /// The external tables this directory's templates may look up.
@@ -590,10 +596,11 @@ pub enum Prepared {
     /// holding them, in the order those directories are first reached,
     /// each paired with the tables compiled for it.
     ///
-    /// Holding the compiled tables is what makes "every template
-    /// compiles before any file is touched" a property of the type
-    /// rather than an ordering inside a function: emitting cannot reach
-    /// a file without already holding the tables for its directory.
+    /// Holding the compiled tables is what makes "every template the
+    /// command renders from compiles before any file is touched" a
+    /// property of the type rather than an ordering inside a function:
+    /// emitting cannot reach a file without already holding the tables
+    /// for its directory.
     Grouped {
         groups: Vec<Group>,
         /// What the collection has admitted already, keyed for the
@@ -630,11 +637,16 @@ pub enum Prepared {
 /// something the whole invocation needs is missing, so there is no
 /// per-file verdict to report:
 ///
-/// - a template that will not compile, or one looking up a table no
-///   configuration declares, which is wrong for every file in the
-///   batch;
-/// - a declared table that cannot be read or will not load, which is
-///   wrong for every file the templates reaching it would have named;
+/// - a template the command renders from that will not compile, or
+///   one looking up a table no configuration declares, which is wrong
+///   for every file in the batch — `rename` renders both a filename
+///   and a citation key, so it compiles both tables, while `bib`
+///   renders only a citation key and compiles only that one, which is
+///   why a filename template it would never read cannot refuse it;
+/// - a declared table that cannot be read or will not load, whichever
+///   template tables the command compiles, since loading a table is
+///   what validates the `lookup` tokens in the ones it does compile and
+///   a table that will not load is a fault in the configuration;
 /// - `cache` with no cache directory, or with one that cannot be read,
 ///   because reporting an empty cache would answer a question that was
 ///   never asked;
@@ -685,7 +697,8 @@ pub fn preflight<C: Cache>(
             None => Err(error("this system names no cache directory".to_string())),
         },
         Command::Rename { paths, .. } => {
-            let (groups, mut warnings) = compiled_groups(paths, configs)?;
+            let (groups, mut warnings) =
+                compiled_groups(paths, configs, Renders::FilenamesAndCitationKeys)?;
             let prepared = crate::ledger::prepare(configs.run().config().ledger, adapters.ledger);
             // After the tables', because a run that cannot trust its
             // ledger should hear that before it hears about a row.
@@ -697,7 +710,7 @@ pub fn preflight<C: Cache>(
             })
         }
         Command::Bib { paths, .. } => {
-            let (groups, warnings) = compiled_groups(paths, configs)?;
+            let (groups, warnings) = compiled_groups(paths, configs, Renders::CitationKeysOnly)?;
             Ok(Prepared::Grouped {
                 groups,
                 // A bibliography run admits nothing, so it neither
@@ -710,18 +723,43 @@ pub fn preflight<C: Cache>(
     }
 }
 
-/// `paths` grouped by directory ([`by_directory`]), each group paired
-/// with the template tables its directory's configuration compiles to
-/// and the lookup tables it declares.
+/// Which template tables a command renders from, and so which ones
+/// [`compiled_groups`] compiles for it.
 ///
-/// Every group's lookup tables are loaded and both its template tables
-/// compiled before any group is worked, so a table that will not load
-/// and a template that will not compile — filename or citation key, in
-/// any of the directories the run spans — each end the run before a
-/// single file is read.
+/// A command compiles what it renders and no more, so a template it
+/// would never have rendered cannot refuse its run.
+#[derive(Clone, Copy)]
+enum Renders {
+    /// `rename`, which names each file it moves and cites the records
+    /// it admits: both tables.
+    FilenamesAndCitationKeys,
+    /// `bib`, which writes bibliography entries and no filename: the
+    /// citation-key table alone.
+    CitationKeysOnly,
+}
+
+/// `paths` grouped by directory ([`by_directory`]), each group paired
+/// with the template tables `renders` calls for, compiled from its
+/// directory's configuration, and the lookup tables that configuration
+/// declares.
+///
+/// Every group's lookup tables are loaded and every template table
+/// `renders` names compiled before any group is worked, so a table that
+/// will not load and a template that will not compile — in any of the
+/// directories the run spans — each end the run before a single file is
+/// read. A template table `renders` leaves out is not compiled and so
+/// cannot end anything: [`Renders::CitationKeysOnly`] carries no
+/// filename templates, and a `templates.default` that will not compile
+/// is a fault only for the command that would have rendered it.
+///
+/// Lookup tables are loaded whichever tables are compiled. Loading one
+/// is what validates the `lookup` tokens in the templates that are
+/// compiled, and a table that will not load is a fault in the
+/// configuration rather than in a template.
 fn compiled_groups(
     paths: &[PathBuf],
     configs: &Configs,
+    renders: Renders,
 ) -> Result<(Vec<Group>, Vec<Diagnostic>), Diagnostic> {
     let mut warnings = Vec::new();
     let groups = by_directory(paths)
@@ -734,7 +772,12 @@ fn compiled_groups(
             warnings.extend(dropped);
             let config = effective.config();
             Ok(Group {
-                filenames: templates(&config.templates, "templates", &tables)?,
+                filenames: match renders {
+                    Renders::FilenamesAndCitationKeys => {
+                        Some(templates(&config.templates, "templates", &tables)?)
+                    }
+                    Renders::CitationKeysOnly => None,
+                },
                 citation_keys: templates(&config.citation_keys, "citation-keys", &tables)?,
                 tables,
                 used,
@@ -1112,9 +1155,15 @@ fn rename_events<C: Cache>(
         // under two configurations.
         let mut lookups = Lookups::new(&group.tables);
 
+        // Only `Rename` reaches here, and that is the command
+        // `preflight` compiles the filename templates for.
+        let filenames = group
+            .filenames
+            .as_ref()
+            .expect("a group built for a rename carries filename templates");
         let mut planning = Planning::new(
             &group.directory,
-            &group.filenames,
+            filenames,
             effective.config().collision,
             adapters.filesystem,
         );

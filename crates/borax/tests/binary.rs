@@ -101,18 +101,25 @@ fn library_declaring(directory: &Path, table: &str) {
         .expect("the file should be written");
 }
 
-/// `borax rename --json <directory>`, run with nothing in the
+/// `borax <subcommand> --json <directory>`, run with nothing in the
 /// environment that could reach the configuration beyond a
 /// `XDG_CONFIG_HOME` that holds none.
-fn rename_json(directory: &Path, config_home: &Path) -> Output {
+fn run_json(subcommand: &str, directory: &Path, config_home: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_borax"))
-        .args(["rename", "--json"])
+        .args([subcommand, "--json"])
         .arg(directory)
         .env_clear()
         .env("XDG_CONFIG_HOME", config_home)
         .env("APPDATA", config_home)
         .output()
         .expect("the binary should run")
+}
+
+/// `borax rename --json <directory>`, run with nothing in the
+/// environment that could reach the configuration beyond a
+/// `XDG_CONFIG_HOME` that holds none.
+fn rename_json(directory: &Path, config_home: &Path) -> Output {
+    run_json("rename", directory, config_home)
 }
 
 /// Assert that `output` is the fatal outcome a broken table produces:
@@ -202,4 +209,161 @@ fn a_dropped_row_warns_and_the_run_goes_on() {
     // The run was not refused: a dropped row is a warning, not a fault.
     assert!(stdout.contains("run-started"), "got {stdout:?}");
     assert!(stdout.contains("run-finished"), "got {stdout:?}");
+}
+
+// ---------------------------------------------------------------------
+// A run compiles the template tables it renders from, and no others:
+// design.md decision D6, and the spec's "Templates fail fast at load
+// time" and "Citation-key templates are configured separately"
+// requirements.
+// ---------------------------------------------------------------------
+
+/// A directory holding `configuration` as its `.borax.toml`, and one
+/// file for the run to have something to work on.
+fn library_with(directory: &Path, configuration: &str) {
+    fs::write(directory.join(".borax.toml"), configuration).expect("the config should be written");
+    fs::write(directory.join("paper.pdf"), b"not really a PDF")
+        .expect("the file should be written");
+}
+
+/// A `.borax.toml` whose `templates.default` will not compile: an
+/// unclosed `[` at byte 11 of `[auth][year`. `citation-keys` is left
+/// unset, so it falls back to the built-in default, which does compile.
+const BROKEN_FILENAME_TEMPLATE: &str = r#"
+[templates]
+default = '[auth][year'
+"#;
+
+/// A `.borax.toml` whose `citation-keys.default` will not compile, by
+/// the same broken source. `templates` is left unset, so it falls back
+/// to the built-in default, which does compile.
+const BROKEN_CITATION_KEY_TEMPLATE: &str = r#"
+[citation-keys]
+default = '[auth][year'
+"#;
+
+/// Spec scenario: "A filename template stops only the runs that render
+/// one" — `borax bib` renders no filename, so an uncompilable
+/// `templates.default` must not end it.
+///
+/// Red today: `compiled_groups` still compiles both template tables for
+/// `bib`, so this run is refused before either framing event.
+#[test]
+fn an_uncompilable_filename_template_lets_bib_run_to_completion() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    library_with(directory.path(), BROKEN_FILENAME_TEMPLATE);
+
+    let output = run_json("bib", directory.path(), config_home.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Not pinned to the partial-success code: that digit is about the
+    // fixture being nine bytes of ASCII rather than a PDF, not about
+    // this change.
+    assert_ne!(output.status.code(), Some(1), "stderr was {stderr:?}");
+    assert!(stdout.contains("run-started"), "got {stdout:?}");
+    assert!(stdout.contains("run-finished"), "got {stdout:?}");
+}
+
+/// The other half of the same scenario: `rename` renders a filename
+/// from that same template, so the same configuration must still end
+/// it with the fatal code and neither framing event.
+///
+/// Green today, and it is the regression guard that says the scoping
+/// cut in one direction only.
+#[test]
+fn an_uncompilable_filename_template_still_ends_rename() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    library_with(directory.path(), BROKEN_FILENAME_TEMPLATE);
+
+    let output = run_json("rename", directory.path(), config_home.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr:?}");
+    assert!(stderr.contains("templates.default"), "got {stderr:?}");
+    assert!(!stdout.contains("run-started"), "got {stdout:?}");
+    assert!(!stdout.contains("run-finished"), "got {stdout:?}");
+}
+
+/// Spec scenario (citation-keys spec): "Uncompilable citation-key
+/// template" — `bib` renders citation keys, so this one it must still
+/// refuse.
+///
+/// Green today; it guards against stage 3 scoping too much away.
+#[test]
+fn an_uncompilable_citation_key_template_still_ends_bib() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    library_with(directory.path(), BROKEN_CITATION_KEY_TEMPLATE);
+
+    let output = run_json("bib", directory.path(), config_home.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "stderr was {stderr:?}");
+    assert!(stderr.contains("citation-keys.default"), "got {stderr:?}");
+    assert!(!stdout.contains("run-started"), "got {stdout:?}");
+    assert!(!stdout.contains("run-finished"), "got {stdout:?}");
+}
+
+/// Spec requirement: "Table failures end a run before it starts" holds
+/// for both commands — table loading is not scoped along with the
+/// template tables the way the templates themselves now are.
+///
+/// The `rename` half is green today; the `bib` half must stay green
+/// through stage 3, which is exactly the point of writing it.
+#[test]
+fn a_table_that_cannot_be_read_ends_both_rename_and_bib() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    library_declaring(directory.path(), "title\tabbreviation\n");
+    let table = directory.path().join("journals.tsv");
+    fs::remove_file(&table).expect("the table should be removable");
+    let reason = table.display().to_string();
+
+    let rename_output = run_json("rename", directory.path(), config_home.path());
+    let bib_output = run_json("bib", directory.path(), config_home.path());
+
+    assert_refused(&rename_output, &reason);
+    assert_refused(&bib_output, &reason);
+}
+
+/// Spec: `design.md` decision D6 — "`borax config` compiles nothing,
+/// and this change does not make it start." A `templates.default` that
+/// will not compile is still reported as the source text a
+/// configuration file gave, with its origin, and the run is not
+/// refused.
+///
+/// Green today; pins that this change does not make `config` start
+/// validating.
+#[test]
+fn config_reports_an_uncompilable_template_as_its_source_text() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    library_with(directory.path(), BROKEN_FILENAME_TEMPLATE);
+
+    // `config` takes no path argument, so the fixture directory has to
+    // be the working directory for the override search to find it.
+    let output = Command::new(env!("CARGO_BIN_EXE_borax"))
+        .arg("config")
+        .current_dir(directory.path())
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("APPDATA", config_home.path())
+        .output()
+        .expect("the binary should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(0), "got {stdout:?}");
+    // The origin's absolute path is not pinned: `config` finds the file
+    // from the working directory, which macOS reports canonicalized,
+    // and the claim here is about the value and the layer it came from.
+    assert!(
+        stdout.contains("templates.default = \"[auth][year\"  # override "),
+        "got {stdout:?}"
+    );
+    assert!(stdout.contains(".borax.toml"), "got {stdout:?}");
 }
