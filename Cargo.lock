@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "borax"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "borax-core",
  "borax-pdf",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "borax-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "regex",
  "serde",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "borax-pdf"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "borax-core",
  "lopdf",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "borax-sources"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "borax-core",
  "quick-xml",
