@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setting with its flag and its default. Nothing about the tool's
   behaviour changed. Release archives now carry the manual beside the
   README.
+- borax describes itself as "fast, configurable" rather than "fast,
+  error-free", in the README and in the crate description. The old
+  phrase promised what no tool can guarantee; what it was reaching for —
+  previews by default, never overwrites, never guesses — is stated as
+  those three things instead.
 
 ## [0.4.0] - 2026-09-03
 

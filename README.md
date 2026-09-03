@@ -1,6 +1,6 @@
 # borax-tools
 
-A fast, error-free CLI suite for bibliography work. Give it a file,
+A fast, configurable CLI suite for bibliography work. Give it a file,
 typically a PDF you have just downloaded. It finds the DOI or arXiv id,
 looks up the identifier with Crossref, OpenAlex, and arXiv, then renames
 the file after the returned record. You choose the new name with a small

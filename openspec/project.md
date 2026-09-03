@@ -10,8 +10,16 @@ A CLI suite for bibliography work. Core pipeline: given a file (typically
 a PDF), extract an identifier, resolve bibliographic metadata from online
 sources, and rename the file by configurable template rules. Stateless by
 design (the only persistent state is a response cache and the rename
-journal); "fast and error-free" are the two governing requirements, in
-that order of scrutiny but with error-free winning any conflict.
+journal); "fast and configurable" are the two governing requirements, in
+that order of scrutiny but with configurable winning any conflict. Where
+a fixed behaviour would be faster than one the user can steer, the
+setting wins.
+
+Neither requirement outranks the file-safety contract, which is not
+negotiable and not a matter of degree: borax previews by default, never
+overwrites, and never guesses. The archived `add-core-pipeline` proposal
+calls that contract "error-free"; it is written out here as the three
+things it means, because the adjective promised more than any tool can.
 
 ## Architecture
 

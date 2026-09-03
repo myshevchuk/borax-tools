@@ -1,6 +1,6 @@
 [package]
 name = "borax"
-description = "Fast, error-free bibliography fetch-and-rename CLI"
+description = "Fast, configurable bibliography fetch-and-rename CLI"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
