@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-08-29, before cutting 0.3.0.
+Last reviewed: 2026-09-03, before cutting 0.4.0.
 
 ## What is built
 
@@ -42,8 +42,8 @@ and still mandatory and pre-flushed for `rename --apply`. Re-running a
 corrected template is the ordinary answer, since files are identified by
 content rather than by name.
 
-`add-external-tables` is implemented on top of all four, archived and
-not yet released. A template can now consult a file the user curates
+`add-external-tables` is implemented and archived on top of all four,
+and ships in 0.4.0. A template can now consult a file the user curates
 outside borax: configuration declares named lookup tables by path and
 by which of their columns supply keys and values, and a
 `lookup("<table>")` filter substitutes what one holds for whatever
@@ -62,19 +62,20 @@ miss renders empty and is reported once per distinct table and input
 and counted in the summary, and `run-started` names every table read
 by path and content digest.
 
-`scope-cli-flags-per-subcommand` is implemented on top of all five, on
-its branch. The flag surface is per-subcommand: each command declares
-the settings that can change what it reports, writes or moves, so a
-subcommand's `--help` describes that subcommand and naming an
-inapplicable setting is an unknown argument rather than a silent
-no-op. What that costs is position, spent deliberately — a setting flag
-follows its subcommand, and `--json` alone is still accepted on either
-side, since an argument propagates down from a parent and never up from
-a child. `--template` is gone with it, which leaves the three
-open-ended tables — `templates`, `citation-keys`, `tables` —
-configuration-file-only without exception. `borax config` keeps every
-flag, because an override there is the question it answers rather than
-a no-op, so the thirty-odd flag-layering tests kept their subjects.
+`scope-cli-flags-per-subcommand` is implemented and archived on top of
+all five, and ships in 0.4.0 beside it. The flag surface is
+per-subcommand: each command declares the settings that can change what
+it reports, writes or moves, so a subcommand's `--help` describes that
+subcommand and naming an inapplicable setting is an unknown argument
+rather than a silent no-op. What that costs is position, spent
+deliberately — a setting flag follows its subcommand, and `--json` alone
+is still accepted on either side, since an argument propagates down from
+a parent and never up from a child. `--template` is gone with it, which
+leaves the three open-ended tables — `templates`, `citation-keys`,
+`tables` — configuration-file-only without exception. `borax config`
+keeps every flag, because an override there is the question it answers
+rather than a no-op, so the thirty-odd flag-layering tests kept their
+subjects.
 Configuration itself is untouched: layering, precedence, origins and
 `borax config` output are what they were, and a file or an environment
 variable still sets every key whatever command runs. A command now
@@ -154,7 +155,7 @@ first.
   and the answer governs re-renames and `ledger rebuild`'s scan alike.
   That is a change of its own, not a patch.
 
-- **Every capability spec opens with a placeholder Purpose.** All nine
+- **Every capability spec opens with a placeholder Purpose.** All ten
   files in `openspec/specs/` carry the same line the archive tool
   writes and asks to have replaced:
 
@@ -170,7 +171,7 @@ first.
   reader infers the scope from the requirements and can only guess
   where a new requirement belongs.
 
-  Worth one sweep across all nine rather than a line at a time. Filling
+  Worth one sweep across all ten rather than a line at a time. Filling
   in only the specs a change happens to touch is what has kept it
   outstanding: it makes the newly written ones the odd files out, which
   is a worse state than uniform placeholders, so each change has
