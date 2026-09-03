@@ -73,6 +73,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `2024-JACS-146-1234` for a paper with a volume and `2024-JACS-1234`
   for one without, rather than leaving `2024-JACS--1234` behind.
 
+### Changed
+
+- **BREAKING:** A setting flag now follows the subcommand that reads
+  it. `borax rename --mailto you@example.org papers/` is the accepted
+  form, and `borax --mailto you@example.org rename papers/` is a usage
+  error naming the flag. `--json` is the exception and still goes on
+  either side, because it chooses how the event stream is rendered and
+  every subcommand honours it.
+
+  The position changed because the surface did. Each subcommand now
+  declares only the settings that can change what it reports, writes or
+  moves, and a flag declared on a subcommand is recognized only after
+  that subcommand's name — an argument propagates down from the parent
+  and never up from a child, so a per-command surface and a
+  position-independent flag cannot both hold. What the position buys is
+  a `--help` that describes the command in front of you, and a refusal
+  where there used to be a silent no-op: `borax cache --no-cache`,
+  `borax cache --mailto …`, `borax rename --concurrency 8`,
+  `borax bib --no-ledger`, `borax bib --collision skip` and
+  `borax ledger rebuild --no-ledger` all named settings those commands
+  never read, and all of them were accepted and dropped. They are now
+  unknown arguments.
+
+  `borax config` still accepts every setting there is, since passing an
+  override to it is not a no-op but the question it answers.
+  Configuration is untouched: a configuration file and an environment
+  variable still set every key whatever command runs, so
+  `network.concurrency` in a `.borax.toml` still resolves and is still
+  reported under a `rename` that will not read it. Nothing about
+  layering, precedence, origins or `borax config` output changed.
+
+  There is no deprecation period and no shim. The error names the flag,
+  and the subcommand's `--help` now lists it in the right place.
+
+- A command compiles only the template tables it renders from.
+  `borax rename` names files and cites records, so it compiles both
+  `[templates]` and `[citation-keys]`; `borax bib` renders no file
+  name, so it compiles the citation keys alone and a `templates.default`
+  that will not compile no longer ends it. You hear about that template
+  from `rename`, where it is what you were asking for. `borax config`
+  compiles nothing, as before, and keeps reporting a template as the
+  source text a configuration file gave it. Lookup tables are still
+  loaded for both commands whichever templates are compiled, since
+  loading one is what checks the `lookup` tokens in those that are.
+
+### Removed
+
+- **BREAKING:** The `--template` flag is gone, with no replacement.
+  Set `templates.default` in a configuration file — the global
+  `borax/config.toml`, or a `.borax.toml` in the directory of the files
+  you are renaming, which is also how you set a per-entry-type template
+  and how `[citation-keys]` and `[tables]` have always been set.
+
+  The flag could reach only the `default` key, so it was a partial door
+  into a structure the command line is otherwise not allowed to open,
+  and the README has always said templates are settable in
+  configuration files alone. It was also the sharpest case of a flag
+  ending a run it could not affect: preflight compiled the filename
+  templates for every command, so an unparseable `--template` aborted a
+  `borax bib` run that renders no file name.
+
 ## [0.3.0] - 2026-08-29
 
 ### Removed

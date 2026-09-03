@@ -42,10 +42,10 @@ and still mandatory and pre-flushed for `rename --apply`. Re-running a
 corrected template is the ordinary answer, since files are identified by
 content rather than by name.
 
-`add-external-tables` is implemented on top of all four, on its branch
-and not yet released. A template can now consult a file the user
-curates outside borax: configuration declares named lookup tables by
-path and by which of their columns supply keys and values, and a
+`add-external-tables` is implemented on top of all four, archived and
+not yet released. A template can now consult a file the user curates
+outside borax: configuration declares named lookup tables by path and
+by which of their columns supply keys and values, and a
 `lookup("<table>")` filter substitutes what one holds for whatever
 reached it. Matching goes through the fold `slug` always performed,
 now public and stated normatively, because the point of the change is
@@ -61,6 +61,33 @@ it. The failures are all in preflight beside template compilation, a
 miss renders empty and is reported once per distinct table and input
 and counted in the summary, and `run-started` names every table read
 by path and content digest.
+
+`scope-cli-flags-per-subcommand` is implemented on top of all five, on
+its branch. The flag surface is per-subcommand: each command declares
+the settings that can change what it reports, writes or moves, so a
+subcommand's `--help` describes that subcommand and naming an
+inapplicable setting is an unknown argument rather than a silent
+no-op. What that costs is position, spent deliberately — a setting flag
+follows its subcommand, and `--json` alone is still accepted on either
+side, since an argument propagates down from a parent and never up from
+a child. `--template` is gone with it, which leaves the three
+open-ended tables — `templates`, `citation-keys`, `tables` —
+configuration-file-only without exception. `borax config` keeps every
+flag, because an override there is the question it answers rather than
+a no-op, so the thirty-odd flag-layering tests kept their subjects.
+Configuration itself is untouched: layering, precedence, origins and
+`borax config` output are what they were, and a file or an environment
+variable still sets every key whatever command runs. A command now
+compiles only the template tables it renders from, so a filename
+template that will not compile ends a `rename` and no longer ends a
+`bib`.
+
+That `rename` and `bib` resolve serially is now visible in the command
+line rather than only in the code: `--concurrency` is declared on
+`resolve` and on `config`, and naming it on a `rename` is refused
+instead of accepted and ignored. The open decision below is unchanged
+— what would put the flag back on `rename` is an answer about ordering,
+not about the flag.
 
 Tests run green on Linux, macOS and Windows, including integration
 tests over real PDFs and Windows coverage of the path shapes discovery
@@ -159,7 +186,12 @@ first.
   answers, so a concurrent `rename` would either report out of order or
   buffer completions to restore input order — which is the buffering
   that change removed. Nothing is broken today, and the answer is not
-  obvious enough to guess at.
+  obvious enough to guess at. `scope-cli-flags-per-subcommand` did not
+  settle it; it stopped `rename` from advertising the flag, so the
+  question is now asked by its absence rather than by a setting that
+  read as available and did nothing. Answering it moves `--concurrency`
+  into the shared resolution group, which is one line at the flatten
+  site.
 - **Whether `pdfium` is ever worth it.** See above; the decision is
   evidence-gated rather than open in the usual sense.
 

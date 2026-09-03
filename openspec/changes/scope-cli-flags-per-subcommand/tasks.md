@@ -102,17 +102,17 @@ the same edit, so the suite has no green state between the two groups.
 
 ## 6. Documentation and release
 
-- [ ] 6.1 `README.md`: state that setting flags follow their subcommand
+- [x] 6.1 `README.md`: state that setting flags follow their subcommand
       and `--json` does not; remove any `--template` usage; the
       configuration section's claim about templates now holds without
       exception
-- [ ] 6.2 `CHANGELOG.md` under Unreleased: a `Removed` entry for
+- [x] 6.2 `CHANGELOG.md` under Unreleased: a `Removed` entry for
       `--template` and a `Changed` entry for the per-subcommand surface,
       both naming the position change, since these are the two things
       that will break an existing invocation
-- [ ] 6.3 `openspec/STATE.md`: record that the flag surface is
+- [x] 6.3 `openspec/STATE.md`: record that the flag surface is
       per-subcommand, and that `rename` and `bib` resolving serially is
       now visible in the CLI rather than only in the code
-- [ ] 6.4 Full suite green on Linux, macOS and Windows; `cargo clippy`
+- [x] 6.4 Full suite green on Linux, macOS and Windows; `cargo clippy`
       clean; `openspec validate --strict` and
       `scripts/check-spec-deltas.py` both pass

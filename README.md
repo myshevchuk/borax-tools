@@ -510,9 +510,20 @@ processed — and an unknown field, an unknown filter, a `lookup` naming
 a table no configuration declares, a bad regular expression, or a
 syntax error aborts the run then and there. A template is
 configuration, so a broken one is wrong for every file in the batch;
-there is nothing to be gained by discovering that once per file. Both
-tables are compiled, so a broken citation-key template stops the run
-just as a broken file-name template does.
+there is nothing to be gained by discovering that once per file.
+
+A command compiles the templates it renders from, and no others.
+`borax rename` names every file it moves and cites every record it
+admits, so it compiles both tables and either one can stop it.
+`borax bib` renders no file name, so it compiles the citation keys
+alone. A `templates.default` that will not compile leaves a
+bibliography run alone. You hear about it from `rename`, where you can
+do something about it.
+
+`borax config` compiles nothing at all. It reports a template as the
+source text your configuration file gave. This keeps it working on a
+configuration that no other command will accept — the situation you
+most want it in.
 
 The message names the table, the key, and the offending token:
 
@@ -526,6 +537,49 @@ citation-keys.thesis: unknown field "titel"
 
 Rendering itself cannot fail. Once a template compiles, the same record
 and the same configuration always produce the same name.
+
+## Settings on the command line
+
+Most settings can be set with a flag or in a configuration file. The
+flag wins for that run. Put a setting flag after the subcommand that
+reads it:
+
+```text
+borax rename --mailto you@example.org --apply papers/
+```
+
+`borax --mailto you@example.org rename papers/` is refused as an
+unknown argument. `git commit -m` and `cargo build --release` also put
+flags after the subcommand.
+
+A subcommand accepts only the settings it can act on, so
+`borax bib --help` describes what `bib` does rather than everything
+borax can be configured to do. Naming a setting a command cannot act on is a usage
+error rather than a silent no-op.
+
+`borax cache --no-cache` was never going to make `borax cache` stop
+reading the cache. That flag decides whether *resolving* consults it.
+`borax rename` with `--concurrency 8` was never going to resolve eight
+files at once. `rename` works one file at a time so that each file's
+verdict and fate stay adjacent. Both are now refused rather than
+accepted and dropped.
+
+`--json` is the exception: it goes on either side. It chooses how to
+render the event stream, and every subcommand honours it. So
+`borax --json bib papers/` and `borax bib --json papers/` are the same
+invocation.
+
+`borax config` accepts every setting. Passing an override to it is not a
+no-op. It asks what this invocation would resolve to and from which
+layer.
+
+None of this limits what a configuration file may say. A `.borax.toml`
+sets every key regardless of which command runs, and so does an
+environment variable. Neither is an argument to an invocation. So
+`network.concurrency` set in a file is reported by `borax config` and
+refuses nothing on a `rename` that will not read it. The three
+open-ended tables differ: `[templates]`, `[citation-keys]` and
+`[tables]` have no flags on any subcommand.
 
 ## Run logs: what a run leaves behind
 
