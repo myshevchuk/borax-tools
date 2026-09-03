@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The README is now an introduction rather than a reference: what borax
+  is for, a few worked examples, how to install it, how to build it,
+  and where everything else is. The reference material it used to
+  carry — the template language, the fields and filters, external
+  lookup tables, configuration, and run logs — moved to
+  `docs/manual.org`, which also documents each subcommand and every
+  setting with its flag and its default. Nothing about the tool's
+  behaviour changed. Release archives now carry the manual beside the
+  README.
+
 ## [0.4.0] - 2026-09-03
 
 ### Added

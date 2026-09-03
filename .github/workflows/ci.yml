@@ -141,6 +141,10 @@ jobs:
             cp "$binary" "$staged/"
           fi
           cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "$staged/"
+          # Under docs/, so the manual's relative link back to the
+          # README resolves in the archive as it does in the tree.
+          mkdir -p "$staged/docs"
+          cp docs/manual.org "$staged/docs/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd "$(dirname "$staged")" && 7z a "$name.zip" "$name" >/dev/null)
             mv "$(dirname "$staged")/$name.zip" .
