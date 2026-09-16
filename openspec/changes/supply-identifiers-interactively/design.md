@@ -307,7 +307,6 @@ file        preprint-v2.pdf
 identifier  arXiv:2401.12345, from the text layer
 no record   crossref: not found
             openalex: not found
-file says   A Title Only the File Knows
 ? What should happen to this file?
 > Supply an identifier
   Skip
@@ -318,6 +317,26 @@ file says   A Title Only the File Knows
 answer the same question, and a file has either a record or the
 reasons it has none. One service to a line, in the order they were
 asked, `name: what it said`.
+
+**`Unresolvable` gains `found`.** The `identifier` line above is the
+single most useful thing to show someone being asked to supply
+another one — it is what they have to improve on — and a `skipped`
+event carries a path and a reason and nothing else, so today nothing
+in the stream holds it. `show-record-before-asking` fixed the rule
+that the description shows only what the stream also carries, so the
+reason carries it: `Unresolvable { found, attempts }`, `found` in the
+form the stream writes an identifier. It is an addition, so the schema
+version does not move. A batch reader gains by it too — a
+`skipped`/`unresolvable` line that does not say which identifier
+nobody held is missing the only part worth acting on.
+
+The other reasons need nothing: `Conflict` already carries both
+titles and the similarity, `Unreadable` its message, and
+`NoIdentifier` has by definition nothing to name. A failed file's
+description therefore shows no `file says` line: claims are read when
+a comparison needs them (D2a), which is when an identifier is
+supplied, and a description never shows what its event does not
+hold.
 
 A conflict, asked about or overridden, adds one line to the layout
 already there — both titles are on it, as `title` and `file says`, so
