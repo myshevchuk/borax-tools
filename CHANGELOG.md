@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--apply --no-batch` is a usage error and exits with code 1 before
   anything is read, resolved, or moved.
 
+  Before each question, borax now writes a twelve-line description to
+  standard error. It shows the file's position, the identifier borax
+  looked up and where it came from, the services and record behind the
+  proposed name, the titles claimed by the file's own metadata, and the
+  proposed name. A collision suffix gets a separate line naming the
+  rendered name that was already taken. Batch output keeps its
+  one-line-per-file shape.
+
   The new Boolean setting `rename.batch`, exposed as `--batch` and
   `--no-batch` on `rename` and `config`, defaults to `false`. It chooses
   whether a terminal run asks or reports a batch plan; it cannot
@@ -42,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `interactive`; interactive runs also report `applying: true`.
   `skipped` accepts the new reason `declined`, and the counts in
   `run-finished` include `unreached`. Questions are not events.
+
+  A `resolved` event now includes `found`, the identifier borax looked
+  up, and `claims`, the titles read from the file with their origins.
+  When the content index answers, `source` now names the services in the
+  record's per-field provenance instead of reading `cache`; only a
+  record whose provenance names no service still reports `cache`. This
+  also changes the human batch line from `via cache (cached)` to, for
+  example, `via crossref (cached)`.
 
 - **BREAKING:** The JSONL event schema version is now 2. An already-named
   file is no longer a `skipped` event with reason `already-named`; it is

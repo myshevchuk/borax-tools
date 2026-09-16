@@ -3,6 +3,7 @@
 #+AI_MODEL: claude-opus-5
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 08:32] -- interactive rename
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 17:28]
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 18:33]
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -125,12 +126,23 @@ how to install it, and a handful of examples.
 *** The interactive session
 
     For each resolved file whose record produces a free target, borax
-    shows the current file name, the name it would take, and a menu on
-    standard error:
+    shows the evidence behind the proposed name and a menu on standard
+    error:
 
     #+begin_example
-      50-Article Text-95-2-10-20240507.pdf
-        → lyutenko2023_ApplicationsChiralSulfinyl.pdf
+      ── 3 of 17 ──────────────────────────────────────────────────────────
+      file        50-Article Text-95-2-10-20240507.pdf
+      identifier  doi:10.15407/bioorganica2023.01.010, from the text layer
+      record      Crossref
+      type        journal article
+      title       Applications of chiral sulfinyl auxiliaries in the asymmetric
+                  synthesis of fluorinated amines and amino acids
+      authors     Nataliya V. Lyutenko, Alexander E. Sorochinsky, Vadim A.
+                  Soloshonok
+      issued      2023
+      in          Ukrainica Bioorganica Acta 18(1), 10–21
+      file says   nothing read
+      new name    lyutenko2023_ApplicationsChiralSulfinyl.pdf
       ? Rename this file?
       > Rename
         Skip
@@ -138,11 +150,34 @@ how to install it, and a handful of examples.
       [↑↓ to move, enter to select]
     #+end_example
 
-    The target includes a collision suffix when one is needed. When a
-    template creates a subdirectory, the target also includes that
-    subdirectory, such as ~sub/name.pdf~. ~Rename~ is selected first, so
-    Enter accepts the move. The file is moved immediately and reported
-    as ~renamed to <name>~, just as it is in an applying batch.
+    The rule gives this file's position in the run. ~file~ names it as
+    the run does: relative to where you started the run, or in full when
+    it lies outside. ~identifier~ is the identifier borax looked up and
+    says whether it came from embedded metadata, the text layer, or an
+    earlier run. It is kept on one line. ~record~ names the service or
+    services that supplied the record.
+
+    ~type~, ~title~, ~authors~, ~issued~, and ~in~ come from the record.
+    A field the record does not contain is omitted. The author line
+    names up to three authors and counts any others. The issued date
+    uses as much precision as the record contains. Other long values
+    wrap under a hanging indent without being truncated.
+
+    ~file says~ lists every title found in the file's XMP or document
+    information, one per line — including one borax judged a producer's
+    leftover rather than a title, since you are better placed to say
+    which is the work's. It reads ~nothing read~ when there was nothing
+    to read: the file carries no title of its own, or the content index
+    answered and the file was never opened. ~new name~ is the name the
+    file would take.
+
+    The target includes a collision suffix when one is needed. A
+    separate line below ~new name~ then names the rendered name that was
+    already taken. When a template creates a subdirectory, the target
+    also includes that subdirectory, such as ~sub/name.pdf~. ~Rename~ is
+    selected first, so Enter accepts the move. The file is moved
+    immediately and reported as ~renamed to <name>~, just as it is in an
+    applying batch.
 
     Choose ~Skip~ to leave the file in place. borax reports ~skipped,
     declined~. The proposed name remains free, so if the next file
@@ -989,7 +1024,20 @@ how to install it, and a handful of examples.
   skipped, not renamed.
 
   The JSONL stream records the result of each decision, not the question
-  that led to it. ~run-started~ includes the Boolean ~interactive~; an
+  that led to it. A ~resolved~ event's ~found~ field is the identifier
+  borax looked up, while ~identifier~ remains the identifier under which
+  the record is filed. Its ~claims~ field lists every title read from
+  the file, in order, with ~from~ set to ~xmp~ or ~info~. The list is
+  empty when the content index answered without opening the file.
+
+  ~resolved.source~ names the services that supplied the record. When
+  the content index answers, borax reads those services from the
+  record's per-field provenance in this order: Crossref, OpenAlex,
+  arXiv, DataCite, PubMed, then a sidecar. It reports ~cache~ only when
+  that provenance names none of them; ~cached~ separately records that
+  the content index answered.
+
+  ~run-started~ includes the Boolean ~interactive~; an
   interactive run also reports ~applying: true~. A declined proposal is
   a ~skipped~ event with reason ~declined~, and the counts in
   ~run-finished~ include ~unreached~. An already-named file produces an

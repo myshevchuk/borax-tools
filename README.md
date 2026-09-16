@@ -18,7 +18,8 @@ do not promise compatibility yet.
 ## Examples
 
 Review a directory of downloads one file at a time. For each file it can
-rename, borax shows the current and proposed names and waits for your
+rename, borax shows the identifier it looked up, the record it found,
+the file's own metadata, and the proposed name before it waits for your
 choice:
 
 ```console
@@ -26,8 +27,19 @@ $ borax rename papers/
 ```
 
 ```text
-50-Article Text-95-2-10-20240507.pdf
-  → lyutenko2023_ApplicationsChiralSulfinyl.pdf
+── 3 of 17 ──────────────────────────────────────────────────────────
+file        50-Article Text-95-2-10-20240507.pdf
+identifier  doi:10.15407/bioorganica2023.01.010, from the text layer
+record      Crossref
+type        journal article
+title       Applications of chiral sulfinyl auxiliaries in the asymmetric
+            synthesis of fluorinated amines and amino acids
+authors     Nataliya V. Lyutenko, Alexander E. Sorochinsky, Vadim A.
+            Soloshonok
+issued      2023
+in          Ukrainica Bioorganica Acta 18(1), 10–21
+file says   nothing read
+new name    lyutenko2023_ApplicationsChiralSulfinyl.pdf
 ? Rename this file?
 > Rename
   Skip
