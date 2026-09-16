@@ -1237,6 +1237,11 @@ fn rename_events<C: Cache>(
             .expect("a group built for a rename carries filename templates");
         let mut planning = Planning::new(
             &group.directory,
+            // What a rendered subdirectory files from, so a collection
+            // run over a filed directory proposes nothing. A run
+            // outside any collection has none and files from the
+            // file's own directory.
+            adapters.collection_root.as_deref(),
             filenames,
             effective.config().collision,
             adapters.filesystem,

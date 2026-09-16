@@ -17,6 +17,17 @@ the tree is filed where it belongs.
 A run with no collection root SHALL join a rendered subdirectory to the
 file's own directory, having no other base to use.
 
+A rendered name containing no `/` SHALL leave the file where it is,
+whatever the run's base: a rendered subdirectory says where in the
+collection a file belongs, and a plain name says what to call it where
+it already sits.
+
+Collisions SHALL be detected across every file a run files into one
+directory, whichever directories those files came from. A run filing
+two files from different directories into one journal directory SHALL
+suffix the second exactly as it would if both had started in the same
+place, and SHALL do so when previewing as well as when applying.
+
 Collisions SHALL be detected where the file is going, not where it came
 from: a name already taken in the target subdirectory blocks or suffixes
 exactly as one in the file's own directory does, and two files heading
@@ -111,3 +122,13 @@ A collision suffix candidate equal to the name the file already carries SHALL be
 - **THEN** `smith2024a.pdf` is reported already named, and no move onto
   its own name is planned or attempted
 
+#### Scenario: A plain name does not move a filed file
+- **WHEN** a template rendering no `/` is applied to a file sitting in a
+  subdirectory of the collection root
+- **THEN** the file is renamed where it is, not hoisted to the root
+
+#### Scenario: Two directories filing into one
+- **WHEN** two files in different directories of one collection both
+  render `Nature/zeng2026`
+- **THEN** the second is suffixed, in a preview and in an applying run
+  alike

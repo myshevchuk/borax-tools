@@ -328,6 +328,7 @@ fn distinct_names_in_one_directory_all_become_rename() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -355,6 +356,7 @@ fn a_file_already_carrying_its_target_name_is_already_named() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -379,6 +381,7 @@ fn two_files_wanting_the_same_name_are_suffixed_under_the_suffix_policy() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -405,6 +408,7 @@ fn two_files_wanting_the_same_name_are_target_taken_under_the_skip_policy() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Skip,
         &filesystem,
@@ -431,6 +435,7 @@ fn files_in_different_directories_wanting_the_same_name_do_not_collide() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -459,6 +464,7 @@ fn an_existing_file_occupying_the_target_is_suffixed_under_the_suffix_policy() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -484,6 +490,7 @@ fn an_existing_file_occupying_the_target_is_target_taken_under_the_skip_policy()
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Skip,
         &filesystem,
@@ -508,6 +515,7 @@ fn a_template_with_a_slash_plans_a_rename_into_a_subdirectory() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -526,6 +534,7 @@ fn a_file_occupying_the_target_subdirectory_is_suffixed_under_the_suffix_policy(
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -544,6 +553,7 @@ fn a_file_occupying_the_target_subdirectory_is_target_taken_under_the_skip_polic
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Skip,
         &filesystem,
@@ -567,6 +577,7 @@ fn two_files_in_one_directory_targeting_the_same_subdirectory_collide() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -597,6 +608,7 @@ fn files_targeting_the_same_name_in_different_subdirectories_do_not_collide() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -622,6 +634,7 @@ fn an_absent_target_subdirectory_plans_normally() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -639,6 +652,7 @@ fn a_target_subdirectory_explicitly_seeded_as_empty_plans_normally() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -769,6 +783,47 @@ fn with_no_collection_root_a_subdirectory_is_joined_to_the_files_own() {
     );
 }
 
+/// Filing at the root means two files from different directories can
+/// want one name. The collision is the target directory's, not either
+/// source directory's, so the second is suffixed — and a preview says
+/// what an applying run would do, which is what makes a preview worth
+/// reading.
+#[test]
+fn two_directories_filing_into_one_collide_there() {
+    let resolved = [
+        resolved(
+            "/lib/inbox/a.pdf",
+            record_by_in("Nature", "Zeng", 2026),
+            None,
+        ),
+        resolved(
+            "/lib/other/b.pdf",
+            record_by_in("Nature", "Zeng", 2026),
+            None,
+        ),
+    ];
+    let templates = table("[journal]/[auth][year]");
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(
+        &resolved,
+        Some(Path::new("/lib")),
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
+
+    assert_eq!(
+        plan,
+        vec![
+            rename("/lib/inbox/a.pdf", "/lib/Nature/Zeng2026.pdf"),
+            rename("/lib/other/b.pdf", "/lib/Nature/Zeng2026a.pdf"),
+        ],
+        "the second file filed into Nature must be suffixed there"
+    );
+}
+
 // A file not yet in the rendered subdirectory is filed into it exactly
 // as `a_template_with_a_slash_plans_a_rename_into_a_subdirectory` above
 // already covers: D5a changes nothing about that case, so it is not
@@ -789,6 +844,7 @@ fn a_relative_escape_in_the_template_sanitizes_to_a_literal_underscore_directory
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -813,6 +869,7 @@ fn a_record_that_renders_no_name_is_unnameable() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -838,6 +895,7 @@ fn an_unnameable_record_does_not_consume_a_collision_slot() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -869,6 +927,7 @@ fn input_order_determines_which_file_gets_the_suffix() {
 
     let plan = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -896,6 +955,7 @@ fn the_plan_is_deterministic_across_repeated_calls() {
 
     let first = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -903,6 +963,7 @@ fn the_plan_is_deterministic_across_repeated_calls() {
     );
     let second = plan_renames(
         &resolved,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -1493,6 +1554,7 @@ fn propose_decides_the_same_target_plan_would_and_does_not_claim_it() {
     let filesystem = FakeFilesystem::new();
     let mut planning = Planning::new(
         Path::new("/lib"),
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -1522,6 +1584,7 @@ fn accept_claims_a_proposed_renames_target_for_later_files() {
     let filesystem = FakeFilesystem::new();
     let mut planning = Planning::new(
         Path::new("/lib"),
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -1558,6 +1621,7 @@ fn propose_then_accept_for_every_file_reproduces_plan_renames_including_a_subdir
 
     let expected = plan_renames(
         &resolved_files,
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -1566,6 +1630,7 @@ fn propose_then_accept_for_every_file_reproduces_plan_renames_including_a_subdir
 
     let mut planning = Planning::new(
         Path::new("/lib"),
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -1597,6 +1662,7 @@ fn accepting_an_already_named_decision_claims_nothing() {
     let filesystem = FakeFilesystem::new();
     let mut planning = Planning::new(
         Path::new("/lib"),
+        None,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
