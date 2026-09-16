@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-09-03, before cutting 0.4.0.
+Last reviewed: 2026-09-16, with `add-interactive-rename` implemented.
 
 ## What is built
 
@@ -96,6 +96,32 @@ and run-log placement depend on. A scheduled job exercises the real
 APIs, so schema drift at a source surfaces without a user finding it
 first.
 
+`add-interactive-rename` is implemented on top of all six and is the
+first of four changes making the rename workflow interactive. A rename
+run with a terminal on stdin and human output asks about each move it
+would make — rename, skip, or quit — and an accepted answer moves that
+file there and then; `--batch` gives the preview that used to be the
+default, and `--apply` selects a batch run by itself, so every existing
+invocation means what it meant. A declined proposal claims no name, so
+it costs the next file nothing, and quitting leaves the rest untouched
+and counted. The planner gained the split this rests on: deciding a
+target and claiming it are two steps, and a batch plan is the two in
+sequence.
+
+Two things came with it that outlive the session. `rename.batch` is
+read from the run's own configuration rather than per input directory,
+because a run is one session with one operator. And every applying run
+now writes a move to its log before making it: the whole-plan pre-flush
+the specifications promised stopped being possible when
+`stream-per-file-events` made a run decide one file at a time, and the
+implementation had been writing each event after its move ever since.
+That divergence is closed rather than inherited.
+
+`inquire` is the first dependency borax has taken for the terminal
+itself. It is the one part of the change the suite does not cover: the
+adapter translates a question into a menu and its answer back, and it
+was verified by hand against the real-PDF corpus through a pty.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
@@ -136,6 +162,15 @@ first.
   and never edits.
 
 ## Known defects
+
+- **A file borax renamed is a duplicate of itself on the next run.** In
+  a collection with a ledger, an applied rename records the file at its
+  new path; the next run finds that entry by hash and reports the file
+  `skipped, same bytes already archived` naming its own path. A file
+  already carrying its name is also counted as a skip, so a run over a
+  collection that is entirely in order exits with the partial-success
+  code. Both are `skip-already-named-files`, the next change in the
+  interactive series, which is proposed and not yet implemented.
 
 - **A sidecar is never moved with its file, so a rename can orphan
   one.** `write_sidecar` writes beside the path the file has when it is

@@ -16,10 +16,16 @@ a fixed behaviour would be faster than one the user can steer, the
 setting wins.
 
 Neither requirement outranks the file-safety contract, which is not
-negotiable and not a matter of degree: borax previews by default, never
-overwrites, and never guesses. The archived `add-core-pipeline` proposal
-calls that contract "error-free"; it is written out here as the three
-things it means, because the adjective promised more than any tool can.
+negotiable and not a matter of degree: borax moves nothing without an
+explicit decision, never overwrites, and never guesses. The archived
+`add-core-pipeline` proposal calls that contract "error-free"; it is
+written out here as the three things it means, because the adjective
+promised more than any tool can.
+
+There are two explicit decisions and no third: `--apply`, given to a
+batch run over a plan it would otherwise preview, and an answer given to
+a question naming one file and the target it would move to. No default,
+no configuration value and no unasked question is one.
 
 ## Architecture
 
