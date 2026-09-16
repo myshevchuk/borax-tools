@@ -192,7 +192,7 @@ pub fn resolve_file<C: Cache>(
 
     let resolved = match resolve(sources, &looked_up) {
         Ok(resolved) => resolved,
-        Err(unresolved) => return FileOutcome::Skipped(unresolvable(&unresolved)),
+        Err(unresolved) => return FileOutcome::Skipped(unresolvable(&unresolved, &looked_up)),
     };
 
     let claimed: Vec<&str> = claims.iter().map(|claim| claim.title.as_str()).collect();
@@ -419,10 +419,12 @@ fn skipped_for(error: &ExtractionError) -> SkipReason {
     }
 }
 
-/// The skip a failed resolution reports, keeping the attempts in the
-/// order the sources were asked.
-fn unresolvable(unresolved: &Unresolved) -> SkipReason {
+/// The skip a failed resolution reports, naming the identifier that
+/// was looked up and keeping the attempts in the order the sources
+/// were asked.
+fn unresolvable(unresolved: &Unresolved, found: &Identifier) -> SkipReason {
     SkipReason::Unresolvable {
+        found: found.to_string(),
         attempts: unresolved
             .attempts
             .iter()

@@ -156,6 +156,7 @@ fn all_events() -> Vec<Event> {
         renamed(),
         skipped(SkipReason::NoIdentifier),
         skipped(SkipReason::Unresolvable {
+            found: "doi:10.1000/xyz123".to_string(),
             attempts: vec![Attempt {
                 source: "crossref".to_string(),
                 error: "not found".to_string(),
@@ -196,6 +197,7 @@ fn all_skip_reasons() -> Vec<SkipReason> {
     vec![
         SkipReason::NoIdentifier,
         SkipReason::Unresolvable {
+            found: "doi:10.1000/xyz123".to_string(),
             attempts: vec![
                 Attempt {
                     source: "crossref".to_string(),
@@ -462,6 +464,7 @@ fn skipped_nests_the_reason_under_reason_with_a_kebab_case_kind_tag() {
         (SkipReason::NoIdentifier, "no-identifier"),
         (
             SkipReason::Unresolvable {
+                found: "doi:10.1000/xyz123".to_string(),
                 attempts: Vec::new(),
             },
             "unresolvable",
@@ -526,6 +529,7 @@ fn unciteable_reason_carries_nothing_but_its_kind() {
 #[test]
 fn unresolvable_reason_carries_an_attempts_array_of_source_and_error_objects() {
     let reason = SkipReason::Unresolvable {
+        found: "doi:10.1000/xyz123".to_string(),
         attempts: vec![
             Attempt {
                 source: "crossref".to_string(),
@@ -553,7 +557,7 @@ fn unresolvable_reason_carries_an_attempts_array_of_source_and_error_objects() {
         .map(String::as_str)
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, vec!["attempts", "kind"]);
+    assert_eq!(keys, vec!["attempts", "found", "kind"]);
 }
 
 // --- round-trip through Event's own (de)serialization ---
@@ -705,6 +709,7 @@ fn human_line_of_skipped_makes_the_reason_legible_for_every_variant() {
         (SkipReason::NoIdentifier, "identifier"),
         (
             SkipReason::Unresolvable {
+                found: "doi:10.1000/xyz123".to_string(),
                 attempts: vec![Attempt {
                     source: "crossref".to_string(),
                     error: "not found".to_string(),
