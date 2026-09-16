@@ -1002,3 +1002,38 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
     let last: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
     assert_eq!(last["event"], Value::from("run-finished"));
 }
+
+// ---------------------------------------------------------------------
+// A move recorded and then refused
+// ---------------------------------------------------------------------
+
+/// A move is written to the run log before it is attempted, so a move
+/// the filesystem then refuses is reported twice: the `renamed` event
+/// that recorded the intent, and the skip that records the refusal. The
+/// totals must still say two files were renamed when two files moved —
+/// the summary counts what happened, and what happened here is a skip.
+#[test]
+fn a_rename_the_filesystem_refused_counts_as_a_skip_and_not_as_a_rename() {
+    let mut counts = Counts::default();
+
+    counts.observe(&Event::Renamed {
+        path: PathBuf::from("/lib/a.pdf"),
+        target: PathBuf::from("/lib/smith2024.pdf"),
+        hash: hash_bytes(b"a"),
+    });
+    counts.observe(&Event::Skipped {
+        path: PathBuf::from("/lib/a.pdf"),
+        reason: SkipReason::RenameFailed {
+            message: "permission denied".to_string(),
+        },
+    });
+
+    assert_eq!(
+        counts,
+        Counts {
+            skipped: 1,
+            ..Counts::default()
+        },
+        "got {counts:?}"
+    );
+}

@@ -123,30 +123,33 @@ pub struct Destination {
     pub mandatory: bool,
 }
 
-/// Whether `command`'s log has to exist for the run to go ahead.
+/// Whether the log of a run of `command` has to exist for the run to go
+/// ahead. `applying` is what the run says of itself.
 ///
-/// True for `rename --apply` and for nothing else. The reason is not
-/// that the run changes something — `bib` and `ledger rebuild` both do
-/// — but that renaming is the one thing borax does that leaves no
-/// account of itself in the files afterwards: a bibliography file and
-/// the ledger can each be produced again from the collection, while
-/// the name a file used to carry is nowhere but this log. A run whose
-/// log is only a record loses a record when the disk refuses it; an
-/// apply run whose log is missing has moved files that nothing now
-/// describes, which is why it is the one run that would rather not
-/// happen at all.
+/// True for a rename run that may move files — one given `--apply`, and
+/// an interactive one, whose every yes is the authorisation for a move
+/// — and for nothing else. The reason is not that the run changes
+/// something — `bib` and `ledger rebuild` both do — but that renaming
+/// is the one thing borax does that leaves no account of itself in the
+/// files afterwards: a bibliography file and the ledger can each be
+/// produced again from the collection, while the name a file used to
+/// carry is nowhere but this log. A run whose log is only a record
+/// loses a record when the disk refuses it; a run that moves files with
+/// its log missing has moved files that nothing now describes, which is
+/// why it is the one run that would rather not happen at all.
 ///
 /// Widening this to "the run mutates something" would make an
 /// unwritable disk abort a `bib` run whose output is derivable anyway.
-pub(crate) fn mandatory(command: &Command) -> bool {
-    matches!(command, Command::Rename { apply: true, .. })
+pub(crate) fn mandatory(command: &Command, applying: bool) -> bool {
+    applying && matches!(command, Command::Rename { .. })
 }
 
 /// Where `command`'s run log goes, or `None` when it keeps none.
 ///
-/// `applying` is what the run reports of itself and decides the name's
-/// suffix; `enabled` is the `run-log` setting. `timestamp` is the run's
-/// own, as [`log_name`] takes it.
+/// `applying` is what the run reports of itself: it decides the name's
+/// suffix, and, for a rename, whether the log is mandatory. `enabled`
+/// is the `run-log` setting. `timestamp` is the run's own, as
+/// [`log_name`] takes it.
 ///
 /// The rules, in the order they apply:
 ///
@@ -171,7 +174,7 @@ pub fn destination(
     collection_root: Option<&Path>,
     state_root: Option<&Path>,
 ) -> Option<Destination> {
-    let mandatory = mandatory(command);
+    let mandatory = mandatory(command, applying);
     if !enabled && !mandatory {
         return None;
     }

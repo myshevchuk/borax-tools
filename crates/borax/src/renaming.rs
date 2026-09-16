@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use borax_core::record::Record;
-use borax_core::rename::{CollisionPolicy, PlanInput, PlannedAction, Planner};
+use borax_core::rename::{CollisionPolicy, PlanInput, PlanItem, PlannedAction, Planner};
 use borax_core::sanitize::sanitize;
 use borax_core::tables::Lookups;
 use borax_core::template::{RenderInput, TemplateTable};
@@ -218,8 +218,23 @@ impl<'a> Planning<'a> {
         file: &FileRecord,
         lookups: &mut Lookups<'_>,
     ) -> PlannedRename {
-        let _ = (path, file, lookups);
-        todo!("propose: decide as plan does, without claiming the target")
+        let path = path.to_path_buf();
+        let Some(input) = plan_input(&path, file, self.templates, lookups) else {
+            return PlannedRename::Unnameable { path };
+        };
+        self.reach(&input.target);
+
+        match self.planner.propose(&input, self.policy).action {
+            PlannedAction::Rename { to } => PlannedRename::Rename {
+                target: self.directory.join(to),
+                path,
+            },
+            PlannedAction::AlreadyNamed => PlannedRename::AlreadyNamed { path },
+            PlannedAction::Skip { .. } => PlannedRename::TargetTaken {
+                target: self.directory.join(&input.target),
+                path,
+            },
+        }
     }
 
     /// Take the name `decided` names, so no later file in this
@@ -229,8 +244,23 @@ impl<'a> Planning<'a> {
     /// decision claims nothing. Accepting a decision this `Planning`
     /// did not propose is not meaningful and is not supported.
     pub fn accept(&mut self, decided: &PlannedRename) {
-        let _ = decided;
-        todo!("accept: claim a proposed rename's target")
+        let PlannedRename::Rename { path, target } = decided else {
+            return;
+        };
+        // Back to the namespace the planner keys in: a bare name, or
+        // the `sub/name` a target in a subdirectory carries. `join` left
+        // the relative part of the path untouched, so stripping the
+        // directory hands back exactly the string that was proposed.
+        self.planner.claim(&PlanItem {
+            source: name_of(path),
+            action: PlannedAction::Rename {
+                to: target
+                    .strip_prefix(&self.directory)
+                    .unwrap_or(target)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        });
     }
 
     /// The decision for the resolved file `file` at `path`.
@@ -251,23 +281,9 @@ impl<'a> Planning<'a> {
         file: &FileRecord,
         lookups: &mut Lookups<'_>,
     ) -> PlannedRename {
-        let path = path.to_path_buf();
-        let Some(input) = plan_input(&path, file, self.templates, lookups) else {
-            return PlannedRename::Unnameable { path };
-        };
-        self.reach(&input.target);
-
-        match self.planner.plan(&input, self.policy).action {
-            PlannedAction::Rename { to } => PlannedRename::Rename {
-                target: self.directory.join(to),
-                path,
-            },
-            PlannedAction::AlreadyNamed => PlannedRename::AlreadyNamed { path },
-            PlannedAction::Skip { .. } => PlannedRename::TargetTaken {
-                target: self.directory.join(&input.target),
-                path,
-            },
-        }
+        let decided = self.propose(path, file, lookups);
+        self.accept(&decided);
+        decided
     }
 
     /// Add the subdirectory `target` names to the planner's namespace,
@@ -291,6 +307,14 @@ impl<'a> Planning<'a> {
                 .collect(),
         );
     }
+}
+
+/// `path`'s file name, empty when it has none.
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// What the planner needs to know about one resolved file, or `None`
@@ -408,6 +432,26 @@ impl<'a> Applying<'a> {
     /// otherwise only says what it would move.
     pub fn new(filesystem: &'a dyn Filesystem, apply: bool) -> Applying<'a> {
         Applying { filesystem, apply }
+    }
+
+    /// The event a move this run is about to make would report, or
+    /// `None` when [`Applying::carry_out`] would move nothing for
+    /// `decision`: a preview, a decision that is not a move, or a move
+    /// whose file has no content hash to record it by.
+    ///
+    /// What it is for is recording a move before making it. The caller
+    /// holds the event the move will report while the move has not
+    /// happened yet, and `carry_out` reports exactly this event when the
+    /// filesystem obliges.
+    pub fn intended(&self, decision: &PlannedRename, hash: Option<&ContentHash>) -> Option<Event> {
+        match decision {
+            PlannedRename::Rename { path, target } if self.apply => Some(Event::Renamed {
+                path: path.clone(),
+                target: target.clone(),
+                hash: hash?.clone(),
+            }),
+            _ => None,
+        }
     }
 
     /// Carry out `decision`, or report what it would do, and say what

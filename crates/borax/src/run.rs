@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use borax_core::content::hash_bytes;
+use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::ledger::Index;
 use borax_core::record::{EntryType, Record};
 use borax_core::tables::{LookupTables, Lookups, Table, TableSpec};
@@ -40,14 +40,16 @@ use crate::config::{
     Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
     layer_from_toml, nearest_override, resolve, table_path,
 };
-use crate::event::{Counts, Diagnostic, Event, Format, Level, TableUsed, render};
+use crate::event::{Counts, Diagnostic, Event, Format, Level, SkipReason, TableUsed, render};
 use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
     resolve_file_checking_ledger,
 };
-use crate::renaming::{Applying, Filesystem, Planning, RealFilesystem};
-use crate::session::{Mode, Outcome, Session, outcome_for};
+use crate::renaming::{Applying, Filesystem, PlannedRename, Planning, RealFilesystem};
+use crate::session::{
+    Answer, Mode, Outcome, Question, Session, TerminalAsker, outcome_for, stdin_is_terminal,
+};
 
 /// The extension a file needs to be picked up from a directory.
 pub const PDF_EXTENSION: &str = "pdf";
@@ -536,6 +538,23 @@ fn warning(message: String) -> Diagnostic {
 pub trait Sink {
     /// Take `event`.
     fn emit(&mut self, event: Event);
+
+    /// Take `event` as the record of a move that is about to be made,
+    /// and fail rather than lose it.
+    ///
+    /// [`Sink::emit`] is best-effort: a run whose stream has gone has
+    /// nowhere left to say so, and losing the line about a skip costs
+    /// nothing that cannot be worked out again. The record of a move is
+    /// the exception — the name a file used to carry is nowhere else —
+    /// so a sink that keeps one says here whether it kept this one, and
+    /// the caller does not move the file when it did not.
+    ///
+    /// A sink that keeps no record has nothing to fail at: the default
+    /// is [`Sink::emit`].
+    fn record(&mut self, event: Event) -> Result<(), Diagnostic> {
+        self.emit(event);
+        Ok(())
+    }
 }
 
 /// Collecting a run rather than showing it, for a caller that wants to
@@ -905,12 +924,10 @@ fn tables_used(prepared: &Prepared) -> Vec<TableUsed> {
 /// as it decides and which has to gather a batch first is the
 /// command's own contract.
 ///
-/// Returns what the run has to say for itself once it is over, which
-/// only a `rename` has anything to fill in: the ledger turns out to
-/// hold entries for files that are no longer there. It is a
-/// [`Diagnostic`] rather than an event because it is about the ledger
-/// rather than about a file, and because it is only known when the last
-/// file has been checked.
+/// Returns the [`Aftermath`]: what the run has to say for itself once
+/// its events are written, which only a `rename` has anything to fill
+/// in — the files it never reached, and what it found that is about the
+/// run rather than about any one file.
 pub fn emit_events<C: Cache>(
     prepared: &Prepared,
     command: &Command,
@@ -918,37 +935,55 @@ pub fn emit_events<C: Cache>(
     adapters: &Adapters<'_, C>,
     session: &mut Session<'_>,
     sink: &mut dyn Sink,
-) -> Option<Diagnostic> {
+) -> Aftermath {
     match (command, prepared) {
         (Command::Config { .. }, _) => {
             for event in configs.run().events() {
                 sink.emit(event);
             }
-            None
+            Aftermath::default()
         }
         (Command::Cache { .. }, Prepared::Cache { report })
         | (Command::Ledger { .. }, Prepared::Rebuilt { report }) => {
             sink.emit(report.clone());
-            None
+            Aftermath::default()
         }
         (Command::Resolve { paths, .. }, _) => {
             resolve_events(paths, configs, adapters, sink);
-            None
+            Aftermath::default()
         }
         (Command::Rename { apply, .. }, Prepared::Grouped { groups, ledger, .. }) => {
             rename_events(groups, *apply, session, ledger, configs, adapters, sink)
         }
         (Command::Bib { .. }, Prepared::Grouped { groups, .. }) => {
             bib_events(groups, configs, adapters, sink);
-            None
+            Aftermath::default()
         }
         // A `Prepared` that does not go with the command could only
         // come of pairing one command's preflight with another's
         // emission, which no caller does: `events_for` and `dispatch`
         // both preflight the command they go on to emit. There is
         // nothing such a pair could report, so it reports nothing.
-        _ => None,
+        _ => Aftermath::default(),
     }
+}
+
+/// What a run has to say for itself once its events are written.
+///
+/// Both fields are about the run rather than about any one file, and
+/// neither is known until the last file has been reached — which is why
+/// they come back from the emission rather than travelling as events.
+#[derive(Debug, Default)]
+pub struct Aftermath {
+    /// Input files the run left without a fate: the file an interactive
+    /// run was quit at, or the one a move that could not be recorded
+    /// stopped it at, and every file after it. Zero for a run that
+    /// reached the end of its inputs.
+    pub unreached: usize,
+    /// What the run discovered that is about the run rather than about
+    /// a file: a ledger holding entries for files that have gone, or the
+    /// record failure that ended the run.
+    pub diagnostic: Option<Diagnostic>,
 }
 
 /// The events `command` produces, between the run's first and last,
@@ -969,9 +1004,9 @@ pub fn events_for<C: Cache>(
 ) -> Result<Vec<Event>, Diagnostic> {
     let prepared = preflight(command, configs, adapters)?;
     let mut events: Vec<Event> = Vec::new();
-    // The stream is the whole of what this hands back, so a diagnostic
-    // about the run has nowhere to go here; [`dispatch`] is what writes
-    // one out.
+    // The stream is the whole of what this hands back, so what the run
+    // has to say about itself has nowhere to go here; [`dispatch`] is
+    // what writes it out.
     let _ = emit_events(&prepared, command, configs, adapters, session, &mut events);
     Ok(events)
 }
@@ -1099,11 +1134,22 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// about the file that happened to reveal it, and however many files
 /// met it there is one line to add.
 ///
+/// An interactive run puts each move to its operator before making it
+/// ([`decided`]), and nothing else about it differs: the file it renames
+/// is moved, cited and admitted exactly as an applying batch run moves,
+/// cites and admits it, and a file it asks nothing about is reported
+/// exactly as a batch run reports it. A run ended by a quit leaves the
+/// file it was ended at and every file after it untouched, counts them
+/// in [`Aftermath::unreached`], and still merges what the files it
+/// visited produced.
+///
 /// Returns a warning when any entry the run matched turned out to
 /// name a file that is no longer there. It comes back at the end
 /// rather than as an event because it is one fact about the ledger and
 /// not about the file that happened to reveal it — however many files
-/// find stale entries, the run says so once.
+/// find stale entries, the run says so once. A run stopped by a move it
+/// could not record reports that instead, being the more urgent of the
+/// two and the reason the rest of the run did not happen.
 fn rename_events<C: Cache>(
     groups: &[Group],
     apply: bool,
@@ -1112,7 +1158,7 @@ fn rename_events<C: Cache>(
     configs: &Configs,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
-) -> Option<Diagnostic> {
+) -> Aftermath {
     let at = (adapters.now)();
     // Whether the ledger is in play at all: the setting says so, and
     // the run is in a collection that has one.
@@ -1146,12 +1192,12 @@ fn rename_events<C: Cache>(
     // Across groups, because a table is named once for the run however
     // many directories consult one under that name.
     let mut missed = Missed::default();
+    // What ended the run early, if anything did: a quit, or a move that
+    // could not be recorded. Either way the files after it are left
+    // untouched and counted.
+    let mut stopped: Option<Stopped> = None;
 
-    if session.mode == Mode::Interactive {
-        todo!("interactive driver: propose, ask, then accept and carry out, or decline, or stop")
-    }
-
-    for group in groups {
+    for (index, group) in groups.iter().enumerate() {
         let effective = configs.for_directory(&group.directory);
         let config = bib_config(effective.config());
         // A run with neither a master file nor sidecars has nowhere to
@@ -1174,60 +1220,230 @@ fn rename_events<C: Cache>(
             effective.config().collision,
             adapters.filesystem,
         );
-        let mut applying = Applying::new(adapters.filesystem, apply);
+        // A yes is the authorisation for one move, so an interactive
+        // run carries its accepted decisions out as an applying run
+        // does; `--apply` is what authorises a batch one.
+        let mut applying = Applying::new(
+            adapters.filesystem,
+            apply || session.mode == Mode::Interactive,
+        );
         let mut cited = Citations::default();
 
-        for path in &group.paths {
-            let Some(file) = resolved_record(path, effective, adapters, checked, sink) else {
-                continue;
-            };
+        // Left as a block so that what a group owes whatever happens —
+        // its merge into the master `.bib` and the misses its templates
+        // recorded — is written once, on the way out of a group the run
+        // finished and a group it was stopped in alike.
+        let ended = 'files: {
+            for (position, path) in group.paths.iter().enumerate() {
+                let Some(file) = resolved_record(path, effective, adapters, checked, sink) else {
+                    continue;
+                };
 
-            // The hash goes to the move rather than to a log beside
-            // it: it travels on the `Renamed` event, so the run's log
-            // records what each file was when it moved.
-            let event =
-                applying.carry_out(&planning.plan(path, &file, &mut lookups), file.hash.clone());
-            // A sidecar goes beside the name the file now carries rather
-            // than beside the one it has just lost, so where it lands is
-            // where the move that just happened put it.
-            let current = match &event {
-                Event::Renamed { target, .. } => {
-                    // Only a move that happened is an admission: a
-                    // preview reports the same target and admits
-                    // nothing, which is why this reads the event rather
-                    // than `apply`.
-                    admit(ledger, &root, &file, target, &at);
-                    target.clone()
+                let decision = planning.propose(path, &file, &mut lookups);
+                let event = match decided(session, &decision) {
+                    Decided::CarryOut => {
+                        planning.accept(&decision);
+                        // The hash goes to the move rather than to a log
+                        // beside it: it travels on the `Renamed` event,
+                        // so the run's log records what each file was
+                        // when it moved.
+                        match moved(&mut applying, &decision, file.hash.clone(), sink) {
+                            Ok(event) => event,
+                            // The move was not made and no later one
+                            // will be: a run that cannot record what it
+                            // moves stops rather than moving unrecorded.
+                            Err(diagnostic) => {
+                                break 'files Some(Stopped {
+                                    at: (index, position),
+                                    diagnostic: Some(diagnostic),
+                                });
+                            }
+                        }
+                    }
+                    Decided::Declined => {
+                        let event = Event::Skipped {
+                            path: path.clone(),
+                            reason: SkipReason::Declined,
+                        };
+                        sink.emit(event.clone());
+                        event
+                    }
+                    // This file and every file after it are left as they
+                    // are, and nothing further is resolved.
+                    Decided::Stop => {
+                        break 'files Some(Stopped {
+                            at: (index, position),
+                            diagnostic: None,
+                        });
+                    }
+                };
+
+                // A sidecar goes beside the name the file now carries
+                // rather than beside the one it has just lost, so where
+                // it lands is where the move that just happened put it.
+                let current = match &event {
+                    Event::Renamed { target, .. } => {
+                        // Only a move that happened is an admission: a
+                        // preview reports the same target and admits
+                        // nothing, which is why this reads the event
+                        // rather than `apply`.
+                        admit(ledger, &root, &file, target, &at);
+                        target.clone()
+                    }
+                    _ => path.clone(),
+                };
+
+                if cites {
+                    cited.add(
+                        current,
+                        file,
+                        &Citing {
+                            citation_keys: &group.citation_keys,
+                            config: &config,
+                            files: adapters.bib_files,
+                        },
+                        sink,
+                        &mut lookups,
+                    );
                 }
-                _ => path.clone(),
-            };
-            sink.emit(event);
-
-            if cites {
-                cited.add(
-                    current,
-                    file,
-                    &Citing {
-                        citation_keys: &group.citation_keys,
-                        config: &config,
-                        files: adapters.bib_files,
-                    },
-                    sink,
-                    &mut lookups,
-                );
             }
-        }
+            None
+        };
 
+        // The files visited before a stop produced entries as correct as
+        // a finished run's, so they are merged rather than dropped.
         if cites {
             cited.merge(&config, adapters.bib_files, sink);
         }
 
         missed.absorb(lookups.take());
+
+        if let Some(end) = ended {
+            stopped = Some(end);
+            break;
+        }
     }
 
     missed.report(sink);
 
-    stale.get().then(crate::ledger::stale_entries_warning)
+    Aftermath {
+        unreached: stopped
+            .as_ref()
+            .map_or(0, |stopped| unreached(groups, stopped.at)),
+        // A run that could not record a move says so; otherwise the only
+        // thing left to report is a ledger naming files that have gone.
+        diagnostic: stopped
+            .and_then(|stopped| stopped.diagnostic)
+            .or_else(|| stale.get().then(crate::ledger::stale_entries_warning)),
+    }
+}
+
+/// Where a run stopped before its inputs ran out, and why.
+struct Stopped {
+    /// The group and the position within it of the file the run stopped
+    /// at. That file is the first of the unreached ones: it was given no
+    /// fate.
+    at: (usize, usize),
+    /// What to tell the operator, for a stop that was not their own
+    /// choice. A quit has nothing to report.
+    diagnostic: Option<Diagnostic>,
+}
+
+/// How many of `groups`' files are left without a fate by a run that
+/// stopped at `at` — that file and every file after it.
+fn unreached(groups: &[Group], at: (usize, usize)) -> usize {
+    let (group, position) = at;
+    groups
+        .iter()
+        .skip(group)
+        .map(|group| group.paths.len())
+        .sum::<usize>()
+        - position
+}
+
+/// What a run does with a decision once its operator has had their say.
+enum Decided {
+    /// Claim the name and carry the decision out, which for a decision
+    /// that moves nothing is to report it.
+    CarryOut,
+    /// Leave the file as it is: the move was put to the operator and
+    /// declined.
+    Declined,
+    /// End the run at this file.
+    Stop,
+}
+
+/// What `session` makes of `decision`.
+///
+/// A batch run decides everything itself, so every decision is carried
+/// out. An interactive run puts a move to a free target to its
+/// operator — the file, the target it would take, and rename, skip or
+/// quit — and decides everything else as a batch run does: nothing
+/// about a file already named, blocked by a collision or unnameable
+/// would happen differently for any answer, so there is nothing to ask.
+///
+/// A run whose mode says to ask and that has nowhere to ask stops
+/// rather than carrying on, since a move nobody was asked about is the
+/// one thing it may not make.
+fn decided(session: &mut Session<'_>, decision: &PlannedRename) -> Decided {
+    let (Mode::Interactive, PlannedRename::Rename { path, target }) = (session.mode, decision)
+    else {
+        return Decided::CarryOut;
+    };
+    let Some(asker) = session.asker.as_deref_mut() else {
+        return Decided::Stop;
+    };
+
+    let answer = asker.choose(&Question {
+        path: path.clone(),
+        target: target.clone(),
+        // Rename leads, so the answer Enter gives is the one the
+        // question was put about; quit trails, so it is never next to
+        // the default.
+        choices: vec![Answer::Rename, Answer::Skip, Answer::Quit],
+    });
+
+    match answer {
+        Answer::Rename => Decided::CarryOut,
+        Answer::Skip => Decided::Declined,
+        Answer::Quit => Decided::Stop,
+    }
+}
+
+/// Carry `decision` out through `applying`, recording a move in `sink`
+/// before it is made, and report what happened.
+///
+/// The record comes first so that a run interrupted at any point has
+/// already recorded every move it may have made: a log naming a move
+/// that did not happen sends its reader to look, while a move nothing
+/// names is a rename the collection cannot account for. A record that
+/// cannot be written is a [`Diagnostic`] and the move is not made.
+///
+/// Only a move takes that path. Every other decision — a preview's
+/// [`Event::Planned`], a skip, a file already named — goes through
+/// [`Sink::emit`], because losing the record of something that did not
+/// move costs nothing that cannot be worked out again.
+///
+/// A move the filesystem then refuses is reported after the record of
+/// the intent, so the stream and the log carry both.
+fn moved(
+    applying: &mut Applying<'_>,
+    decision: &PlannedRename,
+    hash: Option<ContentHash>,
+    sink: &mut dyn Sink,
+) -> Result<Event, Diagnostic> {
+    let Some(intended) = applying.intended(decision, hash.as_ref()) else {
+        let event = applying.carry_out(decision, hash);
+        sink.emit(event.clone());
+        return Ok(event);
+    };
+
+    sink.record(intended)?;
+    let event = applying.carry_out(decision, hash);
+    if !matches!(event, Event::Renamed { .. }) {
+        sink.emit(event.clone());
+    }
+    Ok(event)
 }
 
 /// What a group cites under: the same three things for every file in
@@ -1582,6 +1798,26 @@ impl Sink for Logging<'_> {
         }
         self.terminal.emit(event);
     }
+
+    /// Write `event` to the log and flush it before it reaches the
+    /// terminal, and report a write that failed rather than dropping it.
+    ///
+    /// A run with no log has nothing that can fail here and nothing to
+    /// refuse: the mode that may move files is the mode whose log is
+    /// mandatory, so a rename run reaching this without one has already
+    /// been through the refusal.
+    fn record(&mut self, event: Event) -> Result<(), Diagnostic> {
+        if let Some(log) = &mut self.log {
+            write_event(log, &event).map_err(|failure| {
+                error(format!(
+                    "the run log could not be written, so the move it records was not made: \
+                     {failure}"
+                ))
+            })?;
+        }
+        self.terminal.emit(event);
+        Ok(())
+    }
 }
 
 /// What came of opening a run's log.
@@ -1625,11 +1861,13 @@ fn open_log<C: Cache>(
     cli: &Cli,
     configs: &Configs,
     adapters: &Adapters<C>,
+    mode: Mode,
     started: &Event,
 ) -> Opened {
+    let applying = applying(&cli.command, mode);
     let destination = crate::runlog::destination(
         &cli.command,
-        applying(&cli.command),
+        applying,
         configs.run().config().run_log,
         &(adapters.now)(),
         adapters.collection_root.as_deref(),
@@ -1637,10 +1875,11 @@ fn open_log<C: Cache>(
     );
 
     let Some(destination) = destination else {
-        return match crate::runlog::mandatory(&cli.command) {
+        return match crate::runlog::mandatory(&cli.command, applying) {
             true => log_failure(
                 true,
-                "--apply needs somewhere to record what it moves, and this is neither in a \
+                "a run that may move files needs somewhere to record what it moves — --apply \
+                 and a run that asks about each file both may — and this is neither in a \
                  collection nor on a system that names a state directory"
                     .to_string(),
             ),
@@ -1726,13 +1965,14 @@ pub fn dispatch<C: Cache>(
         }
     }
 
+    let interactive = session.mode == Mode::Interactive;
     let started = Event::RunStarted {
         command: cli.command.name().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        applying: applying(&cli.command),
         // Settled by `session::mode` before the first event; a run that
         // asks is a run that may move files, so it reports both.
-        interactive: false,
+        applying: applying(&cli.command, session.mode),
+        interactive,
         tables: tables_used(&prepared),
     };
 
@@ -1740,7 +1980,7 @@ pub fn dispatch<C: Cache>(
     // file is touched: opening the log writes `started` into it, so an
     // applying run that cannot record itself is refused while there is
     // still nothing to regret and `streams.out` is still untouched.
-    let log = match open_log(cli, configs, adapters, &started) {
+    let log = match open_log(cli, configs, adapters, session.mode, &started) {
         Opened::Log(log) => log,
         Opened::Failed {
             diagnostic,
@@ -1765,7 +2005,7 @@ pub fn dispatch<C: Cache>(
     // Through the terminal alone: the log has `started` already, from
     // the write that proved it writable.
     sink.terminal.emit(started);
-    let discovered = emit_events(
+    let aftermath = emit_events(
         &prepared,
         &cli.command,
         configs,
@@ -1777,22 +2017,31 @@ pub fn dispatch<C: Cache>(
     // Read before the last event is emitted, so what `RunFinished`
     // reports is the body's totals and nothing else: the framing events
     // are about the run rather than about a file, and `Counts::observe`
-    // leaves them out either way.
-    let counts = sink.terminal.counts;
+    // leaves them out either way. The files the run never reached are
+    // the one total no event carries, no event being emitted for a file
+    // nothing happened to.
+    let counts = Counts {
+        unreached: aftermath.unreached,
+        ..sink.terminal.counts
+    };
     sink.emit(Event::RunFinished { counts });
 
-    if let Some(warning) = discovered {
-        let _ = writeln!(streams.err, "{warning}");
+    if let Some(diagnostic) = aftermath.diagnostic {
+        let _ = writeln!(streams.err, "{diagnostic}");
     }
 
     outcome_for(&counts)
 }
 
-/// Whether `command` will change what is on disk rather than only
-/// report on it.
-fn applying(command: &Command) -> bool {
+/// Whether a run of `command` in `mode` will change what is on disk
+/// rather than only report on it.
+///
+/// An interactive rename may move files — a yes to a question is the
+/// authorisation for the move it names — so it is an applying run
+/// whether or not it turns out to move anything.
+fn applying(command: &Command, mode: Mode) -> bool {
     match command {
-        Command::Rename { apply, .. } => *apply,
+        Command::Rename { apply, .. } => *apply || mode == Mode::Interactive,
         Command::Cache { clear, .. } => *clear,
         Command::Bib { .. } | Command::Ledger { .. } => true,
         Command::Resolve { .. } | Command::Config { .. } => false,
@@ -1862,6 +2111,9 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
         .as_deref()
         .map(FileLedger::at_collection_root);
 
+    let mut asker = TerminalAsker;
+    let mut session = session_for(&command, cli.format(), effective.config(), &mut asker);
+
     dispatch(
         &Cli {
             command,
@@ -1880,13 +2132,39 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
             collection_root,
             state_root: crate::runlog::default_state_root(),
         },
-        // The terminal adapter is what turns this into an interactive
-        // session: `session::mode` decides from stdin, the format, the
-        // `batch` setting and `--apply`, and an asker is built when it
-        // says to ask.
-        &mut Session::batch(),
+        &mut session,
         streams,
     )
+}
+
+/// The session `command` runs in against the real terminal.
+///
+/// [`crate::session::mode`] settles the mode from this process's own
+/// stdin, the format asked for, the `batch` setting and `--apply`; an
+/// interactive one puts its questions through [`TerminalAsker`], which
+/// is the only place borax reads a keystroke.
+///
+/// `asker` is the caller's because a session borrows it: the run needs
+/// it for as long as it may ask, and only the caller has a frame it can
+/// live in.
+fn session_for<'a>(
+    command: &Command,
+    format: Format,
+    config: &Config,
+    asker: &'a mut TerminalAsker,
+) -> Session<'a> {
+    let interactive = matches!(command, Command::Rename { .. })
+        && crate::session::mode(
+            stdin_is_terminal(),
+            format,
+            config.batch,
+            matches!(command, Command::Rename { apply: true, .. }),
+        ) == Mode::Interactive;
+
+    match interactive {
+        true => Session::interactive(asker),
+        false => Session::batch(),
+    }
 }
 
 /// `source` wrapped in the decorators a real run adds to it: pacing

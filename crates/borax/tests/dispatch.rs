@@ -3115,6 +3115,9 @@ fn quitting_counts_unreached_and_still_merges_the_bib_for_the_visited_files() {
     }
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
+    // An interactive run is an applying run for its log (design D7), so
+    // it is refused outright unless there is somewhere to write one.
+    let state = tempdir().unwrap();
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let effective = effective_with(|layer| {
@@ -3142,7 +3145,7 @@ fn quitting_counts_unreached_and_still_merges_the_bib_for_the_visited_files() {
         now: fixed_now,
         ledger: None,
         collection_root: None,
-        state_root: None,
+        state_root: Some(state.path().to_path_buf()),
     };
     let mut asker = ScriptedAsker::new(vec![Answer::Rename, Answer::Rename, Answer::Quit]);
     let mut out = Vec::new();

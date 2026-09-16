@@ -15,6 +15,12 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+# The arrow-key menu a rename run asks its questions through. Only the
+# crossterm backend is wanted: the date, editor and fuzzy prompts bring
+# dependencies of their own and borax asks none of them.
+inquire = { version = "0.9.4", default-features = false, features = [
+    "crossterm",
+] }
 # Kept at the major/minor pdf-extract itself depends on, so both see one
 # lopdf and its `Document` crosses between them.
 lopdf = "0.42"

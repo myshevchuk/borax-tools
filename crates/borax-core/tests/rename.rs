@@ -898,19 +898,31 @@ fn claiming_a_proposed_rename_reserves_its_target_for_later_items() {
 
 /// Claiming something other than a `Rename` — `AlreadyNamed` or `Skip`
 /// — claims nothing the snapshot did not already hold.
+///
+/// `t.pdf` has to be occupied for the first decision to be a `Skip` at
+/// all, which is also what makes the assertion the right one: the
+/// second file is suffixed because the snapshot holds `t.pdf`, exactly
+/// as it would have been had the skip never been claimed.
 #[test]
 fn claiming_a_skip_reserves_nothing_new() {
-    let mut planner = Planner::new(snapshot(&[]));
+    let mut planner = Planner::new(snapshot(&[("t.pdf", Some("other"))]));
 
     let skipped = planner.propose(&input("a.pdf", "t.pdf", "h1"), CollisionPolicy::Skip);
     planner.claim(&skipped);
-    let free_again = planner.propose(&input("b.pdf", "t.pdf", "h2"), CollisionPolicy::Suffix);
+    let after = planner.propose(&input("b.pdf", "t.pdf", "h2"), CollisionPolicy::Suffix);
 
     assert_eq!(
-        free_again.action,
-        PlannedAction::Rename {
-            to: "t.pdf".to_string()
+        skipped.action,
+        PlannedAction::Skip {
+            reason: SkipReason::TargetCollision
         },
-        "got {free_again:?}"
+        "got {skipped:?}"
+    );
+    assert_eq!(
+        after.action,
+        PlannedAction::Rename {
+            to: "ta.pdf".to_string()
+        },
+        "the claim added nothing: got {after:?}"
     );
 }

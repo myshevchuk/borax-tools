@@ -144,10 +144,9 @@ impl Planner {
     /// that leaves it, so no ordering of the executed moves can
     /// overwrite anything.
     pub fn plan(&mut self, item: &PlanInput, policy: CollisionPolicy) -> PlanItem {
-        // Becomes `propose` followed by `claim` once both are
-        // implemented; kept whole here so the decisions it already
-        // makes stay covered while they are being taken apart.
-        self.decide(item, policy)
+        let decided = self.propose(item, policy);
+        self.claim(&decided);
+        decided
     }
 
     /// The decision for `item` under `policy`, claiming nothing.
@@ -162,30 +161,6 @@ impl Planner {
     /// This is what lets a caller put a decision to someone before it
     /// takes effect. A batch caller has no use for it and calls `plan`.
     pub fn propose(&self, item: &PlanInput, policy: CollisionPolicy) -> PlanItem {
-        let _ = (item, policy);
-        todo!("propose: decide as plan does, without claiming")
-    }
-
-    /// Record `decided` as taken, so no later decision may name it.
-    ///
-    /// A [`PlannedAction::Rename`] claims the path it names — the
-    /// desired target, or the suffixed candidate the ladder reached.
-    /// Every other action claims nothing, having taken no name that was
-    /// not already the file's own.
-    ///
-    /// Claiming twice is claiming once: the set of taken names is a
-    /// set. Claiming a decision this planner did not make is the
-    /// caller's business and is recorded the same way, since a name is
-    /// taken by whoever took it.
-    pub fn claim(&mut self, decided: &PlanItem) {
-        let _ = decided;
-        todo!("claim: record a Rename's target as taken")
-    }
-
-    /// The decision for `item` under `policy`, as `plan` made it before
-    /// deciding and claiming came apart.
-    #[allow(dead_code)]
-    fn decide(&mut self, item: &PlanInput, policy: CollisionPolicy) -> PlanItem {
         let source_key = item.source.to_lowercase();
         let exempt = self
             .existing
@@ -198,7 +173,6 @@ impl Planner {
         {
             PlannedAction::AlreadyNamed
         } else if is_free(&target_key, &self.claimed, exempt) {
-            self.claimed.insert(target_key);
             PlannedAction::Rename {
                 to: item.target.clone(),
             }
@@ -208,9 +182,7 @@ impl Planner {
                     let mut index = 0;
                     loop {
                         let candidate = with_suffix(&item.target, &letter_suffix(index));
-                        let candidate_key = candidate.to_lowercase();
-                        if is_free(&candidate_key, &self.claimed, exempt) {
-                            self.claimed.insert(candidate_key);
+                        if is_free(&candidate.to_lowercase(), &self.claimed, exempt) {
                             break PlannedAction::Rename { to: candidate };
                         }
                         index += 1;
@@ -225,6 +197,23 @@ impl Planner {
         PlanItem {
             source: item.source.clone(),
             action,
+        }
+    }
+
+    /// Record `decided` as taken, so no later decision may name it.
+    ///
+    /// A [`PlannedAction::Rename`] claims the path it names — the
+    /// desired target, or the suffixed candidate the ladder reached.
+    /// Every other action claims nothing, having taken no name that was
+    /// not already the file's own.
+    ///
+    /// Claiming twice is claiming once: the set of taken names is a
+    /// set. Claiming a decision this planner did not make is the
+    /// caller's business and is recorded the same way, since a name is
+    /// taken by whoever took it.
+    pub fn claim(&mut self, decided: &PlanItem) {
+        if let PlannedAction::Rename { to } = &decided.action {
+            self.claimed.insert(to.to_lowercase());
         }
     }
 }

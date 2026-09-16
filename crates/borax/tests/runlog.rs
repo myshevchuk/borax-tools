@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 use borax::bib::BibFiles;
 use borax::cli::{Cli, Command, LedgerAction};
 use borax::config::{Layer, Origin, resolve};
+use borax::event::{Diagnostic, Event, Level};
 use borax::ledger::ACCOUNTING_DIR;
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
-use borax::run::{Adapters, Configs, Streams, dispatch};
+use borax::run::{Adapters, Configs, Sink, Streams, dispatch, emit_events, preflight};
 use borax::runlog::{RUNS_DIR, destination, log_name, state_root};
 use borax::session::{Outcome, Session};
 use borax_core::content::{ContentHash, hash_bytes};
@@ -1383,6 +1384,126 @@ fn a_rename_event_is_flushed_to_the_log_before_the_move_it_records_is_made() {
         Some(true),
         "the rename event must be written and flushed to the log before the file is moved"
     );
+}
+
+// ---------------------------------------------------------------------
+// 4.3: a move whose record cannot be written is not made, and the run
+// stops there — design D7's second step, through the `Sink::record`
+// seam D10 puts it behind.
+// ---------------------------------------------------------------------
+
+/// A [`Sink`] that keeps every event it is given and refuses the
+/// `fails_at`-th `record`, standing for a log that takes two writes and
+/// then cannot take a third.
+struct FailingRecorder {
+    events: Vec<Event>,
+    records: usize,
+    fails_at: usize,
+}
+
+impl FailingRecorder {
+    fn refusing_the(fails_at: usize) -> FailingRecorder {
+        FailingRecorder {
+            events: Vec::new(),
+            records: 0,
+            fails_at,
+        }
+    }
+
+    fn renamed(&self) -> Vec<&Event> {
+        self.events
+            .iter()
+            .filter(|event| matches!(event, Event::Renamed { .. }))
+            .collect()
+    }
+}
+
+impl Sink for FailingRecorder {
+    fn emit(&mut self, event: Event) {
+        self.events.push(event);
+    }
+
+    fn record(&mut self, event: Event) -> Result<(), Diagnostic> {
+        self.records += 1;
+        if self.records == self.fails_at {
+            return Err(Diagnostic {
+                level: Level::Error,
+                message: "the run log would not take the event".to_string(),
+            });
+        }
+        self.events.push(event);
+        Ok(())
+    }
+}
+
+#[test]
+fn a_move_whose_record_cannot_be_written_is_not_made_and_stops_the_run() {
+    let paths: Vec<PathBuf> = (1..=3)
+        .map(|n| PathBuf::from(format!("/lib/{n}.pdf")))
+        .collect();
+    let mut library = FakeLibrary::new();
+    for (n, path) in paths.iter().enumerate() {
+        library = library.with_file(
+            path,
+            hash_of(&format!("record-refused-{n}")),
+            pdf_with_embedded_doi("10.1000/record-refused"),
+        );
+    }
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/record-refused")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: || "20240101T000000Z".to_string(),
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let command = Command::rename(paths.clone(), true);
+    let configs = Configs::uniform(effective);
+    let prepared = preflight(&command, &configs, &adapters).unwrap();
+    let mut sink = FailingRecorder::refusing_the(3);
+
+    let aftermath = emit_events(
+        &prepared,
+        &command,
+        &configs,
+        &adapters,
+        &mut Session::batch(),
+        &mut sink,
+    );
+
+    assert_eq!(
+        filesystem.renames().len(),
+        2,
+        "the third move must not be made once its record was refused: got {:?}",
+        filesystem.renames()
+    );
+    assert_eq!(
+        sink.renamed().len(),
+        2,
+        "only the two recorded moves are reported: got {:?}",
+        sink.events
+    );
+    assert_eq!(
+        aftermath.unreached, 1,
+        "the file the run stopped at is left without a fate"
+    );
+    let diagnostic = aftermath
+        .diagnostic
+        .unwrap_or_else(|| panic!("a run stopped by a refused record must say so"));
+    assert_eq!(diagnostic.level, Level::Error, "got {diagnostic:?}");
 }
 
 // ---------------------------------------------------------------------

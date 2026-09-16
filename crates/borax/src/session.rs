@@ -7,13 +7,15 @@
 //! an answer nobody is there to give: a run with no terminal on stdin,
 //! or one rendering JSON, is a batch run whatever else was asked for.
 //!
-//! The two functions that touch the process itself — reading whether
-//! stdin is a terminal, and handing a code to the operating system —
-//! are the adapter; everything a test cares about is decided by the
-//! pure functions above them.
+//! What touches the process itself — reading whether stdin is a
+//! terminal, putting a question to the person at it, and handing a code
+//! to the operating system — is the adapter; everything a test cares
+//! about is decided by the pure functions above it, and a run is
+//! written against [`Asker`] rather than against a terminal.
 
+use std::fmt;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::event::{Counts, Format};
 
@@ -59,12 +61,15 @@ impl Outcome {
 
 /// How a run that completed ended, from its totals.
 ///
-/// Only [`Counts::skipped`] decides it: a run over an empty directory
-/// resolves nothing, skips nothing, and succeeds, because there was
-/// nothing it failed to do. [`Outcome::Fatal`] is not reachable from
-/// totals — a run that produced totals is a run that happened.
+/// [`Counts::skipped`] and [`Counts::unreached`] decide it, and each
+/// means a file the run did not finish with: one it looked at and left,
+/// and one it never reached because the run ended early. A run over an
+/// empty directory resolves nothing, skips nothing, reaches the end of
+/// its inputs, and succeeds, because there was nothing it failed to do.
+/// [`Outcome::Fatal`] is not reachable from totals — a run that
+/// produced totals is a run that happened.
 pub fn outcome_for(counts: &Counts) -> Outcome {
-    match counts.skipped {
+    match counts.skipped + counts.unreached {
         0 => Outcome::Success,
         _ => Outcome::Partial,
     }
@@ -95,8 +100,10 @@ pub enum Mode {
 /// Every other command is [`Mode::Batch`]: only `rename` has a decision
 /// to put to anyone.
 pub fn mode(stdin_is_terminal: bool, format: Format, batch: bool, apply: bool) -> Mode {
-    let _ = (stdin_is_terminal, format, batch, apply);
-    todo!("mode: interactive only on a human terminal with no --apply and batch off")
+    match stdin_is_terminal && format == Format::Human && !batch && !apply {
+        true => Mode::Interactive,
+        false => Mode::Batch,
+    }
 }
 
 /// What an interactive run does about one file.
@@ -176,4 +183,81 @@ impl<'a> Session<'a> {
 /// Whether this process's standard input is a terminal.
 pub fn stdin_is_terminal() -> bool {
     io::stdin().is_terminal()
+}
+
+/// One menu entry, as [`inquire`] needs it: an answer and the word the
+/// operator reads for it.
+struct Choice(Answer);
+
+impl fmt::Display for Choice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self.0 {
+            Answer::Rename => "Rename",
+            Answer::Skip => "Skip",
+            Answer::Quit => "Quit",
+        })
+    }
+}
+
+/// The [`Asker`] that puts a question to the terminal: an arrow-key
+/// menu, drawn by [`inquire`].
+///
+/// A menu rather than a line of letter keys, because later changes add
+/// choices to it and a menu stays legible as they arrive. It draws on
+/// standard error, so standard output carries the event stream and
+/// nothing else in an interactive run as in a batch one.
+///
+/// This is the whole of what touches the terminal, and it is kept to
+/// translating a [`Question`] into a menu and the menu's result back
+/// into an [`Answer`]: what the test suite cannot reach is therefore
+/// also what holds no decision.
+pub struct TerminalAsker;
+
+impl Asker for TerminalAsker {
+    /// Draw `question` as a menu of its choices and return the one
+    /// picked, the first being where the cursor starts.
+    ///
+    /// Every way the menu can end without an answer is
+    /// [`Answer::Quit`]: Esc and Ctrl-C, which [`inquire`] reports as
+    /// errors rather than as a signal, and a terminal that cannot be
+    /// read at all. Quit is the answer that touches nothing, so an
+    /// interrupted question leaves the file exactly as an unanswered
+    /// one does.
+    fn choose(&mut self, question: &Question) -> Answer {
+        // Above the menu rather than in its message, so the file and
+        // the name it would take keep a line each.
+        eprintln!(
+            "{}\n  → {}",
+            shown(&question.path),
+            target_shown(&question.target, &question.path)
+        );
+
+        let choices: Vec<Choice> = question.choices.iter().copied().map(Choice).collect();
+        match inquire::Select::new("Rename this file?", choices).prompt() {
+            Ok(choice) => choice.0,
+            Err(_) => Answer::Quit,
+        }
+    }
+}
+
+/// `path` as a question names it: its file name, or the whole path when
+/// it has none to give.
+fn shown(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// `target` as a question names it, beside the file at `path`: the name
+/// it would take, with the subdirectory a template sends it to where
+/// there is one.
+fn target_shown(target: &Path, path: &Path) -> String {
+    match path
+        .parent()
+        .and_then(|parent| target.strip_prefix(parent).ok())
+    {
+        Some(relative) => relative.display().to_string(),
+        None => target.display().to_string(),
+    }
 }

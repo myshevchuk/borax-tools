@@ -157,9 +157,10 @@ pub enum Command {
         #[arg(value_name = "PATH", required = true)]
         paths: Vec<PathBuf>,
 
-        /// Move the files. Without it the run only reports what it
-        /// would move.
-        #[arg(long)]
+        /// Move the files the plan names, asking nothing. Selects a
+        /// batch run; without it a batch run reports what it would
+        /// move.
+        #[arg(long, conflicts_with = "no_batch")]
         apply: bool,
 
         #[command(flatten)]
