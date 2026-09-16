@@ -47,7 +47,7 @@ use crate::pipeline::{
     resolve_file_checking_ledger,
 };
 use crate::renaming::{Applying, Filesystem, Planning, RealFilesystem};
-use crate::session::{Outcome, outcome_for};
+use crate::session::{Mode, Outcome, Session, outcome_for};
 
 /// The extension a file needs to be picked up from a directory.
 pub const PDF_EXTENSION: &str = "pdf";
@@ -916,6 +916,7 @@ pub fn emit_events<C: Cache>(
     command: &Command,
     configs: &Configs,
     adapters: &Adapters<'_, C>,
+    session: &mut Session<'_>,
     sink: &mut dyn Sink,
 ) -> Option<Diagnostic> {
     match (command, prepared) {
@@ -935,7 +936,7 @@ pub fn emit_events<C: Cache>(
             None
         }
         (Command::Rename { apply, .. }, Prepared::Grouped { groups, ledger, .. }) => {
-            rename_events(groups, *apply, ledger, configs, adapters, sink)
+            rename_events(groups, *apply, session, ledger, configs, adapters, sink)
         }
         (Command::Bib { .. }, Prepared::Grouped { groups, .. }) => {
             bib_events(groups, configs, adapters, sink);
@@ -964,13 +965,14 @@ pub fn events_for<C: Cache>(
     command: &Command,
     configs: &Configs,
     adapters: &Adapters<C>,
+    session: &mut Session<'_>,
 ) -> Result<Vec<Event>, Diagnostic> {
     let prepared = preflight(command, configs, adapters)?;
     let mut events: Vec<Event> = Vec::new();
     // The stream is the whole of what this hands back, so a diagnostic
     // about the run has nowhere to go here; [`dispatch`] is what writes
     // one out.
-    let _ = emit_events(&prepared, command, configs, adapters, &mut events);
+    let _ = emit_events(&prepared, command, configs, adapters, session, &mut events);
     Ok(events)
 }
 
@@ -1105,6 +1107,7 @@ fn resolving(config: &Config) -> ResolveConfig {
 fn rename_events<C: Cache>(
     groups: &[Group],
     apply: bool,
+    session: &mut Session<'_>,
     admitted: &Index,
     configs: &Configs,
     adapters: &Adapters<C>,
@@ -1143,6 +1146,10 @@ fn rename_events<C: Cache>(
     // Across groups, because a table is named once for the run however
     // many directories consult one under that name.
     let mut missed = Missed::default();
+
+    if session.mode == Mode::Interactive {
+        todo!("interactive driver: propose, ask, then accept and carry out, or decline, or stop")
+    }
 
     for group in groups {
         let effective = configs.for_directory(&group.directory);
@@ -1700,6 +1707,7 @@ pub fn dispatch<C: Cache>(
     cli: &Cli,
     configs: &Configs,
     adapters: &Adapters<C>,
+    session: &mut Session<'_>,
     streams: &mut Streams,
 ) -> Outcome {
     let prepared = match preflight(&cli.command, configs, adapters) {
@@ -1757,7 +1765,14 @@ pub fn dispatch<C: Cache>(
     // Through the terminal alone: the log has `started` already, from
     // the write that proved it writable.
     sink.terminal.emit(started);
-    let discovered = emit_events(&prepared, &cli.command, configs, adapters, &mut sink);
+    let discovered = emit_events(
+        &prepared,
+        &cli.command,
+        configs,
+        adapters,
+        session,
+        &mut sink,
+    );
 
     // Read before the last event is emitted, so what `RunFinished`
     // reports is the body's totals and nothing else: the framing events
@@ -1865,6 +1880,11 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
             collection_root,
             state_root: crate::runlog::default_state_root(),
         },
+        // The terminal adapter is what turns this into an interactive
+        // session: `session::mode` decides from stdin, the format, the
+        // `batch` setting and `--apply`, and an asker is built when it
+        // says to ask.
+        &mut Session::batch(),
         streams,
     )
 }

@@ -241,6 +241,56 @@ This splits `Logging::emit` in two: events that are recorded
 best-effort, as now, and a move's own event, whose failure ends the run.
 Only `renamed` takes the second path.
 
+### D9. The session is a parameter, not a second entry point
+
+`dispatch`, `events_for`, `emit_events` and `rename_events` each take a
+`Session`:
+
+```rust
+pub struct Session<'a> {
+    pub mode: Mode,
+    /// Where questions go. `None` in a batch run, which asks none.
+    pub asker: Option<&'a mut dyn Asker>,
+}
+```
+
+A batch run passes `Session::batch()` and an interactive one
+`Session::interactive(&mut asker)`. There is no second rename entry
+point: `rename_events` is the one driver, and the mode decides whether
+it proposes-then-asks or plans-and-carries-out. Two entry points would
+be two code paths to keep in agreement, and the property this change
+most needs — that an accepted interactive rename does exactly what a
+batch apply does — is the one such a split would quietly break.
+
+Passing the session rather than putting the asker in `Adapters` keeps
+`Adapters` a set of shared references: an asker is used mutably, which
+inside a shared struct would need interior mutability and would say
+that asking is part of the environment rather than part of the
+invocation. The cost is a parameter on four functions and their call
+sites, which the tests carry as `Session::batch()`.
+
+### D10. A move is recorded through the sink that logs it
+
+`Sink` gains one method:
+
+```rust
+fn record(&mut self, event: Event) -> Result<(), Diagnostic>;
+```
+
+For every sink but the logging one it is `emit` and `Ok(())`. For
+`Logging` it writes the event to the run log, flushes, and returns the
+failure if the write failed; only then does it reach the terminal.
+
+The driver calls `record` for a `renamed` event before asking the
+filesystem to move anything, and abandons the run when it returns an
+error (D7). Nothing else changes: every other event goes through `emit`
+and is still best-effort, because losing the record of a skip costs
+nothing that cannot be recomputed.
+
+This is the smallest seam that makes the guarantee testable: a test
+supplies a sink whose `record` fails on the third call and asserts that
+two files moved, the third did not, and the run ended.
+
 ### D8. Everything after the decision is the batch path
 
 Bibliography output, ledger admission and lookup-miss reporting are

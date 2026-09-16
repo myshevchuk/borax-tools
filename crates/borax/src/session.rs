@@ -140,6 +140,39 @@ pub trait Asker {
     fn choose(&mut self, question: &Question) -> Answer;
 }
 
+/// One invocation's relationship with its operator: which mode it runs
+/// in, and where its questions go.
+///
+/// Carried down through [`crate::run::dispatch`] rather than held in
+/// the run's adapters, because asking is part of the invocation and not
+/// part of the environment it reads: a batch run has no operator, and
+/// says so by carrying no asker at all.
+pub struct Session<'a> {
+    pub mode: Mode,
+    /// Where questions go. `None` in a batch run, which asks none, so a
+    /// driver that tries to ask one has nowhere to send it rather than
+    /// a default answer to invent.
+    pub asker: Option<&'a mut dyn Asker>,
+}
+
+impl<'a> Session<'a> {
+    /// A run that asks nothing.
+    pub fn batch() -> Session<'a> {
+        Session {
+            mode: Mode::Batch,
+            asker: None,
+        }
+    }
+
+    /// A run that puts its decisions to `asker`.
+    pub fn interactive(asker: &'a mut dyn Asker) -> Session<'a> {
+        Session {
+            mode: Mode::Interactive,
+            asker: Some(asker),
+        }
+    }
+}
+
 /// Whether this process's standard input is a terminal.
 pub fn stdin_is_terminal() -> bool {
     io::stdin().is_terminal()

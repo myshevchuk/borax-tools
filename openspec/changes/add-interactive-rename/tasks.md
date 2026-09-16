@@ -41,10 +41,10 @@ scripted `Asker`, never through a terminal.
 
 ## 3. The question
 
-- [ ] 3.1 Define `Question`, `Answer` and the `Asker` trait in
-      `session.rs` (design D4), with a scripted implementation under
-      `crates/borax/tests/` that returns answers from a list and fails
-      the test when asked more questions than scripted
+- [ ] 3.1 Define `Question`, `Answer`, the `Asker` trait and `Session`
+      in `session.rs` (design D4, D9), with a scripted implementation
+      under `crates/borax/tests/` that returns answers from a list and
+      fails the test when asked more questions than scripted
 - [ ] 3.2 Red: `crates/borax/tests/run.rs` — an interactive run over
       fixture files: rename answers produce `renamed` and a ledger
       admission; skip answers produce `skipped`/`declined`; files with
@@ -57,7 +57,10 @@ scripted `Asker`, never through a terminal.
       moved files among them, outcome is partial; the master `.bib`
       merge still runs for the visited files
 - [ ] 3.5 Green: the interactive driver in `rename_events` — propose,
-      ask, then accept and carry out, or decline, or stop
+      ask, then accept and carry out, or decline, or stop — reached by
+      threading `Session` through `dispatch`, `events_for` and
+      `emit_events` (design D9), with every existing call site passing
+      `Session::batch()`
 - [ ] 3.6 Green: `SkipReason::Declined`, `Counts::unreached` (and its
       effect on `outcome_for`), `run-started`'s `interactive`, and their
       human renderings
@@ -77,9 +80,9 @@ scripted `Asker`, never through a terminal.
       that records the log's contents at the moment it is asked to move
       sees the event already there; a move the filesystem refuses is
       followed in the log by its failure
-- [ ] 4.5 Green: split `Logging::emit` into the best-effort write and
-      the move's own write, and record a move before `Applying` carries
-      it out
+- [ ] 4.5 Green: add `Sink::record` (design D10), implement it on
+      `Logging` as the write that may fail, and record a move through it
+      before `Applying` carries it out
 
 ## 5. The terminal
 
