@@ -200,6 +200,39 @@ impl<'a> Planning<'a> {
         }
     }
 
+    /// The decision for the resolved file `file` at `path`, claiming
+    /// nothing.
+    ///
+    /// [`Planning::plan`]'s decision without its effect on the
+    /// namespace: the name a returned [`PlannedRename::Rename`] carries
+    /// is free until [`Planning::accept`] takes it, so a caller may put
+    /// the decision to someone and let it lapse. A proposal that lapses
+    /// leaves the plan as though the file had proposed nothing.
+    ///
+    /// The subdirectory a target names is still looked at here, since
+    /// deciding whether a name is free is what needs it, and looking is
+    /// not claiming.
+    pub fn propose(
+        &mut self,
+        path: &Path,
+        file: &FileRecord,
+        lookups: &mut Lookups<'_>,
+    ) -> PlannedRename {
+        let _ = (path, file, lookups);
+        todo!("propose: decide as plan does, without claiming the target")
+    }
+
+    /// Take the name `decided` names, so no later file in this
+    /// directory may have it.
+    ///
+    /// Only [`PlannedRename::Rename`] takes a name; every other
+    /// decision claims nothing. Accepting a decision this `Planning`
+    /// did not propose is not meaningful and is not supported.
+    pub fn accept(&mut self, decided: &PlannedRename) {
+        let _ = decided;
+        todo!("accept: claim a proposed rename's target")
+    }
+
     /// The decision for the resolved file `file` at `path`.
     ///
     /// `path` is taken to lie in the directory this was built for: only

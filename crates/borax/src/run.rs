@@ -1722,6 +1722,9 @@ pub fn dispatch<C: Cache>(
         command: cli.command.name().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         applying: applying(&cli.command),
+        // Settled by `session::mode` before the first event; a run that
+        // asks is a run that may move files, so it reports both.
+        interactive: false,
         tables: tables_used(&prepared),
     };
 

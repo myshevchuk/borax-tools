@@ -1,10 +1,11 @@
 //! One invocation's relationship with the shell that started it: what
-//! it is allowed to ask, and what it reports back when it ends.
+//! it may ask, how it asks it, and what it reports back when it ends.
 //!
-//! Both halves exist so a run behaves the same whether a person or a
+//! All three exist so a run behaves the same whether a person or a
 //! script started it. A script needs an exit code it can branch on, and
 //! it needs the certainty that no invocation will ever sit waiting for
-//! an answer nobody is there to give.
+//! an answer nobody is there to give: a run with no terminal on stdin,
+//! or one rendering JSON, is a batch run whatever else was asked for.
 //!
 //! The two functions that touch the process itself — reading whether
 //! stdin is a terminal, and handing a code to the operating system —
@@ -12,6 +13,7 @@
 //! pure functions above them.
 
 use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 
 use crate::event::{Counts, Format};
 
@@ -68,43 +70,74 @@ pub fn outcome_for(counts: &Counts) -> Outcome {
     }
 }
 
-/// Whether this invocation may ask the person running it a question.
+/// Whether a run puts its decisions to the person who started it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Interaction {
-    /// A question may be put, and an answer waited for.
-    Allowed,
-    /// Nothing may be asked. Every choice that would have been a
-    /// question takes its safe answer instead.
-    Forbidden,
+pub enum Mode {
+    /// Every decision is put as a question and waited for.
+    Interactive,
+    /// Nothing is asked. The run reports what it would do, or carries
+    /// out what `--apply` authorised.
+    Batch,
 }
 
-/// Whether `format` and a terminal on stdin leave room to ask.
+/// The mode a rename run takes.
 ///
-/// Asking requires both: a terminal, because there is otherwise nobody
-/// to answer, and [`Format::Human`], because `--json` is how a caller
-/// says a program is driving the run. Either one absent forbids the
-/// question rather than deferring it.
-pub fn interaction(stdin_is_terminal: bool, format: Format) -> Interaction {
-    match stdin_is_terminal && format == Format::Human {
-        true => Interaction::Allowed,
-        false => Interaction::Forbidden,
-    }
+/// Interactive requires all four: a terminal on stdin, because there is
+/// otherwise nobody to answer; [`Format::Human`], because `--json` is
+/// how a caller says a program is driving the run; no `--apply`, which
+/// authorises a plan and therefore asks for the run that carries one
+/// out; and `batch` off, which is its default.
+///
+/// `batch` is the run's own setting rather than any input directory's:
+/// a run is one session with one operator, and the mode is settled here
+/// once, before the first event.
+///
+/// Every other command is [`Mode::Batch`]: only `rename` has a decision
+/// to put to anyone.
+pub fn mode(stdin_is_terminal: bool, format: Format, batch: bool, apply: bool) -> Mode {
+    let _ = (stdin_is_terminal, format, batch, apply);
+    todo!("mode: interactive only on a human terminal with no --apply and batch off")
 }
 
-/// The answer to a yes/no question under `interaction`.
+/// What an interactive run does about one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    /// The file the question is about.
+    pub path: PathBuf,
+    /// Where it would move to, as the operator is shown it: the name
+    /// the file would take, including any collision suffix.
+    pub target: PathBuf,
+    /// What may be answered, in the order they are offered. The first
+    /// is the default, so it is never the answer that moves a file
+    /// against a doubt.
+    pub choices: Vec<Answer>,
+}
+
+/// One answer to a [`Question`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// Carry out the move the question named.
+    Rename,
+    /// Leave the file as it is and go on to the next.
+    Skip,
+    /// End the run here, leaving this file and every file after it
+    /// untouched.
+    Quit,
+}
+
+/// Where an interactive run's questions are put and answered.
 ///
-/// `ask` is called only when asking is [`Interaction::Allowed`]; when it
-/// is [`Interaction::Forbidden`] the question is not put at all and the
-/// answer is `false`.
-///
-/// An unasked confirmation is never granted, so the caller's `false`
-/// branch has to be the one that leaves the file alone — that is what
-/// makes a piped run fall back to skipping rather than to acting.
-pub fn confirm(interaction: Interaction, ask: impl FnOnce() -> bool) -> bool {
-    match interaction {
-        Interaction::Allowed => ask(),
-        Interaction::Forbidden => false,
-    }
+/// The seam between the run and the terminal. A run is written against
+/// this and never against a terminal, so every path through it is
+/// tested with answers supplied from a list.
+pub trait Asker {
+    /// Put `question` and return the answer.
+    ///
+    /// The answer is one of `question.choices`. An implementation that
+    /// cannot ask — the operator interrupted, the terminal went away —
+    /// answers [`Answer::Quit`], which is the answer that touches
+    /// nothing further.
+    fn choose(&mut self, question: &Question) -> Answer;
 }
 
 /// Whether this process's standard input is a terminal.

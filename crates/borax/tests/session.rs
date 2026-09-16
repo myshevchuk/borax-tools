@@ -1,9 +1,5 @@
-use std::cell::Cell;
-
-use borax::event::{Counts, Format};
-use borax::session::{
-    FATAL, Interaction, Outcome, PARTIAL, SUCCESS, confirm, interaction, outcome_for,
-};
+use borax::event::Counts;
+use borax::session::{FATAL, Outcome, PARTIAL, SUCCESS, outcome_for};
 
 // ---------------------------------------------------------------------
 // Outcome::code
@@ -40,6 +36,7 @@ fn a_batch_with_eight_successes_and_two_skipped_files_exits_with_the_partial_cod
         renamed: 8,
         skipped: 2,
         unmatched: 0,
+        unreached: 0,
     };
 
     let code = outcome_for(&counts).code();
@@ -66,6 +63,7 @@ fn outcome_for_a_run_that_resolved_and_renamed_everything_with_nothing_skipped_i
         renamed: 5,
         skipped: 0,
         unmatched: 0,
+        unreached: 0,
     };
 
     let outcome = outcome_for(&counts);
@@ -80,6 +78,7 @@ fn outcome_for_a_run_where_resolved_and_renamed_differ_but_skipped_is_zero_is_st
         renamed: 3,
         skipped: 0,
         unmatched: 0,
+        unreached: 0,
     };
 
     let outcome = outcome_for(&counts);
@@ -98,6 +97,7 @@ fn outcome_for_a_run_with_a_single_skip_is_partial() {
         renamed: 4,
         skipped: 1,
         unmatched: 0,
+        unreached: 0,
     };
 
     let outcome = outcome_for(&counts);
@@ -112,6 +112,7 @@ fn outcome_for_a_run_that_skipped_everything_is_partial() {
         renamed: 0,
         skipped: 3,
         unmatched: 0,
+        unreached: 0,
     };
 
     let outcome = outcome_for(&counts);
@@ -126,62 +127,10 @@ fn outcome_for_eight_resolved_and_two_skipped_is_partial() {
         renamed: 8,
         skipped: 2,
         unmatched: 0,
+        unreached: 0,
     };
 
     let outcome = outcome_for(&counts);
 
     assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
-}
-
-// ---------------------------------------------------------------------
-// interaction
-// ---------------------------------------------------------------------
-
-#[test]
-fn interaction_on_a_terminal_in_human_format_is_allowed() {
-    assert_eq!(interaction(true, Format::Human), Interaction::Allowed);
-}
-
-#[test]
-fn interaction_on_a_terminal_in_json_format_is_forbidden() {
-    assert_eq!(interaction(true, Format::Json), Interaction::Forbidden);
-}
-
-#[test]
-fn interaction_off_a_terminal_in_human_format_is_forbidden() {
-    assert_eq!(interaction(false, Format::Human), Interaction::Forbidden);
-}
-
-#[test]
-fn interaction_off_a_terminal_in_json_format_is_forbidden() {
-    assert_eq!(interaction(false, Format::Json), Interaction::Forbidden);
-}
-
-// ---------------------------------------------------------------------
-// confirm
-// ---------------------------------------------------------------------
-
-#[test]
-fn confirm_when_allowed_returns_the_closures_true_answer() {
-    let answer = confirm(Interaction::Allowed, || true);
-    assert!(answer);
-}
-
-#[test]
-fn confirm_when_allowed_returns_the_closures_false_answer() {
-    let answer = confirm(Interaction::Allowed, || false);
-    assert!(!answer);
-}
-
-#[test]
-fn confirm_when_forbidden_never_calls_the_closure_and_answers_false() {
-    let called = Cell::new(false);
-
-    let answer = confirm(Interaction::Forbidden, || {
-        called.set(true);
-        true
-    });
-
-    assert!(!called.get(), "the closure must not run when forbidden");
-    assert!(!answer);
 }

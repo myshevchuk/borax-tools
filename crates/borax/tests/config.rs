@@ -161,6 +161,7 @@ fn layer_from_toml_parses_a_full_document_into_the_expected_layer() {
             run_log: None,
             rename: Some(RenameLayer {
                 collision: Some("skip".to_string()),
+                batch: None,
             }),
             bib: Some(BibLayer {
                 path: Some(PathBuf::from("refs.bib")),
@@ -669,6 +670,7 @@ fn layer_from_env_reads_borax_rename_collision() {
         layer.rename,
         Some(RenameLayer {
             collision: Some("skip".to_string()),
+            batch: None,
         })
     );
 }
@@ -828,6 +830,7 @@ fn resolve_with_no_layers_gives_defaults_with_default_origin_everywhere() {
         "network.cache",
         "network.concurrency",
         "network.min-interval-ms",
+        "rename.batch",
         "rename.collision",
         "run-log",
         "sources",
@@ -882,6 +885,7 @@ fn resolve_full_precedence_chain_defaults_through_flag() {
             mailto: Some("global@example.org".to_string()),
             rename: Some(RenameLayer {
                 collision: Some("skip".to_string()),
+                batch: None,
             }),
             extraction: Some(ExtractionLayer {
                 page_limit: Some(10),
@@ -1357,6 +1361,7 @@ fn resolve_rejects_a_collision_policy_that_is_neither_suffix_nor_skip() {
         Layer {
             rename: Some(RenameLayer {
                 collision: Some("clobber".to_string()),
+                batch: None,
             }),
             ..Layer::default()
         },
@@ -1412,6 +1417,7 @@ fn resolve_maps_valid_collision_and_duplicates_spellings_to_their_variants() {
         Layer {
             rename: Some(RenameLayer {
                 collision: Some("skip".to_string()),
+                batch: None,
             }),
             bib: Some(BibLayer {
                 path: None,
@@ -1464,6 +1470,7 @@ fn entries_are_ordered_by_key_and_cover_every_setting() {
             "network.cache",
             "network.concurrency",
             "network.min-interval-ms",
+            "rename.batch",
             "rename.collision",
             "run-log",
             "sources",

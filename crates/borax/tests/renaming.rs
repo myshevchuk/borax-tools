@@ -1011,6 +1011,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
             renamed: 1,
             skipped: 3,
             unmatched: 0,
+            unreached: 0,
         }
     );
 }
@@ -1045,6 +1046,7 @@ fn a_preview_runs_counts_report_zero_renamed_however_many_moves_were_planned() {
             renamed: 0,
             skipped: 0,
             unmatched: 0,
+            unreached: 0,
         }
     );
 }

@@ -73,6 +73,14 @@ pub struct RenameOptions {
     /// What to do when two files want one name: suffix or skip.
     #[arg(long, value_name = "POLICY")]
     pub collision: Option<String>,
+
+    /// Report the whole plan instead of asking about each file.
+    #[arg(long)]
+    pub batch: bool,
+
+    /// Ask about each file, where there is a terminal to ask at.
+    #[arg(long, conflicts_with = "batch")]
+    pub no_batch: bool,
 }
 
 /// What a subcommand needs to write bibliography output.
@@ -254,6 +262,12 @@ pub struct Settings {
     /// What to do when two files want one name: suffix or skip.
     pub collision: Option<String>,
 
+    /// Report the whole plan instead of asking about each file.
+    pub batch: bool,
+
+    /// Ask about each file, where there is a terminal to ask at.
+    pub no_batch: bool,
+
     /// The master .bib file entries are merged into.
     pub bib: Option<PathBuf>,
 
@@ -313,6 +327,8 @@ impl RenameOptions {
     /// Copies this group's flags into the matching [`Settings`] fields.
     fn fill(&self, settings: &mut Settings) {
         settings.collision = self.collision.clone();
+        settings.batch = self.batch;
+        settings.no_batch = self.no_batch;
     }
 }
 
@@ -551,6 +567,7 @@ pub fn flag_layers(settings: &Settings) -> Vec<(Origin, Layer)> {
             Layer {
                 rename: Some(RenameLayer {
                     collision: Some(collision.clone()),
+                    ..RenameLayer::default()
                 }),
                 ..Layer::default()
             },
@@ -637,6 +654,30 @@ pub fn flag_layers(settings: &Settings) -> Vec<(Origin, Layer)> {
                 cache: Some(false),
                 ..NetworkLayer::default()
             }),
+        );
+    }
+    if settings.batch {
+        push(
+            "batch",
+            Layer {
+                rename: Some(RenameLayer {
+                    batch: Some(true),
+                    ..RenameLayer::default()
+                }),
+                ..Layer::default()
+            },
+        );
+    }
+    if settings.no_batch {
+        push(
+            "no-batch",
+            Layer {
+                rename: Some(RenameLayer {
+                    batch: Some(false),
+                    ..RenameLayer::default()
+                }),
+                ..Layer::default()
+            },
         );
     }
     if settings.ledger {

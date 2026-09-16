@@ -88,6 +88,11 @@ pub struct Config {
     pub sidecars: bool,
     /// Whether to read and write the on-disk response cache.
     pub cache: bool,
+    /// Whether a rename run reports its whole plan instead of putting
+    /// each move to the operator. Off by default: a rename run with a
+    /// terminal on stdin and human output asks. A run with neither
+    /// is a batch run whatever this says.
+    pub batch: bool,
     /// Whether the collection's ledger is consulted for duplicates and
     /// added to by an applied run. Off means the run keeps no
     /// accounting and reports none missing.
@@ -135,6 +140,7 @@ impl Default for Config {
             duplicates: DuplicatePolicy::Skip,
             sidecars: false,
             cache: true,
+            batch: false,
             ledger: true,
             run_log: true,
         }
@@ -279,6 +285,9 @@ pub struct RenameLayer {
     /// `"suffix"` or `"skip"`.
     #[serde(default)]
     pub collision: Option<String>,
+    /// Whether to report a whole plan rather than ask about each file.
+    #[serde(default)]
+    pub batch: Option<bool>,
 }
 
 /// The `[bib]` table of a layer.
@@ -546,6 +555,11 @@ const SETTINGS: &[Setting] = &[
         key: "extraction.page-limit",
         slot: |layer| Slot::Count(&mut layer.extraction.get_or_insert_default().page_limit),
         render: |config| config.page_limit.to_string(),
+    },
+    Setting {
+        key: "rename.batch",
+        slot: |layer| Slot::Flag(&mut layer.rename.get_or_insert_default().batch),
+        render: |config| config.batch.to_string(),
     },
     Setting {
         key: "ledger",
@@ -888,6 +902,13 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
     }
     if let Some(collection_root) = winning.collection_root {
         config.collection_root = Some(collection_root);
+    }
+    if let Some(batch) = winning
+        .rename
+        .as_mut()
+        .and_then(|rename| rename.batch.take())
+    {
+        config.batch = batch;
     }
     if let Some(ledger) = winning.ledger {
         config.ledger = ledger;

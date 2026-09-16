@@ -40,6 +40,11 @@ pub enum Event {
         command: String,
         version: String,
         applying: bool,
+        /// Whether the run puts its decisions to the operator. An
+        /// interactive run also reports `applying`, since it may move
+        /// files; the two together say a session decided them one at a
+        /// time.
+        interactive: bool,
         /// The external lookup tables the run loaded, in name order.
         /// Rendering is deterministic given a table, but a table is a
         /// file that changes, so a run log without this says what a run
@@ -173,6 +178,9 @@ pub enum SkipReason {
     /// The record resolved, but the template rendered an empty name
     /// from it — the record is too sparse to name a file.
     Unnameable,
+    /// The operator was shown the move and answered that it should not
+    /// happen. Only an interactive run reports this.
+    Declined,
     /// The rename itself failed, after the plan said it would not.
     RenameFailed { message: String },
     /// Bibliography output for the file could not be written.
@@ -226,6 +234,13 @@ pub struct Counts {
     pub skipped: usize,
     /// Distinct lookups that found no row.
     pub unmatched: usize,
+    /// Input files the run left without a fate: the file an interactive
+    /// run was ended at and every file after it. Zero for a run that
+    /// reached the end of its inputs.
+    ///
+    /// Not counted from an event, since no event is emitted for a file
+    /// nothing happened to; the run sets it when it stops early.
+    pub unreached: usize,
 }
 
 impl Counts {
@@ -383,13 +398,17 @@ pub fn human_line(event: &Event) -> Option<String> {
         // and a run that looked nothing up has nothing to say about
         // tables it never consulted.
         Event::RunFinished { counts } => Some(format!(
-            "{} resolved, {} renamed, {} skipped{}",
+            "{} resolved, {} renamed, {} skipped{}{}",
             counts.resolved,
             counts.renamed,
             counts.skipped,
             match counts.unmatched {
                 0 => String::new(),
                 unmatched => format!(", {unmatched} unmatched"),
+            },
+            match counts.unreached {
+                0 => String::new(),
+                unreached => format!(", {unreached} not reached"),
             }
         )),
     }
@@ -422,6 +441,7 @@ fn skipped_because(reason: &SkipReason) -> String {
         SkipReason::AlreadyNamed => "already carries that name".to_string(),
         SkipReason::Unreadable { message } => format!("unreadable ({message})"),
         SkipReason::Unnameable => "the record renders an empty name".to_string(),
+        SkipReason::Declined => "declined".to_string(),
         SkipReason::RenameFailed { message } => format!("rename failed ({message})"),
         SkipReason::BibWriteFailed { message } => {
             format!("bibliography output failed ({message})")

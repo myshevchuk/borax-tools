@@ -17,6 +17,7 @@ fn run_started() -> Event {
         command: "rename".to_string(),
         version: "0.1.0".to_string(),
         applying: true,
+        interactive: false,
         tables: Vec::new(),
     }
 }
@@ -26,6 +27,7 @@ fn run_started_with_a_table() -> Event {
         command: "rename".to_string(),
         version: "0.1.0".to_string(),
         applying: true,
+        interactive: false,
         tables: vec![TableUsed {
             name: "jcode".to_string(),
             path: PathBuf::from("/collection/journals.tsv"),
@@ -132,6 +134,7 @@ fn run_finished() -> Event {
             renamed: 2,
             skipped: 1,
             unmatched: 0,
+            unreached: 0,
         },
     }
 }
@@ -321,7 +324,7 @@ fn json_line_of_run_finished_has_exactly_the_documented_field_set() {
 
     assert_eq!(
         object["counts"],
-        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1, "unmatched": 0})
+        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1, "unmatched": 0, "unreached": 0})
     );
 }
 
@@ -779,22 +782,24 @@ fn counts_default_is_all_zeroes() {
             renamed: 0,
             skipped: 0,
             unmatched: 0,
+            unreached: 0,
         }
     );
 }
 
 #[test]
-fn counts_serializes_with_all_four_fields() {
+fn counts_serializes_with_all_five_fields() {
     let counts = Counts {
         resolved: 1,
         renamed: 2,
         skipped: 3,
         unmatched: 4,
+        unreached: 0,
     };
     let value: Value = serde_json::to_value(counts).unwrap();
     assert_eq!(
         value,
-        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "unmatched": 4})
+        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "unmatched": 4, "unreached": 0})
     );
 }
 
@@ -838,6 +843,7 @@ fn counts_observe_counts_a_lookup_missed_as_unmatched() {
             renamed: 0,
             skipped: 0,
             unmatched: 2,
+            unreached: 0,
         }
     );
 }
@@ -852,6 +858,7 @@ fn the_summary_line_names_unmatched_lookups_when_there_were_any() {
             renamed: 12,
             skipped: 0,
             unmatched: 1,
+            unreached: 0,
         },
     })
     .unwrap();
@@ -870,6 +877,7 @@ fn the_summary_line_says_nothing_about_unmatched_lookups_when_there_were_none() 
             renamed: 2,
             skipped: 1,
             unmatched: 0,
+            unreached: 0,
         },
     })
     .unwrap();
@@ -975,6 +983,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
                 renamed: 1,
                 skipped: 1,
                 unmatched: 0,
+                unreached: 0,
             },
         },
     ];
