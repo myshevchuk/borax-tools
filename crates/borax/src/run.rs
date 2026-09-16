@@ -48,7 +48,7 @@ use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
     resolve_file_checking_ledger,
 };
-use crate::renaming::{Applying, Filesystem, PlannedRename, Planning, RealFilesystem};
+use crate::renaming::{Applying, Filesystem, Namespace, PlannedRename, Planning, RealFilesystem};
 use crate::session::{
     Answer, Mode, Outcome, Question, Session, TerminalAsker, outcome_for, stdin_is_terminal,
 };
@@ -1213,6 +1213,9 @@ fn rename_events<C: Cache>(
     // Across groups, because a table is named once for the run however
     // many directories consult one under that name.
     let mut missed = Missed::default();
+    // Likewise across groups: the names a base holds are the run's,
+    // not any one directory's.
+    let mut namespaces: BTreeMap<PathBuf, Namespace> = BTreeMap::new();
     // What ended the run early, if anything did: a quit, or a move that
     // could not be recorded. Either way the files after it are left
     // untouched and counted.
@@ -1235,13 +1238,18 @@ fn rename_events<C: Cache>(
             .filenames
             .as_ref()
             .expect("a group built for a rename carries filename templates");
+        // What a rendered subdirectory files from, so a collection run
+        // over a filed directory proposes nothing. A run outside any
+        // collection has no root and files from the file's own
+        // directory. The namespace outlives the group: two directories
+        // filing into one collection claim names in the same place.
+        let base = Planning::base_for(&group.directory, adapters.collection_root.as_deref());
+        let namespace = namespaces
+            .entry(base.clone())
+            .or_insert_with(|| Namespace::new(&base));
         let mut planning = Planning::new(
             &group.directory,
-            // What a rendered subdirectory files from, so a collection
-            // run over a filed directory proposes nothing. A run
-            // outside any collection has none and files from the
-            // file's own directory.
-            adapters.collection_root.as_deref(),
+            namespace,
             filenames,
             effective.config().collision,
             adapters.filesystem,

@@ -171,59 +171,106 @@ pub fn target_name(
 /// Paths cross two namespaces here: the planner is handed names relative
 /// to the base — a bare name for a file in the base itself, `sub/name`
 /// below it — while every path in a returned decision is full.
+/// The names one base is planned in: what it held when the run reached
+/// it, and what the run has claimed there since.
+///
+/// A base is a collection root, or a directory for a run with no
+/// collection. It outlives the group being planned, because filing
+/// crosses directories: two files in different directories of one
+/// collection can render one journal's name, and the second has to see
+/// what the first took. A namespace per group would let a preview
+/// propose one name twice where an applying run suffixes the second.
+pub struct Namespace {
+    /// The directory every name in the namespace is relative to.
+    base: PathBuf,
+    planner: Planner,
+    /// The directories already read into the namespace, relative to
+    /// `base`.
+    listed: BTreeSet<String>,
+}
+
+impl Namespace {
+    /// An empty namespace over `base`, holding no names until a
+    /// directory is read into it.
+    pub fn new(base: &Path) -> Namespace {
+        Namespace {
+            base: base.to_path_buf(),
+            planner: Planner::new(BTreeMap::new()),
+            listed: BTreeSet::new(),
+        }
+    }
+
+    /// Read the directory `within` names, relative to the base, into
+    /// the namespace — once, however often it is asked for.
+    ///
+    /// Reading a directory hashes every file in it, so a directory is
+    /// read when a file in it is planned or a target reaches into it,
+    /// and never again.
+    fn read(&mut self, within: &str, filesystem: &dyn Filesystem) {
+        if !self.listed.insert(within.to_string()) {
+            return;
+        }
+        let directory = match within.is_empty() {
+            true => self.base.clone(),
+            false => self.base.join(within),
+        };
+        self.planner
+            .widen(keyed(filesystem.existing(&directory), within));
+    }
+}
+
 pub struct Planning<'a> {
     /// What the names the planner compares are relative to: the
     /// collection root, or the directory being planned for a run with
-    /// no collection.
-    base: PathBuf,
-    /// Where the directory being planned sits relative to `base`,
+    /// no collection. Borrowed rather than owned, because the names a
+    /// base holds belong to the run and not to one of its directories.
+    namespace: &'a mut Namespace,
+    /// Where the directory being planned sits relative to the base,
     /// `/`-separated and empty when the two are the same directory.
     within: String,
     templates: &'a TemplateTable,
     policy: CollisionPolicy,
     filesystem: &'a dyn Filesystem,
-    planner: Planner,
-    /// The directories already added to the planner's namespace,
-    /// relative to `base`.
-    listed: BTreeSet<String>,
 }
 
 impl<'a> Planning<'a> {
     /// A plan in progress for files in `directory`, named from
     /// `templates` and resolving collisions by `policy`.
     ///
-    /// `root` is the collection root a rendered subdirectory is filed
-    /// from, and `None` for a run in no collection, which files from
-    /// `directory` itself. A `root` that `directory` does not sit under
-    /// is no base for it and is treated as none.
-    ///
-    /// `directory` is read here, once, and every decision is measured
-    /// against what it held at that moment.
+    /// `namespace` is the base's, shared with every other directory
+    /// the run files into that base ([`Planning::base_for`] says which
+    /// base a directory has). `directory` is read into it here, once,
+    /// and every decision is measured against what it held then.
     pub fn new(
         directory: &Path,
-        root: Option<&Path>,
+        namespace: &'a mut Namespace,
         templates: &'a TemplateTable,
         policy: CollisionPolicy,
         filesystem: &'a dyn Filesystem,
     ) -> Planning<'a> {
-        let base = root
-            .filter(|root| directory.starts_with(root))
-            .unwrap_or(directory);
-        let within = relative_to(base, directory);
+        let within = relative_to(&namespace.base, directory);
+        // Before any decision, so a file is measured against what its
+        // own directory holds however the namespace was reached.
+        namespace.read(&within, filesystem);
         Planning {
-            base: base.to_path_buf(),
-            within: within.clone(),
+            namespace,
+            within,
             templates,
             policy,
             filesystem,
-            // Eagerly, unlike the directories reached below: reading a
-            // directory hashes every file in it, and one pass per file
-            // planned would cost the square of what one pass per
-            // directory does.
-            planner: Planner::new(keyed(filesystem.existing(directory), &within)),
-            // The directory's own names are in the namespace already.
-            listed: BTreeSet::from([within]),
         }
+    }
+
+    /// The base a rendered subdirectory is filed from, given the
+    /// `directory` being planned and the run's collection `root`.
+    ///
+    /// The root, where the directory sits under it; the directory
+    /// itself for a run in no collection, which has no other base, and
+    /// for a root the directory is not under, which is no base for it.
+    pub fn base_for(directory: &Path, root: Option<&Path>) -> PathBuf {
+        root.filter(|root| directory.starts_with(root))
+            .unwrap_or(directory)
+            .to_path_buf()
     }
 
     /// The decision for the resolved file `file` at `path`, claiming
@@ -245,7 +292,8 @@ impl<'a> Planning<'a> {
         lookups: &mut Lookups<'_>,
     ) -> PlannedRename {
         let path = path.to_path_buf();
-        let Some(mut input) = plan_input(&path, &self.base, file, self.templates, lookups) else {
+        let base = self.namespace.base.clone();
+        let Some(mut input) = plan_input(&path, &base, file, self.templates, lookups) else {
             return PlannedRename::Unnameable { path };
         };
         // A rendered name that files the document says where in the
@@ -256,14 +304,14 @@ impl<'a> Planning<'a> {
         }
         self.reach(&input.target);
 
-        match self.planner.propose(&input, self.policy).action {
+        match self.namespace.planner.propose(&input, self.policy).action {
             PlannedAction::Rename { to } => PlannedRename::Rename {
-                target: self.base.join(to),
+                target: base.join(to),
                 path,
             },
             PlannedAction::AlreadyNamed => PlannedRename::AlreadyNamed { path },
             PlannedAction::Skip { .. } => PlannedRename::TargetTaken {
-                target: self.base.join(&input.target),
+                target: base.join(&input.target),
                 path,
             },
         }
@@ -283,10 +331,10 @@ impl<'a> Planning<'a> {
         // the base. `join` left the relative part of the path
         // untouched, so stripping the base hands back exactly the
         // string that was proposed.
-        self.planner.claim(&PlanItem {
-            source: relative_to(&self.base, path),
+        self.namespace.planner.claim(&PlanItem {
+            source: relative_to(&self.namespace.base, path),
             action: PlannedAction::Rename {
-                to: relative_to(&self.base, target),
+                to: relative_to(&self.namespace.base, target),
             },
         });
     }
@@ -327,13 +375,7 @@ impl<'a> Planning<'a> {
         let Some((subdirectory, _)) = target.rsplit_once('/') else {
             return;
         };
-        if !self.listed.insert(subdirectory.to_string()) {
-            return;
-        }
-        self.planner.widen(keyed(
-            self.filesystem.existing(&self.base.join(subdirectory)),
-            subdirectory,
-        ));
+        self.namespace.read(subdirectory, self.filesystem);
     }
 }
 
@@ -396,13 +438,13 @@ fn plan_input(
 
 /// Plan the renames for a batch of resolved files.
 ///
-/// Files are grouped by parent directory and each group planned
-/// separately, because collisions are a property of a directory:
-/// two files heading for the same name in different folders do not
-/// collide, and the planner would wrongly suffix one of them if the
-/// batch were planned as a single namespace. Each group reads the
-/// directory a target reaches into as it goes, so two files in one
-/// directory filed into the same subdirectory do see each other.
+/// Files are grouped by parent directory, because each directory has
+/// its own configuration to be planned under, and the groups sharing a
+/// base share the names claimed there: two files heading for one name
+/// in unrelated folders do not collide, while two filed into one
+/// journal directory of one collection do, whichever directories they
+/// came from. A directory is read into the namespace when a file in it
+/// is planned or a target reaches into it.
 ///
 /// Within a group, order follows the input, so the suffix a collision
 /// receives is deterministic.
@@ -434,8 +476,15 @@ pub fn plan_renames(
     // Decisions are parked at their input position, so grouping — which
     // visits directories in sorted order — cannot reorder the result.
     let mut decisions: Vec<Option<PlannedRename>> = vec![None; resolved.len()];
+    // One namespace per base, kept across groups: two directories
+    // filing into one collection share the names they claim there.
+    let mut namespaces: BTreeMap<PathBuf, Namespace> = BTreeMap::new();
     for (directory, members) in groups {
-        let mut planning = Planning::new(directory, root, templates, policy, filesystem);
+        let base = Planning::base_for(directory, root);
+        let namespace = namespaces
+            .entry(base.clone())
+            .or_insert_with(|| Namespace::new(&base));
+        let mut planning = Planning::new(directory, namespace, templates, policy, filesystem);
         for index in members {
             let (path, file) = &resolved[index];
             decisions[index] = Some(planning.plan(path, file, lookups));

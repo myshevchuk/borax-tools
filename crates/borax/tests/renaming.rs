@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 use borax::event::{Counts, Event, SkipReason};
 use borax::pipeline::FileRecord;
 use borax::renaming::{
-    Applying, Filesystem, PlannedRename, Planning, RealFilesystem, RenameError, apply_renames,
-    counts_for, plan_renames, target_name,
+    Applying, Filesystem, Namespace, PlannedRename, Planning, RealFilesystem, RenameError,
+    apply_renames, counts_for, plan_renames, target_name,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::record::{DateParts, EntryType, Name, Record};
@@ -1552,9 +1552,10 @@ fn several_unrecordable_files_in_one_batch_are_each_skipped_independently() {
 fn propose_decides_the_same_target_plan_would_and_does_not_claim_it() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
+    let mut namespace = Namespace::new(Path::new("/lib"));
     let mut planning = Planning::new(
         Path::new("/lib"),
-        None,
+        &mut namespace,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -1582,9 +1583,10 @@ fn propose_decides_the_same_target_plan_would_and_does_not_claim_it() {
 fn accept_claims_a_proposed_renames_target_for_later_files() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
+    let mut namespace = Namespace::new(Path::new("/lib"));
     let mut planning = Planning::new(
         Path::new("/lib"),
-        None,
+        &mut namespace,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -1628,9 +1630,10 @@ fn propose_then_accept_for_every_file_reproduces_plan_renames_including_a_subdir
         &mut no_tables(),
     );
 
+    let mut namespace = Namespace::new(Path::new("/lib"));
     let mut planning = Planning::new(
         Path::new("/lib"),
-        None,
+        &mut namespace,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -1660,9 +1663,10 @@ fn propose_then_accept_for_every_file_reproduces_plan_renames_including_a_subdir
 fn accepting_an_already_named_decision_claims_nothing() {
     let templates = table("[auth][year]");
     let filesystem = FakeFilesystem::new();
+    let mut namespace = Namespace::new(Path::new("/lib"));
     let mut planning = Planning::new(
         Path::new("/lib"),
-        None,
+        &mut namespace,
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
