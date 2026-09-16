@@ -8,10 +8,22 @@ empty. No title SHALL be truncated. When the proposed name carries a
 collision suffix, the description SHALL say which rendered name was
 taken.
 
-Every fact in the description other than the proposed name and its
-collision note SHALL be a rendering of the file's `resolved` event, so
-that the description shows nothing about the resolution that the event
-stream does not carry.
+The description SHALL show nothing about the resolution that the file's
+`resolved` event does not carry, so that a reader of the stream and the
+operator at the terminal are told the same things about a file. What
+belongs to the question rather than to the resolution — the file's
+position in the run, the proposed name, and the note saying which
+rendered name a collision suffix stepped around — is the question's to
+show and is not held to that.
+
+The identifier the description names SHALL be the one the run looked
+up, with the pass that found it. A record may carry identifiers that
+were not looked up, and naming one of those as found would be evidence
+the run does not have.
+
+The description SHALL be written where the question is written, so that
+a run whose standard output is redirected still asks its questions with
+the evidence attached.
 
 The description SHALL appear only in interactive runs, and SHALL NOT
 change which questions are put or what their answers do.
@@ -34,3 +46,14 @@ change which questions are put or what their answers do.
 - **THEN** the description says the identifier comes from an earlier
   run, names the services the record's provenance records, and says no
   title was read from the file
+
+#### Scenario: The record's identifier is not the one that was found
+- **WHEN** a file's arXiv identifier is found in its text layer and the
+  record resolved for it carries a DOI as well
+- **THEN** the description names the arXiv identifier as the one found
+  in the text layer
+
+#### Scenario: Redirected output still asks with evidence
+- **WHEN** an interactive run's standard output is redirected to a file
+- **THEN** each question and its description appear at the terminal,
+  and the file receives the event stream

@@ -52,8 +52,6 @@ authors     Nataliya V. Lyutenko, Alexander E. Sorochinsky, Vadim A.
             Soloshonok
 issued      2023
 in          Ukrainica Bioorganica Acta 18(1), 10–21
-publisher   National Academy of Sciences of Ukraine (Co. LTD
-            Ukrinformnauka) (Publications)
 file says   nothing read
 new name    lyutenko2023_ApplicationsChiralSulfinyl.pdf
 ? Rename this file?
@@ -71,14 +69,25 @@ read `from the text layer` and `file says` would list the titles read.
   shows three names and a count, because a title cut short is the
   field most likely to hide the difference between two works.
 - A field the record lacks is omitted, not shown empty.
-- `identifier` says where it was found: `from embedded metadata`, `from
-  the text layer`, or `from an earlier run` when the content index
-  answered and no pass ran.
+- `identifier` is the identifier that was looked up, not whichever one
+  the record happens to prefer, and says where it was found: `from
+  embedded metadata`, `from the text layer`, `supplied` once change 4
+  lands, or `from an earlier run` when the content index answered and
+  no pass ran. Where the record carries identifiers the lookup did not
+  use, they are the record's and are not what this line names.
 - `record` names the services that supplied the record. On a live
   answer that is the service the resolver used; on a content-index
-  answer it is the distinct non-extraction sources in the record's
-  provenance, in the resolver's priority order. A record whose
-  provenance names none reads `an earlier run`.
+  answer it is the distinct sources in the record's provenance other
+  than extraction itself, in the fixed order Crossref, OpenAlex, arXiv,
+  DataCite, PubMed, sidecar, joined with `, `. Provenance naming only
+  extraction, or nothing at all, reads `an earlier run`. `priority` is
+  not that order: it is a different list per identifier type and leaves
+  out services a record can still carry a field from.
+- `publisher` is left out. It is the longest string a record holds,
+  wraps to two lines as often as not, and separates two candidate
+  records less often than the title, the authors, the year or the
+  container do. A record's own JSON is a `--json` run away for anyone
+  who wants the rest.
 - `file says` lists every claimed title with where it was read (`XMP`,
   `document info`), or `nothing read` when the content index answered
   and the file was not opened. It is shown whatever the conflict check
@@ -90,6 +99,20 @@ read `from the text layer` and `file says` would list the titles read.
 
 Colour is not part of the contract. Labels may be dimmed where the
 terminal supports it; the text is complete without it.
+
+The description is written to standard error, with the question and by
+the same asker. It is part of what is being asked rather than part of
+what the run reports, and the two streams already divide that way:
+stdout carries the event stream, stderr carries the conversation and
+the diagnostics. A run whose stdout is redirected — `borax rename lib/
+> report.txt`, which stays interactive because the terminal it asks at
+is stdin — therefore keeps its questions legible, which putting the
+description on stdout would not.
+
+The `resolved` line stays on stdout and is not replaced. The terminal
+shows it and then the description; one is the report and the other is
+the question, and the run log and a `--json` reader are unaffected by
+either.
 
 ### D2. The description is a function of an event
 
@@ -106,6 +129,24 @@ pub fn describe(
 unsuffixed rendering so D1's note has something to say. Taking the event
 rather than a `FileRecord` is deliberate: it makes the requirement that
 the description render the stream a property of the signature.
+
+### D2a. The identifier the description names
+
+`Event::Resolved.identifier` is `identifier_of(&record)`, which prefers
+the record's DOI. For a file whose arXiv identifier was found in the
+text layer and whose record carries both, that is the DOI — and the
+description would attach "from the text layer" to an identifier no
+pass ever saw.
+
+The event gains `found`: the identifier the run looked up, as a string
+in the same form the stream already uses (`doi:…`, `arXiv:…`), beside
+the `tier` that says where it came from. `identifier` keeps its meaning
+— what the record is filed under — so a consumer reading it is
+unaffected.
+
+The description names `found`. Where the record's own identifier
+differs, that difference is the record's business and not evidence
+about the file.
 
 ### D3. `claims` on the `resolved` event
 
@@ -142,3 +183,19 @@ than the source, not a change in what batch reports.
 - **Width detection.** A terminal that reports no width gets 80 columns.
   The description is for a person at a terminal, and an interactive run
   requires one.
+
+### D7. The schema version is per release, not per change
+
+`skip-already-named-files` takes the event schema to 2 for removing a
+skip reason. This change adds `claims` and `found`, and changes what
+`source` says when the content index answered — a change of meaning,
+which by that change's own rule needs a version.
+
+Both land in the same unreleased version, so they share schema 2: the
+number tells a consumer that the stream it reads differs from the one
+0.4.0 emitted, and one bump says that whether one change or three made
+it so. What matters is that the boundary is a release a consumer can
+pin, not a change it has no way to see.
+
+The obligation that leaves is a check at release time: if 2 ships
+before this change lands, this change takes 3.

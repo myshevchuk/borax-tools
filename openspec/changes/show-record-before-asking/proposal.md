@@ -28,14 +28,26 @@ compared, and dropped.
   and the proposed name, with a note when it was suffixed because the
   rendered name was taken.
 - **The file's own titles reach the stream.** The `resolved` event
-  gains the titles the file claims, each with where it was read. The
-  description is then a rendering of events the run already emits, as
-  the `cli` capability requires of human output, and a `--json` consumer
-  gains the same evidence.
+  gains the titles the file claims, each with where it was read, so the
+  description tells the operator nothing the event stream does not also
+  carry and a `--json` consumer gains the same evidence.
+- **The identifier the description names is the one extraction found.**
+  A `resolved` event today reports the record's identifier, preferring
+  its DOI, which is not always what was looked up: an arXiv identifier
+  found in the text layer resolves to a record carrying both, and the
+  event names the DOI. Saying that came "from the text layer" would be
+  false about the one judgement this change exists to inform, so the
+  event carries the identifier that was looked up as well as the
+  record's own.
+- **The description is part of the question, so it goes where the
+  question goes.** It is written to standard error beside the menu, not
+  into the event stream on standard output. A run whose stdout is
+  redirected to a file still asks its questions with the evidence
+  attached, and the report in the file is what it always was.
 - **The source survives a content-index answer.** When the content
   index answers, the event names no service today. The description, and
   the event, name the services the record's per-field provenance
-  records instead.
+  records instead, in a fixed order and with a sidecar named as one.
 - **Batch output keeps its shape.** The description replaces the
   one-line resolution report only in interactive runs, where there is a
   decision for it to inform. The batch line changes in one word: a
@@ -56,8 +68,10 @@ compared, and dropped.
 - `crates/borax/src/pipeline.rs`: `extract_from` keeps where each
   claimed title was read; `FileRecord` carries the claims. A content
   index answer carries none, because the file was not opened.
-- `crates/borax/src/event.rs`: `Event::Resolved` gains `claims`; its
-  `source` is filled from provenance when the content index answered.
+- `crates/borax/src/event.rs`: `Event::Resolved` gains `claims` and
+  `found` — the identifier that was looked up, with the pass that found
+  it — and its `source` is filled from provenance when the content
+  index answered.
 - New module `crates/borax/src/describe.rs`: a pure function from a
   `resolved` event, a proposed rename and a terminal width to the lines
   of the description. Tested by exact expected output; no terminal
