@@ -460,7 +460,7 @@ fn each_files_resolution_plan_and_sidecar_are_adjacent_in_input_order() {
             (paper2.clone(), "planned"),
             (paper2.clone(), "sidecar"),
             (already.clone(), "resolved"),
-            (already.clone(), "skipped-already-named"),
+            (already.clone(), "already-named"),
             (already.clone(), "sidecar"),
         ],
         "got {events:?}"
