@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-09-16, with `skip-already-named-files` implemented.
+Last reviewed: 2026-09-16, with `show-record-before-asking` implemented.
 
 ## What is built
 
@@ -146,6 +146,25 @@ one directory, which is what keeps a preview and an applying run
 agreeing when two directories file into one journal. The event schema
 version is 2, the first bump since the stream existed: removing a skip
 reason is not something a consumer can ignore.
+
+`show-record-before-asking` is implemented on top of those, and is the
+third of the four interactive changes. A question is now preceded by
+the evidence its answer rests on: the identifier the run looked up and
+where it was found, the services that supplied the record, what the
+record says, the titles the file claims for itself, and the name the
+file would take. It is written where the question is, on standard
+error, so a run whose stdout is redirected still asks with its evidence
+attached.
+
+Two things it had to settle are worth remembering. The identifier the
+stream reported was the one the record is filed under, which is not
+always the one that was looked up — an arXiv identifier resolves to a
+record carrying a DOI — so `resolved` now carries both, and a
+content-index answer, which looked nothing up, names no origin at all.
+And everything the description quotes from a record or a file is
+escaped: a PDF's title is written by whoever made the file, and an
+escape sequence in one could have redrawn the question above a menu
+whose first choice is Rename.
 
 ## Not built yet
 
