@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-09-16, with `add-interactive-rename` implemented.
+Last reviewed: 2026-09-16, with `skip-already-named-files` implemented.
 
 ## What is built
 
@@ -122,6 +122,31 @@ itself. It is the one part of the change the suite does not cover: the
 adapter translates a question into a menu and its answer back, and it
 was verified by hand against the real-PDF corpus through a pty.
 
+`skip-already-named-files` is implemented on top of it, and closes two
+defects this file recorded as known. A file carrying the name its
+record implies is an outcome of its own rather than a skip, so a
+collection in order exits 0; an interactive run passes over such files
+silently unless `--no-skip-named` asks for them; and a file the ledger
+admitted is no longer reported as a duplicate of itself, the lookups
+walking past their own entry so a second copy elsewhere is still
+found.
+
+Two more corrections came with it, both of them things the duplicate
+check had been hiding rather than anything this change broke. A
+rendered subdirectory is filed from the collection root, so a filed
+collection is left alone instead of being nested one level deeper on
+every run and a paper whose journal changes moves across rather than
+down; outside a collection there is no root and filing stays relative
+to the file's own directory. And a collision suffix that lands on the
+name a file already carries is already-named rather than a move the
+filesystem would refuse.
+
+The names claimed under one base now belong to the run rather than to
+one directory, which is what keeps a preview and an applying run
+agreeing when two directories file into one journal. The event schema
+version is 2, the first bump since the stream existed: removing a skip
+reason is not something a consumer can ignore.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
@@ -162,15 +187,6 @@ was verified by hand against the real-PDF corpus through a pty.
   and never edits.
 
 ## Known defects
-
-- **A file borax renamed is a duplicate of itself on the next run.** In
-  a collection with a ledger, an applied rename records the file at its
-  new path; the next run finds that entry by hash and reports the file
-  `skipped, same bytes already archived` naming its own path. A file
-  already carrying its name is also counted as a skip, so a run over a
-  collection that is entirely in order exits with the partial-success
-  code. Both are `skip-already-named-files`, the next change in the
-  interactive series, which is proposed and not yet implemented.
 
 - **A sidecar is never moved with its file, so a rename can orphan
   one.** `write_sidecar` writes beside the path the file has when it is
