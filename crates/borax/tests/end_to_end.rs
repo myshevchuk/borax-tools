@@ -15,6 +15,7 @@
 //! `tests/cassettes` by the identifier in their URL, so a wrong URL
 //! fails the test rather than quietly reaching the network.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,7 @@ use borax::ledger::{FileLedger, Ledger};
 use borax::pipeline::RealLibrary;
 use borax::renaming::RealFilesystem;
 use borax::run::{Adapters, Configs, Streams, dispatch};
-use borax::session::{Outcome, Session};
+use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_sources::arxiv::ArxivClient;
 use borax_sources::cache::MemoryCache;
 use borax_sources::crossref::CrossrefClient;
@@ -1084,5 +1085,178 @@ fn rebuilding_a_real_collection_twice_is_byte_identical_and_compacts_after_delet
     assert!(
         !compacted.contains("ashby2024.pdf"),
         "the deleted file's entry survived rebuild:\n{compacted}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// task 4.1: a rename from a supplied identifier is recognised offline
+// by a later run, batch included ("asked once")
+// ---------------------------------------------------------------------
+
+/// A scripted [`Asker`], local to this file since the real terminal
+/// adapter (`TerminalAsker`) is not under test here: answers a fixed
+/// list of choices and a fixed list of text answers, each in order, and
+/// panics if asked for more of either than it was given.
+struct ScriptedAsker {
+    answers: RefCell<std::vec::IntoIter<Answer>>,
+    texts: RefCell<std::vec::IntoIter<Option<String>>>,
+}
+
+impl ScriptedAsker {
+    fn new(answers: Vec<Answer>, texts: Vec<Option<String>>) -> ScriptedAsker {
+        ScriptedAsker {
+            answers: RefCell::new(answers.into_iter()),
+            texts: RefCell::new(texts.into_iter()),
+        }
+    }
+}
+
+impl Asker for ScriptedAsker {
+    fn choose(&mut self, question: &Question) -> Answer {
+        self.answers
+            .borrow_mut()
+            .next()
+            .unwrap_or_else(|| panic!("asked more questions than were scripted: {question:?}"))
+    }
+
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
+        self.texts
+            .borrow_mut()
+            .next()
+            .unwrap_or_else(|| panic!("asked for more text than was scripted: {prompt:?}"))
+    }
+}
+
+/// design "Asked once" (spec `resolution`, task 4.1): a rename made in
+/// an interactive run from a supplied identifier is written to the
+/// content index, so a later run — batch included — resolves the file
+/// from there under its new name: no extraction, and no source queried
+/// at all, checked against the transport's own call count rather than
+/// inferred from the event stream.
+#[test]
+fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_run() {
+    let library = library_of(&["no-identifier.pdf"]);
+    let state = tempdir().unwrap();
+    let master = state.path().join("refs.bib");
+    let path = library.path().join("no-identifier.pdf");
+
+    let transport = CassetteTransport::new();
+    let politeness = Politeness::default();
+    let crossref = CrossrefClient::new(&transport, politeness.clone());
+    let arxiv = ArxivClient::new(&transport, politeness);
+    let sources: Vec<&dyn Source> = vec![&crossref, &arxiv];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    // The first, interactive run: the file has no identifier of its
+    // own, so the operator supplies one of the cassette's own DOIs.
+    let mut asker = ScriptedAsker::new(
+        vec![Answer::Supply, Answer::Rename],
+        vec![Some("10.1234/borax.2024.001".to_string())],
+    );
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let first_outcome = dispatch(
+        &Cli {
+            command: Command::rename(vec![path.clone()], false),
+            json: true,
+        },
+        &Configs::uniform(effective_with(&master)),
+        &Adapters {
+            library: &RealLibrary,
+            sources: &sources,
+            index: &index,
+            filesystem: &RealFilesystem,
+            bib_files: &RealBibFiles,
+            cache_root: None,
+            now: || "e2e-supply-first".to_string(),
+            ledger: None,
+            collection_root: None,
+            state_root: Some(state.path().to_path_buf()),
+        },
+        &mut Session::interactive(&mut asker),
+        &mut Streams {
+            out: &mut out,
+            err: &mut err,
+        },
+    );
+
+    let renamed_path = library.path().join("ashby2024.pdf");
+    assert!(
+        renamed_path.exists(),
+        "the file must have been renamed from the supplied identifier's record ({:?}); \
+         directory now holds {:?}, stderr was {:?}",
+        first_outcome,
+        fs::read_dir(library.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>(),
+        String::from_utf8(err).unwrap(),
+    );
+    assert_eq!(
+        first_outcome,
+        Outcome::Success,
+        "the first, interactive run should succeed"
+    );
+    let calls_after_first_run = transport.seen().len();
+    assert!(
+        calls_after_first_run > 0,
+        "the first run must have queried the supplied identifier for this to be a real test"
+    );
+
+    // The second, batch run, over the file's new name.
+    let mut out2 = Vec::new();
+    let mut err2 = Vec::new();
+    let second_outcome = dispatch(
+        &Cli {
+            command: Command::rename(vec![renamed_path.clone()], true),
+            json: true,
+        },
+        &Configs::uniform(effective_with(&master)),
+        &Adapters {
+            library: &RealLibrary,
+            sources: &sources,
+            index: &index,
+            filesystem: &RealFilesystem,
+            bib_files: &RealBibFiles,
+            cache_root: None,
+            now: || "e2e-supply-second".to_string(),
+            ledger: None,
+            collection_root: None,
+            state_root: Some(state.path().to_path_buf()),
+        },
+        &mut Session::batch(),
+        &mut Streams {
+            out: &mut out2,
+            err: &mut err2,
+        },
+    );
+
+    let events: Vec<Value> = String::from_utf8(out2)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    assert_eq!(second_outcome, Outcome::Success, "got {events:?}");
+    assert!(
+        events.iter().any(|event| event["event"] == "resolved"
+            && event["cached"] == true
+            && event["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("ashby2024.pdf"))),
+        "the second run must have resolved the file from the content index: got {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event["event"] == "already-named"
+            && event["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("ashby2024.pdf"))),
+        "resolved from the content index, the file must be reported already named: got {events:?}"
+    );
+    assert_eq!(
+        transport.seen().len(),
+        calls_after_first_run,
+        "the second, batch run must not have queried any source at all: got {:?}",
+        transport.seen()
     );
 }
