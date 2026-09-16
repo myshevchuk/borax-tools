@@ -78,6 +78,20 @@ turn ends in one of four places:
 | does not resolve | the attempts are shown and the file's menu is put again |
 | operator escapes the input | the file's menu is put again, unchanged |
 
+**Where a candidate's outcome is reported.** Every row above but the
+first ends in something the operator has to be told — the target was
+taken, the name rendered empty, the file is already named, no service
+held it, the input named no identifier — about a record that is not
+the file's resolution and never will be. D5 keeps all of that out of
+the event stream, so the only place left is the question itself, and
+`Question::description` is the channel `show-record-before-asking`
+already built for it: the report is prepended to the description of
+the menu that is put again. The choices, the target and the path are
+the file's own and do not change; the description is the part that
+says what just happened to the candidate. A re-put question is
+therefore never byte-identical to the one before it, except after an
+abandoned input, where nothing happened and nothing is reported.
+
 The file's menu is the one its *current* situation calls for, not the
 one it started with. A file that resolved on its own and was offered a
 move keeps that offer: supplying an identifier that then fails leaves
