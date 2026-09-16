@@ -18,8 +18,15 @@ configuration), `cache` (inspect and clear the response cache), and
 
 ### Requirement: JSON Lines output is first-class
 Every subcommand SHALL support `--json`, emitting one JSON object per line
-to stdout. Each event SHALL carry an event type and a schema version;
-schemas are stable within a major version of borax. Human-readable output
+to stdout. Each event SHALL carry an event type and a schema version.
+
+The schema version SHALL change whenever a consumer that reads the
+stream correctly today could read a later stream wrongly: an event or a
+reason that is removed or renamed, or a field whose meaning changes. It
+SHALL NOT change for an addition, which a consumer that ignores what it
+does not know reads unchanged. Before `1.0.0` such changes are
+permitted in any release, and the version is how a consumer is told one
+happened rather than a promise that none will. Human-readable output
 and JSON output SHALL be renderings of the same event stream, and
 diagnostics SHALL go to stderr so stdout stays machine-parseable.
 
@@ -27,6 +34,12 @@ diagnostics SHALL go to stderr so stdout stays machine-parseable.
 - **WHEN** `borax rename --json` processes a batch
 - **THEN** stdout contains only well-formed JSON Lines (per-file events
   plus a summary event) and any progress or warnings appear on stderr
+
+#### Scenario: A removed reason changes the version
+- **WHEN** a release stops emitting a skip reason a consumer could have
+  been counting
+- **THEN** the schema version every event carries is higher than the
+  one before it
 
 ### Requirement: Exit codes distinguish partial success
 The binary SHALL exit 0 when every input file succeeded, exit with a
@@ -155,6 +168,14 @@ This constrains when a line is written, not what it says: the event
 schemas are unchanged, and human and JSON output remain two renderings
 of the same stream in the same order.
 
+An interactive run MAY hold what it shows about one file until that
+file's planning outcome is known, which is what lets it pass over a
+file that needs no decision without having already spoken about it.
+The hold covers one file, ends before that file's question is put or
+its fate is reported, and never spans a wait on the network or on the
+operator. What is written to the run log and to a `--json` stream is
+not held.
+
 The framing is unchanged. A run that starts SHALL open with
 `run-started` and close with `run-finished`; a run ended by a
 configuration or usage error SHALL emit neither, so a consumer still
@@ -172,6 +193,12 @@ event.
 - **WHEN** a run ends because a template will not compile
 - **THEN** stdout carries neither `run-started` nor `run-finished`, the
   reason appears on stderr, and the exit code is the fatal one
+
+#### Scenario: A passed-over file is never half-reported
+- **WHEN** an interactive run reaches a file that turns out to be
+  already named, with the setting to pass over such files on
+- **THEN** nothing about that file has reached the terminal, and the
+  file after it is reported as it is reached
 
 ### Requirement: Citation-key templates are configured separately
 The configuration SHALL carry a `citation-keys` table beside
@@ -341,8 +368,8 @@ its stream through it.
 The surface is: `resolve` accepts the resolution, extraction, network
 and response-cache settings, and how many files may be resolved at once;
 `rename` accepts those, minus how many files at once, plus the collision
-policy, the bibliography settings, the ledger gate, the batch pair, and
-`--apply`; `bib`
+policy, the bibliography settings, the ledger gate, the batch pair, the
+skip-named pair, and `--apply`; `bib`
 accepts the resolution settings and the bibliography settings; `cache`
 accepts `--clear`; `ledger rebuild` accepts no setting of its own. Every
 subcommand additionally accepts the run-log pair, which is decided at
@@ -389,5 +416,10 @@ runs, since neither is an argument to an invocation.
 - **WHEN** `borax rename --batch papers/` and `borax config --no-batch`
   run
 - **THEN** both are accepted, and `borax resolve --batch papers/` is
+  rejected as an unknown argument
+
+#### Scenario: The skip-named pair belongs to rename
+- **WHEN** `borax rename --no-skip-named papers/` runs
+- **THEN** it is accepted, and `borax bib --no-skip-named papers/` is
   rejected as an unknown argument
 
