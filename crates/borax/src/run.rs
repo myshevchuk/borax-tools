@@ -1478,10 +1478,10 @@ fn decided(session: &mut Session<'_>, decision: &PlannedRename, asking: &Asking<
         description: describe(
             &resolved_event(path, asking.file),
             &name,
-            &Proposal {
+            Some(&Proposal {
                 target: beside(target, path),
                 rendered: asking.rendered.map(|rendered| beside(rendered, path)),
-            },
+            }),
             asking.position,
             width,
         ),

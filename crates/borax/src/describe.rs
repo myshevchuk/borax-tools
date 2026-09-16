@@ -58,7 +58,9 @@ const MARGIN: usize = 4;
 const NAMED_AUTHORS: usize = 3;
 
 /// The lines shown above a question about `resolved`, proposing
-/// `proposal`.
+/// `proposal`, or naming no new name when there is no proposal to
+/// make — a file the run could not identify has nothing to be
+/// renamed to.
 ///
 /// `resolved` is the file's [`Event::Resolved`]; any other event has no
 /// description and yields no lines.
@@ -84,7 +86,7 @@ const NAMED_AUTHORS: usize = 3;
 pub fn describe(
     resolved: &Event,
     name: &str,
-    proposal: &Proposal,
+    proposal: Option<&Proposal>,
     position: Position,
     width: usize,
 ) -> Vec<String> {
@@ -150,9 +152,11 @@ pub fn describe(
             }
         }
     }
-    description.field("new name", &proposal.target);
-    if let Some(rendered) = &proposal.rendered {
-        description.field("", &format!("({rendered} is taken)"));
+    if let Some(proposal) = proposal {
+        description.field("new name", &proposal.target);
+        if let Some(rendered) = &proposal.rendered {
+            description.field("", &format!("({rendered} is taken)"));
+        }
     }
 
     description.lines
