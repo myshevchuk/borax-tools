@@ -502,10 +502,7 @@ impl<'a> Applying<'a> {
                 path: path.clone(),
                 target: target.clone(),
             },
-            PlannedRename::AlreadyNamed { path } => Event::Skipped {
-                path: path.clone(),
-                reason: SkipReason::AlreadyNamed,
-            },
+            PlannedRename::AlreadyNamed { path } => Event::AlreadyNamed { path: path.clone() },
             PlannedRename::TargetTaken { path, target } => Event::Skipped {
                 path: path.clone(),
                 reason: SkipReason::TargetTaken {

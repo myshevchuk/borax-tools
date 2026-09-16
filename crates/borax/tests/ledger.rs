@@ -2580,7 +2580,7 @@ fn dispatching_a_rebuild_writes_ledger_rebuilt_on_stdout_carrying_the_schema_fie
         .iter()
         .find(|line| line["event"] == "ledger-rebuilt")
         .unwrap_or_else(|| panic!("no ledger-rebuilt line in {lines:?}"));
-    assert_eq!(rebuilt["schema"], serde_json::json!(1));
+    assert_eq!(rebuilt["schema"], serde_json::json!(2));
     assert_eq!(rebuilt["entries"], serde_json::json!(1));
     assert_eq!(rebuilt["root"], serde_json::to_value(dir.path()).unwrap());
 }

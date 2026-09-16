@@ -93,6 +93,11 @@ pub struct Config {
     /// terminal on stdin and human output asks. A run with neither
     /// is a batch run whatever this says.
     pub batch: bool,
+    /// Whether an interactive rename passes over a file that already
+    /// carries the name its record implies, rather than reporting it.
+    /// On by default: such a file needs no decision, and a collection
+    /// mostly in order would otherwise bury the files that do.
+    pub skip_named: bool,
     /// Whether the collection's ledger is consulted for duplicates and
     /// added to by an applied run. Off means the run keeps no
     /// accounting and reports none missing.
@@ -141,6 +146,7 @@ impl Default for Config {
             sidecars: false,
             cache: true,
             batch: false,
+            skip_named: true,
             ledger: true,
             run_log: true,
         }
@@ -288,6 +294,9 @@ pub struct RenameLayer {
     /// Whether to report a whole plan rather than ask about each file.
     #[serde(default)]
     pub batch: Option<bool>,
+    /// Whether an interactive run passes over an already-named file.
+    #[serde(default, rename = "skip-named")]
+    pub skip_named: Option<bool>,
 }
 
 /// The `[bib]` table of a layer.
@@ -588,6 +597,11 @@ const SETTINGS: &[Setting] = &[
         key: "network.min-interval-ms",
         slot: |layer| Slot::Millis(&mut layer.network.get_or_insert_default().min_interval_ms),
         render: |config| config.min_interval_ms.to_string(),
+    },
+    Setting {
+        key: "rename.skip-named",
+        slot: |layer| Slot::Flag(&mut layer.rename.get_or_insert_default().skip_named),
+        render: |config| config.skip_named.to_string(),
     },
     Setting {
         key: "rename.collision",
@@ -902,6 +916,13 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
     }
     if let Some(collection_root) = winning.collection_root {
         config.collection_root = Some(collection_root);
+    }
+    if let Some(skip_named) = winning
+        .rename
+        .as_mut()
+        .and_then(|rename| rename.skip_named.take())
+    {
+        config.skip_named = skip_named;
     }
     if let Some(batch) = winning
         .rename

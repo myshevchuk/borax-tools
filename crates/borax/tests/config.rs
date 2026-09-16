@@ -162,6 +162,7 @@ fn layer_from_toml_parses_a_full_document_into_the_expected_layer() {
             rename: Some(RenameLayer {
                 collision: Some("skip".to_string()),
                 batch: None,
+                skip_named: None,
             }),
             bib: Some(BibLayer {
                 path: Some(PathBuf::from("refs.bib")),
@@ -671,6 +672,7 @@ fn layer_from_env_reads_borax_rename_collision() {
         Some(RenameLayer {
             collision: Some("skip".to_string()),
             batch: None,
+            skip_named: None,
         })
     );
 }
@@ -832,6 +834,7 @@ fn resolve_with_no_layers_gives_defaults_with_default_origin_everywhere() {
         "network.min-interval-ms",
         "rename.batch",
         "rename.collision",
+        "rename.skip-named",
         "run-log",
         "sources",
         "templates.default",
@@ -886,6 +889,7 @@ fn resolve_full_precedence_chain_defaults_through_flag() {
             rename: Some(RenameLayer {
                 collision: Some("skip".to_string()),
                 batch: None,
+                skip_named: None,
             }),
             extraction: Some(ExtractionLayer {
                 page_limit: Some(10),
@@ -1362,6 +1366,7 @@ fn resolve_rejects_a_collision_policy_that_is_neither_suffix_nor_skip() {
             rename: Some(RenameLayer {
                 collision: Some("clobber".to_string()),
                 batch: None,
+                skip_named: None,
             }),
             ..Layer::default()
         },
@@ -1418,6 +1423,7 @@ fn resolve_maps_valid_collision_and_duplicates_spellings_to_their_variants() {
             rename: Some(RenameLayer {
                 collision: Some("skip".to_string()),
                 batch: None,
+                skip_named: None,
             }),
             bib: Some(BibLayer {
                 path: None,
@@ -1472,6 +1478,7 @@ fn entries_are_ordered_by_key_and_cover_every_setting() {
             "network.min-interval-ms",
             "rename.batch",
             "rename.collision",
+            "rename.skip-named",
             "run-log",
             "sources",
             "templates.default",
@@ -2452,6 +2459,7 @@ fn layer_from_toml_reads_rename_batch() {
         Some(RenameLayer {
             collision: None,
             batch: Some(true),
+            skip_named: None,
         })
     );
 }
@@ -2465,6 +2473,7 @@ fn a_directory_file_setting_rename_batch_true_wins_and_reports_its_own_origin() 
             rename: Some(RenameLayer {
                 collision: None,
                 batch: Some(true),
+                skip_named: None,
             }),
             ..Layer::default()
         },
@@ -2487,6 +2496,7 @@ fn layer_from_env_reads_borax_rename_batch() {
         Some(RenameLayer {
             collision: None,
             batch: Some(true),
+            skip_named: None,
         })
     );
 }
@@ -2513,6 +2523,7 @@ fn a_rename_batch_flag_layer_wins_and_reports_its_own_origin() {
             rename: Some(RenameLayer {
                 collision: None,
                 batch: Some(true),
+                skip_named: None,
             }),
             ..Layer::default()
         },
@@ -2536,6 +2547,7 @@ fn events_reports_a_rename_batch_override_with_its_file_origin() {
             rename: Some(RenameLayer {
                 collision: None,
                 batch: Some(true),
+                skip_named: None,
             }),
             ..Layer::default()
         },

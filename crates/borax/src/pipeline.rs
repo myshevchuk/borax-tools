@@ -222,7 +222,11 @@ pub fn resolve_file_checking_ledger<C: Cache>(
     if let Some(existing) = library
         .hash(path)
         .ok()
-        .and_then(|hash| collection.ledger.content_duplicate(&hash))
+        .and_then(|hash| {
+            collection
+                .ledger
+                .content_duplicate(&hash, &|recorded| collection.is_incoming(recorded, path))
+        })
         .and_then(|duplicate| collection.live_path(&duplicate))
     {
         return FileOutcome::Skipped(SkipReason::Duplicate {
@@ -238,7 +242,9 @@ pub fn resolve_file_checking_ledger<C: Cache>(
     };
     match collection
         .ledger
-        .work_duplicate(&identifiers_of(&file.record))
+        .work_duplicate(&identifiers_of(&file.record), &|recorded| {
+            collection.is_incoming(recorded, path)
+        })
         .and_then(|duplicate| collection.live_path(&duplicate))
     {
         Some(existing) => FileOutcome::Skipped(SkipReason::Duplicate {

@@ -2789,10 +2789,7 @@ fn a_file_with_nothing_to_decide_is_never_asked_about() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Skipped {
-                path,
-                reason: SkipReason::AlreadyNamed,
-            } if *path == already_named
+            Event::AlreadyNamed { path } if *path == already_named
         )),
         "got {events:?}"
     );

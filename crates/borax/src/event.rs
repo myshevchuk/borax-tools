@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 /// Consumers pin it: within a major version of borax the shape of an
 /// event with a given `event` tag does not change, and a new schema
 /// version is how a breaking change announces itself.
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 /// Something that happened to a file, or to the run as a whole.
 ///
@@ -99,6 +99,14 @@ pub enum Event {
     },
     /// A file the run declined to act on, and why.
     Skipped { path: PathBuf, reason: SkipReason },
+    /// A file that already carries the name its record implies, or
+    /// whose target is held by a byte-identical file.
+    ///
+    /// Not a skip: nothing was declined and nothing needs attention.
+    /// The file is in the state the run exists to put it in, which is
+    /// why it has an outcome of its own and why a run of nothing else
+    /// succeeds.
+    AlreadyNamed { path: PathBuf },
     /// An entry written to the master bibliography.
     BibEntry {
         path: PathBuf,
@@ -171,8 +179,6 @@ pub enum SkipReason {
     /// The name the template produced is taken, and the collision
     /// policy is to skip.
     TargetTaken { target: PathBuf },
-    /// The file already carries the name the template produced.
-    AlreadyNamed,
     /// The file could not be read as a PDF at all.
     Unreadable { message: String },
     /// The record resolved, but the template rendered an empty name
@@ -232,6 +238,8 @@ pub struct Counts {
     pub resolved: usize,
     pub renamed: usize,
     pub skipped: usize,
+    /// Files already carrying the name their record implies.
+    pub named: usize,
     /// Distinct lookups that found no row.
     pub unmatched: usize,
     /// Input files the run left without a fate: the file an interactive
@@ -255,6 +263,7 @@ impl Counts {
             Event::Resolved { .. } => self.resolved += 1,
             Event::Renamed { .. } => self.renamed += 1,
             Event::Skipped { .. } => self.skipped += 1,
+            Event::AlreadyNamed { .. } => self.named += 1,
             Event::LookupMissed { .. } => self.unmatched += 1,
             _ => {}
         }
@@ -362,6 +371,7 @@ pub fn human_line(event: &Event) -> Option<String> {
             path.display(),
             skipped_because(reason)
         )),
+        Event::AlreadyNamed { path } => Some(format!("{}: already named", path.display())),
         Event::BibEntry { path, key, outcome } => Some(format!(
             "{}: bibliography entry {key} {outcome}",
             path.display()
@@ -398,10 +408,14 @@ pub fn human_line(event: &Event) -> Option<String> {
         // and a run that looked nothing up has nothing to say about
         // tables it never consulted.
         Event::RunFinished { counts } => Some(format!(
-            "{} resolved, {} renamed, {} skipped{}{}",
+            "{} resolved, {} renamed, {} skipped{}{}{}",
             counts.resolved,
             counts.renamed,
             counts.skipped,
+            match counts.named {
+                0 => String::new(),
+                named => format!(", {named} already named"),
+            },
             match counts.unmatched {
                 0 => String::new(),
                 unmatched => format!(", {unmatched} unmatched"),
@@ -438,7 +452,6 @@ fn skipped_because(reason: &SkipReason) -> String {
             (similarity * 100.0).round()
         ),
         SkipReason::TargetTaken { target } => format!("{} is taken", target.display()),
-        SkipReason::AlreadyNamed => "already carries that name".to_string(),
         SkipReason::Unreadable { message } => format!("unreadable ({message})"),
         SkipReason::Unnameable => "the record renders an empty name".to_string(),
         SkipReason::Declined => "declined".to_string(),

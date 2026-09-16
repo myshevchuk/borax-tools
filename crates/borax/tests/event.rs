@@ -133,6 +133,7 @@ fn run_finished() -> Event {
             resolved: 3,
             renamed: 2,
             skipped: 1,
+            named: 0,
             unmatched: 0,
             unreached: 0,
         },
@@ -162,7 +163,6 @@ fn all_events() -> Vec<Event> {
         skipped(SkipReason::TargetTaken {
             target: PathBuf::from("smith2024_borax.pdf"),
         }),
-        skipped(SkipReason::AlreadyNamed),
         skipped(SkipReason::Unreadable {
             message: "not a PDF".to_string(),
         }),
@@ -209,7 +209,6 @@ fn all_skip_reasons() -> Vec<SkipReason> {
         SkipReason::TargetTaken {
             target: PathBuf::from("smith2024_borax.pdf"),
         },
-        SkipReason::AlreadyNamed,
         SkipReason::Unreadable {
             message: "not a PDF".to_string(),
         },
@@ -324,7 +323,7 @@ fn json_line_of_run_finished_has_exactly_the_documented_field_set() {
 
     assert_eq!(
         object["counts"],
-        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1, "unmatched": 0, "unreached": 0})
+        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1, "named": 0, "unmatched": 0, "unreached": 0})
     );
 }
 
@@ -472,7 +471,6 @@ fn skipped_nests_the_reason_under_reason_with_a_kebab_case_kind_tag() {
             },
             "target-taken",
         ),
-        (SkipReason::AlreadyNamed, "already-named"),
         (
             SkipReason::Unreadable {
                 message: "bad".to_string(),
@@ -504,14 +502,6 @@ fn skipped_nests_the_reason_under_reason_with_a_kebab_case_kind_tag() {
 fn no_identifier_reason_carries_nothing_but_its_kind() {
     let value: Value =
         serde_json::from_str(&json_line(&skipped(SkipReason::NoIdentifier))).unwrap();
-    let reason = value["reason"].as_object().unwrap();
-    assert_eq!(reason.keys().collect::<Vec<_>>(), vec!["kind"]);
-}
-
-#[test]
-fn already_named_reason_carries_nothing_but_its_kind() {
-    let value: Value =
-        serde_json::from_str(&json_line(&skipped(SkipReason::AlreadyNamed))).unwrap();
     let reason = value["reason"].as_object().unwrap();
     assert_eq!(reason.keys().collect::<Vec<_>>(), vec!["kind"]);
 }
@@ -727,7 +717,6 @@ fn human_line_of_skipped_makes_the_reason_legible_for_every_variant() {
             },
             "smith2024_borax.pdf",
         ),
-        (SkipReason::AlreadyNamed, "mystery.pdf"),
         (
             SkipReason::Unreadable {
                 message: "not a PDF".to_string(),
@@ -781,6 +770,7 @@ fn counts_default_is_all_zeroes() {
             resolved: 0,
             renamed: 0,
             skipped: 0,
+            named: 0,
             unmatched: 0,
             unreached: 0,
         }
@@ -788,18 +778,19 @@ fn counts_default_is_all_zeroes() {
 }
 
 #[test]
-fn counts_serializes_with_all_five_fields() {
+fn counts_serializes_with_all_six_fields() {
     let counts = Counts {
         resolved: 1,
         renamed: 2,
         skipped: 3,
+        named: 0,
         unmatched: 4,
         unreached: 0,
     };
     let value: Value = serde_json::to_value(counts).unwrap();
     assert_eq!(
         value,
-        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "unmatched": 4, "unreached": 0})
+        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "named": 0, "unmatched": 4, "unreached": 0})
     );
 }
 
@@ -842,6 +833,7 @@ fn counts_observe_counts_a_lookup_missed_as_unmatched() {
             resolved: 0,
             renamed: 0,
             skipped: 0,
+            named: 0,
             unmatched: 2,
             unreached: 0,
         }
@@ -857,6 +849,7 @@ fn the_summary_line_names_unmatched_lookups_when_there_were_any() {
             resolved: 12,
             renamed: 12,
             skipped: 0,
+            named: 0,
             unmatched: 1,
             unreached: 0,
         },
@@ -876,6 +869,7 @@ fn the_summary_line_says_nothing_about_unmatched_lookups_when_there_were_none() 
             resolved: 3,
             renamed: 2,
             skipped: 1,
+            named: 0,
             unmatched: 0,
             unreached: 0,
         },
@@ -982,6 +976,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
                 resolved: 2,
                 renamed: 1,
                 skipped: 1,
+                named: 0,
                 unmatched: 0,
                 unreached: 0,
             },
@@ -1025,6 +1020,7 @@ fn a_rename_the_filesystem_refused_counts_as_a_skip_and_not_as_a_rename() {
         counts,
         Counts {
             skipped: 1,
+            named: 0,
             ..Counts::default()
         },
         "got {counts:?}"
@@ -1055,6 +1051,7 @@ fn a_refused_move_leaves_an_earlier_successful_one_counted() {
         Counts {
             renamed: 1,
             skipped: 1,
+            named: 0,
             ..Counts::default()
         },
         "got {counts:?}"

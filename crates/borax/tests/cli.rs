@@ -793,6 +793,7 @@ fn collision_alone_sets_rename_collision() {
                 rename: Some(RenameLayer {
                     collision: Some("skip".to_string()),
                     batch: None,
+                    skip_named: None,
                 }),
                 ..Layer::default()
             },
@@ -1015,6 +1016,7 @@ fn several_flags_together_each_produce_their_own_single_setting_layer() {
                 rename: Some(RenameLayer {
                     collision: Some("skip".to_string()),
                     batch: None,
+                    skip_named: None,
                 }),
                 ..Layer::default()
             },

@@ -312,6 +312,27 @@ pub struct Collection<'a> {
 }
 
 impl Collection<'_> {
+    /// Whether the entry recorded at `recorded` — a collection-relative
+    /// path, as the ledger stores it — is the admission of the file at
+    /// `incoming` rather than of another copy of it.
+    ///
+    /// The two are compared as paths and not as text: the entry's path
+    /// is resolved against the collection root, the incoming path is
+    /// made absolute against the working directory, and both are
+    /// normalised lexically — `.` and `..` resolved without asking the
+    /// filesystem — then matched as the platform matches file names,
+    /// case-sensitively on Unix and case-insensitively on Windows.
+    ///
+    /// Symlinks are not resolved. The ledger records where borax moved
+    /// a file and the run names the path it was given; a link and its
+    /// target are two names this does not try to unify, and treating
+    /// them as one would mean a link into a collection could keep the
+    /// file it points at out of it.
+    pub fn is_incoming(&self, recorded: &str, incoming: &Path) -> bool {
+        let _ = (recorded, incoming);
+        todo!("is_incoming: the recorded entry names the incoming file itself")
+    }
+
     /// The full path of `duplicate`, or `None` when the file it names
     /// is no longer there.
     pub(crate) fn live_path(&self, duplicate: &Duplicate) -> Option<PathBuf> {

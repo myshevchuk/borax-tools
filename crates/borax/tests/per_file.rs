@@ -321,6 +321,7 @@ fn path_of(event: &Event) -> PathBuf {
         | Event::Planned { path, .. }
         | Event::Renamed { path, .. }
         | Event::Skipped { path, .. }
+        | Event::AlreadyNamed { path }
         | Event::BibEntry { path, .. }
         | Event::Sidecar { path, .. } => path.clone(),
         other => unreachable!("event carries no path: {other:?}"),
@@ -341,10 +342,7 @@ fn kind(event: &Event) -> &'static str {
             reason: SkipReason::NoIdentifier,
             ..
         } => "skipped-no-identifier",
-        Event::Skipped {
-            reason: SkipReason::AlreadyNamed,
-            ..
-        } => "skipped-already-named",
+        Event::AlreadyNamed { .. } => "already-named",
         other => unreachable!("event not produced by any fixture here: {other:?}"),
     }
 }
@@ -592,10 +590,7 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_in_preview() {
                 "doi:10.1000/per-file-already",
                 &record_by("Jones", 2020, "10.1000/per-file-already"),
             ),
-            Event::Skipped {
-                path: already,
-                reason: SkipReason::AlreadyNamed,
-            },
+            Event::AlreadyNamed { path: already },
         ],
         "got {events:?}"
     );
@@ -673,10 +668,7 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
                 "doi:10.1000/per-file-already",
                 &record_by("Jones", 2020, "10.1000/per-file-already"),
             ),
-            Event::Skipped {
-                path: already,
-                reason: SkipReason::AlreadyNamed,
-            },
+            Event::AlreadyNamed { path: already },
         ],
         "got {events:?}"
     );

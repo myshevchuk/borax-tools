@@ -369,7 +369,7 @@ fn content_duplicate_names_the_existing_path_when_hash_matches() {
     let existing = entry("archived.pdf", "same-bytes");
     let index = Index::build(&[existing]);
 
-    let found = index.content_duplicate(&hash("same-bytes"));
+    let found = index.content_duplicate(&hash("same-bytes"), &|_| false);
 
     assert_eq!(
         found,
@@ -385,7 +385,10 @@ fn content_duplicate_is_none_when_the_hash_is_unknown() {
     let existing = entry("archived.pdf", "same-bytes");
     let index = Index::build(&[existing]);
 
-    assert_eq!(index.content_duplicate(&hash("different-bytes")), None);
+    assert_eq!(
+        index.content_duplicate(&hash("different-bytes"), &|_| false),
+        None
+    );
 }
 
 #[test]
@@ -397,7 +400,7 @@ fn work_duplicate_names_the_existing_path_when_an_identifier_matches() {
     let index = Index::build(&[existing]);
 
     // A different file (different hash), same resolved DOI.
-    let found = index.work_duplicate(&[Identifier::Doi(doi("10.1021/jacs.4c01234"))]);
+    let found = index.work_duplicate(&[Identifier::Doi(doi("10.1021/jacs.4c01234"))], &|_| false);
 
     assert_eq!(
         found,
@@ -416,7 +419,7 @@ fn work_duplicate_is_none_when_no_identifier_matches() {
     };
     let index = Index::build(&[existing]);
 
-    let found = index.work_duplicate(&[Identifier::Doi(doi("10.1038/other"))]);
+    let found = index.work_duplicate(&[Identifier::Doi(doi("10.1038/other"))], &|_| false);
 
     assert_eq!(found, None);
 }
@@ -429,7 +432,7 @@ fn work_duplicate_is_none_for_an_empty_identifier_list() {
     };
     let index = Index::build(&[existing]);
 
-    assert_eq!(index.work_duplicate(&[]), None);
+    assert_eq!(index.work_duplicate(&[], &|_| false), None);
 }
 
 #[test]
@@ -440,10 +443,13 @@ fn work_duplicate_matches_on_a_later_identifier_when_an_earlier_one_is_unknown()
     };
     let index = Index::build(&[existing]);
 
-    let found = index.work_duplicate(&[
-        Identifier::Doi(doi("10.1021/jacs.4c01234")),
-        Identifier::Arxiv(arxiv("2401.12345")),
-    ]);
+    let found = index.work_duplicate(
+        &[
+            Identifier::Doi(doi("10.1021/jacs.4c01234")),
+            Identifier::Arxiv(arxiv("2401.12345")),
+        ],
+        &|_| false,
+    );
 
     assert_eq!(
         found,
@@ -466,10 +472,10 @@ fn content_and_work_duplicates_are_reported_with_distinct_reasons() {
     let index = Index::build(&[archived_a, archived_b]);
 
     let content = index
-        .content_duplicate(&hash("identical-bytes"))
+        .content_duplicate(&hash("identical-bytes"), &|_| false)
         .expect("content duplicate");
     let work = index
-        .work_duplicate(&[Identifier::Doi(doi("10.1021/jacs.4c01234"))])
+        .work_duplicate(&[Identifier::Doi(doi("10.1021/jacs.4c01234"))], &|_| false)
         .expect("work duplicate");
 
     assert_eq!(content.reason, DuplicateReason::Content);
@@ -487,9 +493,12 @@ fn a_file_with_unknown_hash_and_no_matching_identifier_is_not_a_duplicate_of_eit
     };
     let index = Index::build(&[existing]);
 
-    assert_eq!(index.content_duplicate(&hash("new-bytes")), None);
     assert_eq!(
-        index.work_duplicate(&[Identifier::Doi(doi("10.1038/other"))]),
+        index.content_duplicate(&hash("new-bytes"), &|_| false),
+        None
+    );
+    assert_eq!(
+        index.work_duplicate(&[Identifier::Doi(doi("10.1038/other"))], &|_| false),
         None
     );
 }

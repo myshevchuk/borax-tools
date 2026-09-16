@@ -255,30 +255,45 @@ impl Index {
         self.entries.get(*self.by_identifier.get(identifier)?)
     }
 
-    /// Whether a file hashing to `hash` is already archived.
+    /// Whether a file hashing to `hash` is already archived somewhere
+    /// other than where the incoming file itself sits.
     ///
     /// Answerable straight after hashing, before any identifier is
     /// resolved, so a re-downloaded file costs no network access.
-    pub fn content_duplicate(&self, hash: &ContentHash) -> Option<Duplicate> {
-        self.by_hash(hash).map(|entry| Duplicate {
-            reason: DuplicateReason::Content,
-            existing_path: entry.path.clone(),
-        })
+    ///
+    /// `is_incoming` answers whether a recorded path names the file
+    /// being checked. An entry it accepts is the file's own admission
+    /// rather than a copy of it, so the search passes over that entry
+    /// and goes on: a file whose own row is the newest for its hash
+    /// would otherwise hide a second copy recorded under an older one.
+    /// A ledger that holds only the file's own entry answers `None`.
+    pub fn content_duplicate(
+        &self,
+        hash: &ContentHash,
+        is_incoming: &dyn Fn(&str) -> bool,
+    ) -> Option<Duplicate> {
+        let _ = (hash, is_incoming);
+        todo!("content_duplicate: the newest entry for this hash that is not the file itself")
     }
 
-    /// Whether any of `identifiers` names a work already archived.
+    /// Whether any of `identifiers` names a work already archived
+    /// somewhere other than where the incoming file itself sits.
     ///
     /// The first identifier with an entry decides, so a caller ordering
     /// them by confidence gets its preferred match. `None` for an empty
     /// slice: a file with no identifiers can only ever be a content
     /// duplicate.
-    pub fn work_duplicate(&self, identifiers: &[Identifier]) -> Option<Duplicate> {
-        identifiers
-            .iter()
-            .find_map(|identifier| self.by_identifier(identifier))
-            .map(|entry| Duplicate {
-                reason: DuplicateReason::Work,
-                existing_path: entry.path.clone(),
-            })
+    ///
+    /// `is_incoming` is [`Index::content_duplicate`]'s, and passes over
+    /// the file's own admission for the same reason: an annotated file
+    /// at its admitted path carries a new hash and its old identifiers,
+    /// and is not a second copy of itself.
+    pub fn work_duplicate(
+        &self,
+        identifiers: &[Identifier],
+        is_incoming: &dyn Fn(&str) -> bool,
+    ) -> Option<Duplicate> {
+        let _ = (identifiers, is_incoming);
+        todo!("work_duplicate: the first identifier whose newest non-self entry exists")
     }
 }

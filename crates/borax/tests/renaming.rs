@@ -903,9 +903,8 @@ fn already_named_reports_the_same_way_in_preview_and_applying() {
     let preview = apply_renames(&plan, &filesystem, false, &[None]);
     let applying = apply_renames(&plan, &filesystem, true, &[None]);
 
-    let expected = vec![Event::Skipped {
+    let expected = vec![Event::AlreadyNamed {
         path: PathBuf::from("/lib/Smith2024.pdf"),
-        reason: SkipReason::AlreadyNamed,
     }];
     assert_eq!(preview, expected);
     assert_eq!(applying, expected);
@@ -992,9 +991,8 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
             path: PathBuf::from("c.pdf"),
             reason: SkipReason::NoIdentifier,
         },
-        Event::Skipped {
+        Event::AlreadyNamed {
             path: PathBuf::from("d.pdf"),
-            reason: SkipReason::AlreadyNamed,
         },
         Event::Skipped {
             path: PathBuf::from("e.pdf"),
@@ -1009,7 +1007,8 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
         Counts {
             resolved: 2,
             renamed: 1,
-            skipped: 3,
+            skipped: 2,
+            named: 1,
             unmatched: 0,
             unreached: 0,
         }
@@ -1045,6 +1044,7 @@ fn a_preview_runs_counts_report_zero_renamed_however_many_moves_were_planned() {
             resolved: 1,
             renamed: 0,
             skipped: 0,
+            named: 0,
             unmatched: 0,
             unreached: 0,
         }

@@ -387,7 +387,7 @@ fn every_line_of_stdout_is_a_json_object_carrying_the_schema() {
     assert!(!ran.events.is_empty());
     for event in &ran.events {
         assert!(event.is_object(), "not an object: {event}");
-        assert_eq!(event["schema"], Value::from(1));
+        assert_eq!(event["schema"], Value::from(2));
         assert!(event["event"].is_string(), "no event tag: {event}");
     }
 }

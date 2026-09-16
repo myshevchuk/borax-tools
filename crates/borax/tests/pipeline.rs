@@ -976,6 +976,7 @@ fn counts_reflect_the_outcomes_and_renamed_is_always_zero() {
             resolved: 2,
             renamed: 0,
             skipped: 1,
+            named: 0,
             unmatched: 0,
             unreached: 0,
         }
@@ -1050,6 +1051,7 @@ fn a_mixed_batch_completes_and_an_unreadable_file_does_not_curtail_it() {
             resolved: 2,
             renamed: 0,
             skipped: 2,
+            named: 0,
             unmatched: 0,
             unreached: 0,
         }
@@ -1119,6 +1121,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
             resolved: 2,
             renamed: 0,
             skipped: 0,
+            named: 0,
             unmatched: 0,
             unreached: 0,
         }
@@ -1405,6 +1408,7 @@ fn a_concurrency_of_zero_still_resolves_the_whole_batch() {
             resolved: 2,
             renamed: 0,
             skipped: 1,
+            named: 0,
             unmatched: 0,
             unreached: 0,
         }

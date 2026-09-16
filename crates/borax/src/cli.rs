@@ -81,6 +81,16 @@ pub struct RenameOptions {
     /// Ask about each file, where there is a terminal to ask at.
     #[arg(long, conflicts_with = "batch")]
     pub no_batch: bool,
+
+    /// Pass over a file that already carries its name, asking nothing
+    /// and saying nothing about it.
+    #[arg(long)]
+    pub skip_named: bool,
+
+    /// Report a file that already carries its name, as a batch run
+    /// does.
+    #[arg(long, conflicts_with = "skip_named")]
+    pub no_skip_named: bool,
 }
 
 /// What a subcommand needs to write bibliography output.
@@ -269,6 +279,12 @@ pub struct Settings {
     /// Ask about each file, where there is a terminal to ask at.
     pub no_batch: bool,
 
+    /// Pass over a file that already carries its name.
+    pub skip_named: bool,
+
+    /// Report a file that already carries its name.
+    pub no_skip_named: bool,
+
     /// The master .bib file entries are merged into.
     pub bib: Option<PathBuf>,
 
@@ -330,6 +346,8 @@ impl RenameOptions {
         settings.collision = self.collision.clone();
         settings.batch = self.batch;
         settings.no_batch = self.no_batch;
+        settings.skip_named = self.skip_named;
+        settings.no_skip_named = self.no_skip_named;
     }
 }
 
@@ -675,6 +693,30 @@ pub fn flag_layers(settings: &Settings) -> Vec<(Origin, Layer)> {
             Layer {
                 rename: Some(RenameLayer {
                     batch: Some(false),
+                    ..RenameLayer::default()
+                }),
+                ..Layer::default()
+            },
+        );
+    }
+    if settings.skip_named {
+        push(
+            "skip-named",
+            Layer {
+                rename: Some(RenameLayer {
+                    skip_named: Some(true),
+                    ..RenameLayer::default()
+                }),
+                ..Layer::default()
+            },
+        );
+    }
+    if settings.no_skip_named {
+        push(
+            "no-skip-named",
+            Layer {
+                rename: Some(RenameLayer {
+                    skip_named: Some(false),
                     ..RenameLayer::default()
                 }),
                 ..Layer::default()
