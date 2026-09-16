@@ -8,7 +8,9 @@ use std::rc::Rc;
 use std::slice;
 
 use borax::config::{ConfigError, Layer, Origin, resolve};
+use borax::event::Format;
 use borax::run::{Configs, config_for, inputs, start_directory};
+use borax::session::{Mode, mode};
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
@@ -638,6 +640,54 @@ fn run_is_resolved_from_working_not_from_any_input_path() {
     assert_eq!(
         configs.for_path(&input).config().mailto.as_deref(),
         Some("alpha@example.org")
+    );
+}
+
+// ---------------------------------------------------------------------
+// cli spec scenario "Two trees, one mode": the mode a terminal run
+// takes comes from the run's own configuration ([`Configs::run`]),
+// never from any input directory's — `session::mode` is never handed
+// anything but `configs.run().config().batch`.
+// ---------------------------------------------------------------------
+
+#[test]
+fn two_trees_one_mode_the_runs_own_configuration_decides_it_not_either_trees() {
+    let tree_a = PathBuf::from("/library/tree-a/paper.pdf");
+    let tree_b = PathBuf::from("/library/tree-b/paper.pdf");
+    // Outside both trees, so neither's `.borax.toml` is ever read for
+    // the run's own configuration.
+    let working = Path::new("/library");
+    let read = fake_read(&[("/library/tree-a/.borax.toml", "[rename]\nbatch = true\n")]);
+
+    let configs = Configs::resolve(
+        &[tree_a.clone(), tree_b.clone()],
+        working,
+        vec![],
+        &env_vars(&[]),
+        &read,
+    )
+    .unwrap();
+
+    // `borax config` run inside tree-a would report the override and
+    // its file as the origin — the per-directory reading is real.
+    assert!(configs.for_path(&tree_a).config().batch);
+    assert_eq!(
+        configs.for_path(&tree_a).origin("rename.batch"),
+        Some(&Origin::DirectoryFile(PathBuf::from(
+            "/library/tree-a/.borax.toml"
+        )))
+    );
+
+    // But the run itself, started from outside both trees, never saw
+    // that file: its own configuration is untouched, so a terminal run
+    // is interactive throughout, whichever tree a file being worked on
+    // happens to sit in.
+    assert!(!configs.run().config().batch, "got {:?}", configs.run());
+    let decided = mode(true, Format::Human, configs.run().config().batch, false);
+    assert_eq!(
+        decided,
+        Mode::Interactive,
+        "the run's own configuration must decide the mode, not tree-a's: got {decided:?}"
     );
 }
 

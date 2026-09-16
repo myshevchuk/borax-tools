@@ -2937,6 +2937,91 @@ fn an_accepted_proposal_suffixes_the_next_files_colliding_target() {
     );
 }
 
+/// The one path where `Planning::accept` reconstructs the planner key
+/// by stripping the group directory: a template rendering into a
+/// subdirectory, accepted through the interactive driver. Only the
+/// batch tests (`renaming.rs`) covered this before — `plan`/`propose`
+/// widen into the subdirectory the same way in both paths, but only
+/// `accept`, not `claim`, has to turn a full `sub/Name.pdf` target back
+/// into the relative key the planner claimed it under.
+#[test]
+fn an_interactive_proposal_into_a_subdirectory_claims_the_right_key_and_suffixes_a_second() {
+    let a = PathBuf::from("/lib/a.pdf");
+    let b = PathBuf::from("/lib/b.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &a,
+            hash_for("interactive-subdir-a"),
+            pdf_with_embedded_doi("10.1000/interactive-subdir-a"),
+        )
+        .with_file(
+            &b,
+            hash_for("interactive-subdir-b"),
+            pdf_with_embedded_doi("10.1000/interactive-subdir-b"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/interactive-subdir-a",
+            record_by("Smith", 2024, "10.1000/interactive-subdir-a"),
+        )
+        .answering(
+            "doi:10.1000/interactive-subdir-b",
+            record_by("Smith", 2024, "10.1000/interactive-subdir-b"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("sub/[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![a.clone(), b.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path, target, .. }
+                if *path == a && target.as_path() == Path::new("/lib/sub/Smith2024.pdf")
+        )),
+        "the accepted file must land in the subdirectory the template named: got {events:?}"
+    );
+    assert!(
+        filesystem
+            .renames()
+            .contains(&(a, PathBuf::from("/lib/sub/Smith2024.pdf"))),
+        "got {:?}",
+        filesystem.renames()
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path, target, .. }
+                if *path == b && target.as_path() == Path::new("/lib/sub/Smith2024a.pdf")
+        )),
+        "a second file targeting the same subdirectory name must be suffixed, proving \
+         `accept` claimed the first under the subdirectory-relative key `propose` widened \
+         into: got {events:?}"
+    );
+}
+
 /// design "each file's resolution, question, fate and sidecar SHALL
 /// remain adjacent": with no sidecars or master file configured there is
 /// nothing but the resolved/fate pair for each file, but adjacency and
@@ -3155,7 +3240,7 @@ fn quitting_counts_unreached_and_still_merges_the_bib_for_the_visited_files() {
         err: &mut err,
     };
 
-    dispatch(
+    let outcome = dispatch(
         &cli(Command::rename(paths.clone(), false), true),
         &Configs::uniform(effective),
         &adapters,
@@ -3169,6 +3254,9 @@ fn quitting_counts_unreached_and_still_merges_the_bib_for_the_visited_files() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
 
+    // Unreached files did not succeed either: the exit code is the
+    // partial-success one even though nothing was declined here.
+    assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
     assert_eq!(
         filesystem.renames().len(),
         2,

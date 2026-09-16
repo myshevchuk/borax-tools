@@ -14,7 +14,7 @@ use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Sink, Streams, dispatch, emit_events, preflight};
 use borax::runlog::{RUNS_DIR, destination, log_name, state_root};
-use borax::session::{Outcome, Session};
+use borax::session::{Answer, Asker, Outcome, Question, Session};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
@@ -183,6 +183,41 @@ impl BibFiles for FakeBibFiles {
 
     fn write(&self, _path: &Path, _content: &str) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// A scripted [`Asker`]: answers a fixed list in order, records every
+/// [`Question`] it was asked, and panics with a clear message if asked
+/// for more answers than it was given, following the shape of the one
+/// in `tests/dispatch.rs`.
+struct ScriptedAsker {
+    answers: std::vec::IntoIter<Answer>,
+    asked: RefCell<Vec<Question>>,
+}
+
+impl ScriptedAsker {
+    fn new(answers: Vec<Answer>) -> ScriptedAsker {
+        ScriptedAsker {
+            answers: answers.into_iter(),
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn questions_asked(&self) -> Vec<Question> {
+        self.asked.borrow().clone()
+    }
+}
+
+impl Asker for ScriptedAsker {
+    fn choose(&mut self, question: &Question) -> Answer {
+        self.asked.borrow_mut().push(question.clone());
+        self.answers.next().unwrap_or_else(|| {
+            panic!(
+                "asked more questions than were scripted; question was {question:?}, \
+                 already asked {:?}",
+                self.asked.borrow()
+            )
+        })
     }
 }
 
@@ -1270,6 +1305,169 @@ fn destination_of_an_interactive_rename_is_written_even_when_run_log_is_disabled
         .unwrap_or_else(|| panic!("an interactive run's log cannot be disabled by run-log"));
 
     assert!(found.mandatory);
+}
+
+// ---------------------------------------------------------------------
+// run-logs spec scenarios: "Interactive run with an unwritable log" and
+// "A session that moves nothing" — an interactive rename end to end
+// through `dispatch`, with a scripted `Asker`.
+// ---------------------------------------------------------------------
+
+/// run-logs spec: "Interactive run with an unwritable log" — the run
+/// aborts with a clear error before any question is put, and every file
+/// keeps its original name.
+#[test]
+fn an_interactive_rename_with_an_unwritable_log_aborts_before_any_question() {
+    let dir = tempdir().unwrap();
+    // ".borax" is a plain file rather than a directory, so nothing can
+    // ever be created under it — the same deterministic, cross-platform
+    // trick `an_unwritable_mandatory_log_aborts_before_any_rename` uses
+    // for the batch case.
+    std::fs::write(dir.path().join(ACCOUNTING_DIR), b"not a directory").unwrap();
+
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("interactive-unwritable-log"),
+        pdf_with_embedded_doi("10.1000/interactive-unwritable-log"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "Smith",
+            2024,
+            "10.1000/interactive-unwritable-log",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(Vec::new());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::rename(vec![path], false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Fatal, "got {outcome:?}");
+    assert!(
+        asker.questions_asked().is_empty(),
+        "the operator must not be asked anything once the log cannot be opened: got {:?}",
+        asker.questions_asked()
+    );
+    assert!(
+        filesystem.renames().is_empty(),
+        "no file may be renamed when the mandatory log cannot be created"
+    );
+    assert!(
+        out.is_empty(),
+        "a refused run must write no event stream: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+/// run-logs spec: "A session that moves nothing" — every proposal
+/// declined still leaves an `apply`-suffixed log, recording each file
+/// as skipped with reason `declined`.
+#[test]
+fn a_session_that_declines_everything_still_leaves_an_apply_suffixed_log() {
+    let dir = tempdir().unwrap();
+    let a = PathBuf::from("/lib/a.pdf");
+    let b = PathBuf::from("/lib/b.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &a,
+            hash_of("interactive-moves-nothing-a"),
+            pdf_with_embedded_doi("10.1000/interactive-moves-nothing-a"),
+        )
+        .with_file(
+            &b,
+            hash_of("interactive-moves-nothing-b"),
+            pdf_with_embedded_doi("10.1000/interactive-moves-nothing-b"),
+        );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "Smith",
+            2024,
+            "10.1000/interactive-moves-nothing-a",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: || "20240101T000000Z".to_string(),
+        ledger: None,
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip, Answer::Skip]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![a, b], false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    assert!(filesystem.renames().is_empty(), "nothing may move");
+
+    let runs = dir.path().join(ACCOUNTING_DIR).join(RUNS_DIR);
+    let names = run_log_names(&runs);
+    assert_eq!(names.len(), 1, "got {names:?}");
+    assert!(
+        names[0].ends_with("rename-apply.jsonl"),
+        "an interactive run's log is apply-suffixed even when nothing moved: got {names:?}"
+    );
+
+    let log_text = std::fs::read_to_string(runs.join(&names[0])).unwrap();
+    let declined = log_text
+        .lines()
+        .filter(|line| line.contains("\"skipped\"") && line.contains("\"declined\""))
+        .count();
+    assert_eq!(
+        declined, 2,
+        "each declined file must be recorded skipped with reason declined: got {log_text:?}"
+    );
 }
 
 // ---------------------------------------------------------------------

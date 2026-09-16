@@ -135,6 +135,25 @@ fn outcome_for_eight_resolved_and_two_skipped_is_partial() {
     assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
 }
 
+/// design "Quitting an interactive run leaves the rest untouched": a run
+/// that was quit exits with the partial-success code even when nothing
+/// was skipped, because `unreached` files did not succeed either —
+/// `outcome_for` sums `skipped` and `unreached`.
+#[test]
+fn outcome_for_a_run_with_unreached_files_and_nothing_skipped_is_partial() {
+    let counts = Counts {
+        resolved: 2,
+        renamed: 2,
+        skipped: 0,
+        unmatched: 0,
+        unreached: 3,
+    };
+
+    let outcome = outcome_for(&counts);
+
+    assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
+}
+
 // ---------------------------------------------------------------------
 // mode: design D1 — batch := apply || setting(batch) || !terminal ||
 // json
