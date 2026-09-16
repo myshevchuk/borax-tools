@@ -16,16 +16,16 @@ say things this change contradicts, and they will be living by the time
 it is implemented. Re-copy each from `openspec/specs/` into a MODIFIED
 block and amend it, rather than leaving the archive holding both:
 
-- [ ] 0.1 `rename`, "An interactive run passes over already-named
+- [x] 0.1 `rename`, "An interactive run passes over already-named
       files": with `--no-skip-named` such a file is now asked about
-- [ ] 0.2 `cli`, "A run reports as it goes": a file's verdict may be
+- [x] 0.2 `cli`, "A run reports as it goes": a file's verdict may be
       held until the operator's decisions about it are made, which is
       longer than the hold that change allowed
-- [ ] 0.3 `resolution`, "Ambiguity is skipped, never guessed": the
+- [x] 0.3 `resolution`, "Ambiguity is skipped, never guessed": the
       scenarios that skip every conflict unconditionally have to
       distinguish a fresh conflict from one an operator accepted, since
       the index answers for the second without checking again
-- [ ] 0.4 `openspec validate --strict` and `check-spec-deltas.py` pass
+- [x] 0.4 `openspec validate --strict` and `check-spec-deltas.py` pass
       with the MODIFIED blocks in place
 
 ## 1. Resolution in parts, batch unchanged
@@ -35,7 +35,7 @@ block and amend it, rather than leaving the archive holding both:
       conflict check — and re-express `resolve_file` and
       `resolve_file_checking_ledger` as their composition; every
       existing pipeline test passes unchanged. A commit of its own.
-- [ ] 1.2 Red: the file's claimed titles can be read on their own, for
+- [x] 1.2 Red: the file's claimed titles can be read on their own, for
       a file the content index answered for and for one no identifier
       was found in (design D2a); `extract_from` collects them whether or
       not an identifier turns up
@@ -43,22 +43,22 @@ block and amend it, rather than leaving the archive holding both:
 
 ## 2. Supplied identifiers
 
-- [ ] 2.1 Red: `crates/borax-core/tests/identifier.rs` — the supplied
+- [x] 2.1 Red: `crates/borax-core/tests/identifier.rs` — the supplied
       input parser: DOI forms, arXiv forms, `pmid:` and `isbn:` prefixes,
       bare digits refused, prose refused with the accepted forms named
 - [ ] 2.2 Green: the parser, built from the existing `parse` functions
       (design D2)
-- [ ] 2.3 Red: `crates/borax/tests/pipeline.rs` — resolving a supplied
+- [x] 2.3 Red: `crates/borax/tests/pipeline.rs` — resolving a supplied
       identifier for a file: the record, `tier` `supplied`, the conflict
       check's result reported rather than enforced; an unresolvable one
       returns the attempts
 
 ## 3. The questions
 
-- [ ] 3.1 Extend `Answer` with `Supply`, `Override` and `Keep`, and the
+- [x] 3.1 Extend `Answer` with `Supply`, `Override` and `Keep`, and the
       `Asker` trait with `text`; extend the scripted asker to script
       text input
-- [ ] 3.2 Red: `crates/borax/tests/dispatch.rs` — with a scripted
+- [x] 3.2 Red: `crates/borax/tests/dispatch.rs` — with a scripted
       asker, one test per row of design D1's two tables, asserting the
       choices offered, the default, and the events emitted per design
       D5; the inconclusive-resolution row offers a retry and the
@@ -68,11 +68,11 @@ block and amend it, rather than leaving the archive holding both:
       resolves into a taken target, an empty name, or an already-named
       file reports that outcome and asks again; an abandoned input
       changes nothing
-- [ ] 3.3 Red: the reference-DOI case — supply a different identifier on
+- [x] 3.3 Red: the reference-DOI case — supply a different identifier on
       a move question; the first proposal's name stays unclaimed
-- [ ] 3.4 Red: refused input is asked again; Esc returns to the menu; an
+- [x] 3.4 Red: refused input is asked again; Esc returns to the menu; an
       unresolvable supplied identifier puts the menu again
-- [ ] 3.5 Red: `--no-skip-named` — keep emits `already-named`; supplying
+- [x] 3.5 Red: `--no-skip-named` — keep emits `already-named`; supplying
       and renaming re-identifies the file
 - [ ] 3.6 Green: the driver situations, the held verdict, `overrode` and
       `supplied` on `resolved`
