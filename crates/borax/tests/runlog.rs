@@ -1594,7 +1594,12 @@ fn a_rename_event_is_flushed_to_the_log_before_the_move_it_records_is_made() {
 /// `fails_at`-th `record`, standing for a log that takes two writes and
 /// then cannot take a third.
 struct FailingRecorder {
+    /// What the run reported, as a terminal or a `--json` reader sees
+    /// it.
     events: Vec<Event>,
+    /// What the run wrote to its log before making a move, as
+    /// `Logging` writes it: recorded, not reported.
+    recorded: Vec<Event>,
     records: usize,
     fails_at: usize,
 }
@@ -1603,6 +1608,7 @@ impl FailingRecorder {
     fn refusing_the(fails_at: usize) -> FailingRecorder {
         FailingRecorder {
             events: Vec::new(),
+            recorded: Vec::new(),
             records: 0,
             fails_at,
         }
@@ -1629,7 +1635,10 @@ impl Sink for FailingRecorder {
                 message: "the run log would not take the event".to_string(),
             });
         }
-        self.events.push(event);
+        // Recorded and not reported, as the run's own log sink does it:
+        // the move has not been made yet, and `emit` is what says it
+        // was.
+        self.recorded.push(event);
         Ok(())
     }
 }
