@@ -71,10 +71,20 @@ read `from the text layer` and `file says` would list the titles read.
 - A field the record lacks is omitted, not shown empty.
 - `identifier` is the identifier that was looked up, not whichever one
   the record happens to prefer, and says where it was found: `from
-  embedded metadata`, `from the text layer`, `supplied` once change 4
-  lands, or `from an earlier run` when the content index answered and
-  no pass ran. Where the record carries identifiers the lookup did not
-  use, they are the record's and are not what this line names.
+  embedded metadata`, `from the text layer`, or `supplied` once change
+  4 lands.
+
+  Where nothing was looked up — the content index answered — the line
+  names the record's own identifier and says nothing about where it
+  came from, because nothing is known about that. The index keeps
+  records, not the identifiers they were reached by, so a record found
+  last time from an arXiv identifier and carrying a DOI would otherwise
+  be described as a DOI found in an earlier run, which is the false
+  evidence this change exists to remove. `record` carries `from an
+  earlier run` instead, which is true of the record.
+- `record` names the services that supplied the record, and adds `from
+  an earlier run` when the content index answered rather than a service
+  being asked.
 - `record` names the services that supplied the record. On a live
   answer that is the service the resolver used; on a content-index
   answer it is the distinct sources in the record's provenance other
@@ -128,6 +138,14 @@ read `from the text layer` and `file says` would list the titles read.
 - `new name` is the proposed target relative to the file's directory.
   When the planner suffixed it, a second line reads `(<rendered> is
   taken)`.
+
+Every value the description prints from a record or from a file's own
+metadata is escaped first: a control character is rendered visibly
+rather than sent to the terminal. A PDF's title is untrusted text that
+arrives from whoever made the file, and an escape sequence in one could
+erase the lines above it and redraw a different file and target over a
+menu whose first choice is Rename. What the operator is deciding about
+must be what is on the screen.
 
 Colour is not part of the contract. Labels may be dimmed where the
 terminal supports it; the text is complete without it.
