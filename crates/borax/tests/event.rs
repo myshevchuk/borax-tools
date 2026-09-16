@@ -42,6 +42,10 @@ fn resolved() -> Event {
         identifier: "10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         source: "crossref".to_string(),
+        found: "10.1000/xyz123".to_string(),
+
+        claims: Vec::new(),
+
         tier: Some("first-page".to_string()),
         cached: false,
     }
@@ -281,7 +285,9 @@ fn json_line_of_resolved_has_exactly_the_documented_field_set() {
         keys,
         vec![
             "cached",
+            "claims",
             "event",
+            "found",
             "identifier",
             "path",
             "record",
@@ -951,6 +957,10 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
             identifier: "10.1000/aaa".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             source: "crossref".to_string(),
+            found: "10.1000/aaa".to_string(),
+
+            claims: Vec::new(),
+
             tier: Some("first-page".to_string()),
             cached: false,
         },
@@ -959,6 +969,10 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
             identifier: "10.1000/bbb".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             source: "arxiv".to_string(),
+            found: "10.1000/bbb".to_string(),
+
+            claims: Vec::new(),
+
             tier: None,
             cached: true,
         },

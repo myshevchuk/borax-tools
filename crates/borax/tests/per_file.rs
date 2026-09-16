@@ -265,6 +265,10 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
         identifier: identifier.to_string(),
         record: Box::new(record.clone()),
         source: "crossref".to_string(),
+        found: identifier.to_string(),
+
+        claims: Vec::new(),
+
         tier: Some("embedded-metadata".to_string()),
         cached: false,
     }

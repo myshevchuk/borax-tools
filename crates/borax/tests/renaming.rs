@@ -173,6 +173,10 @@ fn resolved(path: &str, record: Record, hash: Option<ContentHash>) -> (PathBuf, 
         FileRecord {
             record,
             source: None,
+            found: None,
+
+            claims: Vec::new(),
+
             tier: None,
             cached: false,
             hash,
@@ -1199,6 +1203,10 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
             identifier: "doi:10.1000/a".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             source: "crossref".to_string(),
+            found: "doi:10.1000/a".to_string(),
+
+            claims: Vec::new(),
+
             tier: None,
             cached: false,
         },
@@ -1207,6 +1215,10 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
             identifier: "doi:10.1000/b".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             source: "crossref".to_string(),
+            found: "doi:10.1000/b".to_string(),
+
+            claims: Vec::new(),
+
             tier: None,
             cached: false,
         },
@@ -1251,6 +1263,10 @@ fn a_preview_runs_counts_report_zero_renamed_however_many_moves_were_planned() {
             identifier: "doi:10.1000/a".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             source: "crossref".to_string(),
+            found: "doi:10.1000/a".to_string(),
+
+            claims: Vec::new(),
+
             tier: None,
             cached: false,
         },

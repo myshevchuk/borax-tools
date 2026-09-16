@@ -173,6 +173,10 @@ fn resolved(path: &str, record: Record) -> (PathBuf, FileRecord) {
         FileRecord {
             record,
             source: None,
+            found: None,
+
+            claims: Vec::new(),
+
             tier: None,
             cached: false,
             hash: None,

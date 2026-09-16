@@ -149,6 +149,10 @@ fn file_record(record: Record, hash: Option<ContentHash>) -> FileRecord {
     FileRecord {
         record,
         source: None,
+        found: None,
+
+        claims: Vec::new(),
+
         tier: None,
         cached: false,
         hash,
@@ -1360,6 +1364,10 @@ fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
                 identifier: "doi:10.1000/stale-dup".to_string(),
                 record: Box::new(record_by("Smith", 2024, "10.1000/stale-dup")),
                 source: "crossref".to_string(),
+                found: "doi:10.1000/stale-dup".to_string(),
+
+                claims: Vec::new(),
+
                 tier: Some("embedded-metadata".to_string()),
                 cached: false,
             },
@@ -1718,6 +1726,10 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
                 identifier: "doi:10.1000/apply-admission".to_string(),
                 record: Box::new(record_by("Smith", 2024, "10.1000/apply-admission")),
                 source: "crossref".to_string(),
+                found: "doi:10.1000/apply-admission".to_string(),
+
+                claims: Vec::new(),
+
                 tier: Some("embedded-metadata".to_string()),
                 cached: false,
             },

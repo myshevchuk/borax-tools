@@ -374,6 +374,10 @@ fn resolved_event(
         identifier: identifier.to_string(),
         record: Box::new(record.clone()),
         source: source.to_string(),
+        found: identifier.to_string(),
+
+        claims: Vec::new(),
+
         tier: tier.map(str::to_string),
         cached,
     }

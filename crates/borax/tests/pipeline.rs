@@ -834,6 +834,10 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
     let outcome = FileOutcome::Resolved(FileRecord {
         record: record.clone(),
         source: Some(SourceName::Crossref),
+        found: None,
+
+        claims: Vec::new(),
+
         tier: Some(Tier::EmbeddedMetadata),
         cached: false,
         hash: Some(hash_for("paper")),
@@ -848,6 +852,10 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
             identifier: "doi:10.1000/xyz".to_string(),
             record: Box::new(record),
             source: "crossref".to_string(),
+            found: "doi:10.1000/xyz".to_string(),
+
+            claims: Vec::new(),
+
             tier: Some(tier_str(Tier::EmbeddedMetadata).to_string()),
             cached: false,
         }
@@ -860,6 +868,10 @@ fn a_content_index_hit_reports_its_source_as_cache() {
     let outcome = FileOutcome::Resolved(FileRecord {
         record: record_with_doi("10.1000/cached-record"),
         source: None,
+        found: None,
+
+        claims: Vec::new(),
+
         tier: None,
         cached: true,
         hash: Some(hash_for("paper")),
@@ -1524,6 +1536,10 @@ fn a_resolved_event_carries_the_whole_record() {
     let outcome = FileOutcome::Resolved(FileRecord {
         record: record.clone(),
         source: Some(SourceName::Crossref),
+        found: None,
+
+        claims: Vec::new(),
+
         tier: Some(Tier::TextLayer),
         cached: false,
         hash: None,
@@ -1550,6 +1566,10 @@ fn a_resolved_event_round_trips_its_record_through_json() {
         &FileOutcome::Resolved(FileRecord {
             record: record.clone(),
             source: Some(SourceName::Crossref),
+            found: None,
+
+            claims: Vec::new(),
+
             tier: Some(Tier::TextLayer),
             cached: false,
             hash: None,

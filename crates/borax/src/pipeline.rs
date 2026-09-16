@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
 use borax_core::ledger::DuplicateReason;
-use borax_core::record::Record;
+use borax_core::record::{Record, Source as FieldSource};
 use borax_pdf::pure::PurePdf;
 use borax_pdf::scan::xmp_title;
 use borax_pdf::source::{ExtractionError, PdfSource};
@@ -28,7 +28,7 @@ use borax_sources::pace::map_bounded;
 use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 
-use crate::event::{Attempt, Counts, Event, SkipReason};
+use crate::event::{Attempt, Claim, ClaimOrigin, Counts, Event, SkipReason};
 use crate::ledger::Collection;
 
 /// The files a run works on, as something that can be read.
@@ -61,6 +61,17 @@ pub struct FileRecord {
     /// Which extraction pass found the identifier, or `None` when
     /// extraction never ran because the content index answered.
     pub tier: Option<Tier>,
+    /// The identifier the run looked up, or `None` when the content
+    /// index answered and nothing was looked up at all.
+    ///
+    /// Kept beside the record because the record's own identifiers are
+    /// not evidence about the file: a lookup by arXiv identifier can
+    /// return a record carrying a DOI, and only the former was ever
+    /// seen in the file.
+    pub found: Option<Identifier>,
+    /// Every title the file claims for itself, in the order they were
+    /// read, and empty when the file was not opened.
+    pub claims: Vec<Claim>,
     /// Whether the content index answered, making both extraction and
     /// resolution unnecessary.
     ///
@@ -153,24 +164,28 @@ pub fn resolve_file<C: Cache>(
                 record,
                 source: None,
                 tier: None,
+                // Nothing was looked up and the file was not opened.
+                found: None,
+                claims: Vec::new(),
                 cached: true,
                 hash,
             });
         }
     }
 
-    let (extracted, claimed_titles) = match extract_from(path, library, &config.extraction) {
+    let (extracted, claims) = match extract_from(path, library, &config.extraction) {
         Ok(found) => found,
         Err(error) => return FileOutcome::Skipped(skipped_for(&error)),
     };
     let Extracted { identifier, tier } = extracted;
+    let looked_up = Identifier::from(identifier);
 
-    let resolved = match resolve(sources, &Identifier::from(identifier)) {
+    let resolved = match resolve(sources, &looked_up) {
         Ok(resolved) => resolved,
         Err(unresolved) => return FileOutcome::Skipped(unresolvable(&unresolved)),
     };
 
-    let claimed: Vec<&str> = claimed_titles.iter().map(String::as_str).collect();
+    let claimed: Vec<&str> = claims.iter().map(|claim| claim.title.as_str()).collect();
     if let Some(conflict) = check_title(&claimed, &resolved.record) {
         return FileOutcome::Skipped(SkipReason::Conflict {
             field: conflict.field.to_string(),
@@ -188,6 +203,8 @@ pub fn resolve_file<C: Cache>(
         record: resolved.record,
         source: Some(resolved.source),
         tier: Some(tier),
+        found: Some(looked_up),
+        claims,
         cached: false,
         hash,
     })
@@ -294,14 +311,25 @@ fn extract_from(
     path: &Path,
     library: &dyn Library,
     config: &ExtractionConfig,
-) -> Result<(Extracted, Vec<String>), ExtractionError> {
+) -> Result<(Extracted, Vec<Claim>), ExtractionError> {
     let pdf = library.open(path)?;
     let extracted = extract(pdf.as_ref(), config)?;
     let claimed = [
-        pdf.xmp().and_then(xmp_title),
-        pdf.info_metadata().title.clone(),
+        (ClaimOrigin::Xmp, pdf.xmp().and_then(xmp_title)),
+        (ClaimOrigin::Info, pdf.info_metadata().title.clone()),
     ];
-    Ok((extracted, claimed.into_iter().flatten().collect()))
+    Ok((
+        extracted,
+        claimed
+            .into_iter()
+            .filter_map(|(from, title)| {
+                Some(Claim {
+                    from,
+                    title: title?,
+                })
+            })
+            .collect(),
+    ))
 }
 
 /// The skip an extraction failure reports.
@@ -334,6 +362,54 @@ fn unresolvable(unresolved: &Unresolved) -> SkipReason {
     }
 }
 
+/// The services that supplied `file`'s record, as the event names them.
+///
+/// The service the resolver used, where the run looked one up. Where
+/// the content index answered instead, the sources the record's own
+/// per-field provenance names, other than extraction itself: a record
+/// is the work of whoever's fields it carries, and the index is only
+/// where it was kept. They are named in one fixed order — Crossref,
+/// OpenAlex, arXiv, DataCite, PubMed, then a sidecar — rather than in
+/// [`borax_sources::dispatch::priority`]'s, which differs by identifier
+/// type and omits services a record can still carry a field from.
+///
+/// A record whose provenance names no such source reports the index
+/// itself, as `cache`, since nothing else is known about where it came
+/// from.
+fn sources_of(file: &FileRecord) -> String {
+    if let Some(source) = file.source {
+        return source.as_str().to_string();
+    }
+
+    // The order a record's makers are named in, fixed rather than
+    // taken from the resolver's priority, which differs by identifier
+    // type and leaves out services a record can carry a field from.
+    const ORDER: [(FieldSource, &str); 6] = [
+        (FieldSource::Crossref, "crossref"),
+        (FieldSource::OpenAlex, "openalex"),
+        (FieldSource::Arxiv, "arxiv"),
+        (FieldSource::DataCite, "datacite"),
+        (FieldSource::PubMed, "pubmed"),
+        (FieldSource::Sidecar, "sidecar"),
+    ];
+    let named: Vec<&str> = ORDER
+        .iter()
+        .filter(|(source, _)| {
+            file.record
+                .borax
+                .provenance
+                .values()
+                .any(|had| had == source)
+        })
+        .map(|(_, name)| *name)
+        .collect();
+
+    match named.is_empty() {
+        true => "cache".to_string(),
+        false => named.join(", "),
+    }
+}
+
 /// The event that reports `outcome` for `path`.
 ///
 /// A resolved file whose source is unknown — the content index
@@ -344,10 +420,12 @@ pub fn event_for(path: &Path, outcome: &FileOutcome) -> Event {
             path: path.to_path_buf(),
             identifier: identifier_of(&file.record),
             record: Box::new(file.record.clone()),
-            source: file
-                .source
-                .map_or("cache", |source| source.as_str())
-                .to_string(),
+            source: sources_of(file),
+            found: file
+                .found
+                .as_ref()
+                .map_or_else(|| identifier_of(&file.record), Identifier::to_string),
+            claims: file.claims.clone(),
             tier: file.tier.map(|tier| tier.as_str().to_string()),
             cached: file.cached,
         },

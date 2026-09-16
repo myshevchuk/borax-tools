@@ -70,6 +70,16 @@ pub enum Event {
         /// run, where every event pays the size of the largest variant.
         record: Box<Record>,
         source: String,
+        /// The identifier the run looked up, in the form the stream
+        /// writes one — `doi:…`, `arXiv:…`. Not always `identifier`,
+        /// which is what the record is filed under: a file resolved
+        /// from an arXiv identifier may come back with a DOI, and only
+        /// what was looked up is evidence about the file.
+        found: String,
+        /// Every title the file claims for itself, in the order they
+        /// were read. Empty when the file was not opened, which is
+        /// what a content-index answer means.
+        claims: Vec<Claim>,
         /// Which extraction pass supplied the identifier, or `None`
         /// when the caller named it rather than a file carrying it.
         tier: Option<String>,
@@ -211,6 +221,30 @@ pub enum SkipReason {
         reason: DuplicateReason,
         existing_path: PathBuf,
     },
+}
+
+/// A title a file claims for itself, and where it was read.
+///
+/// Claims are reported as the file makes them, including one the
+/// conflict check dismissed as a producer's leftover: the check is a
+/// heuristic, and a person reading the two titles is better placed to
+/// judge which is the work's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Claim {
+    /// Where the title was read: the XMP packet, or the document
+    /// information dictionary.
+    pub from: ClaimOrigin,
+    pub title: String,
+}
+
+/// Where a [`Claim`] was read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaimOrigin {
+    /// The XMP packet's `dc:title`.
+    Xmp,
+    /// The document information dictionary's `Title`.
+    Info,
 }
 
 /// One source's answer during resolution.

@@ -1458,6 +1458,10 @@ fn decided(session: &mut Session<'_>, decision: &PlannedRename) -> Decided {
         // question was put about; quit trails, so it is never next to
         // the default.
         choices: vec![Answer::Rename, Answer::Skip, Answer::Quit],
+        // What the answer rests on, rendered by the run: the driver
+        // holds the file's resolution and the move being proposed, and
+        // the asker only draws what it is given.
+        description: Vec::new(),
     });
 
     match answer {

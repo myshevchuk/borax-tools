@@ -118,6 +118,15 @@ pub struct Question {
     /// is the default, so it is never the answer that moves a file
     /// against a doubt.
     pub choices: Vec<Answer>,
+    /// What the operator is shown before the question: the evidence the
+    /// answer rests on, already rendered
+    /// ([`crate::describe::describe`]). Empty for a question that
+    /// carries none.
+    ///
+    /// Rendered by the run rather than by the asker, so what a person
+    /// is shown is decided where every other rendering decision is, and
+    /// the adapter that draws it stays a translation.
+    pub description: Vec<String>,
 }
 
 /// One answer to a [`Question`].

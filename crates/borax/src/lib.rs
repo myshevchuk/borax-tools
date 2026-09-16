@@ -9,6 +9,7 @@ pub mod bib;
 pub mod cache;
 pub mod cli;
 pub mod config;
+pub mod describe;
 pub mod event;
 pub mod ledger;
 pub mod paths;
