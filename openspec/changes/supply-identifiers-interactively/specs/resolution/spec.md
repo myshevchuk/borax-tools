@@ -24,6 +24,13 @@ or a short value sharing nothing with the record — SHALL NOT count as
 evidence of disagreement, since a producer's leftover contradicts every
 record and would otherwise make a resolvable file permanently unskippable.
 
+A record an operator accepted over a conflict SHALL NOT be judged
+again. It is written to the content index under the file's content
+hash, and a later run resolving that file from the index SHALL use it
+as it uses any record the index holds, without re-reading the file or
+re-checking its titles: the decision was made once, by the only party
+entitled to make it.
+
 Only a person SHALL be able to accept a conflicting record. In an
 interactive rename run, a file with a conflict SHALL be shown to the
 operator with the extracted title, the record's title and their
@@ -57,6 +64,12 @@ requirement describes.
   anyway
 - **THEN** the file is renamed from that record, and its `resolved` event
   carries the conflict it overrode with the reported similarity
+
+#### Scenario: An accepted conflict is not re-judged
+- **WHEN** a file whose record an operator accepted over a conflict is
+  reached again by a batch run
+- **THEN** it resolves from the content index and is not skipped as a
+  conflict
 
 #### Scenario: Batch still skips
 - **WHEN** the same file is reached by a batch run with `--apply`
