@@ -69,6 +69,17 @@ there is no interactive reading of `--apply` it could be confused with.
 incompatible intentions, and the `cli` capability's rule for such pairs
 is a usage error rather than a silent choice.
 
+`rename.batch` is read from the run's own configuration, the way
+`sources`, `mailto` and the `network` table already are, rather than per
+input directory. A run has one operator and one session, and the mode is
+decided before the first event; a per-directory reading would either
+change mode between groups — which the requirement above forbids — or
+pick one directory's value and silently ignore another's. The cost is
+that a collection whose `.borax.toml` asks for batch does not get it
+when the run is started from outside; `borax config` inside that
+collection still reports the value and its origin, and the flag is
+always available.
+
 `batch` is a configurable setting and `apply` stays unconfigurable.
 Batch without `--apply` is a preview, so configuration that selects it
 makes a run move less, never more. The asymmetry is the one the apply
@@ -88,6 +99,15 @@ before a yes can act.
 The contract sentence is rewritten to say that directly: borax moves
 nothing without an explicit decision, and the decisions are `--apply`
 over a previewable plan or a yes to a question naming the target.
+
+`openspec/project.md` is not the only place that says it. The `cli`
+capability's apply-gate requirement promises that "previews remain the
+default in every configuration", which after this change is no longer
+true of a terminal session and was always a roundabout way of saying
+what it protects. It is amended to say the thing itself: no
+configuration can authorise a move. `rename.batch` selects which
+authorisation a run asks for and can only make a run move less than the
+command line asked for, which is why it is configurable at all.
 
 ### D3. Deciding a target and claiming it become two steps
 
@@ -179,7 +199,7 @@ The questions themselves are not events. They are the interaction, not
 the report, and a run log records what happened to each file rather
 than the conversation that decided it.
 
-### D7. An interactive run's log is an applying run's log
+### D7. An interactive run's log is an applying run's log, recorded per move
 
 The run-log placement rules key off whether a run may move files, and
 an interactive run may. So `runlog::destination` and `mandatory` treat
@@ -193,13 +213,33 @@ A session in which every answer is no still leaves an `apply` log. That
 is accurate: the log records a run that was authorised to move files and
 moved none.
 
-The rename and run-logs requirements state that an applying run's
-planned renames are flushed before its first move. Since
-`stream-per-file-events`, the implementation writes each `renamed` line
-unbuffered after its move instead, and an interactive run cannot have
-a whole plan up front. This change inherits whatever the requirement
-guarantees of an applying run and does not settle that divergence,
-which predates it and affects `--apply` equally.
+What it cannot inherit is the whole-plan pre-flush. The `rename` and
+`run-logs` requirements say an applying run flushes its planned rename
+events before the first move, which assumes a plan computed in full
+before anything happens. `stream-per-file-events` removed that
+assumption for batch runs, and the implementation has since written each
+`renamed` line after its move (`Logging::emit`, which also discards
+write failures). An interactive run makes the mismatch impossible to
+paper over: its plan does not exist until the operator has answered the
+last question.
+
+So the guarantee becomes per move, for every run that may move files:
+
+1. write the move's `renamed` event to the log and flush it;
+2. if that write fails, abort the run — the move is not made;
+3. make the move;
+4. report the event to the terminal or to stdout, and, if the move
+   failed, write the failure to the log after it.
+
+A crash between (1) and (3) leaves a log naming a move that may not have
+happened, which is the safe direction: the reader goes and looks. The
+reverse order — the one in force today — leaves moves that happened with
+nothing recording them, which is the direction the whole-plan pre-flush
+existed to rule out.
+
+This splits `Logging::emit` in two: events that are recorded
+best-effort, as now, and a move's own event, whose failure ends the run.
+Only `renamed` takes the second path.
 
 ### D8. Everything after the decision is the batch path
 

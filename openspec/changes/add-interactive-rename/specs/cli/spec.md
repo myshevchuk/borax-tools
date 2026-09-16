@@ -71,3 +71,75 @@ runs, since neither is an argument to an invocation.
   run
 - **THEN** both are accepted, and `borax resolve --batch papers/` is
   rejected as an unknown argument
+
+### Requirement: The apply gate is never configurable
+Configuration SHALL NOT be able to set the `--apply` flag or any one-off
+destructive selector; such keys in a configuration file are load-time
+errors, and no configuration SHALL be able to authorise a move.
+
+Authorisation for a move comes from the command line or from a person:
+`--apply` given to a batch run, or an answer given to a question naming
+the file and its target. Configuration selects which of the two a run
+asks for — that is what `rename.batch` does — and can only ever make a
+run move less than the command line asked for.
+
+#### Scenario: apply in config
+- **WHEN** a configuration file contains `apply = true`
+- **THEN** the run aborts at config load stating the key must be passed
+  on the command line
+
+#### Scenario: Configuration cannot authorise a move
+- **WHEN** a configuration file sets `rename.batch = false` and
+  `borax rename papers/` runs with stdin redirected from /dev/null
+- **THEN** the run is a batch preview and moves nothing, because the
+  configuration selected a mode and authorised nothing
+
+### Requirement: Configuration resolution order
+Configuration SHALL be TOML and resolve with this precedence, highest
+first: command-line flags, environment variables, the nearest per-directory
+override file (`.borax.toml`, discovered upward from each input file's
+directory), the XDG global configuration file, built-in defaults.
+`borax config` SHALL print the effective configuration with the origin of
+each value.
+
+The override file SHALL be discovered per input file, so one invocation
+spanning two directory trees applies each tree's overrides to its own
+files and the result does not depend on the order the paths were given.
+
+The settings deciding which services a run queries and how it identifies
+itself — `sources`, `mailto`, and the `network` table — SHALL be taken
+from the run's own configuration rather than per file, since the clients
+are built once before any file is read. `borax config`, which takes no
+paths, SHALL print the run's configuration.
+
+`rename.batch` SHALL be taken from the run's own configuration for the
+same reason: a run has one session with one operator, decided before its
+first event, and a mode that changed between directories would be a run
+that asks about some of its files and not others without saying so. A
+`.borax.toml` under an input therefore does not select the mode unless
+the run was started from within it.
+
+The nearest `.borax.toml` additionally defines the collection root: the
+directory containing it anchors the collection's `.borax/` accounting
+directory (ledger and run logs); an explicit `collection-root`
+configuration key overrides this for unusual layouts.
+
+#### Scenario: Per-directory template override
+- **WHEN** a directory tree contains a `.borax.toml` defining a filename
+  template different from the global configuration
+- **THEN** files under that directory render with the per-directory
+  template and `borax config` run there reports the override file as the
+  value's origin
+
+#### Scenario: Collection root from config discovery
+- **WHEN** files are processed under a directory whose ancestor holds
+  `.borax.toml`
+- **THEN** that ancestor is the collection root and `.borax/` accounting
+  for the run lives there
+
+#### Scenario: Two trees, one mode
+- **WHEN** `borax rename tree-a tree-b` runs from a terminal outside
+  both, and `tree-a/.borax.toml` sets `rename.batch = true`
+- **THEN** the run is interactive throughout, because the mode comes
+  from the run's own configuration, and `borax config` run inside
+  `tree-a` reports that file as the origin of its value

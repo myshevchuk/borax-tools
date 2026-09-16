@@ -14,8 +14,9 @@ and mutate nothing on disk. Renames SHALL only be executed in a batch
 run when `--apply` is given.
 
 An interactive run SHALL show each proposed move before it happens, as
-the question that decides it, so no file moves in either mode before the
-target it moves to has been shown.
+the question that decides it. A batch run SHALL show one when it is
+previewing, which is the run an `--apply` run repeats; `--apply` itself
+carries out the plan without showing it again.
 
 #### Scenario: Default run is a preview
 - **WHEN** `borax rename --batch` runs over a directory without
@@ -27,6 +28,37 @@ target it moves to has been shown.
 - **WHEN** an interactive run is proposing a move and the operator has
   not yet answered
 - **THEN** the file keeps its original name
+
+<!-- drops: the whole-plan pre-flush, which stopped being possible when
+     stream-per-file-events made a run decide one file at a time and an
+     interactive run made the decisions arrive one answer at a time; the
+     per-move guarantee below replaces it -->
+
+### Requirement: Applied renames are recorded in the run log
+Every applied rename SHALL be recorded as a rename event (original path,
+new path, file content hash, timestamp, run identifier) in the run's
+apply-run log — the mandatory record defined by the `run-logs`
+capability. There is no separate journal file.
+
+Each such event SHALL be written and flushed to the log before the move
+it records is made, so that a run interrupted at any point has already
+recorded every move it may have made. A move whose event cannot be
+written SHALL NOT be made.
+
+A move that then fails SHALL be reported as it is today, and its failure
+SHALL be written to the log after the rename event it followed, so a
+reader of the log sees both the intent and its outcome.
+
+#### Scenario: Rename events written on apply
+- **WHEN** a run applies three renames
+- **THEN** the apply-run log contains three rename events sharing one
+  run identifier, each written before the file it names was moved
+
+#### Scenario: A move recorded and then refused
+- **WHEN** the filesystem refuses a move whose rename event was already
+  written
+- **THEN** the log carries that rename event followed by the skip
+  recording the failure
 
 ## ADDED Requirements
 

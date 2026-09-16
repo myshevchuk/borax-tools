@@ -18,7 +18,8 @@ scripted `Asker`, never through a terminal.
       `plan` becomes the two in sequence
 - [ ] 1.4 Red: `crates/borax/tests/renaming.rs` — `Planning::propose`
       does not claim, `Planning::accept` does, and the batch
-      `plan_renames` results are unchanged
+      `plan_renames` results are unchanged, including a target in a
+      subdirectory, so the lazy widening `reach` performs stays covered
 - [ ] 1.5 Green: mirror the split in `renaming::Planning`
 
 ## 2. Choosing the mode
@@ -50,10 +51,11 @@ scripted `Asker`, never through a terminal.
       nothing to decide are never asked about; per-file adjacency holds
 - [ ] 3.3 Red: a declined proposal leaves the next file's collision
       target unsuffixed; an accepted one suffixes it
-- [ ] 3.4 Red: quit at the third of five files — two moved, three
-      untouched and unresolved, `run-finished` counts three unreached,
-      outcome is partial; the master `.bib` merge still runs for the
-      visited files
+- [ ] 3.4 Red: quit at the third of five files — the first two moved,
+      the third resolved but untouched, the last two never opened,
+      `run-finished` counts three unreached and two resolved-but-not-
+      moved files among them, outcome is partial; the master `.bib`
+      merge still runs for the visited files
 - [ ] 3.5 Green: the interactive driver in `rename_events` — propose,
       ask, then accept and carry out, or decline, or stop
 - [ ] 3.6 Green: `SkipReason::Declined`, `Counts::unreached` (and its
@@ -68,6 +70,16 @@ scripted `Asker`, never through a terminal.
       scripted asker is consulted
 - [ ] 4.2 Green: `runlog::destination` and `mandatory` take the run's
       mode rather than `--apply` alone
+- [ ] 4.3 Red: with a log that accepts two writes and then fails, an
+      applying batch run makes the first two moves, does not make the
+      third, and aborts; the log holds the two rename events (design D7)
+- [ ] 4.4 Red: a rename event is on disk before its move — a filesystem
+      that records the log's contents at the moment it is asked to move
+      sees the event already there; a move the filesystem refuses is
+      followed in the log by its failure
+- [ ] 4.5 Green: split `Logging::emit` into the best-effort write and
+      the move's own write, and record a move before `Applying` carries
+      it out
 
 ## 5. The terminal
 

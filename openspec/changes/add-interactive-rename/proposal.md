@@ -5,10 +5,11 @@ would do, and waits for a second invocation with `--apply` to do it.
 That is the right shape for a homogeneous directory and the wrong one
 for the collections borax actually meets. A folder of papers on one
 topic is still a mix of publisher PDFs, free preprints, author
-manuscripts and supplementary files, and in practice roughly half of a
-real folder renames on the first pass. The rest need a person to look,
-and the batch shape makes the person work from a report after the run
-rather than at the file while the run is looking at it.
+manuscripts and supplementary files. The user reports 50-60% of files
+renaming on a first pass in the wild; in a twelve-file sample of the
+real-PDF corpus, eight resolved and three were renamed. The rest need a
+person to look, and the batch shape makes the person work from a report
+after the run rather than at the file while the run is looking at it.
 
 Every remedy for that half is interactive by nature — confirming a
 rename with the target in view, supplying the identifier a preprint does
@@ -58,6 +59,21 @@ only one the other three depend on:
 - **An interactive run is an applying run for its log.** It can move
   files, so its log is mandatory and is named and framed as an applying
   run's, exactly as `--apply`'s is.
+- **A move is recorded before it is made.** The run-log guarantee
+  becomes per-move: each rename event is written and flushed before its
+  file is moved, and a move whose event cannot be written is not made.
+  The whole-plan pre-flush the specifications still describe stopped
+  being possible when `stream-per-file-events` made a run decide one
+  file at a time, and the implementation has written each event after
+  its move since. An interactive run cannot have a whole plan at all, so
+  this change settles the guarantee rather than inheriting a
+  contradiction.
+- **Configuration selects the mode, never the authorisation.**
+  `rename.batch` is read from the run's own configuration, like the
+  settings that decide which services a run queries, because a run is
+  one session with one operator. A `.borax.toml` under an input does not
+  change the mode of a run started outside it, and no configuration can
+  authorise a move.
 
 ## Capabilities
 
@@ -65,10 +81,17 @@ only one the other three depend on:
 
 - `rename`: the preview-by-default requirement is restated as "nothing
   moves without an explicit decision", of which `--apply` is one and a
-  yes to a question naming the target is the other; new requirements
-  for choosing the mode, for the question, and for quitting.
-- `cli`: `rename` and `config` accept the `--batch` / `--no-batch` pair.
-- `run-logs`: an interactive rename run is logged as an applying run.
+  yes to a question naming the target is the other; the run-log
+  requirement states the per-move guarantee below; new requirements for
+  choosing the mode, for the question, and for quitting.
+- `cli`: `rename` and `config` accept the `--batch` / `--no-batch` pair;
+  the apply gate requirement says what configuration may and may not
+  decide, since "previews remain the default in every configuration" is
+  no longer the way to say it; `rename.batch` joins the settings taken
+  from the run's own configuration.
+- `run-logs`: an applying run records and flushes each move before
+  making it, replacing the whole-plan pre-flush; an interactive rename
+  run is logged as an applying run.
 
 ## Impact
 
@@ -82,7 +105,9 @@ only one the other three depend on:
   adapter for terminals and a scripted one for tests. The unused
   `confirm` is replaced by it.
 - `crates/borax/src/run.rs`: `rename_events` gains the interactive
-  driver — propose, ask, then claim and move, or decline.
+  driver — propose, ask, then claim and move, or decline. `Logging`
+  gains a write that is allowed to fail loudly, and a move is recorded
+  through it before `Applying` carries it out.
 - `crates/borax/src/cli.rs`, `config.rs`: the `batch` pair on `rename`
   and `config`, the `rename.batch` key, and the usage error for
   `--apply --no-batch`.
