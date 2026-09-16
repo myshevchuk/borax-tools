@@ -152,16 +152,26 @@ how to install it, and a handful of examples.
 
     The rule gives this file's position in the run. ~file~ names it as
     the run does: relative to where you started the run, or in full when
-    it lies outside. ~identifier~ is the identifier borax looked up and
-    says whether it came from embedded metadata, the text layer, or an
-    earlier run. It is kept on one line. ~record~ names the service or
-    services that supplied the record.
+    it lies outside. ~identifier~ is the identifier borax looked up
+    and says whether it came from embedded metadata or the text layer.
+    It is kept on one line. ~record~ names the service or services that
+    supplied the record, and adds ~from an earlier run~ when the answer
+    came from the content index rather than from a service asked now —
+    in which case the identifier line says nothing about where the
+    identifier came from, because the index keeps records rather than
+    the identifiers they were reached by.
 
     ~type~, ~title~, ~authors~, ~issued~, and ~in~ come from the record.
     A field the record does not contain is omitted. The author line
     names up to three authors and counts any others. The issued date
     uses as much precision as the record contains. Other long values
     wrap under a hanging indent without being truncated.
+
+    Everything the description quotes from a record or from a file's own
+    metadata is written out rather than acted on, control characters
+    included: a PDF's title is written by whoever made the file, and an
+    escape sequence in one would otherwise be able to redraw the
+    question you are answering.
 
     ~file says~ lists every title found in the file's XMP or document
     information, one per line — including one borax judged a producer's

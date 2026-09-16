@@ -188,6 +188,19 @@ reason is not something a consumer can ignore.
 
 ## Known defects
 
+- **Human output other than the description passes metadata through
+  unescaped.** A file's title reaches the terminal verbatim in the
+  metadata-conflict skip line, which prints the file's title and the
+  record's. A title is written by whoever made the PDF, so an escape
+  sequence in one is acted on by the terminal rather than shown.
+
+  `show-record-before-asking` closed this for the description, where a
+  redrawn question could have taken an answer meant for another file;
+  the skip line asks for no answer, which is why it is a defect rather
+  than the same defect. Closing it properly means escaping every value
+  a rendering takes from a record or a file, in one place, rather than
+  in each line that happens to print one.
+
 - **A sidecar is never moved with its file, so a rename can orphan
   one.** `write_sidecar` writes beside the path the file has when it is
   reached, and no code path renames or removes an existing sidecar when
