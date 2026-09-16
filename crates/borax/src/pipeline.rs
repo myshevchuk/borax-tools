@@ -210,6 +210,66 @@ pub fn resolve_file<C: Cache>(
     })
 }
 
+/// What a file says about itself, read from the file rather than from
+/// a record.
+///
+/// Available without resolving anything, which is what a caller needs
+/// when it is about to compare a record it was handed against the file
+/// it is for: a file the content index answered for was never opened,
+/// and one no identifier was found in was opened but never asked about
+/// its titles.
+///
+/// An unreadable file claims nothing, which is the same answer as a
+/// file carrying no titles: neither is evidence against a record.
+pub fn claims_of(path: &Path, library: &dyn Library) -> Vec<Claim> {
+    let _ = (path, library);
+    todo!("claims_of: the titles the file claims, read on their own")
+}
+
+/// Resolve `identifier` for the file at `path`, as a run resolves one
+/// it found itself.
+///
+/// The same services in the same order, and the same title check
+/// against the file's own claims — but the check is reported rather
+/// than enforced: an identifier a person supplied is a stronger
+/// statement than the heuristic that would refuse it, and what the
+/// caller does about a disagreement is the caller's to decide.
+///
+/// Nothing is written to the content index here. A record reached this
+/// way is a candidate until somebody accepts it, and [`remember`] is
+/// what keeps one that was accepted.
+pub fn resolve_supplied(
+    path: &Path,
+    identifier: &Identifier,
+    library: &dyn Library,
+    sources: &[&dyn Source],
+) -> Result<Supplied, Unresolved> {
+    let _ = (path, identifier, library, sources);
+    todo!("resolve_supplied: resolve, then report rather than enforce the check")
+}
+
+/// A record resolved from an identifier somebody supplied, and what the
+/// file has to say about it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Supplied {
+    pub file: FileRecord,
+    /// The disagreement between the record's title and the file's own,
+    /// where there is one. Reported, never enforced.
+    pub conflict: Option<SkipReason>,
+}
+
+/// Keep `record` as what the file at `hash` is, so that no later run
+/// asks about it again.
+///
+/// Best-effort, as every write to the response cache is: an entry that
+/// cannot be written leaves the file to be asked about next time,
+/// which is the safe way to lose an answer and is never reported as a
+/// failure of the rename it followed.
+pub fn remember<C: Cache>(index: &ContentIndex<C>, hash: Option<&ContentHash>, record: &Record) {
+    let _ = (index, hash, record);
+    todo!("remember: write an accepted record to the content index")
+}
+
 /// Resolve one file, checking `collection` for it on the way.
 ///
 /// [`resolve_file`] with the ledger's two duplicate checks around it,

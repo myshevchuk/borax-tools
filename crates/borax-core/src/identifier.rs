@@ -441,3 +441,20 @@ impl From<Isbn> for String {
         i.0
     }
 }
+
+/// The identifier `input` names, as a person types one.
+///
+/// Tried in order: a DOI in any form extraction accepts, including a
+/// `https://doi.org/…` address pasted from a browser; an arXiv
+/// identifier, old style or new; and — only behind a `pmid:` or
+/// `isbn:` prefix — a PMID or an ISBN. The last two need the prefix
+/// because a bare run of digits is both, and guessing which would be
+/// the one guess this tool does not make.
+///
+/// Returns `None` for text that is none of those, which is the
+/// caller's cue to say so and ask again rather than to send it to a
+/// service.
+pub fn supplied(input: &str) -> Option<Identifier> {
+    let _ = input;
+    todo!("supplied: a DOI, an arXiv identifier, or a prefixed PMID or ISBN")
+}

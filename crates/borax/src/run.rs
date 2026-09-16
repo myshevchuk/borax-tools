@@ -1491,6 +1491,13 @@ fn decided(session: &mut Session<'_>, decision: &PlannedRename, asking: &Asking<
         Answer::Rename => Decided::CarryOut,
         Answer::Skip => Decided::Declined,
         Answer::Quit => Decided::Stop,
+        // A file whose record resolved and whose target is free is
+        // offered none of these yet: the situations that offer them,
+        // and the loop an answer of `Supply` opens, are what
+        // `supply-identifiers-interactively` builds.
+        Answer::Override | Answer::Keep | Answer::Supply | Answer::Retry => {
+            todo!("the answers a supplied identifier makes possible")
+        }
     }
 }
 

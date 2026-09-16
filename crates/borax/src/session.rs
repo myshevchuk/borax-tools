@@ -135,11 +135,35 @@ pub struct Question {
 pub enum Answer {
     /// Carry out the move the question named.
     Rename,
+    /// Carry it out although the record's title and the file's own
+    /// disagree. Offered only where they do, never the default, and
+    /// never given by anything but a person.
+    Override,
+    /// Leave the file with the name it has, which is already the name
+    /// its record implies. Offered where there was no move to make.
+    Keep,
+    /// Say what the file is, and decide again from the record that
+    /// identifier resolves to.
+    Supply,
+    /// Try the same lookup again, where what failed was the asking
+    /// rather than the answer.
+    Retry,
     /// Leave the file as it is and go on to the next.
     Skip,
     /// End the run here, leaving this file and every file after it
     /// untouched.
     Quit,
+}
+
+/// A request for text rather than a choice: what is being asked for,
+/// and what to say about the last answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextPrompt {
+    /// What is wanted, as one line.
+    pub asking: String,
+    /// What was wrong with the last attempt, where there was one. Shown
+    /// above the prompt so the operator reads it before typing again.
+    pub refused: Option<String>,
 }
 
 /// Where an interactive run's questions are put and answered.
@@ -155,6 +179,14 @@ pub trait Asker {
     /// answers [`Answer::Quit`], which is the answer that touches
     /// nothing further.
     fn choose(&mut self, question: &Question) -> Answer;
+
+    /// Ask for an identifier, and return what was typed.
+    ///
+    /// `None` is the operator declining to answer — an empty line, or
+    /// an escape — which leaves the file exactly as the question found
+    /// it. What comes back is text and not an identifier: the run
+    /// parses it, and says so again when it is not one.
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String>;
 }
 
 /// One invocation's relationship with its operator: which mode it runs
@@ -245,6 +277,10 @@ impl fmt::Display for Choice {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self.0 {
             Answer::Rename => "Rename",
+            Answer::Override => "Rename anyway",
+            Answer::Keep => "Keep this name",
+            Answer::Supply => "Supply an identifier",
+            Answer::Retry => "Try again",
             Answer::Skip => "Skip",
             Answer::Quit => "Quit",
         })
@@ -298,5 +334,16 @@ impl Asker for TerminalAsker {
             Ok(choice) => choice.0,
             Err(_) => Answer::Quit,
         }
+    }
+
+    /// Ask for a line of text, and return it with its edges trimmed.
+    ///
+    /// An empty line and an interrupted prompt are both `None`: the
+    /// operator declining to answer leaves the file as the question
+    /// found it, which is what an unanswered question has always
+    /// meant.
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
+        let _ = prompt;
+        todo!("text: draw the refusal, ask for a line, and trim it")
     }
 }

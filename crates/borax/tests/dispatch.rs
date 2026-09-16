@@ -19,7 +19,7 @@ use borax::ledger::{Ledger, Loaded};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError, counts_for};
 use borax::run::{Adapters, Configs, Streams, dispatch, entry_type, events_for, templates};
-use borax::session::{Answer, Asker, Outcome, Question, Session};
+use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -2644,6 +2644,12 @@ impl Asker for ScriptedAsker {
             )
         })
     }
+
+    /// This change puts no text prompt; a double that is asked for one
+    /// fails the test rather than inventing an answer.
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
+        panic!("asked for text, which no question here puts: {prompt:?}")
+    }
 }
 
 /// A [`Ledger`] fake recording every `append`, following the shape of
@@ -3666,6 +3672,12 @@ impl Asker for ObservingAsker {
         self.answers.next().unwrap_or_else(|| {
             panic!("asked more questions than were scripted; question was {question:?}")
         })
+    }
+
+    /// This change puts no text prompt; a double that is asked for one
+    /// fails the test rather than inventing an answer.
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
+        panic!("asked for text, which no question here puts: {prompt:?}")
     }
 }
 
