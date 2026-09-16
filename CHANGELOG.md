@@ -43,6 +43,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `skipped` accepts the new reason `declined`, and the counts in
   `run-finished` include `unreached`. Questions are not events.
 
+- **BREAKING:** The JSONL event schema version is now 2. An already-named
+  file is no longer a `skipped` event with reason `already-named`; it is
+  an `already-named` event carrying the file's path. The counts in
+  `run-finished` now include `named`.
+
+  Already-named files are counted separately from skipped files in human
+  output too, and no longer cause the partial-success exit code. A run
+  over a collection in which every file already has its rendered name
+  exits with code 0.
+
+- The new Boolean setting `rename.skip-named`, exposed as `--skip-named`
+  and `--no-skip-named` on `rename` and `config`, defaults to `true` and
+  affects interactive runs only. With it on, an interactive run shows no
+  resolution line, outcome line, or question for an already-named file;
+  the summary reports how many were not shown. With it off, those files
+  are reported as they are in a batch, but are still not offered a
+  question. Batch output, JSONL output, run logs, and bibliography output
+  are unchanged by this setting.
+
+- A ledger entry that records the incoming file at its own path no longer
+  makes that file a content or work duplicate of itself. The lookup keeps
+  going past that entry, so it still finds a real second copy recorded
+  elsewhere in the collection.
+
+- A rendered subdirectory is now filed from the collection root instead
+  of from the file's current directory. Re-running a filed collection
+  therefore changes nothing, and a changed journal moves a file across
+  to the new journal directory rather than one level deeper. Outside a
+  collection, the file's current directory remains the base. A rendered
+  name without a subdirectory still leaves the file in its current
+  directory.
+
+  Collisions are detected across every file a run sends to the same
+  directory, including files arriving from different directories and in
+  both previews and applying runs. Under the suffix policy, a candidate
+  equal to the file's own name is now already named rather than a move
+  onto itself.
+
 - The README is now an introduction rather than a reference: what borax
   is for, a few worked examples, how to install it, how to build it,
   and where everything else is. The reference material it used to

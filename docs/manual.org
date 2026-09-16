@@ -2,6 +2,7 @@
 #+SUBTITLE: Resolving, renaming and citing a collection of papers
 #+AI_MODEL: claude-opus-5
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 08:32] -- interactive rename
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 17:28]
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -53,6 +54,16 @@ how to install it, and a handful of examples.
   as prose or, with ~--json~, as one JSON object per line. That stream
   is the integration contract, and it is what a run log holds.
 
+  The closing summary counts each outcome separately:
+
+  #+begin_example
+    3 resolved, 1 renamed, 0 skipped, 12 already named
+  #+end_example
+
+  A file that already carries the name its record implies is successful,
+  not skipped. It does not cause the partial-success exit code, 2. A run
+  over a collection in which every file is already named exits 0.
+
 * Commands
 
   Every command that works on files takes paths. A directory contributes
@@ -94,6 +105,8 @@ how to install it, and a handful of examples.
    ~--apply~ selects a batch and moves every file its plan names, just as
    it did before interactive renaming was added. A redirected, piped,
    cron, or ~--json~ run is always a batch and never asks a question.
+   A batch reports every file already carrying its rendered name as
+   ~already named~.
 
    Use ~--no-batch~ to override a configured batch default when you want
    questions at a terminal. ~--apply --no-batch~ is a usage error naming
@@ -136,10 +149,28 @@ how to install it, and a handful of examples.
     produces the same name, borax offers that name without a suffix. A
     name is claimed only after you accept its move.
 
-    Files with no move to decide are reported without a question. This
-    includes a file that already carries its rendered name, a target
-    taken under the ~skip~ collision policy, a record that renders no
-    name, and a file that did not resolve.
+    By default, an interactive run passes over a file that already
+    carries its rendered name without showing its resolution, outcome,
+    or a question. The summary still accounts for it:
+
+    #+begin_example
+      12 resolved, 0 renamed, 0 skipped, 12 already named (not shown)
+    #+end_example
+
+    If the run hides only some already-named files, the clause gives the
+    number, for example ~12 already named (4 not shown)~. Use
+    ~--no-skip-named~ to show these files as a batch does. They are still
+    never offered a question. This setting changes only an interactive
+    run; a batch always reports every file.
+
+    Passing over a file changes only what the terminal shows. The JSONL
+    event stream and run log still contain all of its events.
+    Bibliography output is also still shown, including a sidecar written
+    beside the file, a master ~.bib~ merge, or a failure to write either.
+
+    Other files with no move to decide are reported without a question.
+    This includes a target taken under the ~skip~ collision policy, a
+    record that renders no name, and a file that did not resolve.
 
     Choose ~Quit~, press Ctrl-C, or press Esc to end the session. The
     file at that question and every later file stay untouched and are
@@ -206,6 +237,12 @@ how to install it, and a handful of examples.
    notice that a file, or the work it reports, is already in the
    collection, and it can always be rebuilt from the collection.
 
+   A ledger entry for the incoming file at its own path does not make
+   that file a duplicate of itself, whether the content or the resolved
+   work matches. borax passes over that entry and keeps looking, so a
+   genuine second copy recorded elsewhere in the collection is still
+   reported as a duplicate.
+
 * Settings
 
 ** Where a setting can be set
@@ -240,22 +277,23 @@ how to install it, and a handful of examples.
 
 ** The settings
 
-   | Key                       | Flag                         | Default   |
-   |---------------------------+------------------------------+-----------|
-   | ~bib.duplicates~          | ~--duplicates~               | ~skip~    |
-   | ~bib.path~                | ~--bib~                      | unset     |
-   | ~bib.sidecars~            | ~--sidecars~/~--no-sidecars~ | ~false~   |
-   | ~collection-root~         | none                         | unset     |
-   | ~extraction.page-limit~   | ~--page-limit~               | ~3~       |
-   | ~ledger~                  | ~--ledger~/~--no-ledger~     | ~true~    |
-   | ~mailto~                  | ~--mailto~                   | unset     |
-   | ~network.cache~           | ~--cache~/~--no-cache~       | ~true~    |
-   | ~network.concurrency~     | ~--concurrency~              | ~4~       |
-   | ~network.min-interval-ms~ | ~--min-interval-ms~          | ~100~     |
-   | ~rename.batch~            | ~--batch~/~--no-batch~       | ~false~   |
-   | ~rename.collision~        | ~--collision~                | ~suffix~  |
-   | ~run-log~                 | ~--run-log~/~--no-run-log~   | ~true~    |
-   | ~sources~                 | ~--sources~                  | all three |
+   | Key                       | Flag                                | Default   |
+   |---------------------------+-------------------------------------+-----------|
+   | ~bib.duplicates~          | ~--duplicates~                      | ~skip~    |
+   | ~bib.path~                | ~--bib~                             | unset     |
+   | ~bib.sidecars~            | ~--sidecars~/~--no-sidecars~        | ~false~   |
+   | ~collection-root~         | none                                | unset     |
+   | ~extraction.page-limit~   | ~--page-limit~                      | ~3~       |
+   | ~ledger~                  | ~--ledger~/~--no-ledger~            | ~true~    |
+   | ~mailto~                  | ~--mailto~                          | unset     |
+   | ~network.cache~           | ~--cache~/~--no-cache~              | ~true~    |
+   | ~network.concurrency~     | ~--concurrency~                     | ~4~       |
+   | ~network.min-interval-ms~ | ~--min-interval-ms~                 | ~100~     |
+   | ~rename.batch~            | ~--batch~/~--no-batch~              | ~false~   |
+   | ~rename.collision~        | ~--collision~                       | ~suffix~  |
+   | ~rename.skip-named~       | ~--skip-named~/~--no-skip-named~   | ~true~    |
+   | ~run-log~                 | ~--run-log~/~--no-run-log~          | ~true~    |
+   | ~sources~                 | ~--sources~                         | all three |
 
    - ~bib.duplicates~ :: What to do with an entry already in the master
      ~.bib~: ~skip~ or ~update~.
@@ -291,6 +329,11 @@ how to install it, and a handful of examples.
      true~ key in a configuration file remains a load-time error.
    - ~rename.collision~ :: What to do when two files want one name:
      ~suffix~ or ~skip~.
+   - ~rename.skip-named~ :: Whether an interactive rename passes over
+     files that already carry their rendered names. It is ~true~ by
+     default. The flag pair is available on ~rename~ and ~config~ only.
+     ~--no-skip-named~ shows these files, but does not ask about them.
+     This setting does not affect a batch run.
    - ~run-log~ :: Whether a run writes its event stream to a log. An
      applying rename writes one regardless; see [[*Run logs][Run logs]].
    - ~sources~ :: Which services may be asked, comma-separated:
@@ -337,9 +380,10 @@ how to install it, and a handful of examples.
    Every configurable boolean is offered as a pair of flags —
    ~--cache~/~--no-cache~, ~--sidecars~/~--no-sidecars~,
    ~--ledger~/~--no-ledger~, ~--batch~/~--no-batch~,
-   ~--run-log~/~--no-run-log~ — which is how a flag that takes no value
-   says all three things: on, off, and silent. Naming both halves of a
-   pair is a parse error rather than a last-one-wins guess.
+   ~--skip-named~/~--no-skip-named~, and
+   ~--run-log~/~--no-run-log~ — which is how a flag that takes no
+   value says all three things: on, off, and silent. Naming both halves
+   of a pair is a parse error rather than a last-one-wins guess.
 
 * The template language
 
@@ -513,8 +557,29 @@ how to install it, and a handful of examples.
    #+end_example
 
    renders ~2024/smith2024_AwesomePaper~, and borax creates the ~2024~
-   directory if it is not already there. The path is relative to the
-   directory the file is already in.
+   directory if it is not already there.
+
+   Inside a collection, the rendered path is relative to the collection
+   root. This is the directory holding the ~.borax.toml~ that supplied
+   the run's configuration, or the directory selected by the
+   ~collection-root~ setting. A template such as
+   ~[journal]/[auth][year]~ therefore files a paper into ~Nature/~
+   wherever the PDF currently sits in the collection. Re-running over
+   the collection changes nothing. If the journal later renders as
+   ~Science~, borax moves the file across into ~Science/~ rather than
+   deeper into ~Nature/Science/~.
+
+   When a run has no collection root, a rendered subdirectory is
+   relative to the file's current directory, as before. Such a run is
+   not idempotent when the template contains a subdirectory. In either
+   case, a rendered name containing no ~/~ renames the file where it
+   already sits.
+
+   Collisions are checked in the directory where the files will land,
+   across every file the run sends there and in both preview and applying
+   runs. Under the ~suffix~ policy, reaching the file's own current name
+   means it is already named; borax never proposes a move onto that same
+   name.
 
 ** Sanitization
 
@@ -927,7 +992,9 @@ how to install it, and a handful of examples.
   that led to it. ~run-started~ includes the Boolean ~interactive~; an
   interactive run also reports ~applying: true~. A declined proposal is
   a ~skipped~ event with reason ~declined~, and the counts in
-  ~run-finished~ include ~unreached~.
+  ~run-finished~ include ~unreached~. An already-named file produces an
+  ~already-named~ event carrying its path rather than a ~skipped~ event,
+  and the counts include ~named~. The event schema version is 2.
 
 ** Recovering the names a run replaced
 
@@ -941,7 +1008,7 @@ how to install it, and a handful of examples.
 
    #+begin_example
      {
-       "schema": 1,
+       "schema": 2,
        "event": "renamed",
        "path": "/papers/reviewed-final.pdf",
        "target": "/papers/smith2024_AwesomePaperBorax.pdf",
