@@ -1,5 +1,5 @@
-use borax::event::Counts;
-use borax::session::{FATAL, Outcome, PARTIAL, SUCCESS, outcome_for};
+use borax::event::{Counts, Format};
+use borax::session::{FATAL, Mode, Outcome, PARTIAL, SUCCESS, mode, outcome_for};
 
 // ---------------------------------------------------------------------
 // Outcome::code
@@ -133,4 +133,74 @@ fn outcome_for_eight_resolved_and_two_skipped_is_partial() {
     let outcome = outcome_for(&counts);
 
     assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
+}
+
+// ---------------------------------------------------------------------
+// mode: design D1 — batch := apply || setting(batch) || !terminal ||
+// json
+// ---------------------------------------------------------------------
+
+/// The one combination that is interactive: a terminal, human output,
+/// no `--apply`, and `batch` off — the default.
+#[test]
+fn a_terminal_with_human_output_no_apply_and_batch_off_is_interactive() {
+    let result = mode(true, Format::Human, false, false);
+    assert_eq!(result, Mode::Interactive, "got {result:?}");
+}
+
+#[test]
+fn apply_selects_batch_on_a_terminal_with_batch_off() {
+    let result = mode(true, Format::Human, false, true);
+    assert_eq!(result, Mode::Batch, "got {result:?}");
+}
+
+#[test]
+fn the_batch_setting_alone_selects_batch_on_a_terminal() {
+    let result = mode(true, Format::Human, true, false);
+    assert_eq!(result, Mode::Batch, "got {result:?}");
+}
+
+#[test]
+fn no_batch_explicitly_set_still_asks_on_a_terminal_with_no_apply() {
+    // `batch` off is the setting's default, so this is the same input as
+    // the first case, pinned separately because it is the scenario
+    // `--no-batch` on the command line produces.
+    let result = mode(true, Format::Human, false, false);
+    assert_eq!(result, Mode::Interactive, "got {result:?}");
+}
+
+#[test]
+fn a_redirected_stdin_is_batch_even_with_no_apply_and_batch_off() {
+    let result = mode(false, Format::Human, false, false);
+    assert_eq!(result, Mode::Batch, "got {result:?}");
+}
+
+#[test]
+fn json_output_is_batch_even_on_a_terminal_with_no_apply_and_batch_off() {
+    let result = mode(true, Format::Json, false, false);
+    assert_eq!(result, Mode::Batch, "got {result:?}");
+}
+
+#[test]
+fn json_and_a_redirected_stdin_together_are_still_batch() {
+    let result = mode(false, Format::Json, false, false);
+    assert_eq!(result, Mode::Batch, "got {result:?}");
+}
+
+#[test]
+fn apply_selects_batch_even_off_a_terminal() {
+    let result = mode(false, Format::Json, false, true);
+    assert_eq!(result, Mode::Batch, "got {result:?}");
+}
+
+#[test]
+fn the_batch_setting_and_apply_together_are_batch() {
+    let result = mode(true, Format::Human, true, true);
+    assert_eq!(result, Mode::Batch, "got {result:?}");
+}
+
+#[test]
+fn every_disqualifying_input_off_a_terminal_with_json_batch_and_apply_all_set_is_batch() {
+    let result = mode(false, Format::Json, true, true);
+    assert_eq!(result, Mode::Batch, "got {result:?}");
 }

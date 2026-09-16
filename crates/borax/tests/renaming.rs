@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 use borax::event::{Counts, Event, SkipReason};
 use borax::pipeline::FileRecord;
 use borax::renaming::{
-    Applying, Filesystem, PlannedRename, RealFilesystem, RenameError, apply_renames, counts_for,
-    plan_renames, target_name,
+    Applying, Filesystem, PlannedRename, Planning, RealFilesystem, RenameError, apply_renames,
+    counts_for, plan_renames, target_name,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::record::{DateParts, EntryType, Name, Record};
@@ -1342,6 +1342,143 @@ fn several_unrecordable_files_in_one_batch_are_each_skipped_independently() {
         ]
     );
     assert!(filesystem.renames().is_empty());
+}
+
+// ---------------------------------------------------------------------
+// 1.4: Planning::propose / Planning::accept
+// ---------------------------------------------------------------------
+
+/// `propose` decides exactly as `plan` does and claims nothing: a
+/// proposal that is never accepted leaves the next file's collision
+/// target unsuffixed, exactly as though the proposing file had never
+/// been in the batch.
+#[test]
+fn propose_decides_the_same_target_plan_would_and_does_not_claim_it() {
+    let templates = table("[auth][year]");
+    let filesystem = FakeFilesystem::new();
+    let mut planning = Planning::new(
+        Path::new("/lib"),
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+    );
+
+    let (path_a, file_a) = resolved("/lib/a.pdf", record_by("Smith", 2024), None);
+    let (path_b, file_b) = resolved("/lib/b.pdf", record_by("Smith", 2024), None);
+
+    let proposed = planning.propose(&path_a, &file_a, &mut no_tables());
+    assert_eq!(proposed, rename("/lib/a.pdf", "/lib/Smith2024.pdf"));
+
+    // `proposed` is never accepted, so `b.pdf`'s target is unsuffixed —
+    // exactly as though `a.pdf` had never proposed anything.
+    let second = planning.propose(&path_b, &file_b, &mut no_tables());
+    assert_eq!(
+        second,
+        rename("/lib/b.pdf", "/lib/Smith2024.pdf"),
+        "a proposal that is never accepted must not suffix a later file's target"
+    );
+}
+
+/// `accept` claims the target a proposed `Rename` names, so a later file
+/// colliding with it is suffixed exactly as `plan` would suffix it.
+#[test]
+fn accept_claims_a_proposed_renames_target_for_later_files() {
+    let templates = table("[auth][year]");
+    let filesystem = FakeFilesystem::new();
+    let mut planning = Planning::new(
+        Path::new("/lib"),
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+    );
+
+    let (path_a, file_a) = resolved("/lib/a.pdf", record_by("Smith", 2024), None);
+    let (path_b, file_b) = resolved("/lib/b.pdf", record_by("Smith", 2024), None);
+
+    let proposed = planning.propose(&path_a, &file_a, &mut no_tables());
+    planning.accept(&proposed);
+    let second = planning.propose(&path_b, &file_b, &mut no_tables());
+
+    assert_eq!(
+        second,
+        rename("/lib/b.pdf", "/lib/Smith2024a.pdf"),
+        "got {second:?}"
+    );
+}
+
+/// The batch `plan_renames` results are unchanged by the split: driving
+/// `propose` immediately followed by `accept` across a group reproduces
+/// `plan_renames` exactly, including a target reached in a subdirectory
+/// — which is what proves the lazy widening `Planning::reach` performs
+/// still runs during `propose`, not only during `accept`.
+#[test]
+fn propose_then_accept_for_every_file_reproduces_plan_renames_including_a_subdirectory_target() {
+    let resolved_files = [
+        resolved("/lib/a.pdf", record_by("Smith", 2024), None),
+        resolved("/lib/b.pdf", record_by("Smith", 2024), None),
+    ];
+    let templates = table("sub/[auth][year]");
+    let filesystem =
+        FakeFilesystem::new().with_existing("/lib/sub", [("Smith2024.pdf", Some("other-hash"))]);
+
+    let expected = plan_renames(
+        &resolved_files,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
+
+    let mut planning = Planning::new(
+        Path::new("/lib"),
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+    );
+    let mut got = Vec::new();
+    for (path, file) in &resolved_files {
+        let decision = planning.propose(path, file, &mut no_tables());
+        planning.accept(&decision);
+        got.push(decision);
+    }
+
+    assert_eq!(got, expected, "got {got:?}");
+    assert_eq!(
+        got,
+        vec![
+            rename("/lib/a.pdf", "/lib/sub/Smith2024a.pdf"),
+            rename("/lib/b.pdf", "/lib/sub/Smith2024b.pdf"),
+        ],
+        "got {got:?}"
+    );
+}
+
+/// Accepting a decision that is not a `Rename` claims nothing new: the
+/// target it named — never taken in the first place — is still free to
+/// the next file.
+#[test]
+fn accepting_an_already_named_decision_claims_nothing() {
+    let templates = table("[auth][year]");
+    let filesystem = FakeFilesystem::new();
+    let mut planning = Planning::new(
+        Path::new("/lib"),
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+    );
+
+    let (path, file) = resolved("/lib/Smith2024.pdf", record_by("Smith", 2024), None);
+    let decision = planning.propose(&path, &file, &mut no_tables());
+    assert_eq!(decision, already_named("/lib/Smith2024.pdf"));
+    planning.accept(&decision);
+
+    let (other_path, other_file) = resolved("/lib/other.pdf", record_by("Smith", 2024), None);
+    let second = planning.propose(&other_path, &other_file, &mut no_tables());
+    assert_eq!(
+        second,
+        rename("/lib/other.pdf", "/lib/Smith2024.pdf"),
+        "an already-named decision must not have claimed its own name"
+    );
 }
 
 /// Recording is now just reporting: a file that fails to move after its

@@ -27,7 +27,7 @@ use borax::ledger::{FileLedger, Ledger};
 use borax::pipeline::RealLibrary;
 use borax::renaming::RealFilesystem;
 use borax::run::{Adapters, Configs, Streams, dispatch};
-use borax::session::Outcome;
+use borax::session::{Outcome, Session};
 use borax_sources::arxiv::ArxivClient;
 use borax_sources::cache::MemoryCache;
 use borax_sources::crossref::CrossrefClient;
@@ -310,6 +310,7 @@ fn invoke(
             // for the XDG state directory.
             state_root: Some(state.to_path_buf()),
         },
+        &mut Session::batch(),
         &mut Streams {
             out: &mut out,
             err: &mut err,

@@ -1190,6 +1190,84 @@ fn no_run_log_alone_sets_run_log_false() {
     );
 }
 
+// ---------------------------------------------------------------------
+// 2.2: the `--batch` / `--no-batch` pair belongs to `rename` and
+// `config`, like every other setting the "subcommand accepts only the
+// settings it consumes" requirement governs.
+// ---------------------------------------------------------------------
+
+#[test]
+fn rename_batch_parses() {
+    let cli = parse(&["rename", "--batch", "f.pdf"]);
+    assert!(cli.settings().batch, "got {:?}", cli.settings());
+}
+
+#[test]
+fn rename_no_batch_parses() {
+    let cli = parse(&["rename", "--no-batch", "f.pdf"]);
+    assert!(cli.settings().no_batch, "got {:?}", cli.settings());
+}
+
+#[test]
+fn config_batch_parses() {
+    let cli = parse(&["config", "--batch"]);
+    assert!(cli.settings().batch, "got {:?}", cli.settings());
+}
+
+#[test]
+fn config_no_batch_parses() {
+    let cli = parse(&["config", "--no-batch"]);
+    assert!(cli.settings().no_batch, "got {:?}", cli.settings());
+}
+
+#[test]
+fn resolve_refuses_batch_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "resolve", "--batch", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--batch"), "got {message:?}");
+}
+
+#[test]
+fn bib_refuses_batch_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "bib", "--batch", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--batch"), "got {message:?}");
+}
+
+/// design D1: "`--apply --no-batch` refused as a usage error before the
+/// run starts" — the pair asks both for a plan carried out unasked and
+/// for every move to be asked about, so it is refused rather than
+/// silently resolved one way or the other.
+#[test]
+fn rename_refuses_apply_and_no_batch_together() {
+    let result =
+        <Cli as Parser>::try_parse_from(["borax", "rename", "--apply", "--no-batch", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.contains("--apply") && message.contains("--no-batch"),
+        "got {message:?}"
+    );
+}
+
+#[test]
+fn rename_refuses_batch_and_no_batch_together() {
+    let result =
+        <Cli as Parser>::try_parse_from(["borax", "rename", "--batch", "--no-batch", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.contains("--batch") && message.contains("--no-batch"),
+        "got {message:?}"
+    );
+}
+
 #[test]
 fn run_log_and_no_run_log_together_is_a_parse_error() {
     let result = <Cli as Parser>::try_parse_from(["borax", "config", "--run-log", "--no-run-log"]);

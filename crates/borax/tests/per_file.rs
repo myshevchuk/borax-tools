@@ -28,6 +28,7 @@ use borax::event::{Event, SkipReason};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, events_for};
+use borax::session::Session;
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
@@ -446,6 +447,7 @@ fn each_files_resolution_plan_and_sidecar_are_adjacent_in_input_order() {
         ),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -553,6 +555,7 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_in_preview() {
         ),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -631,6 +634,7 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
         ),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -776,7 +780,13 @@ fn a_parent_and_its_subdirectory_report_as_two_uninterleaved_groups_each_under_i
         state_root: None,
     };
 
-    let events = events_for(&Command::rename(paths.clone(), false), &configs, &adapters).unwrap();
+    let events = events_for(
+        &Command::rename(paths.clone(), false),
+        &configs,
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
 
     // The parent group (first reached, through `a`) is reported whole
     // before the subdirectory group, and within each group `a` precedes
@@ -893,6 +903,7 @@ fn master_bib_entries_trail_every_files_resolve_plan_and_sidecar_block_in_input_
         &Command::rename(vec![paper1.clone(), paper2.clone(), paper3.clone()], false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 

@@ -777,3 +777,140 @@ fn planner_reports_a_twin_as_already_named() {
         PlannedAction::AlreadyNamed
     );
 }
+
+// ---------------------------------------------------------------------
+// 1.1/1.2: Planner::propose / Planner::claim — deciding without
+// claiming, and claiming what was proposed
+// ---------------------------------------------------------------------
+
+/// `propose` decides exactly as `plan` does for every case the batch
+/// planner is held to, over a fresh planner each time so a proposal
+/// never claims anything.
+#[test]
+fn propose_decides_the_same_way_plan_does_for_every_scenario() {
+    for scenario in scenarios() {
+        let planner = Planner::new(scenario.existing.clone());
+        for item in &scenario.items {
+            let proposed = planner.propose(item, scenario.policy);
+            let decided = Planner::new(scenario.existing.clone())
+                .plan(item, scenario.policy)
+                .action;
+            assert_eq!(
+                proposed.action, decided,
+                "{}: propose disagreed with plan for a lone item",
+                scenario.name
+            );
+        }
+    }
+}
+
+/// A proposal claims nothing: proposing the same colliding target twice
+/// yields the same unsuffixed name both times, where `plan` would have
+/// suffixed the second call.
+#[test]
+fn propose_leaves_the_claim_set_untouched_so_the_same_target_proposed_twice_is_unsuffixed_both_times()
+ {
+    let planner = Planner::new(snapshot(&[]));
+
+    let first = planner.propose(&input("a.pdf", "t.pdf", "h1"), CollisionPolicy::Suffix);
+    let second = planner.propose(&input("b.pdf", "t.pdf", "h2"), CollisionPolicy::Suffix);
+
+    assert_eq!(
+        first.action,
+        PlannedAction::Rename {
+            to: "t.pdf".to_string()
+        }
+    );
+    assert_eq!(
+        second.action,
+        PlannedAction::Rename {
+            to: "t.pdf".to_string()
+        },
+        "a proposal must not claim the name the first proposal named"
+    );
+}
+
+/// `claim` after `propose` yields exactly what `plan` yields: deciding
+/// and claiming apart is the same as doing both at once.
+#[test]
+fn claim_after_propose_reproduces_what_plan_would_have_decided() {
+    let mut incremental = Planner::new(snapshot(&[]));
+    let mut whole = Planner::new(snapshot(&[]));
+
+    let item = input("a.pdf", "smith2024.pdf", "h1");
+    let proposed = incremental.propose(&item, CollisionPolicy::Suffix);
+    incremental.claim(&proposed);
+    let decided = whole.plan(&item, CollisionPolicy::Suffix);
+
+    assert_eq!(proposed, decided, "got {proposed:?}");
+}
+
+/// A proposal that is never claimed leaves a later file's collision
+/// target unsuffixed, exactly as though the proposing file had not been
+/// in the batch.
+#[test]
+fn a_proposal_never_claimed_leaves_a_later_targets_suffix_unaffected() {
+    let mut planner = Planner::new(snapshot(&[]));
+
+    let declined = planner.propose(
+        &input("a.pdf", "smith2024.pdf", "h1"),
+        CollisionPolicy::Suffix,
+    );
+    // `declined` is never claimed.
+    let second = planner.plan(
+        &input("b.pdf", "smith2024.pdf", "h2"),
+        CollisionPolicy::Suffix,
+    );
+
+    assert_eq!(
+        second.action,
+        PlannedAction::Rename {
+            to: "smith2024.pdf".to_string()
+        },
+        "a declined proposal must not suffix the next file's target: got {declined:?} then {second:?}"
+    );
+}
+
+/// Claiming a proposed rename records exactly the name it names, so a
+/// later item colliding with it is suffixed.
+#[test]
+fn claiming_a_proposed_rename_reserves_its_target_for_later_items() {
+    let mut planner = Planner::new(snapshot(&[]));
+
+    let accepted = planner.propose(
+        &input("a.pdf", "smith2024.pdf", "h1"),
+        CollisionPolicy::Suffix,
+    );
+    planner.claim(&accepted);
+    let second = planner.plan(
+        &input("b.pdf", "smith2024.pdf", "h2"),
+        CollisionPolicy::Suffix,
+    );
+
+    assert_eq!(
+        second.action,
+        PlannedAction::Rename {
+            to: "smith2024a.pdf".to_string()
+        },
+        "got {second:?}"
+    );
+}
+
+/// Claiming something other than a `Rename` — `AlreadyNamed` or `Skip`
+/// — claims nothing the snapshot did not already hold.
+#[test]
+fn claiming_a_skip_reserves_nothing_new() {
+    let mut planner = Planner::new(snapshot(&[]));
+
+    let skipped = planner.propose(&input("a.pdf", "t.pdf", "h1"), CollisionPolicy::Skip);
+    planner.claim(&skipped);
+    let free_again = planner.propose(&input("b.pdf", "t.pdf", "h2"), CollisionPolicy::Suffix);
+
+    assert_eq!(
+        free_again.action,
+        PlannedAction::Rename {
+            to: "t.pdf".to_string()
+        },
+        "got {free_again:?}"
+    );
+}

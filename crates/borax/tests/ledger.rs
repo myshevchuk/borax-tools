@@ -15,7 +15,7 @@ use borax::ledger::{
 use borax::pipeline::{FileRecord, Library};
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Streams, dispatch, events_for};
-use borax::session::Outcome;
+use borax::session::{Outcome, Session};
 use borax_core::bib_output::sidecar;
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
@@ -1137,6 +1137,7 @@ fn a_content_duplicate_is_skipped_with_the_existing_files_full_path_and_the_sour
         &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1199,6 +1200,7 @@ fn a_work_duplicate_is_skipped_with_the_work_reason() {
         &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1261,6 +1263,7 @@ fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
         &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1336,6 +1339,7 @@ fn a_stale_duplicate_warns_that_the_ledger_holds_stale_entries() {
         &cli(Command::rename(vec![path.clone()], false), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1416,6 +1420,7 @@ fn a_live_duplicate_emits_no_stale_warning() {
         &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1474,6 +1479,7 @@ fn no_match_emits_no_stale_warning() {
         &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1543,6 +1549,7 @@ fn several_stale_duplicates_in_one_run_still_produce_exactly_one_warning() {
         &cli(Command::rename(vec![first, second], false), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1614,6 +1621,7 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
         &Command::rename(vec![path.clone()], true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1695,6 +1703,7 @@ fn a_preview_run_appends_nothing_to_the_ledger_even_when_it_plans_a_rename() {
         &Command::rename(vec![path], false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1760,6 +1769,7 @@ fn a_disabled_ledger_neither_checks_nor_appends() {
         &Command::rename(vec![path], true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1818,6 +1828,7 @@ fn outside_a_collection_the_run_checks_nothing_appends_nothing_and_warns_nothing
         &cli(Command::rename(vec![path], false), false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1874,6 +1885,7 @@ fn an_absent_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
         &cli(Command::rename(vec![path.clone()], false), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1945,6 +1957,7 @@ fn an_unparsable_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
         &cli(Command::rename(vec![path.clone()], false), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -2016,6 +2029,7 @@ fn a_content_duplicate_skip_counts_toward_a_partial_outcome() {
         &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -2081,6 +2095,7 @@ fn rebuild_replaces_the_ledger_with_one_entry_per_scanned_file_and_reports_the_c
         },
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -2145,6 +2160,7 @@ fn rebuild_compacts_away_entries_for_files_no_longer_on_disk() {
         },
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -2203,10 +2219,22 @@ fn rebuilding_an_unchanged_collection_twice_through_dispatch_is_byte_identical()
         action: LedgerAction::rebuild(),
     };
 
-    events_for(&command, &Configs::uniform(effective.clone()), &adapters).unwrap();
+    events_for(
+        &command,
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
     let first = std::fs::read(&ledger_path).unwrap();
 
-    events_for(&command, &Configs::uniform(effective), &adapters).unwrap();
+    events_for(
+        &command,
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
     let second = std::fs::read(&ledger_path).unwrap();
 
     assert_eq!(
@@ -2266,6 +2294,7 @@ fn rebuild_skips_files_scan_collection_would_not_count() {
         },
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -2333,6 +2362,7 @@ fn rebuild_outside_a_collection_is_refused_and_writes_nothing() {
         ),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -2404,6 +2434,7 @@ fn a_failing_replace_refuses_the_run_rather_than_reporting_a_clean_rebuild() {
         ),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -2462,6 +2493,7 @@ fn a_disabled_ledger_setting_does_not_prevent_a_rebuild() {
         },
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -2530,6 +2562,7 @@ fn dispatching_a_rebuild_writes_ledger_rebuilt_on_stdout_carrying_the_schema_fie
         ),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 

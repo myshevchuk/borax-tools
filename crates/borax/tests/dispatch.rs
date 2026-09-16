@@ -13,13 +13,15 @@ use borax::config::{
     BibLayer, Effective, KeyColumns, Layer, Origin, TableDeclaration, ValueKindName, resolve,
 };
 use borax::event::{Event, Level, SkipReason};
+use borax::ledger::{Ledger, Loaded};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError, counts_for};
 use borax::run::{Adapters, Configs, Streams, dispatch, entry_type, events_for, templates};
-use borax::session::Outcome;
+use borax::session::{Answer, Asker, Outcome, Question, Session};
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
+use borax_core::ledger::{Entry, Index, RunId};
 use borax_core::record::{DateParts, EntryType, Name, Record};
 use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
 use borax_core::template::RenderInput;
@@ -780,6 +782,7 @@ fn config_emits_one_config_setting_event_per_setting_matching_effective_events()
         &Command::config(),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -821,6 +824,7 @@ fn cache_status_without_clear_emits_a_single_cache_status_event() {
         &Command::cache(false),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -859,6 +863,7 @@ fn cache_clear_emits_a_single_cache_cleared_event_and_empties_the_directory() {
         &Command::cache(true),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -897,6 +902,7 @@ fn cache_with_no_cache_root_is_a_diagnostic() {
         &Command::cache(false),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap_err();
 
@@ -948,6 +954,7 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
         &Command::resolve(vec![good.clone(), bad.clone()]),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1009,6 +1016,7 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
         &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1074,6 +1082,7 @@ fn rename_preview_with_no_journal_succeeds() {
         &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1133,6 +1142,7 @@ fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
         &Command::rename(vec![path.clone()], true),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1211,6 +1221,7 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
         &Command::bib(vec![path.clone()]),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -1275,6 +1286,7 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
         &Command::rename(vec![path], false),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap_err();
 
@@ -1319,6 +1331,7 @@ fn bib_with_an_uncompilable_filename_template_runs_anyway() {
         &Command::bib(vec![path]),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .expect("a filename template bib never renders cannot end it");
 
@@ -1368,6 +1381,7 @@ fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic()
         &Command::rename(vec![path], false),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap_err();
 
@@ -1416,6 +1430,7 @@ fn bib_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
         &Command::bib(vec![path]),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap_err();
 
@@ -1474,6 +1489,7 @@ fn bib_with_a_citation_key_naming_no_entry_type_propagates_the_diagnostic() {
         &Command::bib(vec![path]),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap_err();
 
@@ -1519,6 +1535,7 @@ fn json_format_opens_with_run_started_and_closes_with_run_finished_and_every_lin
         &cli(Command::config(), true),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1597,6 +1614,7 @@ fn json_stdout_is_entirely_well_formed_json_lines_and_nothing_else() {
         &cli(Command::resolve(vec![good, bad]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1656,6 +1674,7 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
         &cli(Command::resolve(vec![path.clone()]), false),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1721,6 +1740,7 @@ fn run_finished_counts_match_counts_for_over_the_body_events() {
         &cli(Command::resolve(vec![good, bad]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1781,6 +1801,7 @@ fn a_clean_run_returns_success() {
         &cli(Command::resolve(vec![path]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1834,6 +1855,7 @@ fn a_run_with_a_skip_returns_partial() {
         &cli(Command::resolve(vec![good, bad]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1890,6 +1912,7 @@ fn a_refusal_dispatch_alone_makes_is_fatal_and_writes_nothing_to_stdout() {
         &cli(command, false),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1945,6 +1968,7 @@ fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() 
         &cli(Command::bib(vec![path]), true),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -2034,6 +2058,7 @@ fn a_lookup_that_hits_names_the_file_with_the_table_value() {
         &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -2090,6 +2115,7 @@ fn two_files_in_one_unlisted_journal_produce_one_lookup_missed_event() {
         &Command::rename(vec![first, second], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -2160,6 +2186,7 @@ fn two_unlisted_journals_produce_one_event_each_in_input_order() {
         &Command::rename(vec![first, second], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -2225,6 +2252,7 @@ fn run_started_names_each_table_read_by_path_and_digest() {
         &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -2274,6 +2302,7 @@ fn a_run_that_reads_no_table_opens_with_an_empty_table_list() {
         &cli(Command::config(), true),
         &Configs::uniform(effective.clone()),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -2316,6 +2345,7 @@ fn a_declared_table_that_cannot_be_read_ends_the_run_naming_the_table_and_the_pa
         &Command::rename(vec![path], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap_err();
 
@@ -2360,6 +2390,7 @@ fn a_header_without_the_declared_value_column_ends_the_run_naming_the_table() {
         &Command::rename(vec![path], false),
         &Configs::uniform(effective_looking_up(&table)),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap_err();
 
@@ -2497,6 +2528,7 @@ fn the_target_pattern_names_every_journal_shape_from_one_template() {
         ),
         &Configs::uniform(effective_for_the_target_pattern(&table)),
         &adapters,
+        &mut Session::batch(),
     )
     .unwrap();
 
@@ -2522,5 +2554,642 @@ fn the_target_pattern_names_every_journal_shape_from_one_template() {
             .iter()
             .any(|event| matches!(event, Event::LookupMissed { .. })),
         "every journal is in the table, got {events:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// interactive rename: tasks 3.2-3.4, through a scripted Asker
+//
+// D9 settles the seam: no second rename entry point, `rename_events` is
+// the one driver and `Session` decides whether it asks. Every test here
+// drives it through the same `events_for`/`dispatch` a batch run uses,
+// with `Session::interactive(&mut asker)` in place of `Session::batch()`
+// and `apply: false` on the command — in an interactive run the answer
+// is the gate, not the flag.
+//
+// `rename_events` currently opens with
+// `if session.mode == Mode::Interactive { todo!(...) }`, so every test
+// below fails on that panic today; the assertions below are what they
+// fail against once the driver exists.
+// ---------------------------------------------------------------------
+
+/// A scripted [`Asker`]: answers a fixed list in order, records every
+/// [`Question`] it was asked, and panics with a clear message if asked
+/// for more answers than it was given — so a driver that asks about a
+/// file it should not have asked about fails loudly rather than
+/// silently consuming the wrong answer.
+struct ScriptedAsker {
+    answers: std::vec::IntoIter<Answer>,
+    asked: RefCell<Vec<Question>>,
+}
+
+impl ScriptedAsker {
+    fn new(answers: Vec<Answer>) -> ScriptedAsker {
+        ScriptedAsker {
+            answers: answers.into_iter(),
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn questions_asked(&self) -> Vec<Question> {
+        self.asked.borrow().clone()
+    }
+}
+
+impl Asker for ScriptedAsker {
+    fn choose(&mut self, question: &Question) -> Answer {
+        self.asked.borrow_mut().push(question.clone());
+        self.answers.next().unwrap_or_else(|| {
+            panic!(
+                "asked more questions than were scripted; question was {question:?}, \
+                 already asked {:?}",
+                self.asked.borrow()
+            )
+        })
+    }
+}
+
+/// A [`Ledger`] fake recording every `append`, following the shape of
+/// the one in `tests/ledger.rs`, trimmed to what an interactive
+/// admission test needs.
+struct FakeLedger {
+    index: Index,
+    appended: RefCell<Vec<Entry>>,
+}
+
+impl FakeLedger {
+    fn empty() -> FakeLedger {
+        FakeLedger {
+            index: Index::build(&[]),
+            appended: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn appended(&self) -> Vec<Entry> {
+        self.appended.borrow().clone()
+    }
+}
+
+impl Ledger for FakeLedger {
+    fn load(&self) -> Loaded {
+        Loaded {
+            index: self.index.clone(),
+            warning: None,
+        }
+    }
+
+    fn append(&self, entries: &[Entry]) -> std::io::Result<()> {
+        self.appended.borrow_mut().extend_from_slice(entries);
+        Ok(())
+    }
+
+    fn replace(&self, _entries: &[Entry]) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// design D5/"An interactive run asks before each move": a rename
+/// answer carries out the move exactly as an applying batch run would,
+/// and a skip answer leaves the file untouched and reports it skipped
+/// with reason `declined`.
+#[test]
+fn a_rename_answer_moves_the_file_and_a_skip_answer_declines_it() {
+    let a = PathBuf::from("/lib/a.pdf");
+    let b = PathBuf::from("/lib/b.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &a,
+            hash_for("interactive-rename-a"),
+            pdf_with_embedded_doi("10.1000/interactive-rename-a"),
+        )
+        .with_file(
+            &b,
+            hash_for("interactive-rename-b"),
+            pdf_with_embedded_doi("10.1000/interactive-rename-b"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/interactive-rename-a",
+            record_by("Smith", 2024, "10.1000/interactive-rename-a"),
+        )
+        .answering(
+            "doi:10.1000/interactive-rename-b",
+            record_by("Doe", 2023, "10.1000/interactive-rename-b"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename, Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![a.clone(), b.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert_eq!(
+        filesystem.renames(),
+        vec![(a.clone(), PathBuf::from("/lib/Smith2024.pdf"))],
+        "only the accepted file must move: got {:?}",
+        filesystem.renames()
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path, target, .. }
+                if *path == a && target.as_path() == Path::new("/lib/Smith2024.pdf")
+        )),
+        "the accepted file must report renamed exactly as an applying batch run would: \
+         got {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Skipped { path, reason: SkipReason::Declined } if *path == b)),
+        "the declined file must be reported skipped with reason declined: got {events:?}"
+    );
+    assert_eq!(
+        asker.questions_asked().len(),
+        2,
+        "got {:?}",
+        asker.questions_asked()
+    );
+}
+
+/// design "A file with nothing to decide": a file already carrying the
+/// name its record implies is reported already-named and no question is
+/// put about it, while a file with a move to decide still gets one.
+#[test]
+fn a_file_with_nothing_to_decide_is_never_asked_about() {
+    let already_named = PathBuf::from("/lib/Smith2024.pdf");
+    let needs_a_decision = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &already_named,
+            hash_for("interactive-already-named"),
+            pdf_with_embedded_doi("10.1000/interactive-already-named"),
+        )
+        .with_file(
+            &needs_a_decision,
+            hash_for("interactive-needs-decision"),
+            pdf_with_embedded_doi("10.1000/interactive-needs-decision"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/interactive-already-named",
+            record_by("Smith", 2024, "10.1000/interactive-already-named"),
+        )
+        .answering(
+            "doi:10.1000/interactive-needs-decision",
+            record_by("Doe", 2023, "10.1000/interactive-needs-decision"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![already_named.clone(), needs_a_decision.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::AlreadyNamed,
+            } if *path == already_named
+        )),
+        "got {events:?}"
+    );
+    assert_eq!(
+        asker.questions_asked().len(),
+        1,
+        "the already-named file must never be asked about: got {:?}",
+        asker.questions_asked()
+    );
+    assert_eq!(
+        asker.questions_asked()[0].path,
+        needs_a_decision,
+        "got {:?}",
+        asker.questions_asked()
+    );
+}
+
+/// design "A declared name stays free" / "the split lets the driver ask
+/// before claiming": a declined proposal leaves its target free for the
+/// next file that wants it, and an accepted one takes it, exactly as
+/// `Planner::propose`/`claim` state.
+#[test]
+fn a_declined_proposal_leaves_the_next_files_target_unsuffixed() {
+    let a = PathBuf::from("/lib/a.pdf");
+    let b = PathBuf::from("/lib/b.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &a,
+            hash_for("interactive-decline-a"),
+            pdf_with_embedded_doi("10.1000/interactive-decline-a"),
+        )
+        .with_file(
+            &b,
+            hash_for("interactive-decline-b"),
+            pdf_with_embedded_doi("10.1000/interactive-decline-b"),
+        );
+    // Both render "Smith2024.pdf" under `[auth][year]`, so they collide.
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/interactive-decline-a",
+            record_by("Smith", 2024, "10.1000/interactive-decline-a"),
+        )
+        .answering(
+            "doi:10.1000/interactive-decline-b",
+            record_by("Smith", 2024, "10.1000/interactive-decline-b"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![a.clone(), b.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path, target, .. }
+                if *path == b && target.as_path() == Path::new("/lib/Smith2024.pdf")
+        )),
+        "the second file's target must be unsuffixed once the first declines it: got {events:?}"
+    );
+}
+
+#[test]
+fn an_accepted_proposal_suffixes_the_next_files_colliding_target() {
+    let a = PathBuf::from("/lib/a.pdf");
+    let b = PathBuf::from("/lib/b.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &a,
+            hash_for("interactive-accept-a"),
+            pdf_with_embedded_doi("10.1000/interactive-accept-a"),
+        )
+        .with_file(
+            &b,
+            hash_for("interactive-accept-b"),
+            pdf_with_embedded_doi("10.1000/interactive-accept-b"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/interactive-accept-a",
+            record_by("Smith", 2024, "10.1000/interactive-accept-a"),
+        )
+        .answering(
+            "doi:10.1000/interactive-accept-b",
+            record_by("Smith", 2024, "10.1000/interactive-accept-b"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![a.clone(), b.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path, target, .. }
+                if *path == b && target.as_path() == Path::new("/lib/Smith2024a.pdf")
+        )),
+        "the second file's target must be suffixed once the first claims it: got {events:?}"
+    );
+}
+
+/// design "each file's resolution, question, fate and sidecar SHALL
+/// remain adjacent": with no sidecars or master file configured there is
+/// nothing but the resolved/fate pair for each file, but adjacency and
+/// input order are exactly what this pins — a driver that resolved a
+/// later file to decide an earlier one's suffix would interleave them.
+#[test]
+fn each_files_events_stay_adjacent_and_in_input_order() {
+    let a = PathBuf::from("/lib/a.pdf");
+    let b = PathBuf::from("/lib/b.pdf");
+    let c = PathBuf::from("/lib/c.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &a,
+            hash_for("interactive-adjacency-a"),
+            pdf_with_embedded_doi("10.1000/interactive-adjacency-a"),
+        )
+        .with_file(
+            &b,
+            hash_for("interactive-adjacency-b"),
+            pdf_with_embedded_doi("10.1000/interactive-adjacency-b"),
+        )
+        .with_file(
+            &c,
+            hash_for("interactive-adjacency-c"),
+            pdf_with_embedded_doi("10.1000/interactive-adjacency-c"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/interactive-adjacency-a",
+            record_by("Smith", 2024, "10.1000/interactive-adjacency-a"),
+        )
+        .answering(
+            "doi:10.1000/interactive-adjacency-b",
+            record_by("Doe", 2023, "10.1000/interactive-adjacency-b"),
+        )
+        .answering(
+            "doi:10.1000/interactive-adjacency-c",
+            record_by("Roe", 2022, "10.1000/interactive-adjacency-c"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename, Answer::Skip, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![a.clone(), b.clone(), c.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let paths: Vec<PathBuf> = events
+        .iter()
+        .map(|event| match event {
+            Event::Resolved { path, .. }
+            | Event::Renamed { path, .. }
+            | Event::Skipped { path, .. } => path.clone(),
+            other => panic!("unexpected event in an adjacency test: {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        paths,
+        vec![a.clone(), a, b.clone(), b, c.clone(), c],
+        "each file's resolved event must be immediately followed by its own fate, in input order"
+    );
+}
+
+/// design D8/"Everything after the decision is the batch path": an
+/// accepted interactive rename is admitted to the collection's ledger
+/// exactly as an applying batch run admits it — same entry, same
+/// fields — because what happens after the decision does not know or
+/// care whether the decision came from `--apply` or from a yes.
+#[test]
+fn an_accepted_interactive_rename_is_admitted_to_the_ledger_exactly_as_an_apply_run_admits_it() {
+    let path = PathBuf::from("/collection/original.pdf");
+    let hash = hash_for("interactive-ledger-admission");
+    let library = library_with_resolvable(&path, hash.clone(), "10.1000/interactive-admission");
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/interactive-admission")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let ledger = FakeLedger::empty();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/collection")),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path: renamed, .. } if *renamed == path
+        )),
+        "got {events:?}"
+    );
+    assert_eq!(
+        ledger.appended(),
+        vec![Entry {
+            hash,
+            doi: Some(doi("10.1000/interactive-admission")),
+            arxiv: None,
+            pmid: None,
+            isbn: None,
+            path: "Smith2024.pdf".to_string(),
+            entry_type: EntryType::Article,
+            run: RunId::new(fixed_now()),
+            timestamp: fixed_now(),
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        }],
+        "an accepted interactive rename must admit exactly the entry an apply run would: \
+         got {:?}",
+        ledger.appended()
+    );
+}
+
+/// design "Quitting an interactive run leaves the rest untouched": a
+/// quit at the third of five files leaves the first two moved and the
+/// rest untouched and unresolved; `run-finished` counts the file quit
+/// at and every file after it as unreached, and the master `.bib`
+/// merge still runs for the files that were visited.
+#[test]
+fn quitting_counts_unreached_and_still_merges_the_bib_for_the_visited_files() {
+    let paths: Vec<PathBuf> = (1..=5)
+        .map(|n| PathBuf::from(format!("/lib/{n}.pdf")))
+        .collect();
+    let mut library = FakeLibrary::new();
+    let mut crossref = KeyedSource::new(SourceName::Crossref);
+    for (n, path) in paths.iter().enumerate() {
+        let doi_value = format!("10.1000/interactive-quit-{n}");
+        library = library.with_file(
+            path,
+            hash_for(&format!("interactive-quit-{n}")),
+            pdf_with_embedded_doi(&doi_value),
+        );
+        crossref = crossref.answering(
+            &format!("doi:{doi_value}"),
+            record_by(&format!("Author{n}"), 2020 + n as i32, &doi_value),
+        );
+    }
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.citation_keys = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.bib = Some(BibLayer {
+            path: Some(PathBuf::from("refs.bib")),
+            duplicates: None,
+            sidecars: Some(false),
+        });
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename, Answer::Rename, Answer::Quit]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(paths.clone(), false), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    assert_eq!(
+        filesystem.renames().len(),
+        2,
+        "only the first two accepted files must move: got {:?}",
+        filesystem.renames()
+    );
+    assert!(
+        !lines.iter().any(|line| line["event"] == "resolved"
+            && (line["path"] == "/lib/4.pdf" || line["path"] == "/lib/5.pdf")),
+        "a file after the quit must never be resolved: got {lines:?}"
+    );
+
+    let finished = lines
+        .last()
+        .unwrap_or_else(|| panic!("expected at least run-started and run-finished"));
+    assert_eq!(finished["event"], "run-finished", "got {lines:?}");
+    assert_eq!(
+        finished["counts"]["unreached"], 3,
+        "the file quit at and both after it must count as unreached: got {lines:?}"
+    );
+
+    assert!(
+        lines.iter().any(|line| line["event"] == "bib-entry"),
+        "the master .bib merge must still run for the files visited before the quit: \
+         got {lines:?}"
     );
 }

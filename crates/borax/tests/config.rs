@@ -2431,3 +2431,129 @@ fn table_path_resolves_a_relative_path_with_a_parent_component() {
         PathBuf::from("/proj/config/../shared/journal_titles.tsv")
     );
 }
+
+// ---------------------------------------------------------------------
+// rename.batch: a boolean key, reported by `borax config` with its
+// origin, from a file, from the environment and from the flag
+// ---------------------------------------------------------------------
+
+#[test]
+fn rename_batch_defaults_to_false_with_default_origin() {
+    let effective = resolve(vec![]).unwrap();
+    assert!(!effective.config().batch);
+    assert_eq!(effective.origin("rename.batch"), Some(&Origin::Default));
+}
+
+#[test]
+fn layer_from_toml_reads_rename_batch() {
+    let layer = layer_from_toml("[rename]\nbatch = true\n", Path::new("/solo.toml")).unwrap();
+    assert_eq!(
+        layer.rename,
+        Some(RenameLayer {
+            collision: None,
+            batch: Some(true),
+        })
+    );
+}
+
+#[test]
+fn a_directory_file_setting_rename_batch_true_wins_and_reports_its_own_origin() {
+    let dir_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(dir_path.clone()),
+        Layer {
+            rename: Some(RenameLayer {
+                collision: None,
+                batch: Some(true),
+            }),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(effective.config().batch);
+    assert_eq!(
+        effective.origin("rename.batch"),
+        Some(&Origin::DirectoryFile(dir_path))
+    );
+}
+
+#[test]
+fn layer_from_env_reads_borax_rename_batch() {
+    let layer = layer_from_env([("BORAX_RENAME_BATCH", "true")]).unwrap();
+    assert_eq!(
+        layer.rename,
+        Some(RenameLayer {
+            collision: None,
+            batch: Some(true),
+        })
+    );
+}
+
+#[test]
+fn an_env_var_setting_rename_batch_wins_and_reports_its_own_origin() {
+    let env_layer = layer_from_env([("BORAX_RENAME_BATCH", "true")]).unwrap();
+    let layers = vec![(Origin::Env("RENAME_BATCH".to_string()), env_layer)];
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(effective.config().batch);
+    assert_eq!(
+        effective.origin("rename.batch"),
+        Some(&Origin::Env("RENAME_BATCH".to_string()))
+    );
+}
+
+#[test]
+fn a_rename_batch_flag_layer_wins_and_reports_its_own_origin() {
+    let layers = vec![(
+        Origin::Flag("batch".to_string()),
+        Layer {
+            rename: Some(RenameLayer {
+                collision: None,
+                batch: Some(true),
+            }),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(effective.config().batch);
+    assert_eq!(
+        effective.origin("rename.batch"),
+        Some(&Origin::Flag("batch".to_string()))
+    );
+}
+
+#[test]
+fn events_reports_a_rename_batch_override_with_its_file_origin() {
+    let config_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(config_path.clone()),
+        Layer {
+            rename: Some(RenameLayer {
+                collision: None,
+                batch: Some(true),
+            }),
+            ..Layer::default()
+        },
+    )];
+    let effective = resolve(layers).unwrap();
+
+    let events = effective.events();
+    let event = events
+        .iter()
+        .find(|event| matches!(event, Event::ConfigSetting { key, .. } if key == "rename.batch"))
+        .unwrap_or_else(|| panic!("no ConfigSetting for rename.batch in {events:?}"));
+
+    assert_eq!(
+        *event,
+        Event::ConfigSetting {
+            key: "rename.batch".to_string(),
+            value: "true".to_string(),
+            origin: Origin::DirectoryFile(config_path).to_string(),
+        }
+    );
+}

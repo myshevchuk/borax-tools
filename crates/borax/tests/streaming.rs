@@ -27,7 +27,7 @@ use borax::config::{Effective, Layer, Origin, resolve};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Streams, dispatch};
-use borax::session::Outcome;
+use borax::session::{Outcome, Session};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
@@ -377,6 +377,7 @@ fn rename_preview_writes_each_file_s_resolved_line_before_the_next_file_is_hashe
         ),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -453,6 +454,7 @@ fn an_uncompilable_template_is_fatal_and_opens_no_stream() {
         &cli(Command::rename(vec![path], false), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -501,6 +503,7 @@ fn apply_with_nowhere_to_record_itself_is_fatal_and_opens_no_stream() {
         &cli(Command::rename(vec![path], true), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -548,6 +551,7 @@ fn cache_with_no_cache_root_is_fatal_and_opens_no_stream() {
         &cli(Command::cache(false), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -593,6 +597,7 @@ fn a_normal_json_run_emits_both_run_started_and_run_finished() {
         &cli(Command::config(), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 

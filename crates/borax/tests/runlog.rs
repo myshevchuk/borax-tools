@@ -13,7 +13,7 @@ use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Streams, dispatch};
 use borax::runlog::{RUNS_DIR, destination, log_name, state_root};
-use borax::session::Outcome;
+use borax::session::{Outcome, Session};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
@@ -594,6 +594,7 @@ fn run_log_contains_exactly_the_json_stdout_stream_including_framing_events() {
         &cli(Command::bib(vec![path]), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -658,6 +659,7 @@ fn a_human_format_run_still_writes_a_json_run_log_identical_to_the_json_runs() {
             &cli(Command::bib(vec![path.clone()]), json),
             &Configs::uniform(effective),
             &adapters,
+            &mut Session::batch(),
             &mut streams,
         );
     }
@@ -719,6 +721,7 @@ fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
         &cli(Command::rename(vec![path.clone()], false), false),
         &Configs::uniform(effective.clone()),
         &preview_adapters,
+        &mut Session::batch(),
         &mut preview_streams,
     );
 
@@ -744,6 +747,7 @@ fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
         &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &apply_adapters,
+        &mut Session::batch(),
         &mut apply_streams,
     );
 
@@ -804,6 +808,7 @@ fn an_unwritable_mandatory_log_aborts_before_any_rename() {
         &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -884,6 +889,7 @@ fn a_mandatory_log_whose_own_name_is_taken_by_a_directory_aborts_before_any_rena
         &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -947,6 +953,7 @@ fn no_run_log_with_apply_still_writes_the_mandatory_log() {
         &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1004,6 +1011,7 @@ fn no_run_log_on_a_preview_writes_nothing_and_the_run_still_succeeds() {
         &cli(Command::rename(vec![path], false), false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1063,6 +1071,7 @@ fn a_failed_optional_log_warns_but_the_run_still_succeeds() {
         &cli(Command::bib(vec![path]), true),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1119,6 +1128,7 @@ fn an_apply_rename_outside_a_collection_writes_its_log_under_the_state_root() {
         &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1169,6 +1179,7 @@ fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving
         &cli(Command::rename(vec![path], true), false),
         &Configs::uniform(effective),
         &adapters,
+        &mut Session::batch(),
         &mut streams,
     );
 
@@ -1184,6 +1195,193 @@ fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving
     assert!(
         !message.to_lowercase().contains("journal"),
         "the message must not name the removed journal: {message:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 4.1/4.2: an interactive rename run is treated as an applying run by
+// destination() and mandatory() — design D7 / cli spec "An interactive
+// rename run is logged as an applying run".
+//
+// `destination` already takes `applying` apart from `command`, so an
+// interactive run is spelled here as `Command::rename(paths, false)`
+// (no `--apply` on the command itself) together with `applying: true`
+// (what the run decided about itself, per `run-started`'s `interactive`
+// and `applying` fields). What is not yet true is that such a run's log
+// is *mandatory* — `mandatory()` today knows only `apply: true` — so
+// these fail on the `mandatory` assertion until it is widened to the
+// run's mode rather than the command's `--apply` flag alone.
+// ---------------------------------------------------------------------
+
+#[test]
+fn destination_of_an_interactive_rename_in_a_collection_is_mandatory_under_the_collection_root() {
+    let root = PathBuf::from("/collection");
+    let command = Command::rename(vec![], false);
+
+    let found = destination(&command, true, true, "20240101T000000Z", Some(&root), None)
+        .unwrap_or_else(|| panic!("expected a destination"));
+
+    assert!(
+        found.mandatory,
+        "an interactive rename run's log must be mandatory, since it may move files"
+    );
+    assert_eq!(
+        found.path,
+        root.join(ACCOUNTING_DIR)
+            .join(RUNS_DIR)
+            .join(log_name("20240101T000000Z", "rename", true))
+    );
+}
+
+#[test]
+fn destination_of_an_interactive_rename_outside_a_collection_falls_back_to_the_state_root() {
+    let state_root = PathBuf::from("/state");
+    let command = Command::rename(vec![], false);
+
+    let found = destination(
+        &command,
+        true,
+        true,
+        "20240101T000000Z",
+        None,
+        Some(&state_root),
+    )
+    .unwrap_or_else(|| panic!("expected a destination"));
+
+    assert!(
+        found.mandatory,
+        "an interactive rename run must fall back to the state root exactly as --apply does"
+    );
+    assert_eq!(
+        found.path,
+        state_root
+            .join(RUNS_DIR)
+            .join(log_name("20240101T000000Z", "rename", true))
+    );
+}
+
+#[test]
+fn destination_of_an_interactive_rename_is_written_even_when_run_log_is_disabled() {
+    let root = PathBuf::from("/collection");
+    let command = Command::rename(vec![], false);
+
+    let found = destination(&command, true, false, "20240101T000000Z", Some(&root), None)
+        .unwrap_or_else(|| panic!("an interactive run's log cannot be disabled by run-log"));
+
+    assert!(found.mandatory);
+}
+
+// ---------------------------------------------------------------------
+// 4.4: a rename event is on disk before its move is made — design D7's
+// per-move guarantee, replacing the whole-plan pre-flush.
+//
+// `LoggingAwareFilesystem::rename` reads the run's own log file, at the
+// exact moment it is asked to move a file, from the path
+// `destination()` computes for this run. The requirement is that the
+// `renamed` event already sits there when the move is attempted; today
+// `rename_events` calls `Applying::carry_out` (which performs the move)
+// before the resulting event ever reaches the log sink, so this fails.
+// ---------------------------------------------------------------------
+
+/// A [`Filesystem`] that, on every `rename`, snapshots whether its own
+/// run's log file already mentions a `"renamed"` event — the assertion
+/// the per-move guarantee rests on — before performing the move.
+struct LoggingAwareFilesystem {
+    log_path: PathBuf,
+    already_logged_before_first_move: RefCell<Option<bool>>,
+}
+
+impl LoggingAwareFilesystem {
+    fn new(log_path: PathBuf) -> LoggingAwareFilesystem {
+        LoggingAwareFilesystem {
+            log_path,
+            already_logged_before_first_move: RefCell::new(None),
+        }
+    }
+
+    /// Whether, at the moment the first move was attempted, the log
+    /// already carried a `renamed` event. `None` if no move was ever
+    /// attempted.
+    fn already_logged_before_first_move(&self) -> Option<bool> {
+        *self.already_logged_before_first_move.borrow()
+    }
+}
+
+impl Filesystem for LoggingAwareFilesystem {
+    fn existing(&self, _directory: &Path) -> BTreeMap<String, Option<String>> {
+        BTreeMap::new()
+    }
+
+    fn rename(&self, _from: &Path, _to: &Path) -> Result<(), RenameError> {
+        let contents = std::fs::read_to_string(&self.log_path).unwrap_or_default();
+        let mut seen = self.already_logged_before_first_move.borrow_mut();
+        if seen.is_none() {
+            *seen = Some(contents.contains("\"renamed\""));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_rename_event_is_flushed_to_the_log_before_the_move_it_records_is_made() {
+    let dir = tempdir().unwrap();
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_of("record-before-move"),
+        pdf_with_embedded_doi("10.1000/record-before-move"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/record-before-move")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let command = Command::rename(vec![path.clone()], true);
+    let log_path = destination(
+        &command,
+        true,
+        true,
+        "20240101T000000Z",
+        Some(dir.path()),
+        None,
+    )
+    .expect("an apply run always has a destination under a collection root")
+    .path;
+    let filesystem = LoggingAwareFilesystem::new(log_path);
+    let bib_files = FakeBibFiles;
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: || "20240101T000000Z".to_string(),
+        ledger: None,
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(command, true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(
+        filesystem.already_logged_before_first_move(),
+        Some(true),
+        "the rename event must be written and flushed to the log before the file is moved"
     );
 }
 
