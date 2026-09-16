@@ -105,7 +105,15 @@ When an interactive run renames a file from a record found from a supplied ident
 
 No record SHALL be written for a file the operator did not rename: a
 record resolved from a supplied identifier and then skipped, abandoned
-for another identifier, or left by quitting SHALL leave no entry.
+for another identifier, or left by quitting SHALL NOT be stored. What
+the index already held for that file SHALL be left as it is — the
+rejected candidate is not kept, and nothing the file was identified as
+before is removed.
+
+Remembering is best-effort, as every write to the response cache is: an
+entry that could not be written means the file is asked about again,
+which is how losing an answer fails safely. A run SHALL NOT report a
+write it could not make as a failure of the rename it followed.
 
 #### Scenario: Asked once
 - **WHEN** a file is renamed in an interactive run from a supplied
@@ -118,3 +126,9 @@ for another identifier, or left by quitting SHALL leave no entry.
   different paper, and skips the file
 - **THEN** the content index holds no record for the file, and the next
   interactive run asks about it again
+
+#### Scenario: The answer could not be kept
+- **WHEN** a rename from a supplied identifier is made and the content
+  index cannot be written
+- **THEN** the rename stands and is reported as any rename is, and the
+  next run over that file asks about it again

@@ -9,6 +9,25 @@ Every group is a red/green pair: the `-tests` task is written and run
 failing first, and the implementation task makes it pass without
 touching it. Group 1 is a refactor with the suite green throughout.
 
+## 0. Reconcile the requirements this change inherits
+
+Before any test. Three requirements from the two changes below this one
+say things this change contradicts, and they will be living by the time
+it is implemented. Re-copy each from `openspec/specs/` into a MODIFIED
+block and amend it, rather than leaving the archive holding both:
+
+- [ ] 0.1 `rename`, "An interactive run passes over already-named
+      files": with `--no-skip-named` such a file is now asked about
+- [ ] 0.2 `cli`, "A run reports as it goes": a file's verdict may be
+      held until the operator's decisions about it are made, which is
+      longer than the hold that change allowed
+- [ ] 0.3 `resolution`, "Ambiguity is skipped, never guessed": the
+      scenarios that skip every conflict unconditionally have to
+      distinguish a fresh conflict from one an operator accepted, since
+      the index answers for the second without checking again
+- [ ] 0.4 `openspec validate --strict` and `check-spec-deltas.py` pass
+      with the MODIFIED blocks in place
+
 ## 1. Resolution in parts, batch unchanged
 
 - [ ] 1.1 Split `resolve_file` into steps a caller can drive — content
@@ -16,6 +35,11 @@ touching it. Group 1 is a refactor with the suite green throughout.
       conflict check — and re-express `resolve_file` and
       `resolve_file_checking_ledger` as their composition; every
       existing pipeline test passes unchanged. A commit of its own.
+- [ ] 1.2 Red: the file's claimed titles can be read on their own, for
+      a file the content index answered for and for one no identifier
+      was found in (design D2a); `extract_from` collects them whether or
+      not an identifier turns up
+- [ ] 1.3 Green: claims are read when a comparison needs them
 
 ## 2. Supplied identifiers
 
@@ -34,9 +58,16 @@ touching it. Group 1 is a refactor with the suite green throughout.
 - [ ] 3.1 Extend `Answer` with `Supply`, `Override` and `Keep`, and the
       `Asker` trait with `text`; extend the scripted asker to script
       text input
-- [ ] 3.2 Red: `crates/borax/tests/run.rs` — with a scripted asker, one
-      test per row of design D1's table, asserting the choices offered,
-      the default, and the events emitted per design D5
+- [ ] 3.2 Red: `crates/borax/tests/dispatch.rs` — with a scripted
+      asker, one test per row of design D1's two tables, asserting the
+      choices offered, the default, and the events emitted per design
+      D5; the inconclusive-resolution row offers a retry and the
+      conclusive one does not
+- [ ] 3.2a Red: the transitions — a supplied identifier that does not
+      resolve leaves the file's original record on offer; one that
+      resolves into a taken target, an empty name, or an already-named
+      file reports that outcome and asks again; an abandoned input
+      changes nothing
 - [ ] 3.3 Red: the reference-DOI case — supply a different identifier on
       a move question; the first proposal's name stays unclaimed
 - [ ] 3.4 Red: refused input is asked again; Esc returns to the menu; an
@@ -54,7 +85,14 @@ touching it. Group 1 is a refactor with the suite green throughout.
       supplied identifier, then a batch run over the new name: resolved
       from the content index, already named, no source queried
 - [ ] 4.2 Red: supply then skip, supply then quit, override then skip —
-      no content-index entry for the file
+      the abandoned candidate is not written to the content index, and a
+      record the file already had is still there
+- [ ] 4.2a Red: an abandoned candidate is never cited — no sidecar and
+      no master-bibliography entry from it — while a file whose own
+      record stands is cited from that record as a batch run cites it
+- [ ] 4.2b Red: a content-index write that fails leaves the rename
+      standing and reported, and the next run asks about the file
+      again
 - [ ] 4.3 Green: the content-index write on rename only (design D7)
 
 ## 5. The terminal

@@ -58,6 +58,34 @@ A file whose hash is unknown cannot be renamed in an applying run
 (`Unrecordable`), so offering it an identifier would lead to a question
 whose only useful answer then fails; it is not asked.
 
+"No service holds it" is only one way resolution fails.
+`Unresolved::is_conclusive` already separates a confirmed absence from
+the services being unreachable, rate-limited, or answering with
+nonsense, and the question says which happened: a file nobody holds is
+one to supply another identifier for, while services that could not
+answer are worth asking again. The inconclusive case therefore offers
+*try again* as its first choice, which re-runs the same lookup, and
+the conclusive one does not offer it at all. Neither presents an
+outage as evidence about the file.
+
+**Where a supplied identifier leads.** Supplying is a loop, and each
+turn ends in one of four places:
+
+| After supplying | What happens |
+|---|---|
+| resolves, proposal is a move | described, then the move question, with *supply a different identifier* still on it |
+| resolves, proposal is not a move | reported as that outcome — target taken, unnameable, already named — and the file's menu is put again |
+| does not resolve | the attempts are shown and the file's menu is put again |
+| operator escapes the input | the file's menu is put again, unchanged |
+
+The file's menu is the one its *current* situation calls for, not the
+one it started with. A file that resolved on its own and was offered a
+move keeps that offer: supplying an identifier that then fails leaves
+the original record still in hand, and the operator can accept it,
+supply another, or skip. A file that never resolved has nothing to
+fall back to, so its menu stays the unidentified one. Nothing about
+the loop can turn a file that had a record into a file that has none.
+
 "Rename anyway" names the proposed target in its label, so the one
 choice that overrides a safety check says exactly what it will do.
 Skip, not rename, is the default for a conflict: Enter must never be the
@@ -83,6 +111,26 @@ A resolved record is described (`show-record-before-asking`), planned
 with `Planning::propose`, and asked about. Proposing claims nothing
 (`add-interactive-rename` D3), so a file can go round this loop any
 number of times and leave the plan exactly as it found it.
+
+### D2a. The claims a comparison needs are read when they are needed
+
+Comparing a supplied record against the file's own titles needs those
+titles, and two paths through the pipeline do not have them: a file
+the content index answered for was never opened, and `extract_from`
+collects titles only after an identifier is found, so a file with no
+identifier reaches the driver with none either.
+
+Both are read when the comparison needs them rather than always: the
+driver asks the library for the file's claimed titles at the moment an
+operator supplies an identifier, and that read is the only new work
+this change does on the ordinary path — none, since the ordinary path
+never asks. Collecting titles moves out from under the
+identifier-found branch so that a file with no identifier still has
+them to be read.
+
+A file that cannot be opened at all has no claims and no comparison;
+the record is described and the question is put without that line,
+which is what a file borax cannot read was always going to allow.
 
 ### D3. The conflict check still runs on a supplied record
 
@@ -127,7 +175,26 @@ question is answered, then emits what the decision made of it:
 A skipped file is reported with the reason borax had, not with
 `declined`: the operator's skip leaves the file exactly as a batch run
 would have, for exactly that reason. `declined` stays the reason for
-refusing a move borax proposed on its own.
+refusing a move borax proposed on its own. A file that never had a
+reason of its own — one that resolved, was offered a move, and was
+skipped after a supplied identifier failed — is `declined`, because
+what the operator declined is the move that was on offer.
+
+**An abandoned candidate leaves nothing anywhere.** A record the
+operator supplied and then walked away from is not the file's
+resolution, so it is not reported, not written to the content index
+(D7), and not cited: no sidecar beside the file, no entry in the
+master bibliography. Only the record a file's decision settled on
+reaches any of them. This is a rule the driver has to hold
+deliberately, because the batch path cites every file it resolves,
+including one whose move was declined.
+
+The prohibition on reporting a file twice is about its identification:
+a file has one resolution and one fate, and a candidate that lost is
+neither. It says nothing about the events that follow a fate — a
+rename that succeeded and a sidecar that then failed are two true
+things about one file — nor about the run log's record of a move
+written before the move is made.
 
 Records resolved from identifiers the operator then abandoned are not
 reported. They were candidates, not outcomes, and the run log records
@@ -168,10 +235,24 @@ forever after. An ordinary resolution writes on resolution because the
 record passed the conflict check; a supplied one has only passed the
 operator, and the operator's acceptance is the rename.
 
-Where the index is the only memory, it forgets: `borax cache --clear`
-removes the entries, and `--no-cache` bypasses the read (though it
-still writes). The file's name, sidecar and ledger entry still say what
-it is. Durable, curated identifications are deferred.
+Where the index is the only memory, it forgets, and more easily than
+clearing it: `FileCache::put` drops a write it cannot make, and a run
+that falls back to an in-memory cache keeps nothing past the process.
+So "asked once" is what the index makes likely, not what it
+guarantees, and the specification says so — an answer that was not
+kept means the file is asked about again, which is the safe way to
+lose it.
+
+`borax cache --clear` removes the entries, and `--no-cache` bypasses
+the read though it still writes. The file's name, sidecar and ledger
+entry still say what it is. Durable, curated identifications are
+deferred.
+
+Nothing is ever removed from the index by this change. An ordinary
+resolution writes its record before the operator is asked anything, so
+a file that already had one keeps it when a supplied candidate is
+abandoned: the promise is that the rejected candidate is not stored,
+not that the file is left unidentified.
 
 ## Risks / Trade-offs
 
