@@ -63,7 +63,7 @@ block and amend it, rather than leaving the archive holding both:
       choices offered, the default, and the events emitted per design
       D5; the inconclusive-resolution row offers a retry and the
       conclusive one does not
-- [ ] 3.2a Red: the transitions — a supplied identifier that does not
+- [x] 3.2a Red: the transitions — a supplied identifier that does not
       resolve leaves the file's original record on offer; one that
       resolves into a taken target, an empty name, or an already-named
       file reports that outcome and asks again; an abandoned input
@@ -76,27 +76,27 @@ block and amend it, rather than leaving the archive holding both:
       and renaming re-identifies the file
 - [ ] 3.6 Green: the driver situations, the held verdict, `overrode` and
       `supplied` on `resolved`
-- [ ] 3.6a Red: `crates/borax/tests/describe.rs` — the description of a
-      file the run could not resolve names what each service answered;
-      a conflict shows both titles and the similarity; a supplied
-      identifier is shown as supplied rather than as a pass's find.
-      `describe` is pure, so this is the one part of the change that
-      can be pinned exactly
+- [ ] 3.6a Red: `crates/borax/tests/describe.rs` — `describe` renders
+      the held verdict whichever it is (design D8): the services'
+      answers for an unresolvable file, both titles and the similarity
+      for a conflict asked about or overridden, and `supplied` on the
+      identifier line. `describe` is pure, so this is the one part of
+      the change that can be pinned exactly
 - [ ] 3.7 Green: `describe` renders attempts, a conflict's two titles and
       similarity, and a supplied identifier
 
 ## 4. Remembering
 
-- [ ] 4.1 Red: `crates/borax/tests/end_to_end.rs` — rename from a
+- [x] 4.1 Red: `crates/borax/tests/end_to_end.rs` — rename from a
       supplied identifier, then a batch run over the new name: resolved
       from the content index, already named, no source queried
-- [ ] 4.2 Red: supply then skip, supply then quit, override then skip —
+- [x] 4.2 Red: supply then skip, supply then quit, override then skip —
       the abandoned candidate is not written to the content index, and a
       record the file already had is still there
-- [ ] 4.2a Red: an abandoned candidate is never cited — no sidecar and
+- [x] 4.2a Red: an abandoned candidate is never cited — no sidecar and
       no master-bibliography entry from it — while a file whose own
       record stands is cited from that record as a batch run cites it
-- [ ] 4.2b Red: a content-index write that fails leaves the rename
+- [x] 4.2b Red: a content-index write that fails leaves the rename
       standing and reported, and the next run asks about the file
       again
 - [ ] 4.3 Green: the content-index write on rename only (design D7)

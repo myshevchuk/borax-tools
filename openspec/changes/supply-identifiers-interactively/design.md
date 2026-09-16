@@ -279,6 +279,71 @@ a file that already had one keeps it when a supplied candidate is
 abandoned: the promise is that the rejected candidate is not stored,
 not that the file is left unidentified.
 
+### D8. The description renders whichever verdict is held
+
+`describe` takes the file's `Event::Resolved` and returns nothing for
+any other event, because until now a question was only ever put about
+a file that resolved. This change puts questions to files that did not
+— no identifier, no service holding it, unreadable, a conflict — and
+each of those has to show what it is asking about.
+
+It keeps its shape rather than gaining a second entry point:
+`describe` renders the verdict event the driver is holding, and D5
+makes that either `Resolved` or `Skipped`. The `skipped` reasons carry
+what the description needs and nothing else has it — `Unresolvable`
+already holds the attempts, `Conflict` both titles and the similarity,
+`Unreadable` the message. The rule that the operator and a reader of
+the stream are told the same things about a file is what made
+`describe` a function of the event, and it holds for a file that
+failed exactly as it did for one that succeeded.
+
+Three renderings are new, in the label column
+`show-record-before-asking` fixed. A file whose identifier no service
+holds:
+
+```
+── 4 of 17 ──────────────────────────────────────────────────────────
+file        preprint-v2.pdf
+identifier  arXiv:2401.12345, from the text layer
+no record   crossref: not found
+            openalex: not found
+file says   A Title Only the File Knows
+? What should happen to this file?
+> Supply an identifier
+  Skip
+  Quit
+```
+
+`no record` replaces the `record` line rather than joining it: they
+answer the same question, and a file has either a record or the
+reasons it has none. One service to a line, in the order they were
+asked, `name: what it said`.
+
+A conflict, asked about or overridden, adds one line to the layout
+already there — both titles are on it, as `title` and `file says`, so
+only how close they were is missing:
+
+```
+identifier  doi:10.1021/jacs.4c01234, from embedded metadata
+record      Crossref
+title       Asymmetric Synthesis of Fluorinated Amines
+file says   Preliminary Notes on Solvent Effects       (XMP)
+conflict    titles 8% alike
+```
+
+`overrode` carries the same four values a `Conflict` reason does, so
+one renderer serves the question and the record that accepted it.
+
+A supplied identifier says so where a pass's name would go:
+
+```
+identifier  doi:10.1021/jacs.4c01234, supplied
+```
+
+The phrase is a bare `supplied`, not "supplied by you" or "supplied by
+hand": the other values in that slot name where the identifier was
+read, and this one names that it was not read at all.
+
 ## Risks / Trade-offs
 
 - **An override is persistent.** A conflict accepted by mistake is
