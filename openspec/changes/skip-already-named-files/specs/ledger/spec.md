@@ -15,6 +15,17 @@ NOT make that file a duplicate at either level. Such an entry records the
 file itself, not another copy of it, and the file SHALL continue through
 resolution and planning as a file matching no entry does.
 
+The lookup SHALL pass over that entry and go on, rather than the
+result being discarded once found: the ledger answers with one entry
+per hash and one per identifier, so a file whose own entry is that
+answer would otherwise hide a second copy recorded elsewhere in the
+collection.
+
+Paths SHALL be compared as the collection builds them — the entry's
+collection-relative path under the collection root against the
+incoming path made absolute — normalised lexically and matched the way
+the platform matches file names. Symlinks SHALL NOT be resolved.
+
 #### Scenario: Re-downloaded identical file
 - **WHEN** an incoming file's hash matches a ledger entry
 - **THEN** it is reported as a content duplicate of the recorded path
@@ -36,3 +47,10 @@ resolution and planning as a file matching no entry does.
 - **WHEN** a file at its admitted path has changed bytes but resolves to
   the identifier its entry records
 - **THEN** it is not reported as a work duplicate of itself
+
+#### Scenario: A file's own entry does not hide a copy
+- **WHEN** a file at its admitted path is reached again and a
+  byte-identical copy of it sits elsewhere in the collection under its
+  own ledger entry
+- **THEN** the incoming file is reported a content duplicate of that
+  other copy, not passed as new

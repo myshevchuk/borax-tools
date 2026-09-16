@@ -1,3 +1,48 @@
+## MODIFIED Requirements
+
+### Requirement: A template may file a document into a subdirectory
+A rendered name containing `/` SHALL be treated as a path relative to
+the directory the file belongs in, and any part of it that does not
+exist SHALL be created when the rename is applied. Sanitization
+prevents such a target from leaving that directory.
+
+The directory a file belongs in is its own, less the rendered
+subdirectory where the file already sits in it. A rendered
+subdirectory therefore says where a file belongs rather than adding a
+level to where it is: a file already filed there is at its target and
+is already named, and one filed under a subdirectory the template no
+longer renders moves across into the new one rather than deeper into
+the old. Only a tail matching the whole rendered prefix counts, so a
+file further down the tree is filed from where it is.
+
+Collisions SHALL be detected where the file is going, not where it came
+from: a name already taken in the target subdirectory blocks or suffixes
+exactly as one in the file's own directory does, and two files heading
+for the same name in different subdirectories do not collide.
+
+#### Scenario: Filing by journal
+- **WHEN** a template renders `nature/smith2024` for a file in `~/lib`
+- **THEN** the file is moved to `~/lib/nature/smith2024.pdf`, creating
+  `~/lib/nature` if it is not there
+
+#### Scenario: The nested name is taken
+- **WHEN** a different file already sits at the nested target
+- **THEN** it is suffixed or skipped by the collision policy, exactly as
+  it would be in the file's own directory
+
+#### Scenario: Re-running a filed collection changes nothing
+- **WHEN** a run files `zeng2026.pdf` into `Nature/` and the same run is
+  repeated over the same directory
+- **THEN** the file is reported already named and stays at
+  `Nature/zeng2026.pdf`, rather than being proposed
+  `Nature/Nature/zeng2026.pdf`
+
+#### Scenario: The journal a file is filed under changes
+- **WHEN** a file sits at `Nature/zeng2026.pdf` and its template now
+  renders `Science/zeng2026`
+- **THEN** the file is proposed `Science/zeng2026.pdf` beside the
+  `Nature` directory, not inside it
+
 ## ADDED Requirements
 
 ### Requirement: A file already carrying its name is not a skip
@@ -49,3 +94,13 @@ files as a batch run does. The setting SHALL NOT affect batch runs.
 - **WHEN** an interactive run passes over an already-named file
 - **THEN** its run log carries that file's resolution and its
   `already-named` event
+
+### Requirement: A collision suffix never lands on the file's own name
+A collision suffix candidate equal to the name the file already carries SHALL be reported as already named rather than planned as a move. A file's own name is exempt from the collision check while its own decision is made, so the suffix ladder can reach it; arriving there means the file already sits where the plan would put it.
+
+#### Scenario: The second of two works, re-run
+- **WHEN** two works render `smith2024.pdf`, the second was filed as
+  `smith2024a.pdf`, and the directory is run again
+- **THEN** `smith2024a.pdf` is reported already named, and no move onto
+  its own name is planned or attempted
+

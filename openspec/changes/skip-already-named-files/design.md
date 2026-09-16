@@ -72,12 +72,24 @@ what `--no-cache` asks for.
 
 ### D2. An entry recording the incoming file itself is not a duplicate
 
-Both ledger checks skip a match whose recorded path, made absolute
-against the collection root, is the incoming file's own path. Paths are
-compared after both are made absolute and normalised the way
-`Collection::live_path` already builds them; they are not canonicalised
-through symlinks, since the ledger records the path borax moved the file
-to and the run names the path it was given.
+Both ledger checks pass over an entry whose recorded path is the
+incoming file's own, and go on looking rather than reporting nothing.
+The distinction matters: `Index` keeps one entry per hash and one per
+identifier, the latest, so a file's own entry is the entry that won.
+Discarding what the lookup returned would hide a second copy sitting
+elsewhere in the collection behind the file's own row. The lookups
+therefore take the incoming path and skip it, which is what keeps
+"genuine copies are still detected" true.
+
+Paths are compared as both sides are built: the entry's
+collection-relative path joined to the collection root, and the
+incoming path made absolute against the working directory, each
+normalised lexically — `.` and `..` resolved textually, separators
+unified — and compared case-sensitively on Unix and case-insensitively
+on Windows, as the planner already compares names. Symlinks are not
+resolved: the ledger records the path borax moved the file to, and the
+run names the path it was given, so a link and its target are two names
+this check does not attempt to unify.
 
 This could have been a special case that reports `already-named`
 directly from the ledger match, without resolving. D1 rules that out: a
@@ -120,15 +132,76 @@ The setting is operative only in interactive runs. It is declared on
 `rename` all the same, because the `cli` capability scopes flags by
 subcommand, and it can change what an interactive `rename` reports.
 
+### D5a. Filing into a subdirectory is idempotent
+
+`Planning` joins a rendered name to the file's own directory, so a file
+already filed at `Nature/Zeng2026.pdf` is proposed
+`Nature/Nature/Zeng2026.pdf` on the next run, and a level deeper on
+every run after that. Reproduced on a scratch collection with
+`default = "[journal]/[auth][year]"`: three filed files, three
+proposals to nest them again.
+
+The rendered subdirectory names where the file belongs, not a level to
+add to where it is. So the base a target is joined to is the file's
+directory with the rendered subdirectory removed when it is already the
+tail of it:
+
+```text
+file      <base>/Nature/Zeng2026.pdf
+rendered  Nature/Zeng2026.pdf
+target    <base>/Nature/Zeng2026.pdf     (already named)
+
+file      <base>/Nature/Zeng2026.pdf     (journal now renders Science)
+rendered  Science/Zeng2026.pdf
+target    <base>/Science/Zeng2026.pdf    (moves across, not deeper)
+```
+
+Only a tail that matches the whole rendered prefix is removed, so a
+file in `Nature/supplementary/` under a template rendering `Nature/` is
+filed into `Nature/` from where it is, and a directory that merely
+shares a name with the rendered one is not mistaken for it.
+
+This is a rename-capability change and not a planner one: the planner
+compares names in a namespace, and which namespace a file's name is
+compared in is `Planning`'s to decide.
+
+### D5b. A suffix never lands on the file's own name
+
+Two works rendering `smith2024.pdf` file as `smith2024.pdf` and
+`smith2024a.pdf`. On the next run the second renders `smith2024.pdf`,
+finds it taken by the first, and walks the ladder to `smith2024a.pdf` —
+which is free, because a file's own name is exempt from the collision
+check for the duration of its own decision. The decision is a move onto
+the name the file already carries: `hard_link` refuses it, and the run
+reports a rename that failed.
+
+A candidate equal to the item's own source is therefore
+`AlreadyNamed`. The exemption stays what it is — it is what lets a file
+change only the case of its name — and this is the one place where
+reaching the exempt name means the ladder has arrived where the file
+already is.
+
 ### D5. A file's lines are rendered once its fate is known
 
 In an interactive run, the human renderer holds a file's `resolved`
 line until the file's planning outcome is known, then renders the file's
 lines together — or none of them, for a passed-over already-named file.
-Nothing waits on the network in between: planning follows resolution
-immediately. The run log and any `--json` rendering are unaffected,
-since the setting governs what is shown to the operator and not what
-happened, and the JSON stream is where a complete account is kept.
+
+The hold ends at planning and never reaches a question. Planning
+follows resolution with no network in between, so the wait is
+computation and not a person; a hold that lasted until the file's fate
+would keep the operator's own resolution line off the screen while they
+decided about it, which is the opposite of what reporting as it goes is
+for. Quitting releases what is held for the file quit at, as a fate
+would.
+
+Bibliography output is not held and is not suppressed. A sidecar
+written beside a passed-over file, an entry merged into the master
+`.bib`, and any failure in either are reported as they happen: the
+setting hides a file that needs no decision, and a failure needs one.
+The run log and any `--json` rendering are unaffected, since the
+setting governs what is shown to the operator and not what happened,
+and the JSON stream is where a complete account is kept.
 
 This makes the interactive human rendering the one place where the
 terminal shows less than the stream holds. The summary is what keeps it
@@ -144,3 +217,19 @@ honest: `N already named (not shown)`.
 - **Consumers of `skipped`/`already-named` break.** Pre-`1.0.0` and with
   no known external consumer (`openspec/STATE.md`, live risks), the
   change is recorded in the changelog rather than shimmed.
+
+### D6. The schema version goes to 2
+
+`SkipReason::AlreadyNamed` is removed rather than deprecated, and a
+consumer counting skips by reason has no way to notice. The event
+schema version is what announces that, so `SCHEMA` becomes 2.
+
+The interactive rename that preceded this change added fields and a
+reason without bumping it, which was right: a consumer that ignores
+what it does not know reads such a stream unchanged. Removal is the
+case the version exists for.
+
+Pre-`1.0.0` this is bookkeeping rather than a compatibility promise —
+`openspec/project.md` says the schemas may change in any release before
+then — but the number is what a consumer reads, and leaving it at 1
+would tell a reader nothing had changed.
