@@ -3,11 +3,13 @@
 use std::path::PathBuf;
 
 use borax::event::{
-    Attempt, Counts, Diagnostic, Event, Format, Level, SCHEMA, SkipReason, TableUsed, human_line,
-    json_line, render,
+    Attempt, Claim, ClaimOrigin, Counts, Diagnostic, Event, Format, Level, SCHEMA, SkipReason,
+    TableUsed, human_line, json_line, render,
 };
+use borax::pipeline::{FileOutcome, FileRecord, event_for};
 use borax_core::content::{ContentHash, hash_bytes};
-use borax_core::record::{EntryType, Record};
+use borax_core::identifier::{ArxivId, Doi, Identifier};
+use borax_core::record::{BoraxExt, EntryType, Record, Source};
 use serde_json::Value;
 
 // --- event constructors ---
@@ -1070,4 +1072,186 @@ fn a_refused_move_leaves_an_earlier_successful_one_counted() {
         },
         "got {counts:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Tasks 1.2/1.2a: `resolved`'s `claims`, `found`, and provenance-derived
+// `source` (design D2a, D3, D4)
+// ---------------------------------------------------------------------
+
+/// design D3: `claims` serializes each title with its origin, in the
+/// order they were read.
+#[test]
+fn resolved_serializes_claims_as_design_d3_shows() {
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        source: "crossref".to_string(),
+        found: "doi:10.1000/xyz123".to_string(),
+        claims: vec![
+            Claim {
+                from: ClaimOrigin::Xmp,
+                title: "Applications of chiral sulfinyl compounds".to_string(),
+            },
+            Claim {
+                from: ClaimOrigin::Info,
+                title: "Microsoft Word - manuscript.docx".to_string(),
+            },
+        ],
+        tier: Some("text-layer".to_string()),
+        cached: false,
+    };
+
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+
+    assert_eq!(
+        value["claims"],
+        serde_json::json!([
+            {"from": "xmp", "title": "Applications of chiral sulfinyl compounds"},
+            {"from": "info", "title": "Microsoft Word - manuscript.docx"}
+        ]),
+        "got {value:#}"
+    );
+}
+
+/// design D2a: a file resolved from an arXiv identifier found in the
+/// text layer, whose record also carries a DOI, reports the arXiv
+/// identifier as `found` and the DOI as the record's own `identifier`.
+#[test]
+fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
+    let mut record = Record::new(EntryType::Preprint);
+    record.doi = Some(Doi::parse("10.1000/from-the-record").unwrap());
+    record.borax.arxiv = Some(ArxivId::parse("2401.01234").unwrap());
+    let path = PathBuf::from("paper.pdf");
+    let outcome = FileOutcome::Resolved(FileRecord {
+        record,
+        source: Some(borax_sources::source::SourceName::Arxiv),
+        tier: Some(borax_pdf::tiered::Tier::TextLayer),
+        found: Some(Identifier::Arxiv(ArxivId::parse("2401.01234").unwrap())),
+        claims: Vec::new(),
+        cached: false,
+        hash: Some(hash_bytes(b"paper")),
+    });
+
+    let event = event_for(&path, &outcome);
+
+    match event {
+        Event::Resolved {
+            identifier, found, ..
+        } => {
+            assert_eq!(
+                found, "arXiv:2401.01234",
+                "found must be what was looked up"
+            );
+            assert_eq!(
+                identifier, "doi:10.1000/from-the-record",
+                "the record's own identifier is unaffected"
+            );
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4: a content-index answer whose provenance names Crossref
+/// reports `source: "crossref"` and keeps `cached: true`.
+#[test]
+fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
+    let mut record = Record::new(EntryType::Article);
+    record.borax = BoraxExt {
+        provenance: [("title".to_string(), Source::Crossref)]
+            .into_iter()
+            .collect(),
+        ..BoraxExt::default()
+    };
+    let path = PathBuf::from("paper.pdf");
+    let outcome = FileOutcome::Resolved(FileRecord {
+        record,
+        source: None,
+        tier: None,
+        found: None,
+        claims: Vec::new(),
+        cached: true,
+        hash: Some(hash_bytes(b"paper")),
+    });
+
+    let event = event_for(&path, &outcome);
+
+    match event {
+        Event::Resolved { source, cached, .. } => {
+            assert_eq!(source, "crossref");
+            assert!(cached);
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4/D1: a record whose provenance names two services is
+/// reported with both, in the fixed order Crossref, OpenAlex, arXiv,
+/// DataCite, PubMed, sidecar — not the order the fields happen to be
+/// keyed in.
+#[test]
+fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
+    let mut record = Record::new(EntryType::Article);
+    record.borax = BoraxExt {
+        provenance: [
+            ("author".to_string(), Source::OpenAlex),
+            ("title".to_string(), Source::Crossref),
+        ]
+        .into_iter()
+        .collect(),
+        ..BoraxExt::default()
+    };
+    let path = PathBuf::from("paper.pdf");
+    let outcome = FileOutcome::Resolved(FileRecord {
+        record,
+        source: None,
+        tier: None,
+        found: None,
+        claims: Vec::new(),
+        cached: true,
+        hash: Some(hash_bytes(b"paper")),
+    });
+
+    let event = event_for(&path, &outcome);
+
+    match event {
+        Event::Resolved { source, .. } => {
+            assert_eq!(source, "crossref, openalex", "got {source:?}");
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4: a record whose provenance names no service at all — only
+/// extraction, or nothing — keeps reporting the content index itself as
+/// `"cache"`.
+#[test]
+fn a_record_whose_provenance_names_no_service_keeps_cache() {
+    let mut record = Record::new(EntryType::Article);
+    record.borax = BoraxExt {
+        provenance: [("title".to_string(), Source::Extraction)]
+            .into_iter()
+            .collect(),
+        ..BoraxExt::default()
+    };
+    let path = PathBuf::from("paper.pdf");
+    let outcome = FileOutcome::Resolved(FileRecord {
+        record,
+        source: None,
+        tier: None,
+        found: None,
+        claims: Vec::new(),
+        cached: true,
+        hash: Some(hash_bytes(b"paper")),
+    });
+
+    let event = event_for(&path, &outcome);
+
+    match event {
+        Event::Resolved { source, .. } => {
+            assert_eq!(source, "cache", "got {source:?}");
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
 }

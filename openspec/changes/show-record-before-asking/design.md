@@ -88,11 +88,21 @@ read `from the text layer` and `file says` would list the titles read.
   records less often than the title, the authors, the year or the
   container do. A record's own JSON is a `--json` run away for anyone
   who wants the rest.
-- `file says` lists every claimed title with where it was read (`XMP`,
-  `document info`), or `nothing read` when the content index answered
-  and the file was not opened. It is shown whatever the conflict check
+- `file says` lists every claimed title with where it was read, one to
+  a line — `XMP` and `document info`, in the order they were read — or
+  `nothing read` when the content index answered and the file was not
+  opened. A line each rather than one joined line, because two titles
+  run together wrap into each other and telling them apart is the
+  whole reason both are shown. It is shown whatever the conflict check
   concluded, including for claims the check dismissed as placeholders:
   the operator is better placed than the heuristic to discard one.
+- `authors` gives three names and a count of the rest — `Alice Adams,
+  Ben Brown, Cara Clark, and 2 more` — since a list is evidence of
+  whose paper this is rather than a bibliography.
+- The rule fills the whole width. D1's example above is typed to fit
+  this document and is not a second, narrower rule.
+- A type is named as the project names it elsewhere: `journal article`,
+  `preprint`, and so on.
 - `new name` is the proposed target relative to the file's directory.
   When the planner suffixed it, a second line reads `(<rendered> is
   taken)`.

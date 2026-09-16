@@ -24,7 +24,7 @@ use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::ledger::{Entry, Index, RunId};
-use borax_core::record::{DateParts, EntryType, Name, Record};
+use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source as FieldSource};
 use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
 use borax_core::template::RenderInput;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
@@ -127,6 +127,25 @@ impl FakeLibrary {
             LibraryEntry {
                 hash: Ok(hash),
                 pdf: Ok(pdf),
+            },
+        );
+        self
+    }
+
+    /// A file whose hash succeeds but whose open fails loudly, so a
+    /// content-index hit that opened it anyway shows up as a skip
+    /// rather than a silently-live resolution.
+    fn with_open_error(
+        mut self,
+        path: impl Into<PathBuf>,
+        hash: ContentHash,
+        error: ExtractionError,
+    ) -> FakeLibrary {
+        self.entries.insert(
+            path.into(),
+            LibraryEntry {
+                hash: Ok(hash),
+                pdf: Err(error),
             },
         );
         self
@@ -3889,4 +3908,230 @@ fn a_sidecar_write_failure_for_a_passed_over_file_is_still_reported() {
         text.contains("skipped"),
         "a sidecar write failure beside a passed-over file must still be reported: {text}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Task 3.1: the description reaches the question, and both streams keep
+// their shape (design D1's "written where the question is written";
+// design D4's batch wording)
+// ---------------------------------------------------------------------
+
+/// design "The description is part of the question, so it goes where
+/// the question goes": the evidence a rename question rests on reaches
+/// the `Question` the asker is given, and the `resolved` line the run
+/// always reports still reaches stdout untouched.
+#[test]
+fn the_description_reaches_the_question_and_stdout_still_carries_resolved() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("description-reaches-question"),
+        pdf_with_embedded_doi("10.1000/description-reaches-question"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "Smith",
+            2024,
+            "10.1000/description-reaches-question",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![path.clone()], false), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let asked = asker.questions_asked();
+    assert_eq!(asked.len(), 1, "got {asked:?}");
+    assert!(
+        !asked[0].description.is_empty(),
+        "a question about a resolved file must carry the evidence it rests on \
+         (crate::describe::describe), got an empty description: {asked:?}"
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["event"] == "resolved" && line["path"] == "/lib/paper.pdf"),
+        "the resolved event must still reach stdout, unreplaced by the \
+         description: got {lines:?}"
+    );
+}
+
+/// design "It is written to standard error beside the menu, not into
+/// the event stream on standard output": the description itself never
+/// appears in the JSON stream — only the `resolved` event's own fields
+/// do, and `Question::description` carries no field of its own there.
+#[test]
+fn the_description_does_not_reach_the_json_event_stream() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("description-not-in-stream"),
+        pdf_with_embedded_doi("10.1000/description-not-in-stream"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "Smith",
+            2024,
+            "10.1000/description-not-in-stream",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![path.clone()], false), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let asked = asker.questions_asked();
+    let description = asked[0].description.join("\n");
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let resolved = lines
+        .iter()
+        .find(|line| line["event"] == "resolved")
+        .unwrap_or_else(|| panic!("no resolved event in {lines:?}"));
+
+    assert!(
+        resolved.get("description").is_none(),
+        "the resolved event must carry no description field of its own: {resolved:?}"
+    );
+    assert!(
+        !description.is_empty(),
+        "the description shown to the asker must not be empty just because \
+         it stays off stdout"
+    );
+}
+
+/// design D4: "the batch line changes in one word: a content-index
+/// answer reads `via crossref (cached)` rather than `via cache
+/// (cached)`". A batch run's human output for a cached hit whose record
+/// was made by Crossref names Crossref, not the content index.
+#[test]
+fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let hash = hash_for("batch-cached-provenance");
+    // The library would fail loudly if opened, so an accidental open
+    // (rather than a content-index hit) shows up as a failure, not a
+    // silently-live resolution.
+    let library = FakeLibrary::new().with_open_error(
+        &path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let mut record = record_by("Smith", 2024, "10.1000/batch-cached-provenance");
+    record.borax = BoraxExt {
+        provenance: [("title".to_string(), FieldSource::Crossref)]
+            .into_iter()
+            .collect(),
+        ..BoraxExt::default()
+    };
+    let index = ContentIndex::new(MemoryCache::new());
+    index.put(&hash, &record);
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::resolve(vec![path.clone()]), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("via crossref (cached)"),
+        "a cached hit whose provenance names Crossref must say so, not \
+         \"via cache\": got {text:?}"
+    );
+    assert!(!text.contains("via cache (cached)"), "got {text:?}");
 }
