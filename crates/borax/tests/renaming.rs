@@ -181,6 +181,7 @@ fn resolved(path: &str, record: Record, hash: Option<ContentHash>) -> (PathBuf, 
             tier: None,
             cached: false,
             hash,
+            overrode: None,
         },
     )
 }
@@ -1210,6 +1211,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
 
             tier: None,
             cached: false,
+            overrode: None,
         },
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
@@ -1222,6 +1224,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
 
             tier: None,
             cached: false,
+            overrode: None,
         },
         Event::Renamed {
             path: PathBuf::from("a.pdf"),
@@ -1270,6 +1273,7 @@ fn a_preview_runs_counts_report_zero_renamed_however_many_moves_were_planned() {
 
             tier: None,
             cached: false,
+            overrode: None,
         },
         Event::Planned {
             path: PathBuf::from("a.pdf"),

@@ -63,6 +63,7 @@ impl Fixture {
             found: self.found.clone(),
             claims: self.claims.clone(),
             tier: self.tier.clone(),
+            overrode: None,
             cached: self.cached,
         }
     }

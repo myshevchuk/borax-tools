@@ -80,9 +80,15 @@ pub enum Event {
         /// were read. Empty when the file was not opened, which is
         /// what a content-index answer means.
         claims: Vec<Claim>,
-        /// Which extraction pass supplied the identifier, or `None`
-        /// when the caller named it rather than a file carrying it.
+        /// Which extraction pass supplied the identifier, `supplied`
+        /// when the operator named it, or `None` when neither a file
+        /// nor an operator did — a content-index answer.
         tier: Option<String>,
+        /// The conflict the operator accepted to reach this record, or
+        /// `None` when nothing was overridden. A record that cleared
+        /// the conflict check on its own and one accepted despite it
+        /// are the same record; only this says which happened.
+        overrode: Option<Overridden>,
         /// Whether the content index answered, so the file was neither
         /// opened nor looked up. A response cache hit behind a source
         /// is not visible here and reports `false`.
@@ -245,6 +251,20 @@ pub enum ClaimOrigin {
     Xmp,
     /// The document information dictionary's `Title`.
     Info,
+}
+
+/// A conflict an operator accepted, reported on the record they
+/// accepted it for.
+///
+/// The fields are the ones [`SkipReason::Conflict`] carries, and carry
+/// them unchanged: a reader of the run log sees what was overridden in
+/// the vocabulary the skip would have used.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Overridden {
+    pub field: String,
+    pub extracted: String,
+    pub resolved: String,
+    pub similarity: f64,
 }
 
 /// One source's answer during resolution.

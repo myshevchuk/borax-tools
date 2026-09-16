@@ -28,7 +28,7 @@ use borax_sources::pace::map_bounded;
 use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 
-use crate::event::{Attempt, Claim, ClaimOrigin, Counts, Event, SkipReason};
+use crate::event::{Attempt, Claim, ClaimOrigin, Counts, Event, Overridden, SkipReason};
 use crate::ledger::Collection;
 
 /// The files a run works on, as something that can be read.
@@ -83,6 +83,13 @@ pub struct FileRecord {
     /// computed. Carried because renaming needs it — the planner
     /// recognises an already-named file by content, not by path.
     pub hash: Option<ContentHash>,
+    /// The conflict an operator accepted to reach this record, or
+    /// `None` when the record cleared the conflict check on its own.
+    ///
+    /// Only an interactive run can set it: the batch path skips every
+    /// conflict it finds, so a record that reaches a caller from there
+    /// has nothing to have overridden.
+    pub overrode: Option<Overridden>,
 }
 
 /// What a run decided about one file.
@@ -169,6 +176,9 @@ pub fn resolve_file<C: Cache>(
                 claims: Vec::new(),
                 cached: true,
                 hash,
+                // A record served from the index was accepted by
+                // whatever run put it there, not by this one.
+                overrode: None,
             });
         }
     }
@@ -207,6 +217,8 @@ pub fn resolve_file<C: Cache>(
         claims,
         cached: false,
         hash,
+        // The conflict check has already passed; nothing was overridden.
+        overrode: None,
     })
 }
 
@@ -503,6 +515,7 @@ pub fn resolved_event(path: &Path, file: &FileRecord) -> Event {
             .map_or_else(|| identifier_of(&file.record), Identifier::to_string),
         claims: file.claims.clone(),
         tier: file.tier.map(|tier| tier.as_str().to_string()),
+        overrode: file.overrode.clone(),
         cached: file.cached,
     }
 }

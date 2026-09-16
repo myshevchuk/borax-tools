@@ -50,6 +50,7 @@ fn resolved() -> Event {
 
         tier: Some("first-page".to_string()),
         cached: false,
+        overrode: None,
     }
 }
 
@@ -291,6 +292,7 @@ fn json_line_of_resolved_has_exactly_the_documented_field_set() {
             "event",
             "found",
             "identifier",
+            "overrode",
             "path",
             "record",
             "schema",
@@ -965,6 +967,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
 
             tier: Some("first-page".to_string()),
             cached: false,
+            overrode: None,
         },
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
@@ -977,6 +980,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
 
             tier: None,
             cached: true,
+            overrode: None,
         },
         Event::Renamed {
             path: PathBuf::from("a.pdf"),
@@ -1101,6 +1105,7 @@ fn resolved_serializes_claims_as_design_d3_shows() {
         ],
         tier: Some("text-layer".to_string()),
         cached: false,
+        overrode: None,
     };
 
     let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
@@ -1132,6 +1137,7 @@ fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
         claims: Vec::new(),
         cached: false,
         hash: Some(hash_bytes(b"paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1173,6 +1179,7 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
         claims: Vec::new(),
         cached: true,
         hash: Some(hash_bytes(b"paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1211,6 +1218,7 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
         claims: Vec::new(),
         cached: true,
         hash: Some(hash_bytes(b"paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1244,6 +1252,7 @@ fn a_record_whose_provenance_names_no_service_keeps_cache() {
         claims: Vec::new(),
         cached: true,
         hash: Some(hash_bytes(b"paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);

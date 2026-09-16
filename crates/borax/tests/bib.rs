@@ -180,6 +180,7 @@ fn resolved(path: &str, record: Record) -> (PathBuf, FileRecord) {
             tier: None,
             cached: false,
             hash: None,
+            overrode: None,
         },
     )
 }

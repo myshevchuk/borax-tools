@@ -399,6 +399,7 @@ fn resolved_event(
 
         tier: tier.map(str::to_string),
         cached,
+        overrode: None,
     }
 }
 

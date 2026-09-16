@@ -841,6 +841,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
         tier: Some(Tier::EmbeddedMetadata),
         cached: false,
         hash: Some(hash_for("paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -858,6 +859,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
 
             tier: Some(tier_str(Tier::EmbeddedMetadata).to_string()),
             cached: false,
+            overrode: None,
         }
     );
 }
@@ -875,6 +877,7 @@ fn a_content_index_hit_reports_its_source_as_cache() {
         tier: None,
         cached: true,
         hash: Some(hash_for("paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1543,6 +1546,7 @@ fn a_resolved_event_carries_the_whole_record() {
         tier: Some(Tier::TextLayer),
         cached: false,
         hash: None,
+        overrode: None,
     });
 
     let Event::Resolved {
@@ -1573,6 +1577,7 @@ fn a_resolved_event_round_trips_its_record_through_json() {
             tier: Some(Tier::TextLayer),
             cached: false,
             hash: None,
+            overrode: None,
         }),
     );
 
