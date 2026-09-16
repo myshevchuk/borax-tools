@@ -403,29 +403,43 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: rebuilt with {entries} entries",
             root.display()
         )),
-        // A zero count of unmatched lookups is left out rather than
-        // written as a zero: the JSON summary carries it either way,
-        // and a run that looked nothing up has nothing to say about
-        // tables it never consulted.
-        Event::RunFinished { counts } => Some(format!(
-            "{} resolved, {} renamed, {} skipped{}{}{}",
-            counts.resolved,
-            counts.renamed,
-            counts.skipped,
-            match counts.named {
-                0 => String::new(),
-                named => format!(", {named} already named"),
-            },
-            match counts.unmatched {
-                0 => String::new(),
-                unmatched => format!(", {unmatched} unmatched"),
-            },
-            match counts.unreached {
-                0 => String::new(),
-                unreached => format!(", {unreached} not reached"),
-            }
-        )),
+        Event::RunFinished { counts } => Some(human_summary(counts, 0)),
     }
+}
+
+/// What a run amounts to, as the closing line of a human rendering.
+///
+/// `hidden` is how many already-named files the run passed over without
+/// a line of their own, which only an interactive run does. Saying so
+/// here is what keeps a terminal that showed less than the stream held
+/// honest about it.
+///
+/// A zero count of unmatched lookups is left out rather than written as
+/// a zero: the JSON summary carries it either way, and a run that
+/// looked nothing up has nothing to say about tables it never
+/// consulted. The same goes for files already named, renames not
+/// reached, and files passed over.
+pub fn human_summary(counts: &Counts, hidden: usize) -> String {
+    format!(
+        "{} resolved, {} renamed, {} skipped{}{}{}",
+        counts.resolved,
+        counts.renamed,
+        counts.skipped,
+        match (counts.named, hidden) {
+            (0, _) => String::new(),
+            (named, 0) => format!(", {named} already named"),
+            (named, hidden) if hidden >= named => format!(", {named} already named (not shown)"),
+            (named, hidden) => format!(", {named} already named ({hidden} not shown)"),
+        },
+        match counts.unmatched {
+            0 => String::new(),
+            unmatched => format!(", {unmatched} unmatched"),
+        },
+        match counts.unreached {
+            0 => String::new(),
+            unreached => format!(", {unreached} not reached"),
+        }
+    )
 }
 
 /// The clause following `skipped,` in a human line.

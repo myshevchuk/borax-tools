@@ -33,13 +33,16 @@ what the rest rests on; group 4 is the setting the change is named for.
       exemption that lets a file change only the case of its name still
       works (design D5b)
 - [ ] 2.2 Green: the ladder stops at the file's own name
-- [ ] 2.3 Red: `crates/borax/tests/renaming.rs` — a file already in the
-      rendered subdirectory is already named; one in a subdirectory the
-      template no longer renders moves across rather than deeper; one
-      further down the tree is filed from where it is; a file not yet in
-      it is filed into it as before (design D5a)
-- [ ] 2.4 Green: the base a target is joined to is the file's directory
-      less the rendered subdirectory, where it already ends with it
+- [ ] 2.3 Red: `crates/borax/tests/renaming.rs` — with a collection
+      root: a file already in the rendered subdirectory is already
+      named; one in a subdirectory the template no longer renders moves
+      across rather than deeper; one further down the tree is filed
+      where it belongs; a file not yet filed is filed into it. With no
+      collection root: the target is joined to the file's own directory,
+      as today (design D5a)
+- [ ] 2.4 Green: `Planning` takes the collection root and joins a
+      rendered subdirectory to it, falling back to the file's own
+      directory when there is none
 - [ ] 2.5 Verify on the scratch collection that reproduced the nesting:
       `default = "[journal]/[auth][year]"`, applied twice, leaves every
       file where the first run filed it

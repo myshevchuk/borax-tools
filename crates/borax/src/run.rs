@@ -40,7 +40,9 @@ use crate::config::{
     Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
     layer_from_toml, nearest_override, resolve, table_path,
 };
-use crate::event::{Counts, Diagnostic, Event, Format, Level, SkipReason, TableUsed, render};
+use crate::event::{
+    Counts, Diagnostic, Event, Format, Level, SkipReason, TableUsed, human_summary, render,
+};
 use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
@@ -556,6 +558,24 @@ pub trait Sink {
         let _ = event;
         Ok(())
     }
+
+    /// Hold back what a person is shown about the file now being
+    /// decided, until [`Sink::release`] or [`Sink::withhold`] says what
+    /// became of it.
+    ///
+    /// Only what is shown: the event stream is complete whatever is
+    /// held, so a sink that keeps the events rather than rendering them
+    /// has nothing to hold and the default does nothing. Holding twice
+    /// without ending the first hold is not meaningful and is not
+    /// supported.
+    fn hold(&mut self) {}
+
+    /// Show what the hold kept back, in the order it was emitted.
+    fn release(&mut self) {}
+
+    /// Drop what the hold kept back: the file it was about is passed
+    /// over, and the run's summary is what says how many were.
+    fn withhold(&mut self) {}
 }
 
 /// Collecting a run rather than showing it, for a caller that wants to
@@ -1229,6 +1249,11 @@ fn rename_events<C: Cache>(
             apply || session.mode == Mode::Interactive,
         );
         let mut cited = Citations::default();
+        // Whether a file this directory's configuration reports as
+        // already named is passed over without a line of its own. Only
+        // an interactive run does: a batch run's output is the complete
+        // per-file account a person reads after the fact.
+        let passing_over = session.mode == Mode::Interactive && effective.config().skip_named;
 
         // Left as a block so that what a group owes whatever happens —
         // its merge into the master `.bib` and the misses its templates
@@ -1236,11 +1261,26 @@ fn rename_events<C: Cache>(
         // finished and a group it was stopped in alike.
         let ended = 'files: {
             for (position, path) in group.paths.iter().enumerate() {
+                // The hold covers this file alone and ends the moment
+                // its planning outcome is known, which is before any
+                // question about it is put: what the operator decides
+                // about, they have already read about.
+                if passing_over {
+                    sink.hold();
+                }
                 let Some(file) = resolved_record(path, effective, adapters, checked, sink) else {
+                    sink.release();
                     continue;
                 };
 
                 let decision = planning.propose(path, &file, &mut lookups);
+                // A file already named is passed over whole, its own
+                // outcome line included, so the hold outlasts the
+                // event that reports it.
+                let named = matches!(decision, PlannedRename::AlreadyNamed { .. });
+                if !named {
+                    sink.release();
+                }
                 let event = match decided(session, &decision) {
                     Decided::CarryOut => {
                         planning.accept(&decision);
@@ -1278,6 +1318,9 @@ fn rename_events<C: Cache>(
                         });
                     }
                 };
+                if named {
+                    sink.withhold();
+                }
 
                 // A sidecar goes beside the name the file now carries
                 // rather than beside the one it has just lost, so where
@@ -1753,18 +1796,71 @@ fn bib_config(config: &Config) -> BibConfig {
 /// A write that fails is dropped rather than reported: the stream is
 /// where a run says things, and a run whose stream has gone has nowhere
 /// left to say that it went.
+///
+/// A hold ([`Sink::hold`]) keeps a file's lines here until the run says
+/// what became of the file, and is what lets an interactive run pass
+/// over a file that needs no decision without having already printed
+/// its resolution. Only the prose is held: the totals take every event
+/// as it arrives, so a withheld file is counted as it would have been
+/// shown, and `hidden` is what the summary says was passed over.
+///
+/// A [`Format::Json`] rendering never holds. It is the complete account
+/// of the run, and a consumer cannot reconstruct one from a stream with
+/// holes in it.
 struct Rendering<'a> {
     format: Format,
     out: &'a mut dyn Write,
     counts: Counts,
+    /// The lines of the file being decided, while its fate is unknown.
+    held: Option<Vec<String>>,
+    /// How many files' lines were dropped rather than written.
+    hidden: usize,
+}
+
+impl Rendering<'_> {
+    /// Write `line` to the stream, or hold it when a hold is on.
+    fn put(&mut self, line: String) {
+        match &mut self.held {
+            Some(held) => held.push(line),
+            None => {
+                let _ = writeln!(self.out, "{line}");
+            }
+        }
+    }
 }
 
 impl Sink for Rendering<'_> {
     fn emit(&mut self, event: Event) {
-        if let Some(line) = render(self.format, &event) {
-            let _ = writeln!(self.out, "{line}");
+        // The summary is the one line the hold changes rather than
+        // delays: a run that passed files over says so there.
+        let line = match (&event, self.format) {
+            (Event::RunFinished { counts }, Format::Human) => {
+                Some(human_summary(counts, self.hidden))
+            }
+            _ => render(self.format, &event),
+        };
+        if let Some(line) = line {
+            self.put(line);
         }
         self.counts.observe(&event);
+    }
+
+    fn hold(&mut self) {
+        if self.format == Format::Human {
+            self.held = Some(Vec::new());
+        }
+    }
+
+    fn release(&mut self) {
+        for line in self.held.take().unwrap_or_default() {
+            let _ = writeln!(self.out, "{line}");
+        }
+    }
+
+    fn withhold(&mut self) {
+        if self.held.take().is_some() {
+            self.hidden += 1;
+        }
     }
 }
 
@@ -1835,6 +1931,20 @@ impl Sink for Logging<'_> {
         }
         self.recorded = Some(event);
         Ok(())
+    }
+
+    /// The hold is the terminal's alone: the log is the run's complete
+    /// account and carries every event whatever a person is shown.
+    fn hold(&mut self) {
+        self.terminal.hold();
+    }
+
+    fn release(&mut self) {
+        self.terminal.release();
+    }
+
+    fn withhold(&mut self) {
+        self.terminal.withhold();
     }
 }
 
@@ -2017,6 +2127,8 @@ pub fn dispatch<C: Cache>(
             format: cli.format(),
             out: streams.out,
             counts: Counts::default(),
+            held: None,
+            hidden: 0,
         },
         log,
         recorded: None,

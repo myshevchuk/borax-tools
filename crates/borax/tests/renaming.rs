@@ -649,13 +649,14 @@ fn a_target_subdirectory_explicitly_seeded_as_empty_plans_normally() {
 }
 
 // ---------------------------------------------------------------------
-// plan_renames: filing into a subdirectory is idempotent (design D5a)
+// plan_renames: a rendered subdirectory is filed from the collection
+// root (design D5a)
 // ---------------------------------------------------------------------
 //
-// `[journal]/[auth][year]` files `Zeng2026.pdf` into `Nature/`. A
-// rendered subdirectory names where the file belongs, not a level to
-// add to where it already sits: re-running over a filed collection
-// must not nest it deeper.
+// `[journal]/[auth][year]` files `Zeng2026.pdf` into `Nature/` beneath
+// the collection root. The rendered subdirectory names where in the
+// collection the file belongs, not a level to add to wherever it sits,
+// so a run over a filed collection proposes nothing.
 
 #[test]
 fn a_file_already_in_the_rendered_subdirectory_is_already_named() {
@@ -669,6 +670,7 @@ fn a_file_already_in_the_rendered_subdirectory_is_already_named() {
 
     let plan = plan_renames(
         &resolved,
+        Some(Path::new("/lib")),
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -690,6 +692,7 @@ fn a_file_in_a_subdirectory_the_template_no_longer_renders_moves_across_not_deep
 
     let plan = plan_renames(
         &resolved,
+        Some(Path::new("/lib")),
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -705,20 +708,10 @@ fn a_file_in_a_subdirectory_the_template_no_longer_renders_moves_across_not_deep
     );
 }
 
-/// Only a tail matching the *whole* rendered prefix is stripped, so a
-/// file sitting further down the tree than the rendered subdirectory —
-/// here, under a sibling of it rather than in it — is filed into the
-/// rendered subdirectory from where it already is, rather than being
-/// mistaken for already sitting in one merely by sharing part of its
-/// name.
-///
-/// Under the current, unfixed implementation this input already
-/// produces the expected target by coincidence (the base directory is
-/// never stripped of anything, matched or not), so this assertion holds
-/// before and after the D5a fix; it is written here as the contract the
-/// fix must not disturb, not as a red assertion in its own right.
+/// A file deeper in the tree than the rendered subdirectory is filed
+/// where the template says it belongs, out of wherever it was put.
 #[test]
-fn a_file_further_down_the_tree_is_filed_from_where_it_is() {
+fn a_file_further_down_the_tree_is_filed_where_it_belongs() {
     let resolved = [resolved(
         "/lib/Nature/supplementary/Zeng2026.pdf",
         record_by_in("Nature", "Zeng", 2026),
@@ -729,6 +722,7 @@ fn a_file_further_down_the_tree_is_filed_from_where_it_is() {
 
     let plan = plan_renames(
         &resolved,
+        Some(Path::new("/lib")),
         &templates,
         CollisionPolicy::Suffix,
         &filesystem,
@@ -739,7 +733,38 @@ fn a_file_further_down_the_tree_is_filed_from_where_it_is() {
         plan,
         vec![rename(
             "/lib/Nature/supplementary/Zeng2026.pdf",
-            "/lib/Nature/supplementary/Nature/Zeng2026.pdf"
+            "/lib/Nature/Zeng2026.pdf"
+        )]
+    );
+}
+
+/// Outside a collection there is no root to file from, so a rendered
+/// subdirectory is joined to the file's own directory, as it always
+/// was.
+#[test]
+fn with_no_collection_root_a_subdirectory_is_joined_to_the_files_own() {
+    let resolved = [resolved(
+        "/downloads/paper.pdf",
+        record_by_in("Nature", "Zeng", 2026),
+        None,
+    )];
+    let templates = table("[journal]/[auth][year]");
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(
+        &resolved,
+        None,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
+
+    assert_eq!(
+        plan,
+        vec![rename(
+            "/downloads/paper.pdf",
+            "/downloads/Nature/Zeng2026.pdf"
         )]
     );
 }

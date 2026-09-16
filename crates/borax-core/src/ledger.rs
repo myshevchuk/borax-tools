@@ -217,24 +217,32 @@ pub struct Duplicate {
 ///
 /// Where two entries collide on a hash or an identifier the later one
 /// answers, matching the append-only file: a fresh admission supersedes
-/// what the same key recorded before.
+/// what the same key recorded before. The earlier ones are kept behind
+/// it rather than dropped, since a duplicate check that has to pass over
+/// the newest entry — the incoming file's own admission — still has to
+/// find what an older one recorded.
 #[derive(Debug, Clone)]
 pub struct Index {
     entries: Vec<Entry>,
-    by_hash: HashMap<ContentHash, usize>,
-    by_identifier: HashMap<Identifier, usize>,
+    /// The positions recorded for a hash, oldest first.
+    by_hash: HashMap<ContentHash, Vec<usize>>,
+    /// The positions recorded for an identifier, oldest first.
+    by_identifier: HashMap<Identifier, Vec<usize>>,
 }
 
 impl Index {
     /// Index `entries`, which are taken in file order (oldest first).
     pub fn build(entries: &[Entry]) -> Index {
-        let mut by_hash = HashMap::new();
-        let mut by_identifier = HashMap::new();
+        let mut by_hash: HashMap<ContentHash, Vec<usize>> = HashMap::new();
+        let mut by_identifier: HashMap<Identifier, Vec<usize>> = HashMap::new();
 
         for (position, entry) in entries.iter().enumerate() {
-            by_hash.insert(entry.hash.clone(), position);
+            by_hash
+                .entry(entry.hash.clone())
+                .or_default()
+                .push(position);
             for identifier in entry.identifiers() {
-                by_identifier.insert(identifier, position);
+                by_identifier.entry(identifier).or_default().push(position);
             }
         }
 
@@ -247,12 +255,23 @@ impl Index {
 
     /// The entry recorded for `hash`, if any.
     pub fn by_hash(&self, hash: &ContentHash) -> Option<&Entry> {
-        self.entries.get(*self.by_hash.get(hash)?)
+        self.newest(self.by_hash.get(hash)?, &|_| false)
     }
 
     /// The entry recorded for `identifier`, if any.
     pub fn by_identifier(&self, identifier: &Identifier) -> Option<&Entry> {
-        self.entries.get(*self.by_identifier.get(identifier)?)
+        self.newest(self.by_identifier.get(identifier)?, &|_| false)
+    }
+
+    /// The newest of the entries at `positions` whose recorded path
+    /// `is_incoming` rejects, or `None` when it accepts every one of
+    /// them.
+    fn newest(&self, positions: &[usize], is_incoming: &dyn Fn(&str) -> bool) -> Option<&Entry> {
+        positions
+            .iter()
+            .rev()
+            .filter_map(|position| self.entries.get(*position))
+            .find(|entry| !is_incoming(&entry.path))
     }
 
     /// Whether a file hashing to `hash` is already archived somewhere
@@ -272,8 +291,13 @@ impl Index {
         hash: &ContentHash,
         is_incoming: &dyn Fn(&str) -> bool,
     ) -> Option<Duplicate> {
-        let _ = (hash, is_incoming);
-        todo!("content_duplicate: the newest entry for this hash that is not the file itself")
+        Some(Duplicate {
+            reason: DuplicateReason::Content,
+            existing_path: self
+                .newest(self.by_hash.get(hash)?, is_incoming)?
+                .path
+                .clone(),
+        })
     }
 
     /// Whether any of `identifiers` names a work already archived
@@ -293,7 +317,13 @@ impl Index {
         identifiers: &[Identifier],
         is_incoming: &dyn Fn(&str) -> bool,
     ) -> Option<Duplicate> {
-        let _ = (identifiers, is_incoming);
-        todo!("work_duplicate: the first identifier whose newest non-self entry exists")
+        identifiers
+            .iter()
+            .filter_map(|identifier| self.by_identifier.get(identifier))
+            .find_map(|positions| self.newest(positions, is_incoming))
+            .map(|entry| Duplicate {
+                reason: DuplicateReason::Work,
+                existing_path: entry.path.clone(),
+            })
     }
 }

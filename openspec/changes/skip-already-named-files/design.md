@@ -132,7 +132,7 @@ The setting is operative only in interactive runs. It is declared on
 `rename` all the same, because the `cli` capability scopes flags by
 subcommand, and it can change what an interactive `rename` reports.
 
-### D5a. Filing into a subdirectory is idempotent
+### D5a. A rendered subdirectory is filed from the collection root
 
 `Planning` joins a rendered name to the file's own directory, so a file
 already filed at `Nature/Zeng2026.pdf` is proposed
@@ -141,29 +141,46 @@ every run after that. Reproduced on a scratch collection with
 `default = "[journal]/[auth][year]"`: three filed files, three
 proposals to nest them again.
 
-The rendered subdirectory names where the file belongs, not a level to
-add to where it is. So the base a target is joined to is the file's
-directory with the rendered subdirectory removed when it is already the
-tail of it:
+The rendered subdirectory names where in the collection the file
+belongs. So it is joined to the collection root — the directory holding
+the `.borax.toml` that the run's configuration came from, which is
+already what anchors `.borax/` — rather than to wherever the file
+happens to sit now:
 
 ```text
-file      <base>/Nature/Zeng2026.pdf
+root      <root>
+file      <root>/Nature/Zeng2026.pdf
 rendered  Nature/Zeng2026.pdf
-target    <base>/Nature/Zeng2026.pdf     (already named)
+target    <root>/Nature/Zeng2026.pdf      (already named)
 
-file      <base>/Nature/Zeng2026.pdf     (journal now renders Science)
+file      <root>/Nature/Zeng2026.pdf      (journal now renders Science)
 rendered  Science/Zeng2026.pdf
-target    <base>/Science/Zeng2026.pdf    (moves across, not deeper)
+target    <root>/Science/Zeng2026.pdf     (moves across, not deeper)
+
+file      <root>/Nature/supplementary/Zeng2026.pdf
+rendered  Nature/Zeng2026.pdf
+target    <root>/Nature/Zeng2026.pdf      (filed where it belongs)
 ```
 
-Only a tail that matches the whole rendered prefix is removed, so a
-file in `Nature/supplementary/` under a template rendering `Nature/` is
-filed into `Nature/` from where it is, and a directory that merely
-shares a name with the rendered one is not mistaken for it.
+The alternative was to strip from the file's own directory any tail
+equal to the rendered prefix. It makes a re-run idempotent and nothing
+else: the prefix a file was filed under last time is not the prefix its
+record renders now, so a paper whose journal field changed would be
+nested under the old directory rather than moved out of it, and no rule
+over the file's own path can tell `Nature` — a directory borax made —
+from `Downloads`, which it must never strip. Only a root distinguishes
+them, and the run has one.
 
-This is a rename-capability change and not a planner one: the planner
-compares names in a namespace, and which namespace a file's name is
-compared in is `Planning`'s to decide.
+A run with no collection root — files outside any collection — keeps
+joining to the file's own directory, which is what it does today and is
+the only base there is. Such a run cannot be idempotent over a
+subdirectory template, and that is the cost of having nowhere to
+anchor.
+
+Collisions are still detected where the file is going: the planner is
+given the target relative to the directory it compares in, and a target
+that now reaches out of that directory widens the namespace the same
+way a nested one already does.
 
 ### D5b. A suffix never lands on the file's own name
 

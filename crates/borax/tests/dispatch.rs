@@ -3791,11 +3791,11 @@ fn a_sidecar_for_a_passed_over_file_is_still_reported() {
 
     let text = String::from_utf8(out).unwrap();
     assert!(
-        !text.contains("resolved"),
+        !text.contains("Smith2024.pdf: resolved"),
         "the passed-over file's resolution line must not show: {text}"
     );
     assert!(
-        !text.contains("already named"),
+        !text.contains("Smith2024.pdf: already named"),
         "the passed-over file's outcome line must not show: {text}"
     );
     assert!(
@@ -3874,11 +3874,11 @@ fn a_sidecar_write_failure_for_a_passed_over_file_is_still_reported() {
 
     let text = String::from_utf8(out).unwrap();
     assert!(
-        !text.contains("resolved"),
+        !text.contains("Smith2024.pdf: resolved"),
         "the passed-over file's resolution line must not show: {text}"
     );
     assert!(
-        !text.contains(": already named"),
+        !text.contains("Smith2024.pdf: already named"),
         "the passed-over file's outcome line must not show: {text}"
     );
     assert!(

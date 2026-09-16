@@ -6,14 +6,16 @@ the directory the file belongs in, and any part of it that does not
 exist SHALL be created when the rename is applied. Sanitization
 prevents such a target from leaving that directory.
 
-The directory a file belongs in is its own, less the rendered
-subdirectory where the file already sits in it. A rendered
-subdirectory therefore says where a file belongs rather than adding a
-level to where it is: a file already filed there is at its target and
-is already named, and one filed under a subdirectory the template no
-longer renders moves across into the new one rather than deeper into
-the old. Only a tail matching the whole rendered prefix counts, so a
-file further down the tree is filed from where it is.
+The directory a file belongs in is the collection root, where the run
+has one. A rendered subdirectory therefore says where in the collection
+a file belongs rather than adding a level to wherever it sits now: a
+file already filed there is at its target and is already named, one
+filed under a subdirectory the template no longer renders moves across
+into the new one rather than deeper into the old, and one further down
+the tree is filed where it belongs.
+
+A run with no collection root SHALL join a rendered subdirectory to the
+file's own directory, having no other base to use.
 
 Collisions SHALL be detected where the file is going, not where it came
 from: a name already taken in the target subdirectory blocks or suffixes
@@ -31,11 +33,16 @@ for the same name in different subdirectories do not collide.
   it would be in the file's own directory
 
 #### Scenario: Re-running a filed collection changes nothing
-- **WHEN** a run files `zeng2026.pdf` into `Nature/` and the same run is
-  repeated over the same directory
+- **WHEN** a run files `zeng2026.pdf` into `Nature/` under the
+  collection root and the same run is repeated over the same collection
 - **THEN** the file is reported already named and stays at
   `Nature/zeng2026.pdf`, rather than being proposed
   `Nature/Nature/zeng2026.pdf`
+
+#### Scenario: Filing outside a collection
+- **WHEN** a run over a directory with no `.borax.toml` above it renders
+  `sub/smith2024` for a file in that directory
+- **THEN** the file is filed into `sub/` beneath it, as it is today
 
 #### Scenario: The journal a file is filed under changes
 - **WHEN** a file sits at `Nature/zeng2026.pdf` and its template now

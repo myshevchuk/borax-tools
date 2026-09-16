@@ -219,9 +219,10 @@ impl<'a> Planning<'a> {
         lookups: &mut Lookups<'_>,
     ) -> PlannedRename {
         let path = path.to_path_buf();
-        let Some(input) = plan_input(&path, file, self.templates, lookups) else {
+        let Some(mut input) = plan_input(&path, file, self.templates, lookups) else {
             return PlannedRename::Unnameable { path };
         };
+        input.target = self.in_namespace(&input.target);
         self.reach(&input.target);
 
         match self.planner.propose(&input, self.policy).action {
@@ -235,6 +236,40 @@ impl<'a> Planning<'a> {
                 path,
             },
         }
+    }
+
+    /// `target` — a rendered name, relative — as a name in the
+    /// namespace this planning compares in: its own directory's.
+    ///
+    /// A rendered subdirectory says where a file belongs rather than
+    /// adding a level to where it already is, so a rendered prefix the
+    /// directory already ends with is dropped: the file is in the
+    /// subdirectory the template named, and its name there is what is
+    /// planned. Everything else is unchanged and is filed into the
+    /// subdirectory from where it is.
+    ///
+    /// Only a tail matching the whole rendered prefix counts, matched
+    /// component by component and case-insensitively as the planner
+    /// matches names. A file further down the tree than the rendered
+    /// subdirectory is therefore filed from where it is, and a
+    /// directory that merely shares part of the prefix's name is not
+    /// mistaken for it.
+    fn in_namespace(&self, target: &str) -> String {
+        let Some((prefix, name)) = target.rsplit_once('/') else {
+            return target.to_string();
+        };
+
+        let mut directory = self.directory.as_path();
+        for component in prefix.rsplit('/') {
+            let ends_with = directory.file_name().is_some_and(|tail| {
+                tail.to_string_lossy().to_lowercase() == component.to_lowercase()
+            });
+            if !ends_with {
+                return target.to_string();
+            }
+            directory = directory.parent().unwrap_or(Path::new(""));
+        }
+        name.to_string()
     }
 
     /// Take the name `decided` names, so no later file in this

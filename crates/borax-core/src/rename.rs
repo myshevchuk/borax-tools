@@ -40,8 +40,9 @@ pub enum PlannedAction {
     /// Rename the file to `to` (the desired target, possibly with a
     /// collision suffix).
     Rename { to: String },
-    /// Nothing to do: the file already sits at the desired target, or
-    /// a byte-identical file (same content hash) already occupies it.
+    /// Nothing to do: the file already sits at the desired target, a
+    /// byte-identical file (same content hash) already occupies it, or
+    /// the suffix ladder reached the name the file already carries.
     AlreadyNamed,
     /// Leave the file untouched, for the stated reason.
     Skip { reason: SkipReason },
@@ -129,7 +130,9 @@ impl Planner {
     ///   … `z`, `aa`, … (before the extension, the suffix ladder of the
     ///   bib merge) and takes the first free candidate; identical
     ///   content elsewhere never short-circuits suffixing, because two
-    ///   distinct files both need names. `Skip` yields
+    ///   distinct files both need names. A candidate equal to `item`'s
+    ///   own source ends the ladder as `AlreadyNamed`: the file already
+    ///   carries that name, so there is nothing to move. `Skip` yields
     ///   `Skip { TargetCollision }`.
     ///
     /// `PlannedAction::Rename` claims the path it names — the desired
@@ -182,7 +185,15 @@ impl Planner {
                     let mut index = 0;
                     loop {
                         let candidate = with_suffix(&item.target, &letter_suffix(index));
-                        if is_free(&candidate.to_lowercase(), &self.claimed, exempt) {
+                        let candidate_key = candidate.to_lowercase();
+                        // The ladder has walked to the name the file
+                        // already carries: the file is where the plan
+                        // would put it, and the move the exemption
+                        // would let through is one onto itself.
+                        if candidate_key == source_key {
+                            break PlannedAction::AlreadyNamed;
+                        }
+                        if is_free(&candidate_key, &self.claimed, exempt) {
                             break PlannedAction::Rename { to: candidate };
                         }
                         index += 1;
