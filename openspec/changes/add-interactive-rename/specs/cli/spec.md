@@ -115,9 +115,14 @@ paths, SHALL print the run's configuration.
 `rename.batch` SHALL be taken from the run's own configuration for the
 same reason: a run has one session with one operator, decided before its
 first event, and a mode that changed between directories would be a run
-that asks about some of its files and not others without saying so. A
-`.borax.toml` under an input therefore does not select the mode unless
-the run was started from within it.
+that asks about some of its files and not others without saying so.
+
+The run's own configuration is the one discovered from the run's start
+directory — the first path it was given, or the working directory when
+it was given none — which is the same configuration `sources`, `mailto`
+and the `network` table are taken from. A second input tree's
+`.borax.toml` therefore does not change the mode, and neither does the
+working directory when the run was given a path.
 
 The nearest `.borax.toml` additionally defines the collection root: the
 directory containing it anchors the collection's `.borax/` accounting
@@ -140,6 +145,11 @@ configuration key overrides this for unusual layouts.
 #### Scenario: Two trees, one mode
 - **WHEN** `borax rename tree-a tree-b` runs from a terminal outside
   both, and `tree-a/.borax.toml` sets `rename.batch = true`
-- **THEN** the run is interactive throughout, because the mode comes
-  from the run's own configuration, and `borax config` run inside
-  `tree-a` reports that file as the origin of its value
+- **THEN** the whole run is a batch run, `tree-b`'s files included,
+  because the mode comes from the configuration of the run's start
+  directory and not from each file's own
+
+#### Scenario: A second tree does not change the mode
+- **WHEN** the same run is given `tree-b` first, and only
+  `tree-a/.borax.toml` sets `rename.batch = true`
+- **THEN** the whole run is interactive, `tree-a`'s files included

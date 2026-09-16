@@ -549,10 +549,11 @@ pub trait Sink {
     /// so a sink that keeps one says here whether it kept this one, and
     /// the caller does not move the file when it did not.
     ///
-    /// A sink that keeps no record has nothing to fail at: the default
-    /// is [`Sink::emit`].
+    /// A sink that keeps no record has nothing to fail at and nothing
+    /// to write: the default takes `event` and does nothing with it,
+    /// since [`Sink::emit`] reports the move once it has been made.
     fn record(&mut self, event: Event) -> Result<(), Diagnostic> {
-        self.emit(event);
+        let _ = event;
         Ok(())
     }
 }
@@ -1440,9 +1441,7 @@ fn moved(
 
     sink.record(intended)?;
     let event = applying.carry_out(decision, hash);
-    if !matches!(event, Event::Renamed { .. }) {
-        sink.emit(event.clone());
-    }
+    sink.emit(event.clone());
     Ok(event)
 }
 
@@ -1786,21 +1785,40 @@ impl Sink for Rendering<'_> {
 /// one is decided. A write that fails is dropped, for
 /// [`Rendering`]'s reason turned around: a run that cannot record
 /// itself still has a person to report to.
+///
+/// A move is the exception at both ends. Its event is written by
+/// [`Sink::record`] before the move is made, so the log names it
+/// whatever becomes of the run; a write that fails there is reported
+/// rather than dropped, because the move must not happen without it.
+/// The terminal is told nothing at that point: a move that has not been
+/// attempted is not a move that happened, and the run reports it once
+/// the filesystem has answered. `recorded` is what keeps the log from
+/// carrying the event twice when it does.
 struct Logging<'a> {
     terminal: Rendering<'a>,
     log: Option<fs::File>,
+    /// The move written to the log and not yet reported, if any.
+    recorded: Option<Event>,
 }
 
 impl Sink for Logging<'_> {
     fn emit(&mut self, event: Event) {
+        let already_logged = self.recorded.take().is_some_and(|last| last == event);
         if let Some(log) = &mut self.log {
-            let _ = writeln!(log, "{}", crate::event::json_line(&event));
+            if !already_logged {
+                let _ = writeln!(log, "{}", crate::event::json_line(&event));
+            }
         }
         self.terminal.emit(event);
     }
 
-    /// Write `event` to the log and flush it before it reaches the
-    /// terminal, and report a write that failed rather than dropping it.
+    /// Write `event` to the log and flush it, and report a write that
+    /// failed rather than dropping it.
+    ///
+    /// The event does not reach the terminal here. It is the move a run
+    /// is about to attempt, and a reader is told what happened to a
+    /// file once it has happened; [`Sink::emit`] is what reports it, and
+    /// writes it to the log only if this did not.
     ///
     /// A run with no log has nothing that can fail here and nothing to
     /// refuse: the mode that may move files is the mode whose log is
@@ -1815,7 +1833,7 @@ impl Sink for Logging<'_> {
                 ))
             })?;
         }
-        self.terminal.emit(event);
+        self.recorded = Some(event);
         Ok(())
     }
 }
@@ -2001,6 +2019,7 @@ pub fn dispatch<C: Cache>(
             counts: Counts::default(),
         },
         log,
+        recorded: None,
     };
     // Through the terminal alone: the log has `started` already, from
     // the write that proved it writable.
@@ -2111,7 +2130,10 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
         .as_deref()
         .map(FileLedger::at_collection_root);
 
-    let mut asker = TerminalAsker;
+    // Questions name a file relative to where the run was started, so
+    // two trees holding the same file name ask two distinguishable
+    // questions.
+    let mut asker = TerminalAsker::new(std::env::current_dir().unwrap_or_default());
     let mut session = session_for(&command, cli.format(), effective.config(), &mut asker);
 
     dispatch(

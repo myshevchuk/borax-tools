@@ -1,5 +1,38 @@
 ## MODIFIED Requirements
 
+<!-- drops: nothing; the requirement gains the one divergence a
+     per-move record can produce -->
+
+### Requirement: Runs persist their event stream as JSONL run logs
+Each run SHALL be able to persist its complete typed event stream — the
+same versioned JSON Lines schema that `--json` prints — to a run-log
+file named `<UTC-timestamp>-<command>-<dry|apply>.jsonl` under
+`.borax/runs/` at the collection root. No other format SHALL be used
+for run records.
+
+A move the filesystem refuses is the one event the log carries and the
+stream does not. Its event is written before the move is attempted,
+because that is what makes the move accountable; the stream reports
+what happened, and what happened is the skip that follows. Every other
+event appears in both.
+
+#### Scenario: Dry and apply runs pair in a listing
+- **WHEN** a preview run is followed by its apply run
+- **THEN** the runs directory contains two files whose names sort
+  adjacently, differing in the `dry`/`apply` suffix and timestamp
+
+#### Scenario: Run log equals --json output
+- **WHEN** a run executes with `--json` and run-logging enabled
+- **THEN** the persisted run log contains the same events as the
+  emitted stdout stream
+
+#### Scenario: A refused move is in the log alone
+- **WHEN** a move whose event was written to the log is then refused by
+  the filesystem
+- **THEN** the log carries that move's event followed by the skip, the
+  stream carries the skip alone, and the run's totals count the file as
+  skipped
+
 <!-- drops: the whole-plan pre-flush, replaced by the per-move guarantee
      the rename capability now states; a run that decides one file at a
      time has no whole plan to flush -->

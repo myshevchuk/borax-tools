@@ -74,11 +74,18 @@ is a usage error rather than a silent choice.
 input directory. A run has one operator and one session, and the mode is
 decided before the first event; a per-directory reading would either
 change mode between groups — which the requirement above forbids — or
-pick one directory's value and silently ignore another's. The cost is
-that a collection whose `.borax.toml` asks for batch does not get it
-when the run is started from outside; `borax config` inside that
-collection still reports the value and its origin, and the flag is
-always available.
+pick one directory's value and silently ignore another's.
+
+"The run's own configuration" is a phrase this repository had already
+settled: `Configs::run()` resolves it from the run's start directory,
+which `start_directory` takes to be the first path the run was given,
+falling back to the working directory when it was given none. So a
+collection whose `.borax.toml` asks for batch gets it whenever it is
+named first, and a second tree's file never changes the mode under the
+first tree's. The alternative — reading the mode from the process
+working directory alone — would have made this one setting resolve
+differently from every other run-level setting, for no reason beyond
+the example that suggested it.
 
 `batch` is a configurable setting and `apply` stays unconfigurable.
 Batch without `--apply` is a preview, so configuration that selects it
@@ -286,6 +293,16 @@ filesystem to move anything, and abandons the run when it returns an
 error (D7). Nothing else changes: every other event goes through `emit`
 and is still best-effort, because losing the record of a skip costs
 nothing that cannot be recomputed.
+
+`record` writes to the log and stops there. The move has not been
+attempted yet, and a reader is told what happened to a file once it has
+happened, so the report is `emit`'s — which writes the event to the log
+only if `record` did not already. The two diverge in exactly one case:
+a move the filesystem refuses stays in the log, where it is what makes
+the attempt accountable, while the stream carries the skip alone and
+the totals count one skip. Reporting the move first instead would have
+had stdout claim a rename that never happened, and would have needed
+the counts to take it back.
 
 This is the smallest seam that makes the guarantee testable: a test
 supplies a sink whose `record` fails on the third call and asserts that

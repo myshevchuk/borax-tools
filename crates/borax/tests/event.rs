@@ -1007,20 +1007,13 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
 // A move recorded and then refused
 // ---------------------------------------------------------------------
 
-/// A move is written to the run log before it is attempted, so a move
-/// the filesystem then refuses is reported twice: the `renamed` event
-/// that recorded the intent, and the skip that records the refusal. The
-/// totals must still say two files were renamed when two files moved —
-/// the summary counts what happened, and what happened here is a skip.
+/// A move is written to the run log before it is attempted, but the
+/// stream reports what happened: a move the filesystem refused reaches
+/// the stream as a skip alone, and the totals count it as one.
 #[test]
 fn a_rename_the_filesystem_refused_counts_as_a_skip_and_not_as_a_rename() {
     let mut counts = Counts::default();
 
-    counts.observe(&Event::Renamed {
-        path: PathBuf::from("/lib/a.pdf"),
-        target: PathBuf::from("/lib/smith2024.pdf"),
-        hash: hash_bytes(b"a"),
-    });
     counts.observe(&Event::Skipped {
         path: PathBuf::from("/lib/a.pdf"),
         reason: SkipReason::RenameFailed {
@@ -1031,6 +1024,36 @@ fn a_rename_the_filesystem_refused_counts_as_a_skip_and_not_as_a_rename() {
     assert_eq!(
         counts,
         Counts {
+            skipped: 1,
+            ..Counts::default()
+        },
+        "got {counts:?}"
+    );
+}
+
+/// The skip recording a refused move never cancels a move that
+/// succeeded: a batch whose first file moved and whose second was
+/// refused renamed one file, and says so.
+#[test]
+fn a_refused_move_leaves_an_earlier_successful_one_counted() {
+    let mut counts = Counts::default();
+
+    counts.observe(&Event::Renamed {
+        path: PathBuf::from("/lib/a.pdf"),
+        target: PathBuf::from("/lib/smith2024.pdf"),
+        hash: hash_bytes(b"a"),
+    });
+    counts.observe(&Event::Skipped {
+        path: PathBuf::from("/lib/b.pdf"),
+        reason: SkipReason::RenameFailed {
+            message: "permission denied".to_string(),
+        },
+    });
+
+    assert_eq!(
+        counts,
+        Counts {
+            renamed: 1,
             skipped: 1,
             ..Counts::default()
         },

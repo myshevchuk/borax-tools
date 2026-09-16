@@ -250,26 +250,10 @@ impl Counts {
     /// renames nothing and leaves `renamed` at zero however many moves
     /// it described. An event that is about the run rather than about a
     /// file changes nothing.
-    ///
-    /// A move the filesystem refused is the one event pair that has to
-    /// be read together: its `renamed` event records an intent written
-    /// to the log before the move was attempted, and the skip that
-    /// follows takes it back.
     pub fn observe(&mut self, event: &Event) {
         match event {
             Event::Resolved { .. } => self.resolved += 1,
             Event::Renamed { .. } => self.renamed += 1,
-            // A move is written to the log before it is attempted, so
-            // the file whose move was refused already counted as
-            // renamed. Its refusal takes that back: the totals say what
-            // happened, and what happened was a skip.
-            Event::Skipped {
-                reason: SkipReason::RenameFailed { .. },
-                ..
-            } => {
-                self.renamed = self.renamed.saturating_sub(1);
-                self.skipped += 1;
-            }
             Event::Skipped { .. } => self.skipped += 1,
             Event::LookupMissed { .. } => self.unmatched += 1,
             _ => {}

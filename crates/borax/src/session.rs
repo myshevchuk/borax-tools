@@ -14,7 +14,7 @@
 //! written against [`Asker`] rather than against a terminal.
 
 use std::fmt;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::event::{Counts, Format};
@@ -211,7 +211,19 @@ impl fmt::Display for Choice {
 /// translating a [`Question`] into a menu and the menu's result back
 /// into an [`Answer`]: what the test suite cannot reach is therefore
 /// also what holds no decision.
-pub struct TerminalAsker;
+pub struct TerminalAsker {
+    /// The directory a question's file is named relative to, where it
+    /// lies under one.
+    working: PathBuf,
+}
+
+impl TerminalAsker {
+    /// An asker naming files relative to `working`, which is the
+    /// directory the run was started from.
+    pub fn new(working: PathBuf) -> TerminalAsker {
+        TerminalAsker { working }
+    }
+}
 
 impl Asker for TerminalAsker {
     /// Draw `question` as a menu of its choices and return the one
@@ -225,12 +237,20 @@ impl Asker for TerminalAsker {
     /// one does.
     fn choose(&mut self, question: &Question) -> Answer {
         // Above the menu rather than in its message, so the file and
-        // the name it would take keep a line each.
-        eprintln!(
+        // the name it would take keep a line each. A terminal that will
+        // not take them is a terminal the question cannot be put on, so
+        // it ends the session rather than ending the process: `eprintln!`
+        // would panic on the write that failed.
+        if writeln!(
+            io::stderr(),
             "{}\n  → {}",
-            shown(&question.path),
+            shown(&question.path, &self.working),
             target_shown(&question.target, &question.path)
-        );
+        )
+        .is_err()
+        {
+            return Answer::Quit;
+        }
 
         let choices: Vec<Choice> = question.choices.iter().copied().map(Choice).collect();
         // Without a help message, `inquire` offers its own, which
@@ -247,13 +267,20 @@ impl Asker for TerminalAsker {
     }
 }
 
-/// `path` as a question names it: its file name, or the whole path when
-/// it has none to give.
-fn shown(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || path.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    )
+/// `path` as a question names it, from a run started in `working`:
+/// relative to that directory where it lies under it, and whole where
+/// it does not.
+///
+/// A file name alone would be shorter and is what a run over one
+/// directory would show either way, but it stops identifying a file as
+/// soon as a run spans two: `tree-a/paper.pdf` and `tree-b/paper.pdf`
+/// are different moves, and a question that named both `paper.pdf`
+/// would take one answer for the other.
+fn shown(path: &Path, working: &Path) -> String {
+    path.strip_prefix(working)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 /// `target` as a question names it, beside the file at `path`: the name

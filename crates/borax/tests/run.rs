@@ -463,231 +463,46 @@ fn a_path_that_is_neither_an_existing_file_nor_directory_is_treated_as_a_file() 
 // Configs::resolve: each file's own directory, not the run's
 // ---------------------------------------------------------------------
 
-/// The defect `Configs` exists to fix: resolving once for the whole run
-/// from the first path made the answer depend on argument order. Both
-/// orders here must reach the same pair of configurations.
+/// A run has one mode, and it comes from the run's own configuration —
+/// the one discovered from its start directory, as `sources` and
+/// `mailto` are. The tree a file happens to sit in never changes it, so
+/// a run does not ask about some of its files and not others.
 #[test]
-fn two_files_in_different_trees_each_use_their_own_override_whichever_order_they_are_given() {
-    let alpha = PathBuf::from("/library/alpha/paper.pdf");
-    let beta = PathBuf::from("/library/beta/paper.pdf");
-    let working = Path::new("/library");
-    let read = fake_read(&[
-        (
-            "/library/alpha/.borax.toml",
-            "mailto = \"alpha@example.org\"",
-        ),
-        ("/library/beta/.borax.toml", "mailto = \"beta@example.org\""),
-    ]);
-
-    let forward = Configs::resolve(
-        &[alpha.clone(), beta.clone()],
-        working,
-        vec![],
-        &env_vars(&[]),
-        &read,
-    )
-    .unwrap();
-    let reversed = Configs::resolve(
-        &[beta.clone(), alpha.clone()],
-        working,
-        vec![],
-        &env_vars(&[]),
-        &read,
-    )
-    .unwrap();
-
-    for configs in [&forward, &reversed] {
-        assert_eq!(
-            configs.for_path(&alpha).config().mailto.as_deref(),
-            Some("alpha@example.org")
-        );
-        assert_eq!(
-            configs.for_path(&beta).config().mailto.as_deref(),
-            Some("beta@example.org")
-        );
-    }
-}
-
-// ---------------------------------------------------------------------
-// Configs::resolve: files sharing a directory share its configuration
-// ---------------------------------------------------------------------
-
-#[test]
-fn two_files_in_the_same_directory_get_the_same_configuration_from_its_override() {
-    let x = PathBuf::from("/library/alpha/x.pdf");
-    let y = PathBuf::from("/library/alpha/y.pdf");
-    let working = Path::new("/elsewhere");
-    let dir_path = PathBuf::from("/library/alpha/.borax.toml");
-    let read = fake_read(&[(
-        "/library/alpha/.borax.toml",
-        "[templates]\ndefault = \"[year]-[auth]\"",
-    )]);
-
-    let configs = Configs::resolve(
-        &[x.clone(), y.clone()],
-        working,
-        vec![],
-        &env_vars(&[]),
-        &read,
-    )
-    .unwrap();
-
-    assert_eq!(configs.for_path(&x), configs.for_path(&y));
-    assert_eq!(
-        configs.for_path(&x).origin("templates.default"),
-        Some(&Origin::DirectoryFile(dir_path))
-    );
-}
-
-// ---------------------------------------------------------------------
-// Configs::resolve: no override in a file's own directory climbs upward
-// ---------------------------------------------------------------------
-
-#[test]
-fn a_file_in_a_directory_with_no_override_uses_the_nearest_ancestors_override() {
-    let path = PathBuf::from("/library/a/b/paper.pdf");
-    let working = Path::new("/elsewhere");
-    let ancestor_path = PathBuf::from("/library/a/.borax.toml");
-    let read = fake_read(&[("/library/a/.borax.toml", "mailto = \"a@example.org\"")]);
-
-    let configs = Configs::resolve(
-        slice::from_ref(&path),
-        working,
-        vec![],
-        &env_vars(&[]),
-        &read,
-    )
-    .unwrap();
-
-    assert_eq!(
-        configs.for_path(&path).config().mailto.as_deref(),
-        Some("a@example.org")
-    );
-    assert_eq!(
-        configs.for_path(&path).origin("mailto"),
-        Some(&Origin::DirectoryFile(ancestor_path))
-    );
-}
-
-// ---------------------------------------------------------------------
-// Configs::for_path: a path the resolver never saw falls back to run()
-// ---------------------------------------------------------------------
-
-#[test]
-fn for_path_on_a_path_the_resolver_never_saw_returns_the_same_as_run() {
-    let seen = PathBuf::from("/library/alpha/paper.pdf");
-    let working = Path::new("/elsewhere");
-    // `/library/gamma` has an override too, so a resolver that lazily
-    // climbed from an unseen path would answer differently from `run()`
-    // here — this is what proves the fallback does not do that.
-    let read = fake_read(&[
-        (
-            "/library/alpha/.borax.toml",
-            "mailto = \"alpha@example.org\"",
-        ),
-        (
-            "/library/gamma/.borax.toml",
-            "mailto = \"gamma@example.org\"",
-        ),
-    ]);
-
-    let configs = Configs::resolve(
-        slice::from_ref(&seen),
-        working,
-        vec![],
-        &env_vars(&[]),
-        &read,
-    )
-    .unwrap();
-
-    let unseen = Path::new("/library/gamma/other.pdf");
-    assert_eq!(configs.for_path(unseen), configs.run());
-    assert_ne!(
-        configs.for_path(unseen).config().mailto.as_deref(),
-        Some("gamma@example.org")
-    );
-}
-
-// ---------------------------------------------------------------------
-// Configs::run: resolved from the working directory, not an input path
-// ---------------------------------------------------------------------
-
-#[test]
-fn run_is_resolved_from_working_not_from_any_input_path() {
-    let input = PathBuf::from("/library/alpha/paper.pdf");
-    let working = Path::new("/elsewhere");
-    let read = fake_read(&[
-        (
-            "/library/alpha/.borax.toml",
-            "mailto = \"alpha@example.org\"",
-        ),
-        ("/elsewhere/.borax.toml", "mailto = \"working@example.org\""),
-    ]);
-
-    let configs = Configs::resolve(
-        slice::from_ref(&input),
-        working,
-        vec![],
-        &env_vars(&[]),
-        &read,
-    )
-    .unwrap();
-
-    assert_eq!(
-        configs.run().config().mailto.as_deref(),
-        Some("working@example.org")
-    );
-    assert_eq!(
-        configs.for_path(&input).config().mailto.as_deref(),
-        Some("alpha@example.org")
-    );
-}
-
-// ---------------------------------------------------------------------
-// cli spec scenario "Two trees, one mode": the mode a terminal run
-// takes comes from the run's own configuration ([`Configs::run`]),
-// never from any input directory's — `session::mode` is never handed
-// anything but `configs.run().config().batch`.
-// ---------------------------------------------------------------------
-
-#[test]
-fn two_trees_one_mode_the_runs_own_configuration_decides_it_not_either_trees() {
-    let tree_a = PathBuf::from("/library/tree-a/paper.pdf");
-    let tree_b = PathBuf::from("/library/tree-b/paper.pdf");
-    // Outside both trees, so neither's `.borax.toml` is ever read for
-    // the run's own configuration.
-    let working = Path::new("/library");
+fn the_start_directorys_configuration_decides_the_mode_for_every_tree() {
+    let in_a = PathBuf::from("/library/tree-a/paper.pdf");
+    let in_b = PathBuf::from("/library/tree-b/paper.pdf");
+    let outside = Path::new("/library");
     let read = fake_read(&[("/library/tree-a/.borax.toml", "[rename]\nbatch = true\n")]);
+    let is_directory = |_: &Path| false;
 
-    let configs = Configs::resolve(
-        &[tree_a.clone(), tree_b.clone()],
-        working,
-        vec![],
-        &env_vars(&[]),
-        &read,
-    )
-    .unwrap();
+    // `tree-a` first: the run starts there, so its file is the run's own
+    // configuration and the whole run is a batch — `tree-b`'s file
+    // included, though nothing under `tree-b` asked for it.
+    let paths = vec![in_a.clone(), in_b.clone()];
+    let working = start_directory(&paths, &is_directory, outside);
+    let configs = Configs::resolve(&paths, &working, vec![], &env_vars(&[]), &read).unwrap();
 
-    // `borax config` run inside tree-a would report the override and
-    // its file as the origin — the per-directory reading is real.
-    assert!(configs.for_path(&tree_a).config().batch);
+    assert_eq!(working, Path::new("/library/tree-a"), "got {working:?}");
+    assert!(configs.run().config().batch, "got {:?}", configs.run());
     assert_eq!(
-        configs.for_path(&tree_a).origin("rename.batch"),
-        Some(&Origin::DirectoryFile(PathBuf::from(
-            "/library/tree-a/.borax.toml"
-        )))
+        mode(true, Format::Human, configs.run().config().batch, false),
+        Mode::Batch,
+        "tree-a's setting decides the run it starts"
     );
 
-    // But the run itself, started from outside both trees, never saw
-    // that file: its own configuration is untouched, so a terminal run
-    // is interactive throughout, whichever tree a file being worked on
-    // happens to sit in.
+    // `tree-b` first: the run starts where nothing sets the mode, so it
+    // asks — about `tree-a`'s file too, whose own directory would have
+    // said otherwise.
+    let paths = vec![in_b, in_a];
+    let working = start_directory(&paths, &is_directory, outside);
+    let configs = Configs::resolve(&paths, &working, vec![], &env_vars(&[]), &read).unwrap();
+
+    assert_eq!(working, Path::new("/library/tree-b"), "got {working:?}");
     assert!(!configs.run().config().batch, "got {:?}", configs.run());
-    let decided = mode(true, Format::Human, configs.run().config().batch, false);
     assert_eq!(
-        decided,
+        mode(true, Format::Human, configs.run().config().batch, false),
         Mode::Interactive,
-        "the run's own configuration must decide the mode, not tree-a's: got {decided:?}"
+        "no tree the run did not start in may change its mode"
     );
 }
 
