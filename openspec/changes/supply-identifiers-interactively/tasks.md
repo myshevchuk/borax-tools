@@ -76,6 +76,12 @@ block and amend it, rather than leaving the archive holding both:
       and renaming re-identifies the file
 - [ ] 3.6 Green: the driver situations, the held verdict, `overrode` and
       `supplied` on `resolved`
+- [ ] 3.6a Red: `crates/borax/tests/describe.rs` — the description of a
+      file the run could not resolve names what each service answered;
+      a conflict shows both titles and the similarity; a supplied
+      identifier is shown as supplied rather than as a pass's find.
+      `describe` is pure, so this is the one part of the change that
+      can be pinned exactly
 - [ ] 3.7 Green: `describe` renders attempts, a conflict's two titles and
       similarity, and a supplied identifier
 
