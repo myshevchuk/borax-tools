@@ -1,6 +1,7 @@
 #+TITLE: The borax manual
 #+SUBTITLE: Resolving, renaming and citing a collection of papers
 #+AI_MODEL: claude-opus-5
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 08:32] -- interactive rename
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -32,13 +33,15 @@ how to install it, and a handful of examples.
      makes that string a legal file name on every supported platform.
   5. *Do the command's work.* ~resolve~ reports what it found and stops.
      ~bib~ writes bibliography output. ~rename~ plans a move for each
-     file and, with ~--apply~, performs it.
+     file, then either asks about the move or handles it as part of a
+     batch.
 
   Three properties hold across all of it, and they are the reason the
   tool is shaped this way:
 
-  - *It previews by default.* ~borax rename~ without ~--apply~ moves
-    nothing; it prints the moves it would make.
+  - *It moves nothing without your decision.* By default on a terminal,
+    ~borax rename~ asks before each move. In a batch, only ~--apply~
+    authorizes the moves in the plan.
   - *It never overwrites.* A rendered name that is already taken is a
     collision, settled by the collision policy — a suffix, or a skip —
     and never by writing over what is there.
@@ -76,13 +79,26 @@ how to install it, and a handful of examples.
 ** borax rename
 
    #+begin_src sh
-     borax rename papers/           # preview
-     borax rename --apply papers/   # move the files
+     borax rename papers/           # ask before each move
+     borax rename --batch papers/   # preview the whole plan
+     borax rename --apply papers/   # move the whole plan
    #+end_src
 
-   Renames each file after the record resolved for it. Without
-   ~--apply~ it is a preview: every move is reported as ~would rename
-   to~, and nothing is touched.
+   Renames each file after the record resolved for it. A run is
+   interactive when standard input is a terminal, output is human rather
+   than ~--json~, ~--apply~ is absent, and ~rename.batch~ is ~false~.
+   These are the defaults when you run the command from a terminal.
+
+   Every other rename run is a batch. ~--batch~ selects a preview that
+   reports each move as ~would rename to~ and changes no file.
+   ~--apply~ selects a batch and moves every file its plan names, just as
+   it did before interactive renaming was added. A redirected, piped,
+   cron, or ~--json~ run is always a batch and never asks a question.
+
+   Use ~--no-batch~ to override a configured batch default when you want
+   questions at a terminal. ~--apply --no-batch~ is a usage error naming
+   both flags. It reads, resolves, and moves nothing, and exits with the
+   fatal code, 1.
 
    ~rename~ is also where bibliography output and the collection's
    ledger belong, because it is the command that admits a file into a
@@ -92,6 +108,50 @@ how to install it, and a handful of examples.
    It works one file at a time, so that a file's verdict and its fate
    stay adjacent in the stream. That is why it takes no
    ~--concurrency~.
+
+*** The interactive session
+
+    For each resolved file whose record produces a free target, borax
+    shows the current file name, the name it would take, and a menu on
+    standard error:
+
+    #+begin_example
+      50-Article Text-95-2-10-20240507.pdf
+        → lyutenko2023_ApplicationsChiralSulfinyl.pdf
+      ? Rename this file?
+      > Rename
+        Skip
+        Quit
+      [↑↓ to move, enter to select]
+    #+end_example
+
+    The target includes a collision suffix when one is needed. When a
+    template creates a subdirectory, the target also includes that
+    subdirectory, such as ~sub/name.pdf~. ~Rename~ is selected first, so
+    Enter accepts the move. The file is moved immediately and reported
+    as ~renamed to <name>~, just as it is in an applying batch.
+
+    Choose ~Skip~ to leave the file in place. borax reports ~skipped,
+    declined~. The proposed name remains free, so if the next file
+    produces the same name, borax offers that name without a suffix. A
+    name is claimed only after you accept its move.
+
+    Files with no move to decide are reported without a question. This
+    includes a file that already carries its rendered name, a target
+    taken under the ~skip~ collision policy, a record that renders no
+    name, and a file that did not resolve.
+
+    Choose ~Quit~, press Ctrl-C, or press Esc to end the session. The
+    file at that question and every later file stay untouched and are
+    not resolved. Work already completed remains in place. The summary
+    counts the remainder as not reached:
+
+    #+begin_example
+      3 resolved, 1 renamed, 3 skipped, 2 not reached
+    #+end_example
+
+    A run with any file not reached exits with the partial-success code,
+    2, as does a run with skipped files.
 
 ** borax bib
 
@@ -192,6 +252,7 @@ how to install it, and a handful of examples.
    | ~network.cache~           | ~--cache~/~--no-cache~       | ~true~    |
    | ~network.concurrency~     | ~--concurrency~              | ~4~       |
    | ~network.min-interval-ms~ | ~--min-interval-ms~          | ~100~     |
+   | ~rename.batch~            | ~--batch~/~--no-batch~       | ~false~   |
    | ~rename.collision~        | ~--collision~                | ~suffix~  |
    | ~run-log~                 | ~--run-log~/~--no-run-log~   | ~true~    |
    | ~sources~                 | ~--sources~                  | all three |
@@ -218,6 +279,16 @@ how to install it, and a handful of examples.
      once.
    - ~network.min-interval-ms~ :: The floor on the gap between two
      requests to one service.
+   - ~rename.batch~ :: Whether a terminal rename reports the whole plan
+     instead of asking about each move. It is ~false~ by default. The
+     flag pair is available on ~rename~ and ~config~ only. Unlike a
+     per-file template or collision policy, this setting comes from the
+     run's own configuration: the configuration found from the working
+     directory where you start borax. A ~.borax.toml~ under an input
+     directory does not change the mode of a run started outside it.
+     Run ~borax config~ inside that directory to see its value and
+     origin there. The setting does not authorize a move. An ~apply =
+     true~ key in a configuration file remains a load-time error.
    - ~rename.collision~ :: What to do when two files want one name:
      ~suffix~ or ~skip~.
    - ~run-log~ :: Whether a run writes its event stream to a log. An
@@ -265,10 +336,10 @@ how to install it, and a handful of examples.
 
    Every configurable boolean is offered as a pair of flags —
    ~--cache~/~--no-cache~, ~--sidecars~/~--no-sidecars~,
-   ~--ledger~/~--no-ledger~, ~--run-log~/~--no-run-log~ — which is how
-   a flag that takes no value says all three things: on, off, and
-   silent. Naming both halves of a pair is a parse error rather than a
-   last-one-wins guess.
+   ~--ledger~/~--no-ledger~, ~--batch~/~--no-batch~,
+   ~--run-log~/~--no-run-log~ — which is how a flag that takes no value
+   says all three things: on, off, and silent. Naming both halves of a
+   pair is a parse error rather than a last-one-wins guess.
 
 * The template language
 
@@ -833,14 +904,30 @@ how to install it, and a handful of examples.
 
   The timestamp leads, so the newest run sorts last; the ~dry~ or
   ~apply~ suffix trails, so a preview sorts directly above the run that
-  applied it.
+  applied it. A batch preview has the ~dry~ suffix. A run that may move
+  files — an interactive rename or a batch with ~--apply~ — has the
+  ~apply~ suffix.
 
   A preview writes a log by default and you can turn that off with
-  ~--no-run-log~. *A ~rename --apply~ always writes one, and cannot be
-  talked out of it.* If borax has nowhere to put that log — you are
-  outside a collection and your system names no state directory — it
-  refuses to run at all rather than move files it cannot account for
-  afterwards.
+  ~--no-run-log~. *An interactive rename and a ~rename --apply~ always
+  write one, and cannot be talked out of it.* An interactive run is an
+  applying run even when you decline every proposal. Its log is created
+  and its first event is written before the first question. If borax has
+  nowhere to put that log — you are outside a collection and your system
+  names no state directory — it refuses to ask or move anything.
+
+  Every applying rename records and flushes a move's ~renamed~ event
+  before it makes the move. If that event cannot be written, the move is
+  not made and the run stops. If the event is written but the filesystem
+  then refuses the move, the log contains the ~renamed~ event followed
+  by the skip that records the failure. The summary counts that file as
+  skipped, not renamed.
+
+  The JSONL stream records the result of each decision, not the question
+  that led to it. ~run-started~ includes the Boolean ~interactive~; an
+  interactive run also reports ~applying: true~. A declined proposal is
+  a ~skipped~ event with reason ~declined~, and the counts in
+  ~run-finished~ include ~unreached~.
 
 ** Recovering the names a run replaced
 

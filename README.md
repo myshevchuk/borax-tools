@@ -6,9 +6,10 @@ looks up the identifier with Crossref, OpenAlex, and arXiv, then renames
 the file after the returned record. You choose the new name with a small
 template language.
 
-The pipeline is stateless. It previews by default, never overwrites, and
-never guesses. It leaves an unidentified file in place and prints the
-reason.
+The pipeline is stateless. By default on a terminal, `rename` asks before
+each move. A batch rename previews unless you pass `--apply`. It never
+overwrites or guesses. It leaves an unidentified file in place and
+prints the reason.
 
 Status: pre-release. `openspec/` specifies the behaviour, and
 `openspec/STATE.md` tracks how much is built. Versions are `0.y.z` and
@@ -16,10 +17,29 @@ do not promise compatibility yet.
 
 ## Examples
 
-Preview what a directory of downloads would be called. Nothing moves:
+Review a directory of downloads one file at a time. For each file it can
+rename, borax shows the current and proposed names and waits for your
+choice:
 
 ```console
 $ borax rename papers/
+```
+
+```text
+50-Article Text-95-2-10-20240507.pdf
+  → lyutenko2023_ApplicationsChiralSulfinyl.pdf
+? Rename this file?
+> Rename
+  Skip
+  Quit
+[↑↓ to move, enter to select]
+```
+
+Press Enter to rename, or choose `Skip` or `Quit`. To preview the whole
+plan without moving anything, use `--batch`:
+
+```console
+$ borax rename --batch papers/
 papers/1-s2.0-S0009261421001234.pdf: resolved 10.1021/jacs.4c01234 via crossref
 papers/1-s2.0-S0009261421001234.pdf: would rename to papers/smith2024_AwesomePaperBorax.pdf
 papers/scan003.pdf: skipped, no identifier found

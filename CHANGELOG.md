@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** By default, `borax rename` now asks about each proposed
+  move when it runs on a terminal with human-readable output. `Rename`
+  moves that file immediately, `Skip` leaves it in place without
+  claiming its proposed name, and `Quit`, Ctrl-C, or Esc leaves that
+  file and every later file untouched and counts them as not reached.
+  Previously, `borax rename` printed the whole plan and required a
+  second invocation with `--apply` to move it.
+
+  `--batch` selects the old preview behavior. `--apply` still selects an
+  applying batch and asks nothing, so existing
+  `borax rename --apply <dir>` commands behave as before. Redirected,
+  piped, cron, and `--json` runs are always batches and never ask.
+  `--apply --no-batch` is a usage error and exits with code 1 before
+  anything is read, resolved, or moved.
+
+  The new Boolean setting `rename.batch`, exposed as `--batch` and
+  `--no-batch` on `rename` and `config`, defaults to `false`. It chooses
+  whether a terminal run asks or reports a batch plan; it cannot
+  authorize a move. The value comes from the run's own configuration,
+  not from a `.borax.toml` discovered separately under each input.
+
+- Interactive renames use mandatory apply-run logs, including sessions
+  in which every proposal is declined. The log is created and its first
+  event is written before the first question. Every applying rename now
+  writes and flushes each `renamed` event before making that move. If the
+  event cannot be written, the move is not made and the run stops. If
+  the filesystem refuses a recorded move, the following skip records
+  the failure and the summary counts the file as skipped.
+
+- The JSONL event stream's `run-started` event now includes the Boolean
+  `interactive`; interactive runs also report `applying: true`.
+  `skipped` accepts the new reason `declined`, and the counts in
+  `run-finished` include `unreached`. Questions are not events.
+
 - The README is now an introduction rather than a reference: what borax
   is for, a few worked examples, how to install it, how to build it,
   and where everything else is. The reference material it used to
