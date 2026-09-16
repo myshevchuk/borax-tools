@@ -92,6 +92,18 @@ from the run's own configuration rather than per file, since the clients
 are built once before any file is read. `borax config`, which takes no
 paths, SHALL print the run's configuration.
 
+`rename.batch` SHALL be taken from the run's own configuration for the
+same reason: a run has one session with one operator, decided before its
+first event, and a mode that changed between directories would be a run
+that asks about some of its files and not others without saying so.
+
+The run's own configuration is the one discovered from the run's start
+directory — the first path it was given, or the working directory when
+it was given none — which is the same configuration `sources`, `mailto`
+and the `network` table are taken from. A second input tree's
+`.borax.toml` therefore does not change the mode, and neither does the
+working directory when the run was given a path.
+
 The nearest `.borax.toml` additionally defines the collection root: the
 directory containing it anchors the collection's `.borax/` accounting
 directory (ledger and run logs); an explicit `collection-root`
@@ -109,6 +121,18 @@ configuration key overrides this for unusual layouts.
   `.borax.toml`
 - **THEN** that ancestor is the collection root and `.borax/` accounting
   for the run lives there
+
+#### Scenario: Two trees, one mode
+- **WHEN** `borax rename tree-a tree-b` runs from a terminal outside
+  both, and `tree-a/.borax.toml` sets `rename.batch = true`
+- **THEN** the whole run is a batch run, `tree-b`'s files included,
+  because the mode comes from the configuration of the run's start
+  directory and not from each file's own
+
+#### Scenario: A second tree does not change the mode
+- **WHEN** the same run is given `tree-b` first, and only
+  `tree-a/.borax.toml` sets `rename.batch = true`
+- **THEN** the whole run is interactive, `tree-a`'s files included
 
 ### Requirement: Non-interactive contexts never prompt
 When stdin is not a terminal, the binary SHALL never wait for interactive
@@ -236,12 +260,24 @@ negation.
 ### Requirement: The apply gate is never configurable
 Configuration SHALL NOT be able to set the `--apply` flag or any one-off
 destructive selector; such keys in a configuration file are load-time
-errors, and previews remain the default in every configuration.
+errors, and no configuration SHALL be able to authorise a move.
+
+Authorisation for a move comes from the command line or from a person:
+`--apply` given to a batch run, or an answer given to a question naming
+the file and its target. Configuration selects which of the two a run
+asks for — that is what `rename.batch` does — and can only ever make a
+run move less than the command line asked for.
 
 #### Scenario: apply in config
 - **WHEN** a configuration file contains `apply = true`
 - **THEN** the run aborts at config load stating the key must be passed
   on the command line
+
+#### Scenario: Configuration cannot authorise a move
+- **WHEN** a configuration file sets `rename.batch = false` and
+  `borax rename papers/` runs with stdin redirected from /dev/null
+- **THEN** the run is a batch preview and moves nothing, because the
+  configuration selected a mode and authorised nothing
 
 ### Requirement: External lookup tables are configured per collection
 The configuration SHALL carry a `tables` table beside `templates` and `citation-keys`, with the same open-ended keys: each key names a lookup table, and its value declares the file to read, the column or columns supplying keys, the column supplying values, and whether those values are literal text or template fragments. Like those two, `tables` MUST be settable only in configuration files, never from an environment variable or a command-line flag, because its keys are open-ended.
@@ -305,7 +341,8 @@ its stream through it.
 The surface is: `resolve` accepts the resolution, extraction, network
 and response-cache settings, and how many files may be resolved at once;
 `rename` accepts those, minus how many files at once, plus the collision
-policy, the bibliography settings, the ledger gate, and `--apply`; `bib`
+policy, the bibliography settings, the ledger gate, the batch pair, and
+`--apply`; `bib`
 accepts the resolution settings and the bibliography settings; `cache`
 accepts `--clear`; `ledger rebuild` accepts no setting of its own. Every
 subcommand additionally accepts the run-log pair, which is decided at
@@ -347,4 +384,10 @@ runs, since neither is an argument to an invocation.
   runs under it
 - **THEN** the run proceeds, `borax config` reports that value with the
   file as its origin, and nothing is refused
+
+#### Scenario: The batch pair belongs to rename
+- **WHEN** `borax rename --batch papers/` and `borax config --no-batch`
+  run
+- **THEN** both are accepted, and `borax resolve --batch papers/` is
+  rejected as an unknown argument
 
