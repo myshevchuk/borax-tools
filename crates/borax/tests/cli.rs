@@ -1270,6 +1270,71 @@ fn rename_refuses_batch_and_no_batch_together() {
     );
 }
 
+// ---------------------------------------------------------------------
+// 4.1: the `--skip-named` / `--no-skip-named` pair belongs to `rename`
+// and `config`, like the batch pair above.
+// ---------------------------------------------------------------------
+
+#[test]
+fn rename_skip_named_parses() {
+    let cli = parse(&["rename", "--skip-named", "f.pdf"]);
+    assert!(cli.settings().skip_named, "got {:?}", cli.settings());
+}
+
+#[test]
+fn rename_no_skip_named_parses() {
+    let cli = parse(&["rename", "--no-skip-named", "f.pdf"]);
+    assert!(cli.settings().no_skip_named, "got {:?}", cli.settings());
+}
+
+#[test]
+fn config_skip_named_parses() {
+    let cli = parse(&["config", "--skip-named"]);
+    assert!(cli.settings().skip_named, "got {:?}", cli.settings());
+}
+
+#[test]
+fn config_no_skip_named_parses() {
+    let cli = parse(&["config", "--no-skip-named"]);
+    assert!(cli.settings().no_skip_named, "got {:?}", cli.settings());
+}
+
+#[test]
+fn resolve_refuses_skip_named_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "resolve", "--skip-named", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--skip-named"), "got {message:?}");
+}
+
+#[test]
+fn bib_refuses_skip_named_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "bib", "--skip-named", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--skip-named"), "got {message:?}");
+}
+
+#[test]
+fn rename_refuses_skip_named_and_no_skip_named_together() {
+    let result = <Cli as Parser>::try_parse_from([
+        "borax",
+        "rename",
+        "--skip-named",
+        "--no-skip-named",
+        "f.pdf",
+    ]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.contains("--skip-named") && message.contains("--no-skip-named"),
+        "got {message:?}"
+    );
+}
+
 #[test]
 fn run_log_and_no_run_log_together_is_a_parse_error() {
     let result = <Cli as Parser>::try_parse_from(["borax", "config", "--run-log", "--no-run-log"]);

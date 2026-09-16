@@ -1801,3 +1801,134 @@ fn resolve_file_checking_ledger_passes_through_a_resolution_failure() {
 
     assert_eq!(outcome, FileOutcome::Skipped(SkipReason::NoIdentifier));
 }
+
+// ---------------------------------------------------------------------
+// design D2: a file is not its own duplicate
+// ---------------------------------------------------------------------
+
+/// A content match whose recorded path is the incoming file's own path
+/// is not a duplicate: the run continues through resolution and, in the
+/// usual case, is answered by the content index with no source asked
+/// and the file never opened.
+#[test]
+fn a_content_match_at_the_incoming_path_is_not_a_duplicate_and_resolves_from_the_index() {
+    let path = Path::new("/collection/archived/Smith2024.pdf");
+    let hash = hash_for("own-bytes");
+    let library = FakeLibrary::new().with_open_error(
+        path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let index = ContentIndex::new(MemoryCache::new());
+    let indexed = record_with_doi("10.1000/own");
+    index.put(&hash, &indexed);
+    let ledger = ledger_index(&[ledger_entry("archived/Smith2024.pdf", hash, None)]);
+
+    let outcome = resolve_file_checking_ledger(
+        path,
+        &library,
+        &sources,
+        &index,
+        &config(true),
+        &Collection {
+            ledger: &ledger,
+            root: Path::new("/collection"),
+            exists: &|_: &Path| true,
+        },
+    );
+
+    let file_record = resolved_outcome(outcome);
+    assert_eq!(file_record.record, indexed);
+    assert!(file_record.cached, "the file's own entry is not a query");
+    assert_eq!(library.open_calls(), 0);
+}
+
+/// A content match at a *different* live path is still reported as a
+/// duplicate — the contrast to the case above, so passing over a file's
+/// own entry cannot be mistaken for passing over every entry.
+#[test]
+fn a_content_match_at_another_live_path_is_still_a_duplicate() {
+    let path = Path::new("/collection/incoming/Copy.pdf");
+    let hash = hash_for("shared-bytes");
+    let library = FakeLibrary::new().with_file(
+        path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/whatever"),
+    );
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let index = ContentIndex::new(MemoryCache::new());
+    let ledger = ledger_index(&[ledger_entry("archived/Smith2024.pdf", hash, None)]);
+
+    let outcome = resolve_file_checking_ledger(
+        path,
+        &library,
+        &sources,
+        &index,
+        &config(true),
+        &Collection {
+            ledger: &ledger,
+            root: Path::new("/collection"),
+            exists: &|_: &Path| true,
+        },
+    );
+
+    assert_eq!(
+        outcome,
+        FileOutcome::Skipped(SkipReason::Duplicate {
+            reason: DuplicateReason::Content,
+            existing_path: PathBuf::from("/collection/archived/Smith2024.pdf"),
+        })
+    );
+}
+
+/// The work check has the same hole and the same fix: a file at its
+/// admitted path, annotated afterwards so its bytes (and therefore its
+/// hash) changed, still resolves to the identifier its own entry
+/// records and is not reported a work duplicate of itself.
+#[test]
+fn a_work_match_at_the_incoming_path_is_not_a_duplicate_after_a_changed_hash() {
+    let path = Path::new("/collection/archived/Reprint2024.pdf");
+    let old_hash = hash_for("original-bytes");
+    let new_hash = hash_for("annotated-bytes");
+    let library =
+        FakeLibrary::new().with_file(path, new_hash, pdf_with_embedded_doi("10.1000/reprint"));
+    let (crossref, calls) =
+        fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/reprint")));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let ledger = ledger_index(&[ledger_entry(
+        "archived/Reprint2024.pdf",
+        old_hash,
+        Some("10.1000/reprint"),
+    )]);
+
+    let outcome = resolve_file_checking_ledger(
+        path,
+        &library,
+        &sources,
+        &index,
+        &config(true),
+        &Collection {
+            ledger: &ledger,
+            root: Path::new("/collection"),
+            exists: &|_: &Path| true,
+        },
+    );
+
+    let file_record = resolved_outcome(outcome);
+    assert_eq!(file_record.record, record_with_doi("10.1000/reprint"));
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "resolution still runs once to learn the identifier the work check matches on"
+    );
+}

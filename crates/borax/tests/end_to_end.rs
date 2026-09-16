@@ -911,6 +911,83 @@ fn a_batch_with_a_content_duplicate_and_a_work_duplicate_skips_both_and_leaves_t
     );
 }
 
+/// design D1/D3, end to end: a run applied over a real collection,
+/// pointed at the files it just renamed, finds every one of them
+/// already named — not a duplicate of itself, not a skip — and exits
+/// 0, the distinction the partial-success code exists to draw.
+#[test]
+fn a_second_run_over_a_renamed_collection_finds_every_file_already_named() {
+    let collection = tempdir().unwrap();
+    let state = tempdir().unwrap();
+    let master = state.path().join("refs.bib");
+
+    let names = [
+        "publisher-info-doi.pdf",
+        "publisher-xmp-doi.pdf",
+        "arxiv-new-id.pdf",
+        "arxiv-old-id.pdf",
+    ];
+    let paths: Vec<PathBuf> = names
+        .iter()
+        .map(|name| duplicate_of(collection.path(), name, name))
+        .collect();
+
+    let first = invoke(
+        Command::rename(paths, true),
+        &master,
+        state.path(),
+        Some(collection.path()),
+    );
+    assert_eq!(
+        first.outcome,
+        Outcome::Success,
+        "first run: {}",
+        first.stderr
+    );
+
+    let renamed: Vec<PathBuf> = fs::read_dir(collection.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "pdf"))
+        .collect();
+    assert_eq!(
+        renamed.len(),
+        names.len(),
+        "expected every fixture to have been renamed to a distinct file"
+    );
+
+    let second = invoke(
+        Command::rename(renamed, true),
+        &master,
+        state.path(),
+        Some(collection.path()),
+    );
+
+    assert_eq!(
+        second.outcome,
+        Outcome::Success,
+        "a re-run over an entirely named collection must exit 0: {}",
+        second.stderr
+    );
+    assert_eq!(
+        second.tagged("already-named").len(),
+        names.len(),
+        "every file must be reported already named: {:?}",
+        second.events
+    );
+    assert!(
+        second.tagged("skipped").is_empty(),
+        "no file must be reported a duplicate of itself: {:?}",
+        second.events
+    );
+    assert!(
+        second.tagged("renamed").is_empty(),
+        "nothing should move on the re-run: {:?}",
+        second.events
+    );
+}
+
 // ---------------------------------------------------------------------
 // `borax ledger rebuild` — determinism over a real fixture collection
 // ---------------------------------------------------------------------

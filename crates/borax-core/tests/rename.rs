@@ -318,6 +318,38 @@ fn case_only_self_rename_is_exempt_from_collision_and_already_named() {
 }
 
 // ---------------------------------------------------------------------
+// design D5b: a suffix candidate never lands on the item's own name
+// ---------------------------------------------------------------------
+
+/// The second of two works rendering `smith2024.pdf`, filed earlier as
+/// `smith2024a.pdf` by the suffix ladder, reached again on a re-run: the
+/// ladder's first candidate (`smith2024.pdf`) is taken by the first
+/// work, and its next candidate (`smith2024a.pdf`) is the item's own
+/// current name. Design D5b: reaching a candidate equal to the item's
+/// own source reports `AlreadyNamed` rather than a move onto the name
+/// the file already carries, which `hard_link` would refuse.
+#[test]
+fn a_suffix_candidate_equal_to_the_items_own_source_is_already_named() {
+    let items = vec![input("smith2024a.pdf", "smith2024.pdf", "h2")];
+    let mut existing = empty();
+    existing.insert("smith2024.pdf".to_string(), Some("h1".to_string()));
+    existing.insert("smith2024a.pdf".to_string(), Some("h2".to_string()));
+
+    let result = plan(&items, &existing, CollisionPolicy::Suffix);
+
+    assert_eq!(result[0].action, PlannedAction::AlreadyNamed);
+}
+
+// The direct-target case the exemption exists for —
+// `case_only_self_rename_is_exempt_from_collision_and_already_named`
+// above — sits outside the suffix ladder entirely (the item's rendered
+// target is free the moment the exemption applies, at the ladder's
+// zeroth position) and so is untouched by D5b, which governs only a
+// candidate the ladder walks to. That existing test is what pins it;
+// D5b's fix is scoped to the loop the case-only path never enters, so
+// nothing here needs to assert it again.
+
+// ---------------------------------------------------------------------
 // vacated slots and batch-claimed suffixes
 // ---------------------------------------------------------------------
 

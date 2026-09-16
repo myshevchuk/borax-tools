@@ -504,6 +504,69 @@ fn a_file_with_unknown_hash_and_no_matching_identifier_is_not_a_duplicate_of_eit
 }
 
 // ---------------------------------------------------------------------
+// design D2: a file's own entry does not hide a copy recorded elsewhere
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_files_own_content_entry_does_not_hide_a_byte_identical_copy_recorded_elsewhere() {
+    let elsewhere = entry("elsewhere.pdf", "same-bytes");
+    let own = entry("own.pdf", "same-bytes");
+    // `own` is built second, so it is the newer entry and the one
+    // `by_hash` alone would answer with.
+    let index = Index::build(&[elsewhere, own]);
+
+    let found = index.content_duplicate(&hash("same-bytes"), &|recorded| recorded == "own.pdf");
+
+    assert_eq!(
+        found,
+        Some(Duplicate {
+            reason: DuplicateReason::Content,
+            existing_path: "elsewhere.pdf".to_string(),
+        }),
+        "passing over the file's own entry must still find the copy recorded under the older one"
+    );
+}
+
+#[test]
+fn content_duplicate_is_none_when_the_ledger_holds_only_the_files_own_entry() {
+    let own = entry("own.pdf", "same-bytes");
+    let index = Index::build(&[own]);
+
+    assert_eq!(
+        index.content_duplicate(&hash("same-bytes"), &|recorded| recorded == "own.pdf"),
+        None
+    );
+}
+
+#[test]
+fn a_files_own_work_entry_does_not_hide_a_matching_identifier_recorded_elsewhere() {
+    let elsewhere = Entry {
+        doi: Some(doi("10.1021/jacs.4c01234")),
+        ..entry("elsewhere.pdf", "elsewhere-bytes")
+    };
+    let own = Entry {
+        doi: Some(doi("10.1021/jacs.4c01234")),
+        ..entry("own.pdf", "own-bytes")
+    };
+    // `own` is built second, so it is the newer entry for that DOI.
+    let index = Index::build(&[elsewhere, own]);
+
+    let found = index.work_duplicate(
+        &[Identifier::Doi(doi("10.1021/jacs.4c01234"))],
+        &|recorded| recorded == "own.pdf",
+    );
+
+    assert_eq!(
+        found,
+        Some(Duplicate {
+            reason: DuplicateReason::Work,
+            existing_path: "elsewhere.pdf".to_string(),
+        }),
+        "passing over the file's own entry must still find the work recorded under the older one"
+    );
+}
+
+// ---------------------------------------------------------------------
 // 1.4 deterministic rebuild serialization
 // ---------------------------------------------------------------------
 

@@ -135,6 +135,15 @@ fn empty_record() -> Record {
     Record::new(EntryType::Article)
 }
 
+/// `record_by`, additionally carrying `journal` as the container title
+/// a `[journal]/...` template files by.
+fn record_by_in(journal: &str, family: &str, year: i32) -> Record {
+    Record {
+        container_title: Some(journal.to_string()),
+        ..record_by(family, year)
+    }
+}
+
 fn compile(source: &str) -> Template {
     Template::compile(source).unwrap()
 }
@@ -638,6 +647,107 @@ fn a_target_subdirectory_explicitly_seeded_as_empty_plans_normally() {
 
     assert_eq!(plan, vec![rename("/lib/a.pdf", "/lib/sub/Smith2024.pdf")]);
 }
+
+// ---------------------------------------------------------------------
+// plan_renames: filing into a subdirectory is idempotent (design D5a)
+// ---------------------------------------------------------------------
+//
+// `[journal]/[auth][year]` files `Zeng2026.pdf` into `Nature/`. A
+// rendered subdirectory names where the file belongs, not a level to
+// add to where it already sits: re-running over a filed collection
+// must not nest it deeper.
+
+#[test]
+fn a_file_already_in_the_rendered_subdirectory_is_already_named() {
+    let resolved = [resolved(
+        "/lib/Nature/Zeng2026.pdf",
+        record_by_in("Nature", "Zeng", 2026),
+        None,
+    )];
+    let templates = table("[journal]/[auth][year]");
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
+
+    assert_eq!(plan, vec![already_named("/lib/Nature/Zeng2026.pdf")]);
+}
+
+#[test]
+fn a_file_in_a_subdirectory_the_template_no_longer_renders_moves_across_not_deeper() {
+    let resolved = [resolved(
+        "/lib/Nature/Zeng2026.pdf",
+        record_by_in("Science", "Zeng", 2026),
+        None,
+    )];
+    let templates = table("[journal]/[auth][year]");
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
+
+    assert_eq!(
+        plan,
+        vec![rename(
+            "/lib/Nature/Zeng2026.pdf",
+            "/lib/Science/Zeng2026.pdf"
+        )]
+    );
+}
+
+/// Only a tail matching the *whole* rendered prefix is stripped, so a
+/// file sitting further down the tree than the rendered subdirectory —
+/// here, under a sibling of it rather than in it — is filed into the
+/// rendered subdirectory from where it already is, rather than being
+/// mistaken for already sitting in one merely by sharing part of its
+/// name.
+///
+/// Under the current, unfixed implementation this input already
+/// produces the expected target by coincidence (the base directory is
+/// never stripped of anything, matched or not), so this assertion holds
+/// before and after the D5a fix; it is written here as the contract the
+/// fix must not disturb, not as a red assertion in its own right.
+#[test]
+fn a_file_further_down_the_tree_is_filed_from_where_it_is() {
+    let resolved = [resolved(
+        "/lib/Nature/supplementary/Zeng2026.pdf",
+        record_by_in("Nature", "Zeng", 2026),
+        None,
+    )];
+    let templates = table("[journal]/[auth][year]");
+    let filesystem = FakeFilesystem::new();
+
+    let plan = plan_renames(
+        &resolved,
+        &templates,
+        CollisionPolicy::Suffix,
+        &filesystem,
+        &mut no_tables(),
+    );
+
+    assert_eq!(
+        plan,
+        vec![rename(
+            "/lib/Nature/supplementary/Zeng2026.pdf",
+            "/lib/Nature/supplementary/Nature/Zeng2026.pdf"
+        )]
+    );
+}
+
+// A file not yet in the rendered subdirectory is filed into it exactly
+// as `a_template_with_a_slash_plans_a_rename_into_a_subdirectory` above
+// already covers: D5a changes nothing about that case, so it is not
+// re-asserted here.
 
 #[test]
 fn a_relative_escape_in_the_template_sanitizes_to_a_literal_underscore_directory() {

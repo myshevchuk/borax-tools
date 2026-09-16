@@ -9,7 +9,7 @@ use borax::cli::{Cli, Command, LedgerAction};
 use borax::config::{Layer, Origin, resolve};
 use borax::event::{Event, Level, SkipReason};
 use borax::ledger::{
-    ACCOUNTING_DIR, FileLedger, LEDGER_FILE, Ledger, LedgerWarning, Loaded, Scanned,
+    ACCOUNTING_DIR, Collection, FileLedger, LEDGER_FILE, Ledger, LedgerWarning, Loaded, Scanned,
     admission_entry, duplicate_is_live, prepare, rebuild, relative_to, scan_collection,
 };
 use borax::pipeline::{FileRecord, Library};
@@ -682,6 +682,91 @@ fn duplicate_is_stale_when_the_recorded_path_is_gone() {
     let live = duplicate_is_live(&duplicate, Path::new("/collection"), &exists_at(&[]));
 
     assert!(!live, "a vanished admission must not veto re-admission");
+}
+
+// ---------------------------------------------------------------------
+// design D2: Collection::is_incoming
+// ---------------------------------------------------------------------
+
+fn empty_index() -> Index {
+    Index::build(&[])
+}
+
+/// A [`Collection`] rooted at `root`. `ledger` and `exists` play no part
+/// in `is_incoming`, so they are fixtures rather than anything a test
+/// varies.
+fn collection_at<'a>(root: &'a Path, ledger: &'a Index) -> Collection<'a> {
+    Collection {
+        ledger,
+        root,
+        exists: &|_: &Path| true,
+    }
+}
+
+/// A relative incoming path is made absolute against the working
+/// directory before it is compared, so it recognises the entry that
+/// names the same file relative to the collection root.
+#[test]
+fn is_incoming_recognises_a_relative_input_path_as_the_file_itself() {
+    let cwd = std::env::current_dir().unwrap();
+    let root = cwd.join("collection");
+    let index = empty_index();
+    let collection = collection_at(&root, &index);
+
+    assert!(collection.is_incoming(
+        "archived/Smith2024.pdf",
+        Path::new("collection/archived/Smith2024.pdf"),
+    ));
+}
+
+/// `..` in the incoming path is resolved lexically before comparison,
+/// not left to defeat it.
+#[test]
+fn is_incoming_recognises_an_input_path_containing_dot_dot_as_the_file_itself() {
+    let cwd = std::env::current_dir().unwrap();
+    let root = cwd.join("collection");
+    let index = empty_index();
+    let collection = collection_at(&root, &index);
+
+    assert!(collection.is_incoming(
+        "archived/Smith2024.pdf",
+        Path::new("collection/other/../archived/Smith2024.pdf"),
+    ));
+}
+
+#[test]
+fn is_incoming_is_false_for_a_different_file() {
+    let root = Path::new("/collection");
+    let index = empty_index();
+    let collection = collection_at(root, &index);
+
+    assert!(!collection.is_incoming(
+        "archived/Smith2024.pdf",
+        Path::new("/collection/archived/Other2024.pdf"),
+    ));
+}
+
+/// Symlinks are never resolved: a link and the file it points at are
+/// two names, and `is_incoming` compares names, not inodes. Built with
+/// a real symlink on disk so the assertion cannot be satisfied by an
+/// implementation that happens not to touch the filesystem for the
+/// wrong reason.
+#[test]
+#[cfg(unix)]
+fn is_incoming_does_not_resolve_a_symlink_to_the_recorded_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("collection");
+    std::fs::create_dir_all(root.join("archived")).unwrap();
+    std::fs::write(root.join("archived/Smith2024.pdf"), b"bytes").unwrap();
+    std::os::unix::fs::symlink(
+        root.join("archived/Smith2024.pdf"),
+        root.join("link-to-smith.pdf"),
+    )
+    .unwrap();
+    let index = empty_index();
+    let collection = collection_at(&root, &index);
+
+    assert!(!collection.is_incoming("archived/Smith2024.pdf", &root.join("link-to-smith.pdf")));
 }
 
 // ---------------------------------------------------------------------

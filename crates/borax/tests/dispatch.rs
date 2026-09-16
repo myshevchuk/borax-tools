@@ -4,13 +4,15 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::OnceLock;
 
-use borax::bib::{BibFiles, citation_key};
+use borax::bib::{BibFiles, citation_key, sidecar_path};
 use borax::cache::{cleared_event, inspect, status_event};
 use borax::cli::{Cli, Command};
 use borax::config::{
-    BibLayer, Effective, KeyColumns, Layer, Origin, TableDeclaration, ValueKindName, resolve,
+    BibLayer, Effective, KeyColumns, Layer, Origin, RenameLayer, TableDeclaration, ValueKindName,
+    resolve,
 };
 use borax::event::{Event, Level, SkipReason};
 use borax::ledger::{Ledger, Loaded};
@@ -258,6 +260,7 @@ impl Filesystem for FakeFilesystem {
 /// following the shape of the one in `bib.rs`.
 struct FakeBibFiles {
     initial: Vec<(PathBuf, String)>,
+    write_failures: std::collections::BTreeSet<PathBuf>,
     writes: RefCell<Vec<(PathBuf, String)>>,
 }
 
@@ -265,8 +268,16 @@ impl FakeBibFiles {
     fn new() -> FakeBibFiles {
         FakeBibFiles {
             initial: Vec::new(),
+            write_failures: std::collections::BTreeSet::new(),
             writes: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Make every `write` to `path` fail, following the shape of the
+    /// one in `tests/bib.rs`.
+    fn with_write_failure(mut self, path: impl Into<PathBuf>) -> FakeBibFiles {
+        self.write_failures.insert(path.into());
+        self
     }
 
     fn writes(&self) -> Vec<(PathBuf, String)> {
@@ -285,6 +296,9 @@ impl BibFiles for FakeBibFiles {
     }
 
     fn write(&self, path: &Path, content: &str) -> std::io::Result<()> {
+        if self.write_failures.contains(path) {
+            return Err(std::io::Error::other("fake write failure"));
+        }
         self.writes
             .borrow_mut()
             .push((path.to_path_buf(), content.to_string()));
@@ -3279,5 +3293,596 @@ fn quitting_counts_unreached_and_still_merges_the_bib_for_the_visited_files() {
         lines.iter().any(|line| line["event"] == "bib-entry"),
         "the master .bib merge must still run for the files visited before the quit: \
          got {lines:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// design D4/D5: passing over already-named files in an interactive run
+// ---------------------------------------------------------------------
+
+/// [`effective_with_default_template`], additionally setting
+/// `rename.skip-named` to `skip_named` rather than leaving it at its
+/// built-in default.
+fn effective_skipping_named(template: &str, skip_named: bool) -> Effective {
+    effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            template.to_string(),
+        )]));
+        layer.rename = Some(RenameLayer {
+            collision: None,
+            batch: None,
+            skip_named: Some(skip_named),
+        });
+    })
+}
+
+/// design "An interactive run passes over already-named files": with
+/// `rename.skip-named` on (the default), two already-named files among
+/// a directory of three render nothing at all — no resolution line, no
+/// outcome line, no question — while the third, which needs a decision,
+/// is reported and asked about exactly as it would be with the setting
+/// off. The closing summary says how many were passed over.
+#[test]
+fn an_interactive_run_with_skip_named_renders_nothing_for_already_named_files() {
+    let smith = PathBuf::from("/lib/Smith2024.pdf");
+    let doe = PathBuf::from("/lib/Doe2023.pdf");
+    let original = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &smith,
+            hash_for("skip-named-smith"),
+            pdf_with_embedded_doi("10.1000/skip-named-smith"),
+        )
+        .with_file(
+            &doe,
+            hash_for("skip-named-doe"),
+            pdf_with_embedded_doi("10.1000/skip-named-doe"),
+        )
+        .with_file(
+            &original,
+            hash_for("skip-named-roe"),
+            pdf_with_embedded_doi("10.1000/skip-named-roe"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/skip-named-smith",
+            record_by("Smith", 2024, "10.1000/skip-named-smith"),
+        )
+        .answering(
+            "doi:10.1000/skip-named-doe",
+            record_by("Doe", 2023, "10.1000/skip-named-doe"),
+        )
+        .answering(
+            "doi:10.1000/skip-named-roe",
+            record_by("Roe", 2022, "10.1000/skip-named-roe"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_skipping_named("[auth][year]", true);
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(
+            Command::rename(vec![smith.clone(), doe.clone(), original.clone()], false),
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+
+    assert!(
+        !text.contains("Smith2024.pdf"),
+        "a passed-over file must render nothing at all: {text}"
+    );
+    assert!(
+        !text.contains("Doe2023.pdf"),
+        "a passed-over file must render nothing at all: {text}"
+    );
+    assert!(
+        text.contains("original.pdf: resolved"),
+        "the file needing a decision must still be reported: {text}"
+    );
+    assert!(
+        text.contains("Roe2022.pdf"),
+        "the accepted file's own new name must be reported: {text}"
+    );
+    assert_eq!(
+        asker.questions_asked().len(),
+        1,
+        "only the file needing a decision may be asked about: {:?}",
+        asker.questions_asked()
+    );
+    assert_eq!(asker.questions_asked()[0].path, original);
+    assert!(
+        text.contains("2 already named (not shown)"),
+        "the summary must say how many were passed over: {text}"
+    );
+    assert_eq!(outcome, Outcome::Success, "got stdout {text}");
+}
+
+/// The setting's other half: `--no-skip-named` shows an already-named
+/// file exactly as a batch run does, while still asking nothing about
+/// it — there is nothing to decide about it either way.
+#[test]
+fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_does() {
+    let smith = PathBuf::from("/lib/Smith2024.pdf");
+    let original = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &smith,
+            hash_for("no-skip-named-smith"),
+            pdf_with_embedded_doi("10.1000/no-skip-named-smith"),
+        )
+        .with_file(
+            &original,
+            hash_for("no-skip-named-roe"),
+            pdf_with_embedded_doi("10.1000/no-skip-named-roe"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/no-skip-named-smith",
+            record_by("Smith", 2024, "10.1000/no-skip-named-smith"),
+        )
+        .answering(
+            "doi:10.1000/no-skip-named-roe",
+            record_by("Roe", 2022, "10.1000/no-skip-named-roe"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_skipping_named("[auth][year]", false);
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::rename(vec![smith.clone(), original.clone()], false),
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+
+    assert!(
+        text.contains("Smith2024.pdf: resolved"),
+        "with the setting off, an already-named file's resolution line must show: {text}"
+    );
+    assert!(
+        text.contains("Smith2024.pdf: already named"),
+        "with the setting off, an already-named file's outcome line must show: {text}"
+    );
+    assert_eq!(
+        asker.questions_asked().len(),
+        1,
+        "an already-named file is never asked about, setting or no: {:?}",
+        asker.questions_asked()
+    );
+}
+
+/// design "The run log and any `--json` rendering are unaffected": the
+/// JSON stream carries a passed-over file's `resolved` and
+/// `already-named` events in full, whatever the human terminal shows.
+#[test]
+fn the_json_stream_carries_a_passed_over_files_events_in_full() {
+    let smith = PathBuf::from("/lib/Smith2024.pdf");
+    let original = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &smith,
+            hash_for("json-skip-named-smith"),
+            pdf_with_embedded_doi("10.1000/json-skip-named-smith"),
+        )
+        .with_file(
+            &original,
+            hash_for("json-skip-named-roe"),
+            pdf_with_embedded_doi("10.1000/json-skip-named-roe"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/json-skip-named-smith",
+            record_by("Smith", 2024, "10.1000/json-skip-named-smith"),
+        )
+        .answering(
+            "doi:10.1000/json-skip-named-roe",
+            record_by("Roe", 2022, "10.1000/json-skip-named-roe"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_skipping_named("[auth][year]", true);
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::rename(vec![smith.clone(), original.clone()], false),
+            true,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["event"] == "resolved" && line["path"] == "/lib/Smith2024.pdf"),
+        "got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["event"] == "already-named" && line["path"] == "/lib/Smith2024.pdf"),
+        "got {lines:?}"
+    );
+}
+
+/// design D5: "the hold covers one file, ends before that file's
+/// question is put". An [`Asker`] that can see what the terminal has
+/// been given proves both halves of the promise at once: the resolved
+/// line of the file it is about to be asked about is already there, and
+/// nothing about an earlier, passed-over file ever leaked in — neither
+/// before the question nor, since this is the only question the run
+/// puts, after it.
+struct SharedBuffer(Rc<RefCell<Vec<u8>>>);
+
+impl std::io::Write for SharedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct ObservingAsker {
+    buffer: Rc<RefCell<Vec<u8>>>,
+    answers: std::vec::IntoIter<Answer>,
+    seen_at_first_question: RefCell<Option<String>>,
+}
+
+impl ObservingAsker {
+    fn new(buffer: Rc<RefCell<Vec<u8>>>, answers: Vec<Answer>) -> ObservingAsker {
+        ObservingAsker {
+            buffer,
+            answers: answers.into_iter(),
+            seen_at_first_question: RefCell::new(None),
+        }
+    }
+
+    fn seen_at_first_question(&self) -> String {
+        self.seen_at_first_question
+            .borrow()
+            .clone()
+            .expect("must have been asked at least once")
+    }
+}
+
+impl Asker for ObservingAsker {
+    fn choose(&mut self, question: &Question) -> Answer {
+        if self.seen_at_first_question.borrow().is_none() {
+            let snapshot = String::from_utf8(self.buffer.borrow().clone()).unwrap();
+            *self.seen_at_first_question.borrow_mut() = Some(snapshot);
+        }
+        self.answers.next().unwrap_or_else(|| {
+            panic!("asked more questions than were scripted; question was {question:?}")
+        })
+    }
+}
+
+#[test]
+fn the_hold_ends_before_the_question_and_never_leaks_a_passed_over_files_lines() {
+    let smith = PathBuf::from("/lib/Smith2024.pdf");
+    let original = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &smith,
+            hash_for("hold-smith"),
+            pdf_with_embedded_doi("10.1000/hold-smith"),
+        )
+        .with_file(
+            &original,
+            hash_for("hold-roe"),
+            pdf_with_embedded_doi("10.1000/hold-roe"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/hold-smith",
+            record_by("Smith", 2024, "10.1000/hold-smith"),
+        )
+        .answering(
+            "doi:10.1000/hold-roe",
+            record_by("Roe", 2022, "10.1000/hold-roe"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_skipping_named("[auth][year]", true);
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let buffer = Rc::new(RefCell::new(Vec::new()));
+    let mut asker = ObservingAsker::new(buffer.clone(), vec![Answer::Rename]);
+    let mut shared_out = SharedBuffer(buffer.clone());
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut shared_out,
+        err: &mut err,
+    };
+
+    let _ = dispatch(
+        &cli(
+            Command::rename(vec![smith.clone(), original.clone()], false),
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let seen = asker.seen_at_first_question();
+    assert!(
+        seen.contains("original.pdf: resolved"),
+        "the hold must have ended for the file's own resolution line before it is asked \
+         about: {seen}"
+    );
+    assert!(
+        !seen.contains("Smith2024.pdf"),
+        "a passed-over file's lines must never reach the terminal, before the question \
+         asked about a later file or after: {seen}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// design D5: bibliography output is not held and is not suppressed
+// ---------------------------------------------------------------------
+
+/// A sidecar written beside a passed-over file is reported even though
+/// nothing else about that file is: the setting hides a file that needs
+/// no decision, not what a run actually did.
+#[test]
+fn a_sidecar_for_a_passed_over_file_is_still_reported() {
+    let smith = PathBuf::from("/lib/Smith2024.pdf");
+    let library = FakeLibrary::new().with_file(
+        &smith,
+        hash_for("sidecar-passed-over"),
+        pdf_with_embedded_doi("10.1000/sidecar-passed-over"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/sidecar-passed-over")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.rename = Some(RenameLayer {
+            collision: None,
+            batch: None,
+            skip_named: Some(true),
+        });
+        layer.bib = Some(BibLayer {
+            path: None,
+            duplicates: None,
+            sidecars: Some(true),
+        });
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![smith.clone()], false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        !text.contains("resolved"),
+        "the passed-over file's resolution line must not show: {text}"
+    );
+    assert!(
+        !text.contains("already named"),
+        "the passed-over file's outcome line must not show: {text}"
+    );
+    assert!(
+        text.contains("sidecar written to"),
+        "a sidecar written beside a passed-over file must still be reported: {text}"
+    );
+}
+
+/// The same for a sidecar that failed to write: the failure is a fact
+/// about the run and is reported whether or not the file it happened
+/// beside was shown.
+#[test]
+fn a_sidecar_write_failure_for_a_passed_over_file_is_still_reported() {
+    let smith = PathBuf::from("/lib/Smith2024.pdf");
+    let library = FakeLibrary::new().with_file(
+        &smith,
+        hash_for("sidecar-failure-passed-over"),
+        pdf_with_embedded_doi("10.1000/sidecar-failure-passed-over"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "Smith",
+            2024,
+            "10.1000/sidecar-failure-passed-over",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new().with_write_failure(sidecar_path(&smith));
+    let state = tempdir().unwrap();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.rename = Some(RenameLayer {
+            collision: None,
+            batch: None,
+            skip_named: Some(true),
+        });
+        layer.bib = Some(BibLayer {
+            path: None,
+            duplicates: None,
+            sidecars: Some(true),
+        });
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![smith.clone()], false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        !text.contains("resolved"),
+        "the passed-over file's resolution line must not show: {text}"
+    );
+    assert!(
+        !text.contains(": already named"),
+        "the passed-over file's outcome line must not show: {text}"
+    );
+    assert!(
+        text.contains("skipped"),
+        "a sidecar write failure beside a passed-over file must still be reported: {text}"
     );
 }

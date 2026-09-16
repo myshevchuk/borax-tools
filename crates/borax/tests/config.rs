@@ -2569,3 +2569,140 @@ fn events_reports_a_rename_batch_override_with_its_file_origin() {
         }
     );
 }
+
+// ---------------------------------------------------------------------
+// 4.1: rename.skip-named — a boolean key defaulting to true, reported
+// by `borax config` with its origin, from a file, from the environment
+// and from the flag (design D4)
+// ---------------------------------------------------------------------
+
+#[test]
+fn rename_skip_named_defaults_to_true_with_default_origin() {
+    let effective = resolve(vec![]).unwrap();
+    assert!(effective.config().skip_named);
+    assert_eq!(
+        effective.origin("rename.skip-named"),
+        Some(&Origin::Default)
+    );
+}
+
+#[test]
+fn layer_from_toml_reads_rename_skip_named() {
+    let layer = layer_from_toml("[rename]\nskip-named = false\n", Path::new("/solo.toml")).unwrap();
+    assert_eq!(
+        layer.rename,
+        Some(RenameLayer {
+            collision: None,
+            batch: None,
+            skip_named: Some(false),
+        })
+    );
+}
+
+#[test]
+fn a_directory_file_setting_rename_skip_named_false_wins_and_reports_its_own_origin() {
+    let dir_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(dir_path.clone()),
+        Layer {
+            rename: Some(RenameLayer {
+                collision: None,
+                batch: None,
+                skip_named: Some(false),
+            }),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(!effective.config().skip_named);
+    assert_eq!(
+        effective.origin("rename.skip-named"),
+        Some(&Origin::DirectoryFile(dir_path))
+    );
+}
+
+#[test]
+fn layer_from_env_reads_borax_rename_skip_named() {
+    let layer = layer_from_env([("BORAX_RENAME_SKIP_NAMED", "false")]).unwrap();
+    assert_eq!(
+        layer.rename,
+        Some(RenameLayer {
+            collision: None,
+            batch: None,
+            skip_named: Some(false),
+        })
+    );
+}
+
+#[test]
+fn an_env_var_setting_rename_skip_named_wins_and_reports_its_own_origin() {
+    let env_layer = layer_from_env([("BORAX_RENAME_SKIP_NAMED", "false")]).unwrap();
+    let layers = vec![(Origin::Env("RENAME_SKIP_NAMED".to_string()), env_layer)];
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(!effective.config().skip_named);
+    assert_eq!(
+        effective.origin("rename.skip-named"),
+        Some(&Origin::Env("RENAME_SKIP_NAMED".to_string()))
+    );
+}
+
+#[test]
+fn a_rename_skip_named_flag_layer_wins_and_reports_its_own_origin() {
+    let layers = vec![(
+        Origin::Flag("no-skip-named".to_string()),
+        Layer {
+            rename: Some(RenameLayer {
+                collision: None,
+                batch: None,
+                skip_named: Some(false),
+            }),
+            ..Layer::default()
+        },
+    )];
+
+    let effective = resolve(layers).unwrap();
+
+    assert!(!effective.config().skip_named);
+    assert_eq!(
+        effective.origin("rename.skip-named"),
+        Some(&Origin::Flag("no-skip-named".to_string()))
+    );
+}
+
+#[test]
+fn events_reports_a_rename_skip_named_override_with_its_file_origin() {
+    let config_path = PathBuf::from("/proj/.borax.toml");
+    let layers = vec![(
+        Origin::DirectoryFile(config_path.clone()),
+        Layer {
+            rename: Some(RenameLayer {
+                collision: None,
+                batch: None,
+                skip_named: Some(false),
+            }),
+            ..Layer::default()
+        },
+    )];
+    let effective = resolve(layers).unwrap();
+
+    let events = effective.events();
+    let event = events
+        .iter()
+        .find(
+            |event| matches!(event, Event::ConfigSetting { key, .. } if key == "rename.skip-named"),
+        )
+        .unwrap_or_else(|| panic!("no ConfigSetting for rename.skip-named in {events:?}"));
+
+    assert_eq!(
+        *event,
+        Event::ConfigSetting {
+            key: "rename.skip-named".to_string(),
+            value: "false".to_string(),
+            origin: Origin::DirectoryFile(config_path).to_string(),
+        }
+    );
+}
