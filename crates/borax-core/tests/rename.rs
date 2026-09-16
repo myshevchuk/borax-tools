@@ -928,6 +928,30 @@ fn claiming_a_proposed_rename_reserves_its_target_for_later_items() {
     );
 }
 
+/// The ladder stopping at the file's own name must not stop at a name
+/// that differs from it only in case: that is the one move onto the
+/// exempt slot worth making, and the planner has always allowed it.
+#[test]
+fn a_suffix_candidate_differing_only_in_case_is_still_a_rename() {
+    let mut planner = Planner::new(snapshot(&[
+        ("Smith2024a.pdf", Some("h1")),
+        ("smith2024.pdf", Some("other")),
+    ]));
+
+    let decided = planner.plan(
+        &input("Smith2024a.pdf", "smith2024.pdf", "h1"),
+        CollisionPolicy::Suffix,
+    );
+
+    assert_eq!(
+        decided.action,
+        PlannedAction::Rename {
+            to: "smith2024a.pdf".to_string()
+        },
+        "a case-only rename reached by the ladder is a rename: got {decided:?}"
+    );
+}
+
 /// Claiming something other than a `Rename` — `AlreadyNamed` or `Skip`
 /// — claims nothing the snapshot did not already hold.
 ///

@@ -16,8 +16,9 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
+use crate::paths::{lexical, same_name};
 use borax_core::bib_output::parse_sidecar_record;
 use borax_core::content::ContentHash;
 use borax_core::ledger::{
@@ -341,6 +342,18 @@ impl Collection<'_> {
         }
     }
 
+    /// Whether the entry recorded at `recorded` is a duplicate worth
+    /// reporting for the file at `incoming`: another file rather than
+    /// this one, and one that is still where the ledger says.
+    ///
+    /// This is what the lookups walk their candidates with. Refusing an
+    /// entry does not end their search — a row the file itself left
+    /// behind, or one whose file is gone, must not hide a copy recorded
+    /// behind it.
+    pub fn counts_against(&self, recorded: &str, incoming: &Path) -> bool {
+        !self.is_incoming(recorded, incoming) && (self.exists)(&relative_to(self.root, recorded))
+    }
+
     /// The full path of `duplicate`, or `None` when the file it names
     /// is no longer there.
     pub(crate) fn live_path(&self, duplicate: &Duplicate) -> Option<PathBuf> {
@@ -348,55 +361,6 @@ impl Collection<'_> {
             true => Some(relative_to(self.root, &duplicate.existing_path)),
             false => None,
         }
-    }
-}
-
-/// `path` made absolute against the working directory and normalised
-/// lexically: `.` dropped, `..` resolved against the component before
-/// it, and separators unified by rebuilding the path component by
-/// component.
-///
-/// Nothing is asked of the filesystem, so a symlink stays the name it
-/// is and a path that is not there is normalised like any other. `None`
-/// only when `path` is relative and there is no working directory to
-/// resolve it against.
-///
-/// A `..` with nothing before it to cancel — which only a relative path
-/// can have, and only one that climbs out of the working directory — is
-/// kept, so two such paths still compare as themselves.
-fn lexical(path: &Path) -> Option<PathBuf> {
-    let absolute = match path.is_absolute() {
-        true => path.to_path_buf(),
-        false => std::env::current_dir().ok()?.join(path),
-    };
-
-    let mut normalised = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => match normalised.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    normalised.pop();
-                }
-                Some(Component::RootDir | Component::Prefix(_)) => {}
-                _ => normalised.push(component),
-            },
-            _ => normalised.push(component),
-        }
-    }
-    Some(normalised)
-}
-
-/// Whether two normalised paths name the same file the way the platform
-/// matches file names: case-sensitively on Unix, case-insensitively on
-/// Windows.
-fn same_name(left: &Path, right: &Path) -> bool {
-    match cfg!(windows) {
-        true => left
-            .to_string_lossy()
-            .to_lowercase()
-            .eq(&right.to_string_lossy().to_lowercase()),
-        false => left == right,
     }
 }
 

@@ -369,7 +369,7 @@ fn content_duplicate_names_the_existing_path_when_hash_matches() {
     let existing = entry("archived.pdf", "same-bytes");
     let index = Index::build(&[existing]);
 
-    let found = index.content_duplicate(&hash("same-bytes"), &|_| false);
+    let found = index.content_duplicate(&hash("same-bytes"), &|_| true);
 
     assert_eq!(
         found,
@@ -386,7 +386,7 @@ fn content_duplicate_is_none_when_the_hash_is_unknown() {
     let index = Index::build(&[existing]);
 
     assert_eq!(
-        index.content_duplicate(&hash("different-bytes"), &|_| false),
+        index.content_duplicate(&hash("different-bytes"), &|_| true),
         None
     );
 }
@@ -400,7 +400,7 @@ fn work_duplicate_names_the_existing_path_when_an_identifier_matches() {
     let index = Index::build(&[existing]);
 
     // A different file (different hash), same resolved DOI.
-    let found = index.work_duplicate(&[Identifier::Doi(doi("10.1021/jacs.4c01234"))], &|_| false);
+    let found = index.work_duplicate(&[Identifier::Doi(doi("10.1021/jacs.4c01234"))], &|_| true);
 
     assert_eq!(
         found,
@@ -419,7 +419,7 @@ fn work_duplicate_is_none_when_no_identifier_matches() {
     };
     let index = Index::build(&[existing]);
 
-    let found = index.work_duplicate(&[Identifier::Doi(doi("10.1038/other"))], &|_| false);
+    let found = index.work_duplicate(&[Identifier::Doi(doi("10.1038/other"))], &|_| true);
 
     assert_eq!(found, None);
 }
@@ -432,7 +432,7 @@ fn work_duplicate_is_none_for_an_empty_identifier_list() {
     };
     let index = Index::build(&[existing]);
 
-    assert_eq!(index.work_duplicate(&[], &|_| false), None);
+    assert_eq!(index.work_duplicate(&[], &|_| true), None);
 }
 
 #[test]
@@ -448,7 +448,7 @@ fn work_duplicate_matches_on_a_later_identifier_when_an_earlier_one_is_unknown()
             Identifier::Doi(doi("10.1021/jacs.4c01234")),
             Identifier::Arxiv(arxiv("2401.12345")),
         ],
-        &|_| false,
+        &|_| true,
     );
 
     assert_eq!(
@@ -472,10 +472,10 @@ fn content_and_work_duplicates_are_reported_with_distinct_reasons() {
     let index = Index::build(&[archived_a, archived_b]);
 
     let content = index
-        .content_duplicate(&hash("identical-bytes"), &|_| false)
+        .content_duplicate(&hash("identical-bytes"), &|_| true)
         .expect("content duplicate");
     let work = index
-        .work_duplicate(&[Identifier::Doi(doi("10.1021/jacs.4c01234"))], &|_| false)
+        .work_duplicate(&[Identifier::Doi(doi("10.1021/jacs.4c01234"))], &|_| true)
         .expect("work duplicate");
 
     assert_eq!(content.reason, DuplicateReason::Content);
@@ -493,12 +493,9 @@ fn a_file_with_unknown_hash_and_no_matching_identifier_is_not_a_duplicate_of_eit
     };
     let index = Index::build(&[existing]);
 
+    assert_eq!(index.content_duplicate(&hash("new-bytes"), &|_| true), None);
     assert_eq!(
-        index.content_duplicate(&hash("new-bytes"), &|_| false),
-        None
-    );
-    assert_eq!(
-        index.work_duplicate(&[Identifier::Doi(doi("10.1038/other"))], &|_| false),
+        index.work_duplicate(&[Identifier::Doi(doi("10.1038/other"))], &|_| true),
         None
     );
 }
@@ -515,7 +512,7 @@ fn a_files_own_content_entry_does_not_hide_a_byte_identical_copy_recorded_elsewh
     // `by_hash` alone would answer with.
     let index = Index::build(&[elsewhere, own]);
 
-    let found = index.content_duplicate(&hash("same-bytes"), &|recorded| recorded == "own.pdf");
+    let found = index.content_duplicate(&hash("same-bytes"), &|recorded| recorded != "own.pdf");
 
     assert_eq!(
         found,
@@ -527,13 +524,55 @@ fn a_files_own_content_entry_does_not_hide_a_byte_identical_copy_recorded_elsewh
     );
 }
 
+/// A ledger keeps the row a file left behind when it was renamed, and
+/// nothing reads it — unless a search stops there. A row whose file is
+/// gone must be walked past like the file's own, or a copy recorded
+/// behind it goes unreported.
+#[test]
+fn a_row_whose_file_is_gone_does_not_hide_a_copy_recorded_behind_it() {
+    let elsewhere = entry("elsewhere.pdf", "same-bytes");
+    let superseded = entry("moved-away.pdf", "same-bytes");
+    let index = Index::build(&[elsewhere, superseded]);
+
+    // What a collection answers: the superseded row names nothing that
+    // is there any more, so it counts for nothing.
+    let found = index.content_duplicate(&hash("same-bytes"), &|recorded| {
+        recorded != "moved-away.pdf"
+    });
+
+    assert_eq!(
+        found,
+        Some(Duplicate {
+            reason: DuplicateReason::Content,
+            existing_path: "elsewhere.pdf".to_string(),
+        }),
+        "a row whose file is gone must not end the search"
+    );
+}
+
+/// The same row, with nothing behind it: a search that reported it
+/// would name a path the collection does not hold.
+#[test]
+fn a_row_whose_file_is_gone_is_not_a_duplicate_on_its_own() {
+    let superseded = entry("moved-away.pdf", "same-bytes");
+    let index = Index::build(&[superseded]);
+
+    assert_eq!(
+        index.content_duplicate(&hash("same-bytes"), &|recorded| {
+            recorded != "moved-away.pdf"
+        }),
+        None,
+        "a row naming nothing that is there is no duplicate"
+    );
+}
+
 #[test]
 fn content_duplicate_is_none_when_the_ledger_holds_only_the_files_own_entry() {
     let own = entry("own.pdf", "same-bytes");
     let index = Index::build(&[own]);
 
     assert_eq!(
-        index.content_duplicate(&hash("same-bytes"), &|recorded| recorded == "own.pdf"),
+        index.content_duplicate(&hash("same-bytes"), &|recorded| recorded != "own.pdf"),
         None
     );
 }
@@ -553,7 +592,7 @@ fn a_files_own_work_entry_does_not_hide_a_matching_identifier_recorded_elsewhere
 
     let found = index.work_duplicate(
         &[Identifier::Doi(doi("10.1021/jacs.4c01234"))],
-        &|recorded| recorded == "own.pdf",
+        &|recorded| recorded != "own.pdf",
     );
 
     assert_eq!(

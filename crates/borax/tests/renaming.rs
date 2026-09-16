@@ -824,6 +824,38 @@ fn two_directories_filing_into_one_collide_there() {
     );
 }
 
+/// One invocation can spell one directory two ways — a bare path and a
+/// path under `./` — and a collection root discovered as an absolute
+/// path is under neither spelling as text. Ancestry and namespace
+/// identity are decided on the normalised paths, or a preview and an
+/// applying run would file two files differently.
+#[test]
+fn two_spellings_of_one_base_are_one_namespace() {
+    let here = std::env::current_dir().unwrap();
+    let root = here.join("lib");
+
+    assert_eq!(
+        Planning::base_for(Path::new("lib"), Some(&root)),
+        root,
+        "a relative directory under an absolute root files from the root"
+    );
+    assert_eq!(
+        Planning::base_for(Path::new("./lib/sub"), Some(&root)),
+        root,
+        "a dotted spelling is the same directory"
+    );
+    assert_eq!(
+        Planning::key_for(Path::new("lib")),
+        Planning::key_for(&root),
+        "two spellings of one base must claim names in one namespace"
+    );
+    assert_ne!(
+        Planning::base_for(Path::new("elsewhere"), Some(&root)),
+        root,
+        "a directory that is not under the root files from itself"
+    );
+}
+
 // A file not yet in the rendered subdirectory is filed into it exactly
 // as `a_template_with_a_slash_plans_a_rename_into_a_subdirectory` above
 // already covers: D5a changes nothing about that case, so it is not

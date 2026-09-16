@@ -225,7 +225,7 @@ pub fn resolve_file_checking_ledger<C: Cache>(
         .and_then(|hash| {
             collection
                 .ledger
-                .content_duplicate(&hash, &|recorded| collection.is_incoming(recorded, path))
+                .content_duplicate(&hash, &|recorded| collection.counts_against(recorded, path))
         })
         .and_then(|duplicate| collection.live_path(&duplicate))
     {
@@ -243,7 +243,7 @@ pub fn resolve_file_checking_ledger<C: Cache>(
     match collection
         .ledger
         .work_duplicate(&identifiers_of(&file.record), &|recorded| {
-            collection.is_incoming(recorded, path)
+            collection.counts_against(recorded, path)
         })
         .and_then(|duplicate| collection.live_path(&duplicate))
     {

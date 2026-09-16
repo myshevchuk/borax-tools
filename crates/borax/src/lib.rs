@@ -11,6 +11,7 @@ pub mod cli;
 pub mod config;
 pub mod event;
 pub mod ledger;
+pub mod paths;
 pub mod pipeline;
 pub mod renaming;
 pub mod run;

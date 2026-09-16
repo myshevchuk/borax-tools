@@ -255,23 +255,28 @@ impl Index {
 
     /// The entry recorded for `hash`, if any.
     pub fn by_hash(&self, hash: &ContentHash) -> Option<&Entry> {
-        self.newest(self.by_hash.get(hash)?, &|_| false)
+        self.newest(self.by_hash.get(hash)?, &|_| true)
     }
 
     /// The entry recorded for `identifier`, if any.
     pub fn by_identifier(&self, identifier: &Identifier) -> Option<&Entry> {
-        self.newest(self.by_identifier.get(identifier)?, &|_| false)
+        self.newest(self.by_identifier.get(identifier)?, &|_| true)
     }
 
     /// The newest of the entries at `positions` whose recorded path
-    /// `is_incoming` rejects, or `None` when it accepts every one of
-    /// them.
-    fn newest(&self, positions: &[usize], is_incoming: &dyn Fn(&str) -> bool) -> Option<&Entry> {
+    /// `counts`, or `None` when none of them does.
+    ///
+    /// The search walks every entry rather than stopping at the newest
+    /// one: a ledger keeps the rows a file left behind when it was
+    /// renamed, and a caller looking for a duplicate has to see past
+    /// its own row and past rows describing a path that is no longer
+    /// what they say it is.
+    fn newest(&self, positions: &[usize], counts: &dyn Fn(&str) -> bool) -> Option<&Entry> {
         positions
             .iter()
             .rev()
             .filter_map(|position| self.entries.get(*position))
-            .find(|entry| !is_incoming(&entry.path))
+            .find(|entry| counts(&entry.path))
     }
 
     /// Whether a file hashing to `hash` is already archived somewhere
@@ -280,23 +285,21 @@ impl Index {
     /// Answerable straight after hashing, before any identifier is
     /// resolved, so a re-downloaded file costs no network access.
     ///
-    /// `is_incoming` answers whether a recorded path names the file
-    /// being checked. An entry it accepts is the file's own admission
-    /// rather than a copy of it, so the search passes over that entry
-    /// and goes on: a file whose own row is the newest for its hash
-    /// would otherwise hide a second copy recorded under an older one.
-    /// A ledger that holds only the file's own entry answers `None`.
+    /// `counts` answers whether a recorded path is a duplicate the
+    /// caller would report: not the incoming file's own admission, and
+    /// still naming a file that is there. Entries it refuses are walked
+    /// past rather than ending the search, because a ledger keeps every
+    /// row a file ever had — its own, and the ones it left behind when
+    /// it was renamed — and a copy recorded elsewhere can sit behind
+    /// any of them.
     pub fn content_duplicate(
         &self,
         hash: &ContentHash,
-        is_incoming: &dyn Fn(&str) -> bool,
+        counts: &dyn Fn(&str) -> bool,
     ) -> Option<Duplicate> {
         Some(Duplicate {
             reason: DuplicateReason::Content,
-            existing_path: self
-                .newest(self.by_hash.get(hash)?, is_incoming)?
-                .path
-                .clone(),
+            existing_path: self.newest(self.by_hash.get(hash)?, counts)?.path.clone(),
         })
     }
 
@@ -308,19 +311,19 @@ impl Index {
     /// slice: a file with no identifiers can only ever be a content
     /// duplicate.
     ///
-    /// `is_incoming` is [`Index::content_duplicate`]'s, and passes over
-    /// the file's own admission for the same reason: an annotated file
-    /// at its admitted path carries a new hash and its old identifiers,
+    /// `counts` is [`Index::content_duplicate`]'s, and passes over the
+    /// file's own admission for the same reason: an annotated file at
+    /// its admitted path carries a new hash and its old identifiers,
     /// and is not a second copy of itself.
     pub fn work_duplicate(
         &self,
         identifiers: &[Identifier],
-        is_incoming: &dyn Fn(&str) -> bool,
+        counts: &dyn Fn(&str) -> bool,
     ) -> Option<Duplicate> {
         identifiers
             .iter()
             .filter_map(|identifier| self.by_identifier.get(identifier))
-            .find_map(|positions| self.newest(positions, is_incoming))
+            .find_map(|positions| self.newest(positions, counts))
             .map(|entry| Duplicate {
                 reason: DuplicateReason::Work,
                 existing_path: entry.path.clone(),

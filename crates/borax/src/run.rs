@@ -1245,7 +1245,7 @@ fn rename_events<C: Cache>(
         // filing into one collection claim names in the same place.
         let base = Planning::base_for(&group.directory, adapters.collection_root.as_deref());
         let namespace = namespaces
-            .entry(base.clone())
+            .entry(Planning::key_for(&base))
             .or_insert_with(|| Namespace::new(&base));
         let mut planning = Planning::new(
             &group.directory,

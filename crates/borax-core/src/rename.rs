@@ -190,7 +190,13 @@ impl Planner {
                         // already carries: the file is where the plan
                         // would put it, and the move the exemption
                         // would let through is one onto itself.
-                        if candidate_key == source_key {
+                        //
+                        // Byte-equal, not case-insensitively equal: a
+                        // candidate differing from the file's name only
+                        // in case is a case-only rename, which is the
+                        // one move onto the exempt slot there is any
+                        // point in making.
+                        if candidate == item.source {
                             break PlannedAction::AlreadyNamed;
                         }
                         if is_free(&candidate_key, &self.claimed, exempt) {

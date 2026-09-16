@@ -277,23 +277,23 @@ how to install it, and a handful of examples.
 
 ** The settings
 
-   | Key                       | Flag                                | Default   |
-   |---------------------------+-------------------------------------+-----------|
-   | ~bib.duplicates~          | ~--duplicates~                      | ~skip~    |
-   | ~bib.path~                | ~--bib~                             | unset     |
-   | ~bib.sidecars~            | ~--sidecars~/~--no-sidecars~        | ~false~   |
-   | ~collection-root~         | none                                | unset     |
-   | ~extraction.page-limit~   | ~--page-limit~                      | ~3~       |
-   | ~ledger~                  | ~--ledger~/~--no-ledger~            | ~true~    |
-   | ~mailto~                  | ~--mailto~                          | unset     |
-   | ~network.cache~           | ~--cache~/~--no-cache~              | ~true~    |
-   | ~network.concurrency~     | ~--concurrency~                     | ~4~       |
-   | ~network.min-interval-ms~ | ~--min-interval-ms~                 | ~100~     |
-   | ~rename.batch~            | ~--batch~/~--no-batch~              | ~false~   |
-   | ~rename.collision~        | ~--collision~                       | ~suffix~  |
-   | ~rename.skip-named~       | ~--skip-named~/~--no-skip-named~   | ~true~    |
-   | ~run-log~                 | ~--run-log~/~--no-run-log~          | ~true~    |
-   | ~sources~                 | ~--sources~                         | all three |
+   | Key                       | Flag                             | Default   |
+   |---------------------------+----------------------------------+-----------|
+   | ~bib.duplicates~          | ~--duplicates~                   | ~skip~    |
+   | ~bib.path~                | ~--bib~                          | unset     |
+   | ~bib.sidecars~            | ~--sidecars~/~--no-sidecars~     | ~false~   |
+   | ~collection-root~         | none                             | unset     |
+   | ~extraction.page-limit~   | ~--page-limit~                   | ~3~       |
+   | ~ledger~                  | ~--ledger~/~--no-ledger~         | ~true~    |
+   | ~mailto~                  | ~--mailto~                       | unset     |
+   | ~network.cache~           | ~--cache~/~--no-cache~           | ~true~    |
+   | ~network.concurrency~     | ~--concurrency~                  | ~4~       |
+   | ~network.min-interval-ms~ | ~--min-interval-ms~              | ~100~     |
+   | ~rename.batch~            | ~--batch~/~--no-batch~           | ~false~   |
+   | ~rename.collision~        | ~--collision~                    | ~suffix~  |
+   | ~rename.skip-named~       | ~--skip-named~/~--no-skip-named~ | ~true~    |
+   | ~run-log~                 | ~--run-log~/~--no-run-log~       | ~true~    |
+   | ~sources~                 | ~--sources~                      | all three |
 
    - ~bib.duplicates~ :: What to do with an entry already in the master
      ~.bib~: ~skip~ or ~update~.

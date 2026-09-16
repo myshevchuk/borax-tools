@@ -24,6 +24,7 @@ use borax_core::template::{RenderInput, TemplateTable};
 use borax_sources::store::hash_file;
 
 use crate::event::{Counts, Event, SkipReason};
+use crate::paths::lexical;
 use crate::pipeline::FileRecord;
 
 /// Moving files, and seeing what is already there.
@@ -248,7 +249,12 @@ impl<'a> Planning<'a> {
         policy: CollisionPolicy,
         filesystem: &'a dyn Filesystem,
     ) -> Planning<'a> {
-        let within = relative_to(&namespace.base, directory);
+        // Normalised on both sides, so a directory named one way and a
+        // base discovered another still yield the path between them.
+        let within = match (lexical(&namespace.base), lexical(directory)) {
+            (Some(base), Some(directory)) => relative_to(&base, &directory),
+            _ => relative_to(&namespace.base, directory),
+        };
         // Before any decision, so a file is measured against what its
         // own directory holds however the namespace was reached.
         namespace.read(&within, filesystem);
@@ -267,10 +273,34 @@ impl<'a> Planning<'a> {
     /// The root, where the directory sits under it; the directory
     /// itself for a run in no collection, which has no other base, and
     /// for a root the directory is not under, which is no base for it.
+    ///
+    /// Whether one lies under the other is decided on the paths
+    /// normalised ([`crate::paths::lexical`]), not on how they were
+    /// spelled: one invocation can name `papers/a.pdf` and
+    /// `./papers/b.pdf` and mean one directory, and a root discovered
+    /// as an absolute path is under neither spelling of a relative
+    /// one. The base is returned as it was given, since it is what
+    /// targets are joined to and a run reports the paths it was
+    /// handed.
     pub fn base_for(directory: &Path, root: Option<&Path>) -> PathBuf {
-        root.filter(|root| directory.starts_with(root))
-            .unwrap_or(directory)
-            .to_path_buf()
+        let under = |root: &&Path| match (lexical(directory), lexical(root)) {
+            (Some(directory), Some(root)) => directory.starts_with(root),
+            // A path that cannot be made absolute cannot be shown to
+            // lie under the root, and filing from the directory is the
+            // answer that moves a file least.
+            _ => false,
+        };
+        root.filter(under).unwrap_or(directory).to_path_buf()
+    }
+
+    /// What identifies `base` as one namespace, whatever it was called.
+    ///
+    /// Two spellings of one directory share the names claimed under
+    /// it: a run that reached a base twice by two spellings must not
+    /// plan against two namespaces, or a preview and an applying run
+    /// would suffix differently.
+    pub fn key_for(base: &Path) -> PathBuf {
+        lexical(base).unwrap_or_else(|| base.to_path_buf())
     }
 
     /// The decision for the resolved file `file` at `path`, claiming
@@ -482,7 +512,7 @@ pub fn plan_renames(
     for (directory, members) in groups {
         let base = Planning::base_for(directory, root);
         let namespace = namespaces
-            .entry(base.clone())
+            .entry(Planning::key_for(&base))
             .or_insert_with(|| Namespace::new(&base));
         let mut planning = Planning::new(directory, namespace, templates, policy, filesystem);
         for index in members {
