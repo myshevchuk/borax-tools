@@ -218,6 +218,17 @@ identifier reports the explicit value `supplied`.
 the run log sees what was overridden in the vocabulary the skip would
 have used.
 
+**Where `supplied` lives.** `FileRecord::tier` is
+`Option<borax_pdf::tiered::Tier>`, and every `Tier` variant names an
+extraction pass over a file. A supplied identifier came from no pass,
+so it is not a `Tier` and no variant is added to that enum: borax-pdf
+knows nothing about operators. `FileRecord` carries a borax-level
+`Provenance` instead — `Extracted(Tier)` or `Supplied`, with `None`
+still meaning the content index answered and nothing was read or
+asked. `resolved_event` renders it into the `tier` string, which keeps
+the three cases the stream has to tell apart in one field: the pass's
+own name, `supplied`, and `null`.
+
 ### D7. The answer is remembered in the content index, on rename only
 
 After a rename carried out on a supplied identifier or over a conflict,
