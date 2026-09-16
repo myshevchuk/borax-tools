@@ -76,7 +76,7 @@ block and amend it, rather than leaving the archive holding both:
       and renaming re-identifies the file
 - [ ] 3.6 Green: the driver situations, the held verdict, `overrode` and
       `supplied` on `resolved`
-- [ ] 3.6a Red: `crates/borax/tests/describe.rs` — `describe` renders
+- [x] 3.6a Red: `crates/borax/tests/describe.rs` — `describe` renders
       the held verdict whichever it is (design D8): the services'
       answers for an unresolvable file, both titles and the similarity
       for a conflict asked about or overridden, and `supplied` on the

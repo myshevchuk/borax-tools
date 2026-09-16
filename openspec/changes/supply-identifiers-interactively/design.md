@@ -353,11 +353,24 @@ conflict    titles 8% alike
 `overrode` carries the same four values a `Conflict` reason does, so
 one renderer serves the question and the record that accepted it.
 
+A file with no identifier at all says so in the same slot, since that
+slot's question is "what was looked up":
+
+```
+file        scanned.pdf
+identifier  none found in the file
+```
+
 A supplied identifier says so where a pass's name would go:
 
 ```
 identifier  doi:10.1021/jacs.4c01234, supplied
 ```
+
+Every new label fits the twelve-column label field
+`show-record-before-asking` fixed — `no record`, `conflict`,
+`identifier` — which is why the no-identifier case reuses `identifier`
+rather than taking a label of its own.
 
 The phrase is a bare `supplied`, not "supplied by you" or "supplied by
 hand": the other values in that slot name where the identifier was
