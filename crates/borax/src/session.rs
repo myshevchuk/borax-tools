@@ -233,7 +233,14 @@ impl Asker for TerminalAsker {
         );
 
         let choices: Vec<Choice> = question.choices.iter().copied().map(Choice).collect();
-        match inquire::Select::new("Rename this file?", choices).prompt() {
+        // Without a help message, `inquire` offers its own, which
+        // advertises filtering by typing. Three choices do not need
+        // filtering, and the offer reads as though an answer could be
+        // typed.
+        match inquire::Select::new("Rename this file?", choices)
+            .with_help_message("↑↓ to move, enter to select")
+            .prompt()
+        {
             Ok(choice) => choice.0,
             Err(_) => Answer::Quit,
         }
