@@ -219,11 +219,11 @@ fn a_content_index_answer_is_d1s_worked_example() {
         vec![
             rule(3, 17, DEFAULT_WIDTH),
             label_line("file", "50-Article Text-95-2-10-20240507.pdf"),
-            label_line(
-                "identifier",
-                "doi:10.15407/bioorganica2023.01.010, from an earlier run"
-            ),
-            label_line("record", "Crossref"),
+            // Nothing was looked up, so nothing is said about where
+            // the identifier came from; the record is what came from
+            // an earlier run.
+            label_line("identifier", "doi:10.15407/bioorganica2023.01.010"),
+            label_line("record", "Crossref, from an earlier run"),
             label_line("type", "journal article"),
             "title       Applications of chiral sulfinyl auxiliaries in the asymmetric".to_string(),
             continuation("synthesis of fluorinated amines and amino acids"),
@@ -651,5 +651,195 @@ fn a_producers_placeholder_claim_is_shown_not_filtered() {
         ],
         "the placeholder the conflict check would dismiss must still \
          appear: got {lines:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// What the reviewer gate found: evidence that would have been wrong,
+// and a description a document could redraw
+// ---------------------------------------------------------------------
+
+/// The content index keeps records, not the identifiers they were
+/// reached by. A record found last time from an arXiv identifier and
+/// carrying a DOI must not be described as a DOI found in an earlier
+/// run: nothing is known about where its identifier came from, and the
+/// description says nothing rather than something false.
+#[test]
+fn a_cached_answer_names_no_origin_for_its_identifier() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Preprint That Was Published".to_string());
+    record.authors = vec![name("Ada", "Byron")];
+    record.doi = Some(Doi::parse("10.1234/published.2024").unwrap());
+
+    let mut fixture = Fixture::new(record, "doi:10.1234/published.2024");
+    // What a content-index answer looks like: no pass ran, no service
+    // was asked, and the claims were never read.
+    fixture.tier = None;
+    fixture.cached = true;
+    fixture.source = "crossref".to_string();
+
+    let lines = describe(
+        &fixture.event(),
+        "paper.pdf",
+        &Proposal {
+            target: "byron2024.pdf".to_string(),
+            rendered: None,
+        },
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line("identifier", "doi:10.1234/published.2024")),
+        "a cached answer must name the identifier without claiming where \
+         it was found: got {lines:#?}"
+    );
+    assert!(
+        lines.contains(&label_line("record", "Crossref, from an earlier run")),
+        "the record is what came from an earlier run: got {lines:#?}"
+    );
+}
+
+/// A PDF's title is written by whoever made the file. An escape
+/// sequence in one, written to the terminal as it stands, could erase
+/// the lines above it and redraw a different file and target over a
+/// menu whose first choice is Rename.
+#[test]
+fn control_characters_in_a_title_are_shown_rather_than_acted_on() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("Innocent Title".to_string());
+    record.doi = Some(Doi::parse("10.1234/escape.2024").unwrap());
+
+    let mut fixture = Fixture::new(record, "doi:10.1234/escape.2024");
+    fixture.claims = vec![Claim {
+        from: ClaimOrigin::Xmp,
+        title: "\u{1b}[2J\u{1b}[Hfile        innocent.pdf".to_string(),
+    }];
+
+    let lines = describe(
+        &fixture.event(),
+        "paper.pdf",
+        &Proposal {
+            target: "author2024.pdf".to_string(),
+            rendered: None,
+        },
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    let text = lines.join("\n");
+    assert!(
+        !text.contains('\u{1b}'),
+        "no escape may reach the terminal: got {text:?}"
+    );
+    assert!(
+        text.contains("\\x1b[2J"),
+        "the sequence is shown as text instead: got {text:?}"
+    );
+}
+
+/// A record can hold a volume and pages and name no container. Every
+/// field the run knows is shown; a container it does not have is the
+/// only thing left out.
+#[test]
+fn a_volume_with_no_container_is_still_reported() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("Published Somewhere Unnamed".to_string());
+    record.volume = Some("12".to_string());
+    record.pages = Some("45-67".to_string());
+    record.doi = Some(Doi::parse("10.1234/nocontainer.2024").unwrap());
+
+    let lines = describe(
+        &Fixture::new(record, "doi:10.1234/nocontainer.2024").event(),
+        "paper.pdf",
+        &Proposal {
+            target: "author2024.pdf".to_string(),
+            rendered: None,
+        },
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line("in", "12, 45-67")),
+        "a volume and pages are known even with no container to hold \
+         them: got {lines:#?}"
+    );
+}
+
+/// A record can hold text that is empty or only spaces. It is absent,
+/// not a field to print a label for.
+#[test]
+fn a_blank_field_is_absent_rather_than_an_empty_label() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("   ".to_string());
+    record.container_title = Some(String::new());
+    record.authors = vec![name("Ada", "Byron")];
+    record.doi = Some(Doi::parse("10.1234/blank.2024").unwrap());
+
+    let lines = describe(
+        &Fixture::new(record, "doi:10.1234/blank.2024").event(),
+        "paper.pdf",
+        &Proposal {
+            target: "byron.pdf".to_string(),
+            rendered: None,
+        },
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        !lines.iter().any(|line| line.starts_with("title")),
+        "a title of spaces is no title: got {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("in")),
+        "an empty container is no container: got {lines:#?}"
+    );
+}
+
+/// Only the identifier is exempt from wrapping. A word longer than the
+/// room — a long filename, typically — is broken rather than allowed to
+/// run past the width and break the layout.
+#[test]
+fn a_word_longer_than_the_width_is_broken_rather_than_overrunning() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A".repeat(120));
+    record.doi = Some(Doi::parse("10.1234/long.2024").unwrap());
+
+    let lines = describe(
+        &Fixture::new(record, "doi:10.1234/long.2024").event(),
+        "paper.pdf",
+        &Proposal {
+            target: "author2024.pdf".to_string(),
+            rendered: None,
+        },
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    let overrunning: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.chars().count() > DEFAULT_WIDTH)
+        .filter(|line| !line.starts_with("identifier"))
+        .collect();
+    assert!(
+        overrunning.is_empty(),
+        "nothing but an identifier may pass the width: got {overrunning:#?}"
     );
 }

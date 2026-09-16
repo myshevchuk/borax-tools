@@ -1552,11 +1552,14 @@ fn shown(path: &Path, working: &Path) -> String {
 /// file at `path` sits in, so a name the template files elsewhere keeps
 /// the subdirectory that says where it goes.
 fn beside(target: &Path, path: &Path) -> String {
-    path.parent()
-        .and_then(|parent| target.strip_prefix(parent).ok())
-        .unwrap_or(target)
-        .display()
-        .to_string()
+    // A route rather than a prefix stripped: filing from the collection
+    // root moves a file between sibling directories, and
+    // `../Science/paper.pdf` says where it is going where the whole
+    // path only says where it ends up.
+    match path.parent() {
+        Some(parent) => crate::paths::route(target, parent).display().to_string(),
+        None => target.display().to_string(),
+    }
 }
 
 /// Carry `decision` out through `applying`, recording a move in `sink`

@@ -94,6 +94,7 @@ pub fn describe(
         found,
         claims,
         tier,
+        cached,
         ..
     } = resolved
     else {
@@ -110,14 +111,25 @@ pub fn describe(
         // Whole, however long it runs. An identifier folded across two
         // lines cannot be read back or copied out, and it is the one
         // value in the description a person takes away with them.
+        //
+        // The clause saying where it was found is written only where
+        // the run found it. A content-index answer looked nothing up:
+        // the index keeps records rather than the identifiers they
+        // were reached by, so a record reached last time by an arXiv
+        // identifier and carrying a DOI has nothing to say about where
+        // the DOI came from, and saying "from an earlier run" would
+        // say something false about it.
         description.whole(
             "identifier",
-            &format!("{found}, {}", whence(tier.as_deref())),
+            &match whence(tier.as_deref()) {
+                Some(whence) => format!("{found}, {whence}"),
+                None => found.clone(),
+            },
         );
     }
-    description.field("record", &services(source));
+    description.field("record", &record_from(source, *cached));
     description.field("type", type_name(record.entry_type));
-    if let Some(title) = &record.title {
+    if let Some(title) = held(record.title.as_deref()) {
         description.field("title", title);
     }
     if !record.authors.is_empty() {
@@ -160,14 +172,16 @@ impl Description {
     /// second claimed title and the note about a taken name are
     /// written.
     fn field(&mut self, label: &str, value: &str) {
-        self.lines.extend(wrapped(label, value, self.width));
+        self.lines
+            .extend(wrapped(label, &escaped(value), self.width));
     }
 
     /// Write `value` against `label` on one line, whatever the width.
     fn whole(&mut self, label: &str, value: &str) {
         self.lines.push(format!(
-            "{label}{}{value}",
-            " ".repeat(LABEL.saturating_sub(label.chars().count()))
+            "{label}{}{}",
+            " ".repeat(LABEL.saturating_sub(label.chars().count())),
+            escaped(value)
         ));
     }
 }
@@ -199,12 +213,15 @@ fn wrapped(label: &str, value: &str, width: usize) -> Vec<String> {
 }
 
 /// `text` broken into lines of at most `room` characters, at the spaces
-/// between words.
+/// between words, and at `room` itself for a word with no space to
+/// break at.
 ///
-/// A word longer than `room` takes a line of its own and keeps its
-/// length: a description truncates nothing, and a line too long is
-/// easier to read than a word cut in half.
+/// A description truncates nothing, so an overlong word is carried
+/// across lines rather than cut short — but it is carried, not left to
+/// run past the width and break the layout around it. A file name with
+/// no spaces in it is the usual one.
 fn fold(text: &str, room: usize) -> Vec<String> {
+    let room = room.max(1);
     let mut lines: Vec<String> = Vec::new();
     for word in text.split_whitespace() {
         match lines.last_mut() {
@@ -212,7 +229,13 @@ fn fold(text: &str, room: usize) -> Vec<String> {
                 line.push(' ');
                 line.push_str(word);
             }
-            _ => lines.push(word.to_string()),
+            _ => {
+                let mut rest: Vec<char> = word.chars().collect();
+                while rest.len() > room {
+                    lines.push(rest.drain(..room).collect());
+                }
+                lines.push(rest.into_iter().collect());
+            }
         }
     }
     match lines.is_empty() {
@@ -221,16 +244,51 @@ fn fold(text: &str, room: usize) -> Vec<String> {
     }
 }
 
+/// `text` with every control character written out rather than sent to
+/// the terminal.
+///
+/// A title, a container, an author's name: all of it is written by
+/// whoever made the file or the record, and none of it is borax's. An
+/// escape sequence left in one would be acted on by the terminal the
+/// description is drawn on — `ESC [2J` erases the screen — and what it
+/// could redraw is the file and the target above a menu whose first
+/// choice is Rename. The operator would then answer about a file they
+/// were never shown.
+///
+/// Whitespace is left alone: folding has already made the lines, and a
+/// space is not a command.
+fn escaped(text: &str) -> String {
+    text.chars()
+        .map(|character| match character.is_control() {
+            true => format!("\\x{:02x}", character as u32),
+            false => character.to_string(),
+        })
+        .collect()
+}
+
 /// Where the identifier was found, as the clause following it.
 ///
 /// A file that was not opened has no pass to name, and the identifier
 /// it was filed under is what an earlier run found.
-fn whence(tier: Option<&str>) -> &'static str {
+fn whence(tier: Option<&str>) -> Option<&'static str> {
     match tier {
-        Some("embedded-metadata") => "from embedded metadata",
-        Some("text-layer") => "from the text layer",
-        Some(_) => "from the file",
-        None => "from an earlier run",
+        Some("embedded-metadata") => Some("from embedded metadata"),
+        Some("text-layer") => Some("from the text layer"),
+        Some(_) => Some("from the file"),
+        // Nothing was looked up, so nothing is known about where the
+        // record's identifier came from. [`record_from`] says what is
+        // known: the record itself is from an earlier run.
+        None => None,
+    }
+}
+
+/// The services line: who supplied the record, and whether it was
+/// asked this time or kept from before.
+fn record_from(source: &str, cached: bool) -> String {
+    let named = services(source);
+    match cached && !named.is_empty() {
+        true => format!("{named}, from an earlier run"),
+        false => named,
     }
 }
 
@@ -312,19 +370,36 @@ fn issued_on(issued: &DateParts) -> String {
 /// or a book has instead of a journal: a volume with nothing to be a
 /// volume of says nothing.
 fn within(record: &Record) -> Option<String> {
-    let container = record.container_title.as_ref()?;
-    let mut line = container.clone();
-    if let Some(volume) = &record.volume {
-        line.push(' ');
+    let mut line = held(record.container_title.as_deref())
+        .unwrap_or_default()
+        .to_string();
+    if let Some(volume) = held(record.volume.as_deref()) {
+        if !line.is_empty() {
+            line.push(' ');
+        }
         line.push_str(volume);
     }
-    if let Some(issue) = &record.issue {
+    if let Some(issue) = held(record.issue.as_deref()) {
         line.push_str(&format!("({issue})"));
     }
-    if let Some(pages) = &record.pages {
-        line.push_str(&format!(", {pages}"));
+    if let Some(pages) = held(record.pages.as_deref()) {
+        let separator = match line.is_empty() {
+            true => "",
+            false => ", ",
+        };
+        line.push_str(&format!("{separator}{pages}"));
     }
-    Some(line)
+    (!line.is_empty()).then_some(line)
+}
+
+/// `text` when the record really holds it, and `None` when what it
+/// holds is nothing to show.
+///
+/// A source can answer with an empty string or a run of spaces where it
+/// has no value, and a field a record does not hold is left out rather
+/// than printed as a label with nothing after it.
+fn held(text: Option<&str>) -> Option<&str> {
+    text.filter(|text| !text.trim().is_empty())
 }
 
 /// One title the file claims, with where it was read.

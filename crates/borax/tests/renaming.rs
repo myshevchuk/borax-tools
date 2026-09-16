@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use borax::event::{Counts, Event, SkipReason};
+use borax::paths::route;
 use borax::pipeline::FileRecord;
 use borax::renaming::{
     Applying, Filesystem, Namespace, PlannedRename, Planning, RealFilesystem, RenameError,
@@ -1753,5 +1754,37 @@ fn a_known_hash_that_then_fails_to_move_reports_the_filesystem_failure() {
                 message: "permission denied".to_string(),
             },
         }
+    );
+}
+
+// ---------------------------------------------------------------------
+// paths::route: where a target is, from where the file is
+// ---------------------------------------------------------------------
+
+/// Filing from the collection root moves a file between sibling
+/// directories, and a description says where it is going rather than
+/// repeating the whole path.
+#[test]
+fn a_sibling_target_is_a_route_from_the_files_own_directory() {
+    assert_eq!(
+        route(
+            Path::new("/lib/Science/paper.pdf"),
+            Path::new("/lib/Nature")
+        ),
+        PathBuf::from("../Science/paper.pdf"),
+        "a move across is written as one"
+    );
+    assert_eq!(
+        route(
+            Path::new("/lib/Nature/smith2024.pdf"),
+            Path::new("/lib/Nature")
+        ),
+        PathBuf::from("smith2024.pdf"),
+        "a file staying where it is keeps its bare name"
+    );
+    assert_eq!(
+        route(Path::new("/lib/Nature/x.pdf"), Path::new("/lib")),
+        PathBuf::from("Nature/x.pdf"),
+        "a subdirectory below is named from where the file sits"
     );
 }

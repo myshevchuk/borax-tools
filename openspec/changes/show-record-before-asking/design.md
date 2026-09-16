@@ -43,8 +43,8 @@ Non-goals:
 ```text
 ── 3 of 17 ──────────────────────────────────────────────────────────
 file        50-Article Text-95-2-10-20240507.pdf
-identifier  doi:10.15407/bioorganica2023.01.010, from an earlier run
-record      Crossref
+identifier  doi:10.15407/bioorganica2023.01.010
+record      Crossref, from an earlier run
 type        journal article
 title       Applications of chiral sulfinyl auxiliaries in the asymmetric
             synthesis of fluorinated amines and amino acids
@@ -59,8 +59,10 @@ new name    lyutenko2023_ApplicationsChiralSulfinyl.pdf
 
 The record is the one the content index holds for that corpus file,
 whose provenance attributes every field to Crossref while today's event
-reports its source as `cache` (D4). On a live answer `identifier` would
-read `from the text layer` and `file says` would list the titles read.
+reports its source as `cache` (D4). Nothing was looked up, so the
+identifier carries no origin and the record says where it came from
+instead. On a live answer `identifier` would read `…, from the text
+layer` and `file says` would list the titles read.
 
 - A rule with the position opens each description, so a long session
   can be read back as a sequence of files.
