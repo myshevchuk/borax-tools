@@ -15,6 +15,11 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+# How wide a question's description is drawn. Already in the tree under
+# `inquire`, which draws its menus through it, so nothing new is
+# compiled; only the terminal size is wanted, and the event reader and
+# the rest of the terminal machinery are left off.
+crossterm = { version = "0.29", default-features = false }
 # The arrow-key menu a rename run asks its questions through. Only the
 # crossterm backend is wanted: the date, editor and fuzzy prompts bring
 # dependencies of their own and borax asks none of them.

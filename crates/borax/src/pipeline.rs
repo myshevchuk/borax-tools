@@ -416,23 +416,34 @@ fn sources_of(file: &FileRecord) -> String {
 /// answered — reports its source as `cache`.
 pub fn event_for(path: &Path, outcome: &FileOutcome) -> Event {
     match outcome {
-        FileOutcome::Resolved(file) => Event::Resolved {
-            path: path.to_path_buf(),
-            identifier: identifier_of(&file.record),
-            record: Box::new(file.record.clone()),
-            source: sources_of(file),
-            found: file
-                .found
-                .as_ref()
-                .map_or_else(|| identifier_of(&file.record), Identifier::to_string),
-            claims: file.claims.clone(),
-            tier: file.tier.map(|tier| tier.as_str().to_string()),
-            cached: file.cached,
-        },
+        FileOutcome::Resolved(file) => resolved_event(path, file),
         FileOutcome::Skipped(reason) => Event::Skipped {
             path: path.to_path_buf(),
             reason: reason.clone(),
         },
+    }
+}
+
+/// The event that reports `file` as `path`'s resolution.
+///
+/// Public because the description an interactive run shows is a
+/// rendering of this event and of nothing else: the operator at the
+/// terminal and a reader of the stream are told the same things about a
+/// file, and the way to keep that true is for both to be made from the
+/// same value.
+pub fn resolved_event(path: &Path, file: &FileRecord) -> Event {
+    Event::Resolved {
+        path: path.to_path_buf(),
+        identifier: identifier_of(&file.record),
+        record: Box::new(file.record.clone()),
+        source: sources_of(file),
+        found: file
+            .found
+            .as_ref()
+            .map_or_else(|| identifier_of(&file.record), Identifier::to_string),
+        claims: file.claims.clone(),
+        tier: file.tier.map(|tier| tier.as_str().to_string()),
+        cached: file.cached,
     }
 }
 

@@ -1,10 +1,16 @@
 ## ADDED Requirements
 
 ### Requirement: An interactive question shows what the answer rests on
-Before an interactive run puts a question about a resolved file, it SHALL show the operator a description of that file comprising, as far as the run knows them: the file's name and its position among the run's files; the identifier used and where it was found; the services that supplied the record; the record's type, title, authors, date of issue, container title, volume, issue, pages and publisher; every title the file claims for itself, with where each was read; and the proposed name.
+Before an interactive run puts a question about a resolved file, it SHALL show the operator a description of that file comprising, as far as the run knows them: the file's name and its position among the run's files; the identifier used and where it was found; the services that supplied the record; the record's type, title, authors, date of issue, container title, volume, issue and pages; every title the file claims for itself, with where each was read; and the proposed name.
 
 A field the record does not hold SHALL be left out rather than shown
-empty. No title SHALL be truncated. When the proposed name carries a
+empty. No title SHALL be truncated, and no identifier SHALL be broken
+across lines: one that cannot be read back in one piece is no longer
+evidence.
+
+The file SHALL be named as the run names it elsewhere, so that two
+files sharing a name in different directories are told apart by the
+question rather than only by their place in the run. When the proposed name carries a
 collision suffix, the description SHALL say which rendered name was
 taken.
 
@@ -57,3 +63,8 @@ change which questions are put or what their answers do.
 - **WHEN** an interactive run's standard output is redirected to a file
 - **THEN** each question and its description appear at the terminal,
   and the file receives the event stream
+
+#### Scenario: Two files of one name
+- **WHEN** a run spans two directories that each hold `paper.pdf` and
+  both are proposed a move
+- **THEN** the two questions name their files distinguishably

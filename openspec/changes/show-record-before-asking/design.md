@@ -101,6 +101,28 @@ read `from the text layer` and `file says` would list the titles read.
   whose paper this is rather than a bibliography.
 - The rule fills the whole width. D1's example above is typed to fit
   this document and is not a second, narrower rule.
+- The `identifier` line is never folded. A DOI broken across lines
+  cannot be read back or copied, which is most of what an operator
+  does with one; every other value wraps.
+- `file` names the file relative to the directory the run was started
+  in — the working directory, not the directory its configuration was
+  found in — and whole when it lies outside that. A run started inside
+  the directory it is working on therefore shows a bare file name, as
+  the example does, and a run spanning two directories that both hold
+  `paper.pdf` names them `tree-a/paper.pdf` and `tree-b/paper.pdf`,
+  which is symmetrical however the inputs were ordered.
+
+  The two candidates differ on that last point. The run's start
+  directory — the first input's, which is where its configuration is
+  climbed from — would name the first input's files bare and the
+  second's by a path, so which files got a prefix would depend on the
+  order of the arguments. The working directory is also what "where
+  the run was started" plainly means, and the two being different
+  things is exactly what the interactive rename's review caught being
+  conflated once already.
+  The interactive rename settled that when its own review found two
+  identical questions for two different moves, and a description that
+  reverted to a bare name would give it back.
 - A type is named as the project names it elsewhere: `journal article`,
   `preprint`, and so on.
 - `new name` is the proposed target relative to the file's directory.

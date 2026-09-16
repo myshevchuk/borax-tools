@@ -4069,6 +4069,93 @@ fn the_description_does_not_reach_the_json_event_stream() {
     );
 }
 
+/// design D1's `file` line: "names the file as the rest of the run
+/// names it — relative to where the run was started, and whole when it
+/// lies outside". Two directories under one run both holding
+/// `paper.pdf` are two different moves, and two questions naming both
+/// of them `paper.pdf` would take one answer for the other.
+#[test]
+fn two_files_of_one_name_in_two_directories_are_asked_about_distinguishably() {
+    let one = PathBuf::from("/lib/tree-a/paper.pdf");
+    let other = PathBuf::from("/lib/tree-b/paper.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &one,
+            hash_for("tree-a-paper"),
+            pdf_with_embedded_doi("10.1000/tree-a"),
+        )
+        .with_file(
+            &other,
+            hash_for("tree-b-paper"),
+            pdf_with_embedded_doi("10.1000/tree-b"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/tree-a",
+            record_by("Adams", 2024, "10.1000/tree-a"),
+        )
+        .answering(
+            "doi:10.1000/tree-b",
+            record_by("Brown", 2023, "10.1000/tree-b"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip, Answer::Skip]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![one, other], false), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker).started_in(PathBuf::from("/lib")),
+        &mut streams,
+    );
+
+    let asked = asker.questions_asked();
+    assert_eq!(asked.len(), 2, "got {asked:?}");
+    let named: Vec<String> = asked
+        .iter()
+        .map(|question| {
+            question
+                .description
+                .iter()
+                .find(|line| line.starts_with("file "))
+                .unwrap_or_else(|| panic!("no file line in {:?}", question.description))
+                .clone()
+        })
+        .collect();
+
+    assert_eq!(
+        named,
+        vec![
+            "file        tree-a/paper.pdf".to_string(),
+            "file        tree-b/paper.pdf".to_string(),
+        ],
+        "each question must name its own file: got {asked:?}"
+    );
+}
+
 /// design D4: "the batch line changes in one word: a content-index
 /// answer reads `via crossref (cached)` rather than `via cache
 /// (cached)`". A batch run's human output for a cached hit whose record

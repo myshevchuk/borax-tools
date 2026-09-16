@@ -15,8 +15,9 @@
 
 use std::fmt;
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use crate::describe::DEFAULT_WIDTH;
 use crate::event::{Counts, Format};
 
 /// How an invocation ended.
@@ -169,6 +170,20 @@ pub struct Session<'a> {
     /// driver that tries to ask one has nowhere to send it rather than
     /// a default answer to invent.
     pub asker: Option<&'a mut dyn Asker>,
+    /// The columns a question's description is rendered to.
+    ///
+    /// Part of the session rather than read where the description is
+    /// built, because asking a terminal how wide it is touches the
+    /// process: the run stays a pure function of what it was handed,
+    /// and a session built without one is rendered at
+    /// [`DEFAULT_WIDTH`].
+    pub width: usize,
+    /// The directory a question names its file relative to: the one the
+    /// run was started in.
+    ///
+    /// Here for the same reason as `width`: it is read from the
+    /// invocation, and a run given no directory names its files whole.
+    pub working: PathBuf,
 }
 
 impl<'a> Session<'a> {
@@ -177,15 +192,43 @@ impl<'a> Session<'a> {
         Session {
             mode: Mode::Batch,
             asker: None,
+            width: DEFAULT_WIDTH,
+            working: PathBuf::new(),
         }
     }
 
-    /// A run that puts its decisions to `asker`.
+    /// A run that puts its decisions to `asker`, rendered to the
+    /// default width.
     pub fn interactive(asker: &'a mut dyn Asker) -> Session<'a> {
         Session {
             mode: Mode::Interactive,
             asker: Some(asker),
+            width: DEFAULT_WIDTH,
+            working: PathBuf::new(),
         }
+    }
+
+    /// The same session, rendering its questions to `width` columns.
+    pub fn at_width(self, width: usize) -> Session<'a> {
+        Session { width, ..self }
+    }
+
+    /// The same session, naming the files it asks about relative to
+    /// `working`.
+    pub fn started_in(self, working: PathBuf) -> Session<'a> {
+        Session { working, ..self }
+    }
+}
+
+/// The terminal's width in columns, or [`DEFAULT_WIDTH`] where there is
+/// no terminal to ask or it does not say.
+///
+/// A width of nothing is treated as no answer: a description wrapped to
+/// zero columns is one word a line.
+pub fn terminal_width() -> usize {
+    match crossterm::terminal::size() {
+        Ok((columns, _)) if columns > 0 => usize::from(columns),
+        _ => DEFAULT_WIDTH,
     }
 }
 
@@ -220,19 +263,7 @@ impl fmt::Display for Choice {
 /// translating a [`Question`] into a menu and the menu's result back
 /// into an [`Answer`]: what the test suite cannot reach is therefore
 /// also what holds no decision.
-pub struct TerminalAsker {
-    /// The directory a question's file is named relative to, where it
-    /// lies under one.
-    working: PathBuf,
-}
-
-impl TerminalAsker {
-    /// An asker naming files relative to `working`, which is the
-    /// directory the run was started from.
-    pub fn new(working: PathBuf) -> TerminalAsker {
-        TerminalAsker { working }
-    }
-}
+pub struct TerminalAsker;
 
 impl Asker for TerminalAsker {
     /// Draw `question` as a menu of its choices and return the one
@@ -245,19 +276,13 @@ impl Asker for TerminalAsker {
     /// interrupted question leaves the file exactly as an unanswered
     /// one does.
     fn choose(&mut self, question: &Question) -> Answer {
-        // Above the menu rather than in its message, so the file and
-        // the name it would take keep a line each. A terminal that will
-        // not take them is a terminal the question cannot be put on, so
-        // it ends the session rather than ending the process: `eprintln!`
-        // would panic on the write that failed.
-        if writeln!(
-            io::stderr(),
-            "{}\n  → {}",
-            shown(&question.path, &self.working),
-            target_shown(&question.target, &question.path)
-        )
-        .is_err()
-        {
+        // Above the menu rather than in its message, because it
+        // is a dozen lines and a prompt is one line. A terminal
+        // that will not take them is a terminal the question
+        // cannot be put on, so it ends the session rather than
+        // ending the process: `eprintln!` would panic on the write
+        // that failed.
+        if writeln!(io::stderr(), "{}", question.description.join("\n")).is_err() {
             return Answer::Quit;
         }
 
@@ -273,34 +298,5 @@ impl Asker for TerminalAsker {
             Ok(choice) => choice.0,
             Err(_) => Answer::Quit,
         }
-    }
-}
-
-/// `path` as a question names it, from a run started in `working`:
-/// relative to that directory where it lies under it, and whole where
-/// it does not.
-///
-/// A file name alone would be shorter and is what a run over one
-/// directory would show either way, but it stops identifying a file as
-/// soon as a run spans two: `tree-a/paper.pdf` and `tree-b/paper.pdf`
-/// are different moves, and a question that named both `paper.pdf`
-/// would take one answer for the other.
-fn shown(path: &Path, working: &Path) -> String {
-    path.strip_prefix(working)
-        .unwrap_or(path)
-        .display()
-        .to_string()
-}
-
-/// `target` as a question names it, beside the file at `path`: the name
-/// it would take, with the subdirectory a template sends it to where
-/// there is one.
-fn target_shown(target: &Path, path: &Path) -> String {
-    match path
-        .parent()
-        .and_then(|parent| target.strip_prefix(parent).ok())
-    {
-        Some(relative) => relative.display().to_string(),
-        None => target.display().to_string(),
     }
 }

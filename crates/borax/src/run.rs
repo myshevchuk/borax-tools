@@ -40,17 +40,19 @@ use crate::config::{
     Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
     layer_from_toml, nearest_override, resolve, table_path,
 };
+use crate::describe::{Position, Proposal, describe};
 use crate::event::{
     Counts, Diagnostic, Event, Format, Level, SkipReason, TableUsed, human_summary, render,
 };
 use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
     FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
-    resolve_file_checking_ledger,
+    resolve_file_checking_ledger, resolved_event,
 };
 use crate::renaming::{Applying, Filesystem, Namespace, PlannedRename, Planning, RealFilesystem};
 use crate::session::{
     Answer, Mode, Outcome, Question, Session, TerminalAsker, outcome_for, stdin_is_terminal,
+    terminal_width,
 };
 
 /// The extension a file needs to be picked up from a directory.
@@ -1286,7 +1288,8 @@ fn rename_events<C: Cache>(
                     continue;
                 };
 
-                let decision = planning.propose(path, &file, &mut lookups);
+                let proposed = planning.proposed(path, &file, &mut lookups);
+                let decision = proposed.decision;
                 // A file already named is passed over whole, its own
                 // outcome line included, so the hold outlasts the
                 // event that reports it.
@@ -1294,7 +1297,12 @@ fn rename_events<C: Cache>(
                 if !named {
                     sink.release();
                 }
-                let event = match decided(session, &decision) {
+                let asking = Asking {
+                    file: &file,
+                    rendered: proposed.rendered.as_deref(),
+                    position: among(groups, (index, position)),
+                };
+                let event = match decided(session, &decision, &asking) {
                     Decided::CarryOut => {
                         planning.accept(&decision);
                         // The hash goes to the move rather than to a log
@@ -1442,11 +1450,17 @@ enum Decided {
 /// A run whose mode says to ask and that has nowhere to ask stops
 /// rather than carrying on, since a move nobody was asked about is the
 /// one thing it may not make.
-fn decided(session: &mut Session<'_>, decision: &PlannedRename) -> Decided {
+///
+/// `asking` is what a question is shown with, and is read only when
+/// there is a question to put: a batch run renders no description, and
+/// pays for none.
+fn decided(session: &mut Session<'_>, decision: &PlannedRename, asking: &Asking<'_>) -> Decided {
     let (Mode::Interactive, PlannedRename::Rename { path, target }) = (session.mode, decision)
     else {
         return Decided::CarryOut;
     };
+    let width = session.width;
+    let name = shown(path, &session.working);
     let Some(asker) = session.asker.as_deref_mut() else {
         return Decided::Stop;
     };
@@ -1461,7 +1475,16 @@ fn decided(session: &mut Session<'_>, decision: &PlannedRename) -> Decided {
         // What the answer rests on, rendered by the run: the driver
         // holds the file's resolution and the move being proposed, and
         // the asker only draws what it is given.
-        description: Vec::new(),
+        description: describe(
+            &resolved_event(path, asking.file),
+            &name,
+            &Proposal {
+                target: beside(target, path),
+                rendered: asking.rendered.map(|rendered| beside(rendered, path)),
+            },
+            asking.position,
+            width,
+        ),
     });
 
     match answer {
@@ -1469,6 +1492,71 @@ fn decided(session: &mut Session<'_>, decision: &PlannedRename) -> Decided {
         Answer::Skip => Decided::Declined,
         Answer::Quit => Decided::Stop,
     }
+}
+
+/// What the description of a question is made from, beyond the decision
+/// itself: the file's resolution, the name its record rendered where a
+/// collision moved the target aside, and where it sits in the run.
+struct Asking<'a> {
+    file: &'a FileRecord,
+    rendered: Option<&'a Path>,
+    position: Position,
+}
+
+/// Where the file at `at` — the group, and the file within it — sits
+/// among all of `groups`' files, counted from one.
+///
+/// Counted across the whole run rather than within the group: the
+/// operator answering questions is working through one list of files,
+/// and the directories it was assembled from are not what they are
+/// counting down.
+fn among(groups: &[Group], at: (usize, usize)) -> Position {
+    let (group, position) = at;
+    Position {
+        of_this: groups
+            .iter()
+            .take(group)
+            .map(|group| group.paths.len())
+            .sum::<usize>()
+            + position
+            + 1,
+        total: groups.iter().map(|group| group.paths.len()).sum(),
+    }
+}
+
+/// `path` as a question names it, from a run started in `working`:
+/// relative to that directory where it lies under it, and whole where
+/// it does not.
+///
+/// A file name alone would be shorter and is what a run over one
+/// directory shows either way, but it stops identifying a file as soon
+/// as a run spans two: `tree-a/paper.pdf` and `tree-b/paper.pdf` are
+/// different moves, and a question that named both `paper.pdf` would
+/// take one answer for the other.
+fn shown(path: &Path, working: &Path) -> String {
+    // Normalised on both sides before the comparison: a run given `.`
+    // hands its files paths like `./a.pdf`, which do not start with an
+    // absolute working directory as text however plainly they lie
+    // under it, and the question would name a file `./a.pdf`.
+    match (crate::paths::lexical(path), crate::paths::lexical(working)) {
+        (Some(absolute), Some(working)) => absolute
+            .strip_prefix(&working)
+            .unwrap_or(&absolute)
+            .display()
+            .to_string(),
+        _ => path.display().to_string(),
+    }
+}
+
+/// `target` as a description names it: relative to the directory the
+/// file at `path` sits in, so a name the template files elsewhere keeps
+/// the subdirectory that says where it goes.
+fn beside(target: &Path, path: &Path) -> String {
+    path.parent()
+        .and_then(|parent| target.strip_prefix(parent).ok())
+        .unwrap_or(target)
+        .display()
+        .to_string()
 }
 
 /// Carry `decision` out through `applying`, recording a move in `sink`
@@ -2259,11 +2347,19 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
         .as_deref()
         .map(FileLedger::at_collection_root);
 
-    // Questions name a file relative to where the run was started, so
-    // two trees holding the same file name ask two distinguishable
-    // questions.
-    let mut asker = TerminalAsker::new(std::env::current_dir().unwrap_or_default());
-    let mut session = session_for(&command, cli.format(), effective.config(), &mut asker);
+    let mut asker = TerminalAsker;
+    let mut session = session_for(
+        &command,
+        cli.format(),
+        effective.config(),
+        // Where the run was started, which is not where its
+        // configuration was found: `working` above climbs from the
+        // first path the run was given, and a question naming a file
+        // relative to one of its own inputs would name the files of
+        // one input differently from the files of another.
+        &std::env::current_dir().unwrap_or_default(),
+        &mut asker,
+    );
 
     dispatch(
         &Cli {
@@ -2295,6 +2391,11 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
 /// interactive one puts its questions through [`TerminalAsker`], which
 /// is the only place borax reads a keystroke.
 ///
+/// `working` is the run's own directory — the one its configuration
+/// climbs from — and is what a question names its file relative to, so
+/// a run over one directory asks about bare file names while one
+/// spanning two tells two files of the same name apart.
+///
 /// `asker` is the caller's because a session borrows it: the run needs
 /// it for as long as it may ask, and only the caller has a frame it can
 /// live in.
@@ -2302,6 +2403,7 @@ fn session_for<'a>(
     command: &Command,
     format: Format,
     config: &Config,
+    working: &Path,
     asker: &'a mut TerminalAsker,
 ) -> Session<'a> {
     let interactive = matches!(command, Command::Rename { .. })
@@ -2313,7 +2415,11 @@ fn session_for<'a>(
         ) == Mode::Interactive;
 
     match interactive {
-        true => Session::interactive(asker),
+        // The width is read here rather than deeper in, because this is
+        // the one frame that is allowed to ask the terminal anything.
+        true => Session::interactive(asker)
+            .at_width(terminal_width())
+            .started_in(working.to_path_buf()),
         false => Session::batch(),
     }
 }

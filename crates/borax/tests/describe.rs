@@ -123,6 +123,7 @@ fn a_full_journal_article_from_a_text_layer_doi() {
 
     let lines = describe(
         &fixture.event(),
+        "smith2024_raw.pdf",
         &Proposal {
             target: "smith2024_TestingStudy.pdf".to_string(),
             rendered: None,
@@ -201,6 +202,7 @@ fn a_content_index_answer_is_d1s_worked_example() {
 
     let lines = describe(
         &fixture.event(),
+        "50-Article Text-95-2-10-20240507.pdf",
         &Proposal {
             target: "lyutenko2023_ApplicationsChiralSulfinyl.pdf".to_string(),
             rendered: None,
@@ -262,6 +264,7 @@ fn a_preprint_with_no_container() {
 
     let lines = describe(
         &fixture.event(),
+        "draft.pdf",
         &Proposal {
             target: "preprint2024_PreliminaryReport.pdf".to_string(),
             rendered: None,
@@ -326,6 +329,7 @@ fn five_authors_show_three_names_and_a_count() {
 
     let lines = describe(
         &fixture.event(),
+        "many_authors.pdf",
         &Proposal {
             target: "adams2024_CollaborativeFindings.pdf".to_string(),
             rendered: None,
@@ -391,6 +395,7 @@ fn a_suffixed_proposal_notes_the_rendered_name_that_was_taken() {
 
     let lines = describe(
         &fixture.event(),
+        "smith2024_raw.pdf",
         &Proposal {
             target: "smith2024a.pdf".to_string(),
             rendered: Some("smith2024.pdf".to_string()),
@@ -449,6 +454,7 @@ fn a_title_wraps_at_width_60_with_a_hanging_indent_and_nothing_truncated() {
     let width = 60;
     let lines = describe(
         &fixture.event(),
+        "widetitle.pdf",
         &Proposal {
             target: "widetitle_2024.pdf".to_string(),
             rendered: None,
@@ -525,6 +531,7 @@ fn missing_fields_are_left_out_rather_than_shown_empty() {
 
     let lines = describe(
         &fixture.event(),
+        "sparse.pdf",
         &Proposal {
             target: "sparse_SparseRecord.pdf".to_string(),
             rendered: None,
@@ -609,6 +616,7 @@ fn a_producers_placeholder_claim_is_shown_not_filtered() {
 
     let lines = describe(
         &fixture.event(),
+        "placeholder.pdf",
         &Proposal {
             target: "author2024_GenuineTitle.pdf".to_string(),
             rendered: None,

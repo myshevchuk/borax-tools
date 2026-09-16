@@ -19,6 +19,7 @@ borax-core = { path = "../borax-core" }
 borax-sources = { path = "../borax-sources" }
 borax-pdf = { path = "../borax-pdf" }
 clap.workspace = true
+crossterm.workspace = true
 inquire.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -146,6 +146,7 @@ dependencies = [
  "borax-pdf",
  "borax-sources",
  "clap",
+ "crossterm",
  "inquire",
  "serde",
  "serde_json",

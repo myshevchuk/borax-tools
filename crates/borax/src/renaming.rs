@@ -82,6 +82,27 @@ pub enum PlannedRename {
     Unnameable { path: PathBuf },
 }
 
+/// A decision the planner has made but not claimed, and the name the
+/// template rendered for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proposed {
+    pub decision: PlannedRename,
+    /// The name the record rendered, when a collision suffix means the
+    /// file is not taking it, and `None` when the decision's target is
+    /// what was rendered or when nothing was rendered at all.
+    pub rendered: Option<PathBuf>,
+}
+
+impl Proposed {
+    /// `decision`, whose target is the rendered name itself.
+    fn of(decision: PlannedRename) -> Proposed {
+        Proposed {
+            decision,
+            rendered: None,
+        }
+    }
+}
+
 impl PlannedRename {
     /// The file this decision is about.
     pub fn path(&self) -> &Path {
@@ -321,10 +342,27 @@ impl<'a> Planning<'a> {
         file: &FileRecord,
         lookups: &mut Lookups<'_>,
     ) -> PlannedRename {
+        self.proposed(path, file, lookups).decision
+    }
+
+    /// [`Planning::propose`]'s decision, with the name the template
+    /// rendered before a collision moved it aside.
+    ///
+    /// The planner knows both and the decision carries only the one the
+    /// file would take, which is all an event or a move needs. A run
+    /// that puts the move to someone needs the other as well: a target
+    /// wearing a collision suffix is explained by the name that was
+    /// already there and by nothing else.
+    pub fn proposed(
+        &mut self,
+        path: &Path,
+        file: &FileRecord,
+        lookups: &mut Lookups<'_>,
+    ) -> Proposed {
         let path = path.to_path_buf();
         let base = self.namespace.base.clone();
         let Some(mut input) = plan_input(&path, &base, file, self.templates, lookups) else {
-            return PlannedRename::Unnameable { path };
+            return Proposed::of(PlannedRename::Unnameable { path });
         };
         // A rendered name that files the document says where in the
         // collection it belongs and is taken from the base; a plain
@@ -335,15 +373,21 @@ impl<'a> Planning<'a> {
         self.reach(&input.target);
 
         match self.namespace.planner.propose(&input, self.policy).action {
-            PlannedAction::Rename { to } => PlannedRename::Rename {
-                target: base.join(to),
-                path,
+            PlannedAction::Rename { to } => Proposed {
+                // Only a target the planner moved aside has a rendered
+                // name worth naming: where the two agree, the file is
+                // taking the name its record asked for.
+                rendered: (to != input.target).then(|| base.join(&input.target)),
+                decision: PlannedRename::Rename {
+                    target: base.join(to),
+                    path,
+                },
             },
-            PlannedAction::AlreadyNamed => PlannedRename::AlreadyNamed { path },
-            PlannedAction::Skip { .. } => PlannedRename::TargetTaken {
+            PlannedAction::AlreadyNamed => Proposed::of(PlannedRename::AlreadyNamed { path }),
+            PlannedAction::Skip { .. } => Proposed::of(PlannedRename::TargetTaken {
                 target: base.join(&input.target),
                 path,
-            },
+            }),
         }
     }
 
