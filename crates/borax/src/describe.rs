@@ -268,7 +268,11 @@ fn fold(text: &str, room: usize) -> Vec<String> {
 ///
 /// Whitespace is left alone: folding has already made the lines, and a
 /// space is not a command.
-fn escaped(text: &str) -> String {
+///
+/// Reachable from the run for the same reason: text the operator
+/// pasted is quoted back to them when it names no identifier, and a
+/// paste carries whatever was copied.
+pub(crate) fn escaped(text: &str) -> String {
     text.chars()
         .map(|character| match character.is_control() {
             true => format!("\\x{:02x}", character as u32),
@@ -312,15 +316,7 @@ fn failure(description: &mut Description, reason: &SkipReason) {
         // resolution.
         SkipReason::Unresolvable { found, attempts } => {
             description.whole("identifier", found);
-            match attempts.split_first() {
-                None => description.field("no record", "no source was asked"),
-                Some((first, rest)) => {
-                    description.field("no record", &answered(first));
-                    for attempt in rest {
-                        description.field("", &answered(attempt));
-                    }
-                }
-            }
+            no_record(description, attempts);
         }
         // The same slot as an identifier that was found: its question
         // is what was looked up, and the answer here is nothing.
@@ -357,9 +353,86 @@ fn failure(description: &mut Description, reason: &SkipReason) {
     }
 }
 
+/// The `no record` block: what each service was asked and what it
+/// said, one to a line, in the order they were asked.
+///
+/// It replaces the `record` line rather than joining it — they answer
+/// the same question, and a file has either a record or the reasons it
+/// has none.
+fn no_record(description: &mut Description, attempts: &[Attempt]) {
+    match attempts.split_first() {
+        None => description.field("no record", "no source was asked"),
+        Some((first, rest)) => {
+            description.field("no record", &answered(first));
+            for attempt in rest {
+                description.field("", &answered(attempt));
+            }
+        }
+    }
+}
+
 /// One service's answer, as the `no record` block lists it.
 fn answered(attempt: &Attempt) -> String {
     format!("{}: {}", attempt.source, attempt.error)
+}
+
+/// What became of a record an identifier the operator gave led to.
+///
+/// Every one of these is about a candidate rather than about the file,
+/// and a candidate the file's decision did not settle on reaches
+/// nobody through the event stream (design D5). The question put again
+/// is where the operator is told, and [`reported`] is what it says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Candidate<'a> {
+    /// No service held the identifier: what each of them answered.
+    Unheld { attempts: &'a [Attempt] },
+    /// The name its record renders is taken by another file.
+    NameTaken { target: &'a str },
+    /// Its record renders no usable name.
+    Unnameable,
+    /// Its record names the file exactly as it is called now.
+    AlreadyNamed,
+}
+
+/// The lines reporting what `identifier` came to, shown above the
+/// description of the question that is put again.
+///
+/// `lead` labels the identifier with how the operator reached it —
+/// `supplied` for one they typed, `tried again` for a lookup they had
+/// repeated — since the block otherwise says nothing about which of
+/// the two just happened.
+///
+/// A blank line closes the block, so the rule the description opens
+/// with reads as the beginning of the file's own account rather than
+/// as part of this one.
+pub fn reported(
+    lead: &str,
+    identifier: &str,
+    outcome: &Candidate<'_>,
+    width: usize,
+) -> Vec<String> {
+    let mut description = Description {
+        lines: Vec::new(),
+        width,
+    };
+    // Whole, for the reason a description writes an identifier whole:
+    // one folded across two lines cannot be read back.
+    description.whole(lead, identifier);
+    match outcome {
+        Candidate::Unheld { attempts } => no_record(&mut description, attempts),
+        Candidate::NameTaken { target } => description.field("name taken", target),
+        Candidate::Unnameable => {
+            description.field("no name", "the record is too sparse to name a file");
+        }
+        Candidate::AlreadyNamed => {
+            description.field(
+                "same name",
+                "the file already carries the name this record renders",
+            );
+        }
+    }
+    description.lines.push(String::new());
+    description.lines
 }
 
 /// How close two values were, as the `conflict` line puts it.
