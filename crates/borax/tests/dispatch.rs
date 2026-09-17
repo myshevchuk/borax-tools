@@ -4255,12 +4255,19 @@ fn two_files_of_one_name_in_two_directories_are_asked_about_distinguishably() {
         })
         .collect();
 
+    // Built with the platform's own separator rather than written with
+    // a slash: what this test is about is that the two files are told
+    // apart by the directory above them, and Windows spells that
+    // `tree-a\paper.pdf`.
+    let named_as = |tree: &str| {
+        format!(
+            "file        {}",
+            Path::new(tree).join("paper.pdf").display()
+        )
+    };
     assert_eq!(
         named,
-        vec![
-            "file        tree-a/paper.pdf".to_string(),
-            "file        tree-b/paper.pdf".to_string(),
-        ],
+        vec![named_as("tree-a"), named_as("tree-b"),],
         "each question must name its own file: got {asked:?}"
     );
 }
