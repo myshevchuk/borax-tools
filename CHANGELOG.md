@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-17
+
+### Changed
+
+- Automated testing now runs on Linux only. macOS and Windows remain
+  supported, but are no longer verified on each change. A
+  platform-specific break could therefore reach users on those platforms
+  without being caught by CI.
+
+- The test for displaying a file path now uses each platform's path
+  separator. The Windows failure in 0.5.0's CI was a test defect, not a
+  bug in borax. This maintenance release does not change the behavior of
+  any command from 0.5.0 on any platform.
+
 ## [0.5.0] - 2026-09-17
 
 ### Changed
@@ -535,7 +549,8 @@ that development.
   which drops the archive that is part of such an identifier, so every
   pre-2007 preprint failed with a malformed-response error.
 
-[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/myshevchuk/borax-tools/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/myshevchuk/borax-tools/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/myshevchuk/borax-tools/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/myshevchuk/borax-tools/compare/v0.2.0...v0.3.0
