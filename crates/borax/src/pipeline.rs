@@ -318,8 +318,7 @@ pub fn resolve_file<C: Cache>(
 ///
 /// [`resolve_file`]'s working, kept rather than dropped. A batch run
 /// wants the verdict and nothing else; a run with an operator at it
-/// needs three more things, each for one decision it has to make
-/// (design D1):
+/// needs three more things, each for one decision it has to make:
 ///
 /// - the hash, because a file nobody knows the hash of cannot be
 ///   renamed and so is not asked about;
@@ -716,7 +715,7 @@ pub fn unresolvable(unresolved: &Unresolved, found: &Identifier) -> SkipReason {
 /// Separate from [`unresolvable`] because a caller that is showing a
 /// failed lookup rather than reporting it has no skip to build — an
 /// identifier the operator supplied and nobody held is a candidate's
-/// outcome and not the file's verdict (design D5).
+/// outcome and not the file's verdict.
 pub fn attempts_of(unresolved: &Unresolved) -> Vec<Attempt> {
     unresolved
         .attempts

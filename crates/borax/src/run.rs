@@ -1489,8 +1489,7 @@ fn unreached(groups: &[Group], at: (usize, usize)) -> usize {
 ///
 /// The verdict and the fate travel together because an interactive run
 /// reports neither until both are known: a file the operator
-/// re-identified is reported once, for the record they settled on
-/// (design D5).
+/// re-identified is reported once, for the record they settled on.
 enum Settled {
     /// Claim the name `decision` names and carry it out — which for a
     /// decision that moves nothing is to report it — from the record
@@ -1505,7 +1504,7 @@ enum Settled {
         /// resolved; one the operator reached — by supplying an
         /// identifier, by accepting a conflict, by asking the services
         /// again — is written when they accept it, and their
-        /// acceptance is the rename (design D7).
+        /// acceptance is the rename.
         remember: bool,
     },
     /// Leave the file as it is and report `reason`, with the record
@@ -1560,7 +1559,7 @@ struct Offer {
     /// The disagreement between the record's title and the file's own,
     /// where there is one. Shown, and never by itself a refusal: an
     /// identifier a person stands behind is a stronger statement than
-    /// the heuristic that would refuse it (design D3).
+    /// the heuristic that would refuse it.
     conflict: Option<SkipReason>,
     /// Whether the content index already holds this record for the
     /// file, which decides whether accepting it writes one
@@ -1585,7 +1584,7 @@ enum Situation {
 ///
 /// The one place an interactive run differs from a batch one. Every
 /// file whose situation an answer could change is put to the operator
-/// (design D1): a move to make, a conflict to accept or refuse, a file
+/// a move to make, a conflict to accept or refuse, a file
 /// nothing identified, one no service holds a record for, one that
 /// could not be read, and — where `rename.skip-named` is off — one
 /// already carrying its record's name. Everything else is settled as
@@ -1597,8 +1596,7 @@ enum Situation {
 /// candidate that leads nowhere leaves the file exactly as it was,
 /// with the record and the choices it already had, and what became of
 /// it is reported in the description of the question put again — the
-/// only channel left, since a candidate reaches no event stream
-/// (design D5).
+/// only channel left, since a candidate reaches no event stream.
 ///
 /// A run whose mode says to ask and that has nowhere to ask stops
 /// rather than carrying on, since a move nobody was asked about is the
@@ -1842,8 +1840,7 @@ fn asked<C: Cache>(
 }
 
 /// The menu `offer` and `decision` call for, or the outcome to settle
-/// for where no answer would change anything (design D1's first
-/// table).
+/// for where no answer would change anything.
 ///
 /// The first choice is the default an unadorned Enter takes, so it is
 /// never the answer that moves a file against a doubt: rename leads
@@ -1930,7 +1927,7 @@ fn situation(
     }
 }
 
-/// What a skip reports (design D5's table).
+/// What a skip reports.
 ///
 /// The reason borax had, where it had one: an operator's skip leaves
 /// the file exactly as a batch run would have left it, and for exactly
@@ -1955,7 +1952,7 @@ fn skipped(own: Option<Offer>, held: &Event) -> Settled {
 
 /// `offer`'s record as accepting it makes it: the conflict it was
 /// accepted over recorded on the record, in the vocabulary the skip
-/// would have used (design D6), and nothing recorded where the record
+/// would have used, and nothing recorded where the record
 /// cleared the check on its own.
 fn accepted(offer: &Offer) -> FileRecord {
     FileRecord {
@@ -1977,7 +1974,7 @@ fn accepted(offer: &Offer) -> FileRecord {
     }
 }
 
-/// The event a question's description renders (design D8).
+/// The event a question's description renders.
 ///
 /// The verdict the run is holding, which is the whole of what it knows
 /// about the file — or, while a candidate is on offer, the `resolved`
@@ -2009,8 +2006,7 @@ fn proposed_move(proposal: Option<&Proposed>) -> Option<Proposal> {
 }
 
 /// What became of a candidate whose record leads somewhere other than
-/// a move, as the question put again reports it (design D1's second
-/// table).
+/// a move, as the question put again reports it.
 fn elsewhere(offer: Option<&Offer>, decision: Option<&PlannedRename>, width: usize) -> Vec<String> {
     let identifier = offer
         .and_then(|offer| offer.file.found.as_ref())
@@ -2041,7 +2037,7 @@ fn elsewhere(offer: Option<&Offer>, decision: Option<&PlannedRename>, width: usi
 /// who asked to supply an identifier and mistyped it has not changed
 /// their mind. The refusal quotes what was typed and names the forms
 /// that are taken, and nothing reaches any service until something
-/// parses (design D2).
+/// parses.
 fn supplied_identifier(asker: &mut dyn Asker) -> Option<Identifier> {
     let mut refused: Option<String> = None;
     loop {

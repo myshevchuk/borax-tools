@@ -380,7 +380,7 @@ fn answered(attempt: &Attempt) -> String {
 ///
 /// Every one of these is about a candidate rather than about the file,
 /// and a candidate the file's decision did not settle on reaches
-/// nobody through the event stream (design D5). The question put again
+/// nobody through the event stream. The question put again
 /// is where the operator is told, and [`reported`] is what it says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Candidate<'a> {
