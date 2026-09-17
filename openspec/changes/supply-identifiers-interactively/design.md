@@ -318,7 +318,7 @@ answer the same question, and a file has either a record or the
 reasons it has none. One service to a line, in the order they were
 asked, `name: what it said`.
 
-**`Unresolvable` gains `found`.** The `identifier` line above is the
+**`Unresolvable` gains `found` and `tier`.** The `identifier` line above is the
 single most useful thing to show someone being asked to supply
 another one — it is what they have to improve on — and a `skipped`
 event carries a path and a reason and nothing else, so today nothing

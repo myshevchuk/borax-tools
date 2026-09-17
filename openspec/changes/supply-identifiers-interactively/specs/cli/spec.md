@@ -60,8 +60,9 @@ an extraction pass.
 
 So that the first of these is possible without the description knowing
 more than the stream does, the `unresolvable` skip reason SHALL carry
-the identifier that was looked up alongside the services' answers. That
-is an addition, so the schema version does not change.
+the identifier that was looked up, and the extraction pass that read
+it, alongside the services' answers. Those are additions, so the
+schema version does not change.
 
 #### Scenario: Asked to supply an identifier for a file nobody holds
 - **WHEN** an interactive run reaches a file whose arXiv identifier no

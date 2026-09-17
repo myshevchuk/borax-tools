@@ -1145,7 +1145,8 @@ how to install it, and a handful of examples.
   ~null~ when you overrode nothing.
 
   An ~unresolvable~ skip reason contains ~found~, the identifier that
-  was looked up, as well as ~attempts~, the answers from the services.
+  was looked up, ~tier~, the extraction pass that read it, and
+  ~attempts~, the answers from the services.
   The corresponding human-readable line names the identifier too, for
   example ~no source had a record for doi:... (crossref: not found;
   openalex: not found)~.

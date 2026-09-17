@@ -1318,6 +1318,7 @@ fn rename_events<C: Cache>(
                         &mut planning,
                         &mut lookups,
                         adapters,
+                        checked,
                     ),
                 };
 
@@ -1327,6 +1328,13 @@ fn rename_events<C: Cache>(
                     // the run was ended at was given no fate, so it has
                     // no verdict to report either.
                     Settled::Stop => {
+                        // The hold is still open, and nothing drains it
+                        // after this: without ending it here the run's
+                        // own summary — and any bibliography line after
+                        // it — would be buffered and never shown. The
+                        // hold is empty, since a file's verdict is only
+                        // emitted once it has a fate.
+                        sink.release();
                         break 'files Some(Stopped {
                             at: (index, position),
                             diagnostic: None,
@@ -1608,6 +1616,7 @@ fn asked<C: Cache>(
     planning: &mut Planning<'_>,
     lookups: &mut Lookups<'_>,
     adapters: &Adapters<'_, C>,
+    collection: Option<&Collection<'_>>,
 ) -> Settled {
     let Standing {
         verdict,
@@ -1729,11 +1738,36 @@ fn asked<C: Cache>(
             // of which is offered without a decision to carry out.
             Answer::Rename | Answer::Override | Answer::Keep => {
                 return match (offer, proposal) {
-                    (Some(on), Some(proposed)) => Settled::CarryOut {
-                        file: accepted(&on),
-                        decision: proposed.decision,
-                        remember: !on.kept,
-                    },
+                    (Some(on), Some(proposed)) => {
+                        // A record the run resolved on its own was put
+                        // to the ledger as it resolved. One the
+                        // operator reached — supplied, retried, or
+                        // accepted over a conflict — never was, and
+                        // admitting a second copy of a work the
+                        // collection already holds is the one thing the
+                        // ledger exists to prevent. Its verdict is
+                        // about the collection, not about where the
+                        // identifier came from.
+                        let second_copy = (!on.kept)
+                            .then(|| {
+                                collection.and_then(|collection| {
+                                    crate::pipeline::work_duplicate(
+                                        about.path,
+                                        &on.file.record,
+                                        collection,
+                                    )
+                                })
+                            })
+                            .flatten();
+                        match second_copy {
+                            Some(reason) => Settled::Skip { file: None, reason },
+                            None => Settled::CarryOut {
+                                file: accepted(&on),
+                                decision: proposed.decision,
+                                remember: !on.kept,
+                            },
+                        }
+                    }
                     _ => skipped(own, &held),
                 };
             }
@@ -1826,7 +1860,7 @@ fn asked<C: Cache>(
                         // verdict the run now holds for it.
                         held = Event::Skipped {
                             path: about.path.to_path_buf(),
-                            reason: crate::pipeline::unresolvable(&unheld, &identifier),
+                            reason: crate::pipeline::unresolvable(&unheld, &identifier, tier),
                         };
                         unresolved = Some(unheld);
                         own = None;
@@ -1908,18 +1942,23 @@ fn situation(
         ]),
         // Nothing to override where there is no move to make.
         (Some(_), _) => Situation::Ask(vec![Answer::Skip, Answer::Supply, Answer::Quit]),
-        (None, Some(PlannedRename::Rename { .. })) => Situation::Ask(match supply {
-            true => vec![Answer::Rename, Answer::Supply, Answer::Skip, Answer::Quit],
-            false => vec![Answer::Rename, Answer::Skip, Answer::Quit],
-        }),
+        // A file whose content hash is unknown is not asked about at
+        // all: an applying run refuses to move what it cannot record,
+        // so every answer but Skip would end in `Unrecordable`, and a
+        // question whose default answer cannot succeed is worse than
+        // the report a batch run gives.
+        (None, Some(PlannedRename::Rename { .. })) if !supply => Situation::Report,
+        (None, Some(PlannedRename::Rename { .. })) => Situation::Ask(vec![
+            Answer::Rename,
+            Answer::Supply,
+            Answer::Skip,
+            Answer::Quit,
+        ]),
         // A file already named is asked about only where the run is
         // not passing such files over: keeping the name is the default,
         // and a name that came from the wrong record can be put right.
-        (None, Some(PlannedRename::AlreadyNamed { .. })) if !passing_over => {
-            Situation::Ask(match supply {
-                true => vec![Answer::Keep, Answer::Supply, Answer::Quit],
-                false => vec![Answer::Keep, Answer::Quit],
-            })
+        (None, Some(PlannedRename::AlreadyNamed { .. })) if !passing_over && supply => {
+            Situation::Ask(vec![Answer::Keep, Answer::Supply, Answer::Quit])
         }
         // A file passed over, a target taken, a record too sparse to
         // name a file: no answer would change any of them.

@@ -178,12 +178,15 @@ pub enum SkipReason {
     /// records what each source said, in the order they were asked.
     ///
     /// `found` is the identifier that was looked up, in the form the
-    /// stream writes one. Carried because it is the part of this skip
-    /// worth acting on: a reader deciding what to do about the file,
-    /// at the terminal or over the log, needs to know which identifier
-    /// nobody held.
+    /// stream writes one, and `tier` the pass that read it. Carried
+    /// because they are the part of this skip worth acting on: a
+    /// reader deciding what to do about the file, at the terminal or
+    /// over the log, needs to know which identifier nobody held — and
+    /// one read from the text layer is likelier to be a reference's
+    /// than one read from the file's own metadata.
     Unresolvable {
         found: String,
+        tier: Option<String>,
         attempts: Vec<Attempt>,
     },
     /// The file's own metadata disagrees with the resolved record, so
@@ -509,7 +512,9 @@ pub fn human_summary(counts: &Counts, hidden: usize) -> String {
 fn skipped_because(reason: &SkipReason) -> String {
     match reason {
         SkipReason::NoIdentifier => "no identifier found".to_string(),
-        SkipReason::Unresolvable { found, attempts } => {
+        SkipReason::Unresolvable {
+            found, attempts, ..
+        } => {
             let said: Vec<String> = attempts
                 .iter()
                 .map(|attempt| format!("{}: {}", attempt.source, attempt.error))

@@ -663,6 +663,7 @@ fn an_identifier_no_source_holds_is_skipped_as_unresolvable_with_attempts_in_pri
         reason,
         SkipReason::Unresolvable {
             found: "doi:10.1000/nowhere".to_string(),
+            tier: Some("embedded-metadata".to_string()),
             attempts: vec![
                 Attempt {
                     source: "crossref".to_string(),

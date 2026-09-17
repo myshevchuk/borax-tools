@@ -2720,6 +2720,14 @@ impl FakeLedger {
         }
     }
 
+    /// A ledger that has already admitted `entry`.
+    fn holding(entry: Entry) -> FakeLedger {
+        FakeLedger {
+            index: Index::build(std::slice::from_ref(&entry)),
+            appended: RefCell::new(Vec::new()),
+        }
+    }
+
     fn appended(&self) -> Vec<Entry> {
         self.appended.borrow().clone()
     }
@@ -5376,6 +5384,9 @@ fn skipping_a_conflict_that_could_have_been_overridden_writes_nothing() {
 /// not a new one built from the failed candidate.
 #[test]
 fn a_supplied_identifier_resolving_into_a_taken_target_reports_and_reasks() {
+    const CANDIDATE: &str = "10.1000/would-collide";
+    const OUTCOME: &str = "name taken";
+
     let path = PathBuf::from("/lib/paper.pdf");
     let library = FakeLibrary::new().with_file(
         &path,
@@ -5442,11 +5453,17 @@ fn a_supplied_identifier_resolving_into_a_taken_target_reports_and_reasks() {
     // The candidate's outcome is reported in the re-put question's
     // description, which is the only channel left for it: design D5
     // keeps an abandoned candidate out of the event stream entirely.
-    // The wording is the implementer's; that something was reported is
-    // the contract.
-    assert_ne!(
-        questions[1].description, questions[0].description,
-        "the candidate's outcome must be reported before asking again: got {questions:?}"
+    // Asserting only that the description changed would pass on any
+    // change at all, so the identifier tried and the outcome's own
+    // label both have to be there.
+    let reported = questions[1].description.join("\n");
+    assert!(
+        reported.contains(CANDIDATE) && reported.contains(OUTCOME),
+        "the re-put question must report {CANDIDATE} and {OUTCOME}: got {reported}"
+    );
+    assert!(
+        !questions[0].description.join("\n").contains(CANDIDATE),
+        "and must not have reported it before it was tried: got {questions:?}"
     );
     assert!(
         events.iter().any(|event| matches!(
@@ -5470,6 +5487,9 @@ fn a_supplied_identifier_resolving_into_a_taken_target_reports_and_reasks() {
 /// own menu again, unchanged.
 #[test]
 fn a_supplied_identifier_resolving_into_an_unnameable_record_reports_and_reasks() {
+    const CANDIDATE: &str = "10.1000/renders-empty";
+    const OUTCOME: &str = "no name";
+
     let path = PathBuf::from("/lib/paper.pdf");
     let library = FakeLibrary::new().with_file(
         &path,
@@ -5521,11 +5541,17 @@ fn a_supplied_identifier_resolving_into_an_unnameable_record_reports_and_reasks(
     // The candidate's outcome is reported in the re-put question's
     // description, which is the only channel left for it: design D5
     // keeps an abandoned candidate out of the event stream entirely.
-    // The wording is the implementer's; that something was reported is
-    // the contract.
-    assert_ne!(
-        questions[1].description, questions[0].description,
-        "the candidate's outcome must be reported before asking again: got {questions:?}"
+    // Asserting only that the description changed would pass on any
+    // change at all, so the identifier tried and the outcome's own
+    // label both have to be there.
+    let reported = questions[1].description.join("\n");
+    assert!(
+        reported.contains(CANDIDATE) && reported.contains(OUTCOME),
+        "the re-put question must report {CANDIDATE} and {OUTCOME}: got {reported}"
+    );
+    assert!(
+        !questions[0].description.join("\n").contains(CANDIDATE),
+        "and must not have reported it before it was tried: got {questions:?}"
     );
     assert!(
         events.iter().any(|event| matches!(
@@ -5544,6 +5570,9 @@ fn a_supplied_identifier_resolving_into_an_unnameable_record_reports_and_reasks(
 /// file's own menu again, unchanged.
 #[test]
 fn a_supplied_identifier_resolving_into_the_files_own_current_name_reports_and_reasks() {
+    const CANDIDATE: &str = "10.1000/renders-current-name";
+    const OUTCOME: &str = "same name";
+
     let path = PathBuf::from("/lib/Smith2024.pdf");
     let library = FakeLibrary::new().with_file(
         &path,
@@ -5592,11 +5621,17 @@ fn a_supplied_identifier_resolving_into_the_files_own_current_name_reports_and_r
     // The candidate's outcome is reported in the re-put question's
     // description, which is the only channel left for it: design D5
     // keeps an abandoned candidate out of the event stream entirely.
-    // The wording is the implementer's; that something was reported is
-    // the contract.
-    assert_ne!(
-        questions[1].description, questions[0].description,
-        "the candidate's outcome must be reported before asking again: got {questions:?}"
+    // Asserting only that the description changed would pass on any
+    // change at all, so the identifier tried and the outcome's own
+    // label both have to be there.
+    let reported = questions[1].description.join("\n");
+    assert!(
+        reported.contains(CANDIDATE) && reported.contains(OUTCOME),
+        "the re-put question must report {CANDIDATE} and {OUTCOME}: got {reported}"
+    );
+    assert!(
+        !questions[0].description.join("\n").contains(CANDIDATE),
+        "and must not have reported it before it was tried: got {questions:?}"
     );
     assert!(
         events.iter().any(|event| matches!(
@@ -6011,5 +6046,176 @@ fn a_resolved_candidate_that_led_nowhere_leaves_the_files_own_record_to_cite() {
         index.get(&hash_for("resolved-candidate-discarded")),
         Some(record_by("Smith", 2024, "10.1000/the-files-own")),
         "the file keeps the record its own resolution wrote, not the candidate's"
+    );
+}
+
+/// Quitting an interactive run in human output still prints the run's
+/// summary.
+///
+/// A hold is open while each file's question is answered, and quitting
+/// leaves the per-file loop without a fate for that file. Nothing
+/// after it drains the hold, so before this was fixed every line the
+/// run had left to write — the summary, and any bibliography result —
+/// was buffered and silently dropped. The existing quit test runs in
+/// JSON, where a hold is a no-op, so it passed throughout.
+#[test]
+fn quitting_a_human_interactive_run_still_prints_the_summary() {
+    let first = PathBuf::from("/lib/first.pdf");
+    let second = PathBuf::from("/lib/second.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &first,
+            hash_for("quit-summary-first"),
+            pdf_with_embedded_doi("10.1000/quit-summary-first"),
+        )
+        .with_file(
+            &second,
+            hash_for("quit-summary-second"),
+            pdf_with_embedded_doi("10.1000/quit-summary-second"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/quit-summary-first",
+            record_by("Smith", 2024, "10.1000/quit-summary-first"),
+        )
+        .answering(
+            "doi:10.1000/quit-summary-second",
+            record_by("Doe", 2023, "10.1000/quit-summary-second"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Quit]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::rename(vec![first.clone(), second.clone()], false),
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("2 not reached"),
+        "the summary must reach the terminal after a quit: {text:?}"
+    );
+    assert!(
+        !text.contains("first.pdf: resolved"),
+        "the file the run stopped at was given no fate, so it has no \
+         verdict to report: {text:?}"
+    );
+}
+
+/// A record the operator reached is put to the ledger before it is
+/// admitted, exactly as one the run resolved on its own is.
+///
+/// `resolve_file_checking_ledger` runs the work check on a record it
+/// resolved, but a supplied one never went through it, and neither did
+/// a record the conflict check refused and the operator then accepted.
+/// Admitting a second copy of a work the collection already holds is
+/// the one thing the ledger exists to prevent, and the ledger's verdict
+/// is about the collection rather than about where the identifier came
+/// from.
+#[test]
+fn a_supplied_record_the_collection_already_holds_is_reported_a_duplicate() {
+    let path = PathBuf::from("/collection/incoming.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("supplied-work-duplicate"),
+        pdf_with_no_identifier(),
+    );
+    let mut held = record_by("Smith", 2024, "10.1000/already-in-the-collection");
+    held.doi = Doi::parse("10.1000/already-in-the-collection").ok();
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering("doi:10.1000/already-in-the-collection", held);
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem =
+        FakeFilesystem::new().with_existing("/collection", [("Smith2024.pdf", Some("other"))]);
+    let bib_files = FakeBibFiles::new();
+    // The collection already holds this work, at a different file.
+    let ledger = FakeLedger::holding(Entry {
+        hash: hash_for("the-copy-already-admitted"),
+        doi: Doi::parse("10.1000/already-in-the-collection").ok(),
+        arxiv: None,
+        pmid: None,
+        isbn: None,
+        path: "Smith2024.pdf".to_string(),
+        entry_type: EntryType::Article,
+        run: RunId::new("run-earlier"),
+        timestamp: "2026-08-19T00:00:00Z".to_string(),
+        tool_version: "0.4.0-test".to_string(),
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/collection")),
+        state_root: None,
+    };
+    // Supply the identifier, then accept the move it offers.
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/already-in-the-collection".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: p,
+                reason: SkipReason::Duplicate { .. },
+            } if *p == path
+        )),
+        "the collection's own copy must be reported, not a second one \
+         admitted: got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Renamed { .. })),
+        "nothing may move: got {events:?}"
+    );
+    assert!(
+        ledger.appended().is_empty(),
+        "and nothing may be admitted: got {:?}",
+        ledger.appended()
     );
 }

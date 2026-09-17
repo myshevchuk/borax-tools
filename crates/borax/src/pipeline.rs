@@ -408,7 +408,7 @@ pub fn standing<C: Cache>(
         Ok(resolved) => resolved,
         Err(unresolved) => {
             return Standing {
-                verdict: FileOutcome::Skipped(unresolvable(&unresolved, &looked_up)),
+                verdict: FileOutcome::Skipped(unresolvable(&unresolved, &looked_up, tier)),
                 hash,
                 found,
                 unresolved: Some(unresolved),
@@ -702,9 +702,10 @@ fn skipped_for(error: &ExtractionError) -> SkipReason {
 /// The skip a failed resolution reports, naming the identifier that
 /// was looked up and keeping the attempts in the order the sources
 /// were asked.
-pub fn unresolvable(unresolved: &Unresolved, found: &Identifier) -> SkipReason {
+pub fn unresolvable(unresolved: &Unresolved, found: &Identifier, tier: Tier) -> SkipReason {
     SkipReason::Unresolvable {
         found: found.to_string(),
+        tier: Some(tier.as_str().to_string()),
         attempts: attempts_of(unresolved),
     }
 }

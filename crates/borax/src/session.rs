@@ -287,7 +287,20 @@ impl fmt::Display for Choice {
             // says exactly what it will do and the operator is not
             // reading it against a description they may have scrolled
             // past.
-            Answer::Override => write!(formatter, "Rename anyway, to {}", self.target),
+            //
+            // Escaped for the reason the description is: a target is
+            // rendered from a record somebody else wrote, and
+            // `sanitize` replaces only the control characters below
+            // U+0020 — a C1 control such as U+009B survives into a
+            // filename, and this is the label of the one choice that
+            // overrides a check.
+            Answer::Override => {
+                write!(
+                    formatter,
+                    "Rename anyway, to {}",
+                    crate::describe::escaped(&self.target)
+                )
+            }
             Answer::Keep => formatter.write_str("Keep this name"),
             Answer::Supply => formatter.write_str("Supply an identifier"),
             Answer::Retry => formatter.write_str("Try the services again"),

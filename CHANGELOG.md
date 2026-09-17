@@ -72,8 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   up, and `claims`, the titles read from the file with their origins.
   Its `tier` can be `supplied` when the operator entered the identifier,
   and its new `overrode` field carries an accepted title conflict or is
-  `null`. The `unresolvable` skip reason now includes `found` alongside
-  the service attempts. The schema version remains 2 for these additions.
+  `null`. The `unresolvable` skip reason now includes `found`, the
+  identifier that was looked up, and `tier`, the pass that read it,
+  alongside the service attempts. The schema version remains 2 for these
+  additions.
   When the content index answers, `source` now names the services in the
   record's per-field provenance instead of reading `cache`; only a
   record whose provenance names no service still reports `cache`. This

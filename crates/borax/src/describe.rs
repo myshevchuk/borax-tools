@@ -314,8 +314,18 @@ fn failure(description: &mut Description, reason: &SkipReason) {
         // The identifier is the thing a person asked to supply a better
         // one has to improve on, so it leads — and whole, as on a
         // resolution.
-        SkipReason::Unresolvable { found, attempts } => {
-            description.whole("identifier", found);
+        SkipReason::Unresolvable {
+            found,
+            tier,
+            attempts,
+        } => {
+            description.whole(
+                "identifier",
+                &match whence(tier.as_deref()) {
+                    Some(whence) => format!("{found}, {whence}"),
+                    None => found.clone(),
+                },
+            );
             no_record(description, attempts);
         }
         // The same slot as an identifier that was found: its question

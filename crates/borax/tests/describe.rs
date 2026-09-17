@@ -862,6 +862,7 @@ fn a_file_no_service_holds_a_record_for_names_what_each_one_said() {
         path: PathBuf::from("preprint-v2.pdf"),
         reason: SkipReason::Unresolvable {
             found: "arXiv:2401.12345".to_string(),
+            tier: Some("text-layer".to_string()),
             attempts: vec![
                 Attempt {
                     source: "crossref".to_string(),
@@ -891,7 +892,7 @@ fn a_file_no_service_holds_a_record_for_names_what_each_one_said() {
         vec![
             rule(4, 17, DEFAULT_WIDTH),
             label_line("file", "preprint-v2.pdf"),
-            label_line("identifier", "arXiv:2401.12345"),
+            label_line("identifier", "arXiv:2401.12345, from the text layer"),
             label_line("no record", "crossref: not found"),
             continuation("openalex: not found"),
         ],
@@ -909,6 +910,7 @@ fn an_unreachable_service_is_shown_saying_what_it_said() {
         path: PathBuf::from("preprint-v2.pdf"),
         reason: SkipReason::Unresolvable {
             found: "arXiv:2401.12345".to_string(),
+            tier: Some("embedded-metadata".to_string()),
             attempts: vec![Attempt {
                 source: "arxiv".to_string(),
                 error: "timed out".to_string(),
@@ -932,7 +934,7 @@ fn an_unreachable_service_is_shown_saying_what_it_said() {
         vec![
             rule(1, 1, DEFAULT_WIDTH),
             label_line("file", "preprint-v2.pdf"),
-            label_line("identifier", "arXiv:2401.12345"),
+            label_line("identifier", "arXiv:2401.12345, from embedded metadata"),
             label_line("no record", "arxiv: timed out"),
         ]
     );
