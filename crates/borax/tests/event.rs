@@ -1137,7 +1137,9 @@ fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
     let outcome = FileOutcome::Resolved(FileRecord {
         record,
         source: Some(borax_sources::source::SourceName::Arxiv),
-        tier: Some(borax_pdf::tiered::Tier::TextLayer),
+        tier: Some(borax::pipeline::Provenance::Extracted(
+            borax_pdf::tiered::Tier::TextLayer,
+        )),
         found: Some(Identifier::Arxiv(ArxivId::parse("2401.01234").unwrap())),
         claims: Vec::new(),
         cached: false,

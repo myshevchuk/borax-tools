@@ -58,9 +58,14 @@ pub struct FileRecord {
     /// Which service supplied it, or `None` when the content index
     /// answered and the service is no longer known.
     pub source: Option<SourceName>,
-    /// Which extraction pass found the identifier, or `None` when
-    /// extraction never ran because the content index answered.
-    pub tier: Option<Tier>,
+    /// Where the identifier came from, or `None` when nothing was
+    /// found or asked for because the content index answered.
+    ///
+    /// Named for the `resolved` event's `tier` field, which it is
+    /// rendered into and which it keeps in step: the three cases a
+    /// reader of the stream has to tell apart — a pass's own name,
+    /// `supplied`, and nothing — are the three this holds.
+    pub tier: Option<Provenance>,
     /// The identifier the run looked up, or `None` when the content
     /// index answered and nothing was looked up at all.
     ///
@@ -92,6 +97,35 @@ pub struct FileRecord {
     pub overrode: Option<Overridden>,
 }
 
+/// Where the identifier a record was reached by came from.
+///
+/// Not a [`Tier`] variant, and no variant is added to that enum: every
+/// `Tier` names a pass over a file, and borax-pdf knows nothing about
+/// operators. A supplied identifier came from no pass at all, so the
+/// distinction is drawn here, where the operator exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// An extraction pass over the file found it.
+    Extracted(Tier),
+    /// The operator typed it.
+    Supplied,
+}
+
+impl Provenance {
+    /// The word the `resolved` event's `tier` field carries for it: the
+    /// pass's own name, or `supplied`.
+    ///
+    /// A bare `supplied` rather than "supplied by hand": the other
+    /// values in that field name where the identifier was read, and
+    /// this one names that it was not read.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provenance::Extracted(tier) => tier.as_str(),
+            Provenance::Supplied => "supplied",
+        }
+    }
+}
+
 /// What a run decided about one file.
 ///
 // One of these is produced per file and moved once, so the 352 bytes
@@ -116,9 +150,118 @@ pub struct ResolveConfig {
     pub cache: bool,
 }
 
+/// What the content index had for a file, and the hash it was asked
+/// about.
+///
+/// The hash is carried whether or not the index answered: it is what a
+/// renamed file is recorded under and what a record accepted later is
+/// remembered under, so a caller needs it even on a miss.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Indexed {
+    /// The file's content hash, or `None` when it could not be
+    /// computed. A hash failure is not yet a verdict — opening the file
+    /// reports a better one — so it reads here as a miss.
+    pub hash: Option<ContentHash>,
+    /// The record the index holds for that hash, or `None` when it
+    /// holds none or was not consulted.
+    pub record: Option<Record>,
+}
+
+/// The first pass: what the content index says about the file at
+/// `path`.
+///
+/// A hit means the file need not be opened at all, since a record is
+/// served for its content under any name. The index is not consulted
+/// when [`ResolveConfig::cache`] is `false` — the `--no-cache` bypass —
+/// and the hash is taken either way.
+pub fn from_index<C: Cache>(
+    path: &Path,
+    library: &dyn Library,
+    index: &ContentIndex<C>,
+    config: &ResolveConfig,
+) -> Indexed {
+    let hash = library.hash(path).ok();
+    let record = match config.cache {
+        true => hash.as_ref().and_then(|hash| index.get(hash)),
+        false => None,
+    };
+    Indexed { hash, record }
+}
+
+/// The record a content-index hit stands for.
+///
+/// Nothing was read and nothing was looked up, which is what every
+/// `None` here says; `cached` is what tells a reader that the index
+/// answered rather than a service.
+pub fn indexed_record(record: Record, hash: Option<ContentHash>) -> FileRecord {
+    FileRecord {
+        record,
+        source: None,
+        tier: None,
+        found: None,
+        claims: Vec::new(),
+        cached: true,
+        hash,
+        // A record served from the index was accepted by whatever run
+        // put it there, not by this one.
+        overrode: None,
+    }
+}
+
+/// The second pass: what the file at `path` says about itself.
+///
+/// The identifier the tiered extractor found, and every title the
+/// document's own metadata claims. See [`claims_of`] for the titles on
+/// their own.
+///
+/// The titles are read before the identifier is looked for, so that
+/// finding none is a failure of this pass alone: a file with no
+/// identifier still has claims, and an operator supplying one for it
+/// has something to compare the record against.
+pub fn from_file(
+    path: &Path,
+    library: &dyn Library,
+    config: &ExtractionConfig,
+) -> Result<(Extracted, Vec<Claim>), ExtractionError> {
+    let pdf = library.open(path)?;
+    let claims = claimed_titles(pdf.as_ref());
+    Ok((extract(pdf.as_ref(), config)?, claims))
+}
+
+/// The third pass: the record `sources` hold for `identifier`.
+///
+/// [`borax_sources::dispatch::resolve`] under the name the other passes
+/// go by, so a caller driving the passes one at a time reads them as
+/// one sequence. The services are consulted in priority order for the
+/// identifier's kind, and where the identifier came from makes no
+/// difference to any of it.
+pub fn from_sources(
+    sources: &[&dyn Source],
+    identifier: &Identifier,
+) -> Result<borax_sources::dispatch::Resolved, Unresolved> {
+    resolve(sources, identifier)
+}
+
+/// The fourth pass: what the file's own titles say against `record`.
+///
+/// `None` is agreement, or nothing to disagree with. A disagreement is
+/// the [`SkipReason::Conflict`] a batch run skips on, built here so
+/// that a caller reporting one and a caller acting on one describe it
+/// the same way.
+pub fn disagreement(claims: &[Claim], record: &Record) -> Option<SkipReason> {
+    let claimed: Vec<&str> = claims.iter().map(|claim| claim.title.as_str()).collect();
+    check_title(&claimed, record).map(|conflict| SkipReason::Conflict {
+        field: conflict.field.to_string(),
+        extracted: conflict.extracted,
+        resolved: conflict.resolved,
+        similarity: conflict.similarity,
+    })
+}
+
 /// Resolve one file.
 ///
-/// The passes, in order, each ending the run when it succeeds:
+/// The four passes above, in order, each ending the run when it
+/// succeeds:
 ///
 /// 1. **Content index**: the file's hash is looked up, and a hit is
 ///    returned without opening the file at all. Skipped entirely when
@@ -163,46 +306,25 @@ pub fn resolve_file<C: Cache>(
     index: &ContentIndex<C>,
     config: &ResolveConfig,
 ) -> FileOutcome {
-    let hash = library.hash(path).ok();
-
-    if config.cache {
-        if let Some(record) = hash.as_ref().and_then(|hash| index.get(hash)) {
-            return FileOutcome::Resolved(FileRecord {
-                record,
-                source: None,
-                tier: None,
-                // Nothing was looked up and the file was not opened.
-                found: None,
-                claims: Vec::new(),
-                cached: true,
-                hash,
-                // A record served from the index was accepted by
-                // whatever run put it there, not by this one.
-                overrode: None,
-            });
-        }
+    let Indexed { hash, record } = from_index(path, library, index, config);
+    if let Some(record) = record {
+        return FileOutcome::Resolved(indexed_record(record, hash));
     }
 
-    let (extracted, claims) = match extract_from(path, library, &config.extraction) {
+    let (extracted, claims) = match from_file(path, library, &config.extraction) {
         Ok(found) => found,
         Err(error) => return FileOutcome::Skipped(skipped_for(&error)),
     };
     let Extracted { identifier, tier } = extracted;
     let looked_up = Identifier::from(identifier);
 
-    let resolved = match resolve(sources, &looked_up) {
+    let resolved = match from_sources(sources, &looked_up) {
         Ok(resolved) => resolved,
         Err(unresolved) => return FileOutcome::Skipped(unresolvable(&unresolved, &looked_up)),
     };
 
-    let claimed: Vec<&str> = claims.iter().map(|claim| claim.title.as_str()).collect();
-    if let Some(conflict) = check_title(&claimed, &resolved.record) {
-        return FileOutcome::Skipped(SkipReason::Conflict {
-            field: conflict.field.to_string(),
-            extracted: conflict.extracted,
-            resolved: conflict.resolved,
-            similarity: conflict.similarity,
-        });
+    if let Some(conflict) = disagreement(&claims, &resolved.record) {
+        return FileOutcome::Skipped(conflict);
     }
 
     if let Some(hash) = hash.as_ref() {
@@ -212,7 +334,7 @@ pub fn resolve_file<C: Cache>(
     FileOutcome::Resolved(FileRecord {
         record: resolved.record,
         source: Some(resolved.source),
-        tier: Some(tier),
+        tier: Some(Provenance::Extracted(tier)),
         found: Some(looked_up),
         claims,
         cached: false,
@@ -234,8 +356,10 @@ pub fn resolve_file<C: Cache>(
 /// An unreadable file claims nothing, which is the same answer as a
 /// file carrying no titles: neither is evidence against a record.
 pub fn claims_of(path: &Path, library: &dyn Library) -> Vec<Claim> {
-    let _ = (path, library);
-    todo!("claims_of: the titles the file claims, read on their own")
+    match library.open(path) {
+        Ok(pdf) => claimed_titles(pdf.as_ref()),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Resolve `identifier` for the file at `path`, as a run resolves one
@@ -256,8 +380,33 @@ pub fn resolve_supplied(
     library: &dyn Library,
     sources: &[&dyn Source],
 ) -> Result<Supplied, Unresolved> {
-    let _ = (path, identifier, library, sources);
-    todo!("resolve_supplied: resolve, then report rather than enforce the check")
+    let resolved = from_sources(sources, identifier)?;
+    // Read now rather than carried in: a file the content index
+    // answered for was never opened, and one no identifier was found in
+    // was never asked about its titles, so the comparison has nothing
+    // to work from until it is wanted (design D2a).
+    let claims = claims_of(path, library);
+    let conflict = disagreement(&claims, &resolved.record);
+
+    Ok(Supplied {
+        file: FileRecord {
+            record: resolved.record,
+            source: Some(resolved.source),
+            tier: Some(Provenance::Supplied),
+            found: Some(identifier.clone()),
+            claims,
+            cached: false,
+            // Taken here because a rename needs it: the planner
+            // recognises an already-named file by content, and a record
+            // the operator then accepts is remembered under it.
+            hash: library.hash(path).ok(),
+            // Nothing has been overridden yet. Accepting this record
+            // over `conflict` is the caller's decision, and the caller
+            // records it.
+            overrode: None,
+        },
+        conflict,
+    })
 }
 
 /// A record resolved from an identifier somebody supplied, and what the
@@ -278,8 +427,13 @@ pub struct Supplied {
 /// which is the safe way to lose an answer and is never reported as a
 /// failure of the rename it followed.
 pub fn remember<C: Cache>(index: &ContentIndex<C>, hash: Option<&ContentHash>, record: &Record) {
-    let _ = (index, hash, record);
-    todo!("remember: write an accepted record to the content index")
+    // A file whose hash could not be computed has nowhere to be
+    // remembered under. It cannot be renamed in an applying run either,
+    // so this is not a case the operator can reach with a decision
+    // worth keeping.
+    if let Some(hash) = hash {
+        index.put(hash, record);
+    }
 }
 
 /// Resolve one file, checking `collection` for it on the way.
@@ -308,20 +462,8 @@ pub fn resolve_file_checking_ledger<C: Cache>(
     config: &ResolveConfig,
     collection: &Collection<'_>,
 ) -> FileOutcome {
-    if let Some(existing) = library
-        .hash(path)
-        .ok()
-        .and_then(|hash| {
-            collection
-                .ledger
-                .content_duplicate(&hash, &|recorded| collection.counts_against(recorded, path))
-        })
-        .and_then(|duplicate| collection.live_path(&duplicate))
-    {
-        return FileOutcome::Skipped(SkipReason::Duplicate {
-            reason: DuplicateReason::Content,
-            existing_path: existing,
-        });
+    if let Some(duplicate) = content_duplicate(path, library.hash(path).ok().as_ref(), collection) {
+        return FileOutcome::Skipped(duplicate);
     }
 
     let outcome = resolve_file(path, library, sources, index, config);
@@ -329,19 +471,56 @@ pub fn resolve_file_checking_ledger<C: Cache>(
     let FileOutcome::Resolved(file) = &outcome else {
         return outcome;
     };
-    match collection
-        .ledger
-        .work_duplicate(&identifiers_of(&file.record), &|recorded| {
-            collection.counts_against(recorded, path)
-        })
-        .and_then(|duplicate| collection.live_path(&duplicate))
-    {
-        Some(existing) => FileOutcome::Skipped(SkipReason::Duplicate {
-            reason: DuplicateReason::Work,
-            existing_path: existing,
-        }),
+    match work_duplicate(path, &file.record, collection) {
+        Some(duplicate) => FileOutcome::Skipped(duplicate),
         None => outcome,
     }
+}
+
+/// The file `collection` already holds with the same content as the
+/// file at `path`, as the skip that reports it.
+///
+/// Answerable before the file is opened, which is the point: a
+/// byte-identical re-download is recognised without a single source
+/// being asked. A file with no hash is no duplicate — there is nothing
+/// to match on — and neither is one whose recorded twin has since left
+/// the collection.
+pub fn content_duplicate(
+    path: &Path,
+    hash: Option<&ContentHash>,
+    collection: &Collection<'_>,
+) -> Option<SkipReason> {
+    let duplicate = collection
+        .ledger
+        .content_duplicate(hash?, &|recorded| collection.counts_against(recorded, path))?;
+    Some(SkipReason::Duplicate {
+        reason: DuplicateReason::Content,
+        existing_path: collection.live_path(&duplicate)?,
+    })
+}
+
+/// The file `collection` already holds for the same work as `record`,
+/// as the skip that reports it.
+///
+/// Answerable only once a record is in hand, which is the earliest a
+/// second PDF of one paper can be recognised at all. A record the
+/// operator supplied is judged here exactly as an extracted one is: the
+/// ledger's verdict is about the collection, not about where the
+/// identifier came from.
+pub fn work_duplicate(
+    path: &Path,
+    record: &Record,
+    collection: &Collection<'_>,
+) -> Option<SkipReason> {
+    let duplicate = collection
+        .ledger
+        .work_duplicate(&identifiers_of(record), &|recorded| {
+            collection.counts_against(recorded, path)
+        })?;
+    Some(SkipReason::Duplicate {
+        reason: DuplicateReason::Work,
+        existing_path: collection.live_path(&duplicate)?,
+    })
 }
 
 /// Every identifier `record` carries, in the order DOI, arXiv, PMID,
@@ -365,8 +544,8 @@ fn identifiers_of(record: &Record) -> Vec<Identifier> {
     identifiers
 }
 
-/// Extract from the file at `path`, along with every title its own
-/// metadata claims.
+/// Every title an open document claims for itself, in the order they
+/// are read.
 ///
 /// A document may hold two — the XMP packet's `dc:title` and the Info
 /// dictionary's — and they need not agree with each other or with
@@ -379,29 +558,19 @@ fn identifiers_of(record: &Record) -> Vec<Identifier> {
 ///
 /// The titles are taken while the document is open, since the conflict
 /// check runs after it has been dropped.
-fn extract_from(
-    path: &Path,
-    library: &dyn Library,
-    config: &ExtractionConfig,
-) -> Result<(Extracted, Vec<Claim>), ExtractionError> {
-    let pdf = library.open(path)?;
-    let extracted = extract(pdf.as_ref(), config)?;
-    let claimed = [
+fn claimed_titles(pdf: &dyn PdfSource) -> Vec<Claim> {
+    [
         (ClaimOrigin::Xmp, pdf.xmp().and_then(xmp_title)),
         (ClaimOrigin::Info, pdf.info_metadata().title.clone()),
-    ];
-    Ok((
-        extracted,
-        claimed
-            .into_iter()
-            .filter_map(|(from, title)| {
-                Some(Claim {
-                    from,
-                    title: title?,
-                })
-            })
-            .collect(),
-    ))
+    ]
+    .into_iter()
+    .filter_map(|(from, title)| {
+        Some(Claim {
+            from,
+            title: title?,
+        })
+    })
+    .collect()
 }
 
 /// The skip an extraction failure reports.
@@ -422,7 +591,7 @@ fn skipped_for(error: &ExtractionError) -> SkipReason {
 /// The skip a failed resolution reports, naming the identifier that
 /// was looked up and keeping the attempts in the order the sources
 /// were asked.
-fn unresolvable(unresolved: &Unresolved, found: &Identifier) -> SkipReason {
+pub fn unresolvable(unresolved: &Unresolved, found: &Identifier) -> SkipReason {
     SkipReason::Unresolvable {
         found: found.to_string(),
         attempts: unresolved
@@ -516,7 +685,7 @@ pub fn resolved_event(path: &Path, file: &FileRecord) -> Event {
             .as_ref()
             .map_or_else(|| identifier_of(&file.record), Identifier::to_string),
         claims: file.claims.clone(),
-        tier: file.tier.map(|tier| tier.as_str().to_string()),
+        tier: file.tier.map(|whence| whence.as_str().to_string()),
         overrode: file.overrode.clone(),
         cached: file.cached,
     }

@@ -11,8 +11,8 @@ use std::time::Duration;
 use borax::event::{Attempt, Claim, ClaimOrigin, Counts, Event, SkipReason};
 use borax::ledger::Collection;
 use borax::pipeline::{
-    FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, claims_of, event_for, remember,
-    resolve_batch, resolve_file, resolve_file_checking_ledger, resolve_supplied,
+    FileOutcome, FileRecord, Library, Provenance, RealLibrary, ResolveConfig, claims_of, event_for,
+    remember, resolve_batch, resolve_file, resolve_file_checking_ledger, resolve_supplied,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -403,7 +403,10 @@ fn embedded_metadata_identifier_resolves_via_the_first_source_uncached() {
 
     assert_eq!(file_record.record, record_with_doi("10.1000/embedded"));
     assert_eq!(file_record.source, Some(SourceName::Crossref));
-    assert_eq!(file_record.tier, Some(Tier::EmbeddedMetadata));
+    assert_eq!(
+        file_record.tier,
+        Some(Provenance::Extracted(Tier::EmbeddedMetadata))
+    );
     assert!(!file_record.cached);
 }
 
@@ -422,7 +425,10 @@ fn text_layer_identifier_reports_the_text_layer_tier() {
     let outcome = resolve_file(path, &library, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
-    assert_eq!(file_record.tier, Some(Tier::TextLayer));
+    assert_eq!(
+        file_record.tier,
+        Some(Provenance::Extracted(Tier::TextLayer))
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -839,7 +845,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
 
         claims: Vec::new(),
 
-        tier: Some(Tier::EmbeddedMetadata),
+        tier: Some(Provenance::Extracted(Tier::EmbeddedMetadata)),
         cached: false,
         hash: Some(hash_for("paper")),
         overrode: None,
@@ -1544,7 +1550,7 @@ fn a_resolved_event_carries_the_whole_record() {
 
         claims: Vec::new(),
 
-        tier: Some(Tier::TextLayer),
+        tier: Some(Provenance::Extracted(Tier::TextLayer)),
         cached: false,
         hash: None,
         overrode: None,
@@ -1575,7 +1581,7 @@ fn a_resolved_event_round_trips_its_record_through_json() {
 
             claims: Vec::new(),
 
-            tier: Some(Tier::TextLayer),
+            tier: Some(Provenance::Extracted(Tier::TextLayer)),
             cached: false,
             hash: None,
             overrode: None,
