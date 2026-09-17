@@ -6,8 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-09-17, with all four interactive changes
-implemented.
+Last reviewed: 2026-09-17, before 0.5.0, with all four interactive
+changes implemented.
 
 ## What is built
 
@@ -196,6 +196,20 @@ cited, which the driver has to hold deliberately because the batch
 path cites every file it resolves. And the index write happens on
 rename alone, because a mistyped identifier that resolved to the wrong
 paper must not be served for that file forever after.
+
+Its review gate found two defects worth recording for what they say
+about the suite rather than about the change. A record the operator
+supplied or accepted over a conflict never went through the ledger's
+work check, so the collection could take a second copy of a paper it
+already held — the one thing the ledger exists to prevent. And
+quitting an interactive run left the output hold open, so the summary
+and any bibliography line after it were buffered and dropped: a run
+that ended with no output at all. That one predates this change, and
+survived because the quit test runs in JSON, where a hold does
+nothing. Both are fixed and both now have tests that fail without the
+fix. The lesson is that the interactive human-output paths are the
+thinnest-covered part of the suite, because most dispatch tests assert
+on events rather than on what a terminal was shown.
 
 This change also amended three requirements it inherited, in its own
 group 0, rather than leaving the archive holding both halves of a

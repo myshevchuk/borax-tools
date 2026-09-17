@@ -22,7 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   move still reports `declined`. `Quit`, Ctrl-C, or Esc at the file menu
   leaves that file and every later file untouched and counts them as not
   reached. Previously, `borax rename` printed the whole plan and required
-  a second invocation with `--apply` to move it.
+  a second invocation with `--apply` to move it. An interactive run does
+  not ask about a file whose content hash is unknown, because no answer
+  could move it: a run refuses to move what it cannot record.
 
   `--batch` selects the old preview behavior. `--apply` still selects an
   applying batch and asks nothing, so existing
@@ -37,9 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record behind the proposed name, the titles claimed by the file's own
   metadata, and the proposed name. For a failed file it shows the facts
   available for that failure: no identifier, each service's answer, a
-  title conflict and its similarity, or an unreadable-file error. A
-  collision suffix gets a separate line naming the rendered name that
-  was already taken. Batch output keeps its one-line-per-file shape.
+  title conflict and its similarity, or an unreadable-file error. When
+  borax found an identifier, the description also names the extraction
+  pass that read it, such as `from the text layer`. A collision suffix
+  gets a separate line naming the rendered name that was already taken.
+  borax escapes text from records and file metadata before writing it to
+  the terminal, including control characters in the target named by the
+  `Rename anyway` choice. Batch output keeps its one-line-per-file
+  shape.
 
   A rename made from a supplied identifier or over an accepted conflict
   writes the accepted record to the content index under the file's hash.
@@ -135,6 +142,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   phrase promised what no tool can guarantee; what it was reaching for —
   previews by default, never overwrites, never guesses — is stated as
   those three things instead.
+
+### Fixed
+
+- Quitting an interactive run now prints the run summary and any
+  bibliography result that follows it. Previously, both could remain
+  buffered and be silently dropped, making the run appear to end without
+  output.
+
+- Records reached by supplying an identifier, retrying a lookup, or
+  accepting a title conflict now pass through the collection's duplicate
+  check. Previously, borax could admit a second copy of a work already
+  in the ledger and rename it with a collision suffix. It now reports
+  that file as a duplicate and leaves it unchanged.
 
 ## [0.4.0] - 2026-09-03
 
