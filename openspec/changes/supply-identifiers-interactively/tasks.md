@@ -114,7 +114,7 @@ block and amend it, rather than leaving the archive holding both:
       rename`, a section on supplying identifiers and what the content
       index remembers), `README.md` and `CHANGELOG.md`, with this
       proposal as source; check the diff
-- [ ] 6.2 Record the built state in `openspec/STATE.md`, including the
+- [x] 6.2 Record the built state in `openspec/STATE.md`, including the
       deferred title search as the next step for the hit rate
 - [ ] 6.3 `openspec validate supply-identifiers-interactively --strict`
       and `scripts/check-spec-deltas.py` pass; full suite green

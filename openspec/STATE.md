@@ -6,7 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-09-16, with `show-record-before-asking` implemented.
+Last reviewed: 2026-09-17, with all four interactive changes
+implemented.
 
 ## What is built
 
@@ -166,6 +167,41 @@ escaped: a PDF's title is written by whoever made the file, and an
 escape sequence in one could have redrawn the question above a menu
 whose first choice is Rename.
 
+`supply-identifiers-interactively` completes the four. A question is
+now put to every file the run could not settle on its own — no
+identifier, no service holding one, unreadable, a title conflict — and
+not only to the files that resolved, which is where the hit rate
+actually went. The operator can give a file an identifier by hand,
+accept a record over a conflict, ask the services again after an
+outage, or keep the name an already-named file has. A record accepted
+this way is written to the content index on the move, so later runs,
+batch included, are answered without asking.
+
+The measured problem it addresses: on a slice of eight files from the
+real corpus, two resolve unaided. Of the six that do not, three carry
+no identifier, one is a patent, one has a title conflict, and one
+carries a DOI with `.author` appended — an author manuscript, which no
+service holds. That last is the case the whole change was proposed
+for, and it is now a DOI typed once.
+
+Four things it settled are worth remembering. A file's verdict is held
+until its fate is settled, so a file re-identified by hand is reported
+once, from the record that settled it; that is a longer hold than
+`stream-per-file-events` allowed, and the requirement was amended
+rather than contradicted. `supplied` is not an extraction tier —
+borax-pdf names passes over a file and knows nothing about operators —
+so `FileRecord` carries a borax-level `Provenance`. An abandoned
+candidate leaves nothing anywhere: not reported, not indexed, not
+cited, which the driver has to hold deliberately because the batch
+path cites every file it resolves. And the index write happens on
+rename alone, because a mistyped identifier that resolved to the wrong
+paper must not be served for that file forever after.
+
+This change also amended three requirements it inherited, in its own
+group 0, rather than leaving the archive holding both halves of a
+contradiction — the first change in the project to need that, and the
+pattern to copy when a stacked change contradicts one below it.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
@@ -183,10 +219,23 @@ whose first choice is Rename.
   failures, offline operation) and never names a backend, so which
   engine reads the PDF is an implementation choice the specs leave
   free.
-- **Fuzzy title matching**, for files carrying no usable identifier.
-  Named out of scope in the `add-core-pipeline` proposal. Today such a
-  file is reported unresolvable and skipped, which is correct but leaves
-  a class of documents borax cannot help with.
+- **Searching for an identifier by title.** This is now the single
+  largest remaining lever on the hit rate, and the natural next change.
+  `supply-identifiers-interactively` made every unidentified file
+  answerable, but the operator supplies the answer: borax asks and
+  waits, having looked for nothing. A file with no identifier usually
+  does have a title, and Crossref and OpenAlex both take one — so the
+  same question could offer candidates to choose from instead of an
+  empty prompt, and the choosing is already built.
+
+  What it needs that does not exist: a title query on the `Source`
+  trait, a way to rank and present several candidates, and a rule for
+  when a match is close enough to offer at all. What it can reuse:
+  the whole supply loop, the description, and the content-index memory
+  — a chosen candidate is remembered exactly as a supplied identifier
+  is. Named out of scope in the `add-core-pipeline` proposal, and
+  deferred again by `supply-identifiers-interactively` deliberately,
+  so that supplying by hand works before searching is layered on it.
 - **Book series.** The pattern external tables were built for applies
   to book series as much as to journals — a code for the series, the
   volume within it, the first page — and nothing can render it, because
