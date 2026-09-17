@@ -80,9 +80,15 @@ pub enum Event {
         /// were read. Empty when the file was not opened, which is
         /// what a content-index answer means.
         claims: Vec<Claim>,
-        /// Which extraction pass supplied the identifier, or `None`
-        /// when the caller named it rather than a file carrying it.
+        /// Which extraction pass supplied the identifier, `supplied`
+        /// when the operator named it, or `None` when neither a file
+        /// nor an operator did — a content-index answer.
         tier: Option<String>,
+        /// The conflict the operator accepted to reach this record, or
+        /// `None` when nothing was overridden. A record that cleared
+        /// the conflict check on its own and one accepted despite it
+        /// are the same record; only this says which happened.
+        overrode: Option<Overridden>,
         /// Whether the content index answered, so the file was neither
         /// opened nor looked up. A response cache hit behind a source
         /// is not visible here and reports `false`.
@@ -170,7 +176,19 @@ pub enum SkipReason {
     NoIdentifier,
     /// An identifier was found but no source holds it. `attempts`
     /// records what each source said, in the order they were asked.
-    Unresolvable { attempts: Vec<Attempt> },
+    ///
+    /// `found` is the identifier that was looked up, in the form the
+    /// stream writes one, and `tier` the pass that read it. Carried
+    /// because they are the part of this skip worth acting on: a
+    /// reader deciding what to do about the file, at the terminal or
+    /// over the log, needs to know which identifier nobody held — and
+    /// one read from the text layer is likelier to be a reference's
+    /// than one read from the file's own metadata.
+    Unresolvable {
+        found: String,
+        tier: Option<String>,
+        attempts: Vec<Attempt>,
+    },
     /// The file's own metadata disagrees with the resolved record, so
     /// the record is probably about a different work.
     ///
@@ -245,6 +263,20 @@ pub enum ClaimOrigin {
     Xmp,
     /// The document information dictionary's `Title`.
     Info,
+}
+
+/// A conflict an operator accepted, reported on the record they
+/// accepted it for.
+///
+/// The fields are the ones [`SkipReason::Conflict`] carries, and carry
+/// them unchanged: a reader of the run log sees what was overridden in
+/// the vocabulary the skip would have used.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Overridden {
+    pub field: String,
+    pub extracted: String,
+    pub resolved: String,
+    pub similarity: f64,
 }
 
 /// One source's answer during resolution.
@@ -480,14 +512,16 @@ pub fn human_summary(counts: &Counts, hidden: usize) -> String {
 fn skipped_because(reason: &SkipReason) -> String {
     match reason {
         SkipReason::NoIdentifier => "no identifier found".to_string(),
-        SkipReason::Unresolvable { attempts } => {
+        SkipReason::Unresolvable {
+            found, attempts, ..
+        } => {
             let said: Vec<String> = attempts
                 .iter()
                 .map(|attempt| format!("{}: {}", attempt.source, attempt.error))
                 .collect();
             match said.is_empty() {
-                true => "no source had a record".to_string(),
-                false => format!("no source had a record ({})", said.join("; ")),
+                true => format!("no source had a record for {found}"),
+                false => format!("no source had a record for {found} ({})", said.join("; ")),
             }
         }
         SkipReason::Conflict {

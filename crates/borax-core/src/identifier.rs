@@ -441,3 +441,39 @@ impl From<Isbn> for String {
         i.0
     }
 }
+
+/// The identifier `input` names, as a person types one.
+///
+/// Tried in order: a DOI in any form extraction accepts, including a
+/// `https://doi.org/…` address pasted from a browser; an arXiv
+/// identifier, old style or new; and — only behind a `pmid:` or
+/// `isbn:` prefix — a PMID or an ISBN. The last two need the prefix
+/// because a bare run of digits is both, and guessing which would be
+/// the one guess this tool does not make.
+///
+/// Returns `None` for text that is none of those, which is the
+/// caller's cue to say so and ask again rather than to send it to a
+/// service.
+pub fn supplied(input: &str) -> Option<Identifier> {
+    if let Ok(doi) = Doi::parse(input) {
+        return Some(Identifier::Doi(doi));
+    }
+    if let Ok(arxiv) = ArxivId::parse(input) {
+        return Some(Identifier::Arxiv(arxiv));
+    }
+
+    let body = input.trim();
+    if strip_prefix_ci(body, "pmid:").is_some() {
+        return Pmid::parse(body).ok().map(Identifier::Pmid);
+    }
+    // Every prefix `Isbn::parse` takes, since somebody typing one is as
+    // likely to name the length as not.
+    if ["isbn:", "isbn-10:", "isbn-13:"]
+        .iter()
+        .any(|prefix| strip_prefix_ci(body, prefix).is_some())
+    {
+        return Isbn::parse(body).ok().map(Identifier::Isbn);
+    }
+
+    None
+}

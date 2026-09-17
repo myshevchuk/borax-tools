@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borax_core::content::{ContentHash, hash_bytes};
+use borax_core::identifier::{Identifier, supplied};
 use borax_core::ledger::Index;
 use borax_core::record::{EntryType, Record};
 use borax_core::tables::{LookupTables, Lookups, Table, TableSpec};
@@ -27,6 +28,7 @@ use borax_pdf::tiered::ExtractionConfig;
 use borax_sources::arxiv::ArxivClient;
 use borax_sources::cache::{Cache, Cached, MemoryCache};
 use borax_sources::crossref::CrossrefClient;
+use borax_sources::dispatch::Unresolved;
 use borax_sources::http::Politeness;
 use borax_sources::openalex::OpenAlexClient;
 use borax_sources::pace::Paced;
@@ -40,19 +42,22 @@ use crate::config::{
     Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
     layer_from_toml, nearest_override, resolve, table_path,
 };
-use crate::describe::{Position, Proposal, describe};
+use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
-    Counts, Diagnostic, Event, Format, Level, SkipReason, TableUsed, human_summary, render,
+    Counts, Diagnostic, Event, Format, Level, Overridden, SkipReason, TableUsed, human_summary,
+    render,
 };
 use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
-    FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, resolve_batch, resolve_file,
-    resolve_file_checking_ledger, resolved_event,
+    FileOutcome, FileRecord, Library, Provenance, RealLibrary, ResolveConfig, Standing,
+    resolve_batch, resolve_file, resolve_file_checking_ledger, resolved_event,
 };
-use crate::renaming::{Applying, Filesystem, Namespace, PlannedRename, Planning, RealFilesystem};
+use crate::renaming::{
+    Applying, Filesystem, Namespace, PlannedRename, Planning, Proposed, RealFilesystem,
+};
 use crate::session::{
-    Answer, Mode, Outcome, Question, Session, TerminalAsker, outcome_for, stdin_is_terminal,
-    terminal_width,
+    Answer, Asker, Mode, Outcome, Question, Session, TerminalAsker, TextPrompt, outcome_for,
+    stdin_is_terminal, terminal_width,
 };
 
 /// The extension a file needs to be picked up from a directory.
@@ -1157,14 +1162,17 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// about the file that happened to reveal it, and however many files
 /// met it there is one line to add.
 ///
-/// An interactive run puts each move to its operator before making it
-/// ([`decided`]), and nothing else about it differs: the file it renames
-/// is moved, cited and admitted exactly as an applying batch run moves,
-/// cites and admits it, and a file it asks nothing about is reported
-/// exactly as a batch run reports it. A run ended by a quit leaves the
-/// file it was ended at and every file after it untouched, counts them
-/// in [`Aftermath::unreached`], and still merges what the files it
-/// visited produced.
+/// An interactive run puts each file it could not settle on its own to
+/// its operator ([`asked`]) and holds the file's verdict until their
+/// answers settle it, so a file re-identified in the session is
+/// reported once, for the record it was settled on. Nothing else about
+/// it differs: the file it renames is moved, cited and admitted
+/// exactly as an applying batch run moves, cites and admits it, and a
+/// file it asks nothing about is reported exactly as a batch run
+/// reports it. A run ended by a quit leaves the file it was ended at
+/// and every file after it untouched, says nothing about it, counts it
+/// and every file after it in [`Aftermath::unreached`], and still
+/// merges what the files it visited produced.
 ///
 /// Returns a warning when any entry the run matched turned out to
 /// name a file that is no longer there. It comes back at the end
@@ -1277,39 +1285,92 @@ fn rename_events<C: Cache>(
         let ended = 'files: {
             for (position, path) in group.paths.iter().enumerate() {
                 // The hold covers this file alone and ends the moment
-                // its planning outcome is known, which is before any
-                // question about it is put: what the operator decides
-                // about, they have already read about.
+                // its fate is settled, which is when the first thing is
+                // said about it: an interactive run holds every file's
+                // verdict until then (design D5), so a file passed over
+                // is one nothing was ever written about.
                 if passing_over {
                     sink.hold();
                 }
-                let Some(file) = resolved_record(path, effective, adapters, checked, sink) else {
-                    sink.release();
-                    continue;
+                // Resolved without reporting. What is reported is what
+                // the file's fate made of the verdict, which for a
+                // batch run is settled the moment the verdict is and
+                // for an interactive one is settled by its operator.
+                let standing = crate::pipeline::standing(
+                    path,
+                    adapters.library,
+                    adapters.sources,
+                    adapters.index,
+                    &resolving(effective.config()),
+                    checked,
+                );
+                let about = About {
+                    path,
+                    position: among(groups, (index, position)),
+                    passing_over,
+                };
+                let settled = match session.mode {
+                    Mode::Batch => alone(standing, &about, &mut planning, &mut lookups),
+                    Mode::Interactive => asked(
+                        session,
+                        standing,
+                        &about,
+                        &mut planning,
+                        &mut lookups,
+                        adapters,
+                        checked,
+                    ),
                 };
 
-                let proposed = planning.proposed(path, &file, &mut lookups);
-                let decision = proposed.decision;
-                // A file already named is passed over whole, its own
-                // outcome line included, so the hold outlasts the
-                // event that reports it.
-                let named = matches!(decision, PlannedRename::AlreadyNamed { .. });
-                if !named {
-                    sink.release();
-                }
-                let asking = Asking {
-                    file: &file,
-                    rendered: proposed.rendered.as_deref(),
-                    position: among(groups, (index, position)),
-                };
-                let event = match decided(session, &decision, &asking) {
-                    Decided::CarryOut => {
+                let (file, event) = match settled {
+                    // This file and every file after it are left as they
+                    // are, and nothing is said about any of them: a file
+                    // the run was ended at was given no fate, so it has
+                    // no verdict to report either.
+                    Settled::Stop => {
+                        // The hold is still open, and nothing drains it
+                        // after this: without ending it here the run's
+                        // own summary — and any bibliography line after
+                        // it — would be buffered and never shown. The
+                        // hold is empty, since a file's verdict is only
+                        // emitted once it has a fate.
+                        sink.release();
+                        break 'files Some(Stopped {
+                            at: (index, position),
+                            diagnostic: None,
+                        });
+                    }
+                    Settled::Skip { file, reason } => {
+                        sink.release();
+                        if let Some(file) = &file {
+                            sink.emit(crate::pipeline::resolved_event(path, file));
+                        }
+                        let event = Event::Skipped {
+                            path: path.clone(),
+                            reason,
+                        };
+                        sink.emit(event.clone());
+                        (file, event)
+                    }
+                    Settled::CarryOut {
+                        file,
+                        decision,
+                        remember,
+                    } => {
+                        // A file already named is passed over whole, its
+                        // own outcome line included, so the hold
+                        // outlasts the event that reports it.
+                        let named = matches!(decision, PlannedRename::AlreadyNamed { .. });
+                        if !named {
+                            sink.release();
+                        }
+                        sink.emit(crate::pipeline::resolved_event(path, &file));
                         planning.accept(&decision);
                         // The hash goes to the move rather than to a log
                         // beside it: it travels on the `Renamed` event,
                         // so the run's log records what each file was
                         // when it moved.
-                        match moved(&mut applying, &decision, file.hash.clone(), sink) {
+                        let event = match moved(&mut applying, &decision, file.hash.clone(), sink) {
                             Ok(event) => event,
                             // The move was not made and no later one
                             // will be: a run that cannot record what it
@@ -1320,28 +1381,34 @@ fn rename_events<C: Cache>(
                                     diagnostic: Some(diagnostic),
                                 });
                             }
-                        }
-                    }
-                    Decided::Declined => {
-                        let event = Event::Skipped {
-                            path: path.clone(),
-                            reason: SkipReason::Declined,
                         };
-                        sink.emit(event.clone());
-                        event
-                    }
-                    // This file and every file after it are left as they
-                    // are, and nothing further is resolved.
-                    Decided::Stop => {
-                        break 'files Some(Stopped {
-                            at: (index, position),
-                            diagnostic: None,
-                        });
+                        if named {
+                            sink.withhold();
+                        }
+                        // On the move and never before: an operator who
+                        // supplies an identifier and then walks away
+                        // from the record has not accepted it, and a
+                        // move that did not happen is not an
+                        // acceptance either (design D7). Best-effort,
+                        // like every write to the response cache: an
+                        // answer that could not be kept means the file
+                        // is asked about again.
+                        if remember && matches!(event, Event::Renamed { .. }) {
+                            crate::pipeline::remember(
+                                adapters.index,
+                                file.hash.as_ref(),
+                                &file.record,
+                            );
+                        }
+                        (Some(file), event)
                     }
                 };
-                if named {
-                    sink.withhold();
-                }
+
+                // Nothing further is owed for a file no record stands
+                // for: there is nothing to admit and nothing to cite.
+                let Some(file) = file else {
+                    continue;
+                };
 
                 // A sidecar goes beside the name the file now carries
                 // rather than beside the one it has just lost, so where
@@ -1426,82 +1493,614 @@ fn unreached(groups: &[Group], at: (usize, usize)) -> usize {
         - position
 }
 
-/// What a run does with a decision once its operator has had their say.
-enum Decided {
-    /// Claim the name and carry the decision out, which for a decision
-    /// that moves nothing is to report it.
-    CarryOut,
-    /// Leave the file as it is: the move was put to the operator and
-    /// declined.
-    Declined,
-    /// End the run at this file.
+/// What one file's resolution and its operator's answers came to.
+///
+/// The verdict and the fate travel together because an interactive run
+/// reports neither until both are known: a file the operator
+/// re-identified is reported once, for the record they settled on.
+enum Settled {
+    /// Claim the name `decision` names and carry it out — which for a
+    /// decision that moves nothing is to report it — from the record
+    /// `file`, which is reported as the file's resolution.
+    CarryOut {
+        file: FileRecord,
+        decision: PlannedRename,
+        /// Whether the record is written to the content index once the
+        /// move is made.
+        ///
+        /// A record the run resolved on its own was written as it
+        /// resolved; one the operator reached — by supplying an
+        /// identifier, by accepting a conflict, by asking the services
+        /// again — is written when they accept it, and their
+        /// acceptance is the rename.
+        remember: bool,
+    },
+    /// Leave the file as it is and report `reason`, with the record
+    /// that still stands for it where one does: a file that resolved
+    /// and was not moved has one to be cited from, and a file nothing
+    /// identified has none.
+    Skip {
+        file: Option<FileRecord>,
+        reason: SkipReason,
+    },
+    /// End the run at this file, saying nothing about it.
     Stop,
 }
 
-/// What `session` makes of `decision`.
+/// The file a decision is about: where it lies, where it sits among
+/// the run's files, and whether one already carrying its record's name
+/// is passed over rather than asked about.
+struct About<'a> {
+    path: &'a Path,
+    position: Position,
+    /// `rename.skip-named` for the directory this file lies in, in a
+    /// run that asks. A passed-over file is shown nothing and asked
+    /// nothing, and is reported exactly as a batch run reports it.
+    passing_over: bool,
+}
+
+/// What a run with nobody to ask makes of `standing`: its own verdict,
+/// and the planner's decision about the record it reached.
+fn alone(
+    standing: Standing,
+    about: &About<'_>,
+    planning: &mut Planning<'_>,
+    lookups: &mut Lookups<'_>,
+) -> Settled {
+    match standing.verdict {
+        FileOutcome::Skipped(reason) => Settled::Skip { file: None, reason },
+        FileOutcome::Resolved(file) => Settled::CarryOut {
+            decision: planning.proposed(about.path, &file, lookups).decision,
+            file,
+            // A batch run's resolution wrote itself to the content
+            // index as it resolved; there is nothing here it has not
+            // already kept.
+            remember: false,
+        },
+    }
+}
+
+/// A record on offer for a file, and what stands against it.
+#[derive(Clone)]
+struct Offer {
+    file: FileRecord,
+    /// The disagreement between the record's title and the file's own,
+    /// where there is one. Shown, and never by itself a refusal: an
+    /// identifier a person stands behind is a stronger statement than
+    /// the heuristic that would refuse it.
+    conflict: Option<SkipReason>,
+    /// Whether the content index already holds this record for the
+    /// file, which decides whether accepting it writes one
+    /// ([`Settled::CarryOut::remember`]).
+    kept: bool,
+}
+
+/// What a file's situation calls for.
+enum Situation {
+    /// Put these choices, the first being the default an unadorned
+    /// Enter takes.
+    Ask(Vec<Answer>),
+    /// Carry the planner's decision out, as a batch run would: no
+    /// answer would change it.
+    Settle,
+    /// Report the file's own verdict, as a batch run would.
+    Report,
+}
+
+/// What `session`'s operator makes of the file `standing` was reached
+/// for.
 ///
-/// A batch run decides everything itself, so every decision is carried
-/// out. An interactive run puts a move to a free target to its
-/// operator — the file, the target it would take, and rename, skip or
-/// quit — and decides everything else as a batch run does: nothing
-/// about a file already named, blocked by a collision or unnameable
-/// would happen differently for any answer, so there is nothing to ask.
+/// The one place an interactive run differs from a batch one. Every
+/// file whose situation an answer could change is put to the operator
+/// a move to make, a conflict to accept or refuse, a file
+/// nothing identified, one no service holds a record for, one that
+/// could not be read, and — where `rename.skip-named` is off — one
+/// already carrying its record's name. Everything else is settled as
+/// [`alone`] settles it, since no answer would change what happens.
+///
+/// Answering `supply` opens a loop rather than ending the question:
+/// the identifier is resolved, the record it reaches is described, and
+/// the file's situation becomes whatever that record puts it in. A
+/// candidate that leads nowhere leaves the file exactly as it was,
+/// with the record and the choices it already had, and what became of
+/// it is reported in the description of the question put again — the
+/// only channel left, since a candidate reaches no event stream.
 ///
 /// A run whose mode says to ask and that has nowhere to ask stops
 /// rather than carrying on, since a move nobody was asked about is the
 /// one thing it may not make.
-///
-/// `asking` is what a question is shown with, and is read only when
-/// there is a question to put: a batch run renders no description, and
-/// pays for none.
-fn decided(session: &mut Session<'_>, decision: &PlannedRename, asking: &Asking<'_>) -> Decided {
-    let (Mode::Interactive, PlannedRename::Rename { path, target }) = (session.mode, decision)
-    else {
-        return Decided::CarryOut;
+fn asked<C: Cache>(
+    session: &mut Session<'_>,
+    standing: Standing,
+    about: &About<'_>,
+    planning: &mut Planning<'_>,
+    lookups: &mut Lookups<'_>,
+    adapters: &Adapters<'_, C>,
+    collection: Option<&Collection<'_>>,
+) -> Settled {
+    let Standing {
+        verdict,
+        hash,
+        found,
+        mut unresolved,
+        refused,
+    } = standing;
+    // The verdict the run is holding for the file, which is what its
+    // question is described from and what a skip reports.
+    let mut held = crate::pipeline::event_for(about.path, &verdict);
+    // The record the file's own passes put on offer: the one they
+    // resolved, or the one the conflict check refused and an operator
+    // may yet accept.
+    let mut own = match (verdict, refused) {
+        (FileOutcome::Resolved(file), _) => Some(Offer {
+            file,
+            conflict: None,
+            // Written to the content index as it resolved, or served
+            // from it.
+            kept: true,
+        }),
+        (FileOutcome::Skipped(conflict), Some(file)) => Some(Offer {
+            file,
+            conflict: Some(conflict),
+            kept: false,
+        }),
+        (FileOutcome::Skipped(_), None) => None,
     };
+    // What is on offer now: the file's own record, or one a supplied
+    // identifier reached in its place.
+    let mut offer = own.clone();
+    let mut candidate = false;
+    // What became of the last candidate, prepended to the description
+    // of the question put again and reported nowhere else.
+    let mut report: Vec<String> = Vec::new();
+
     let width = session.width;
-    let name = shown(path, &session.working);
+    let name = shown(about.path, &session.working);
     let Some(asker) = session.asker.as_deref_mut() else {
-        return Decided::Stop;
+        return Settled::Stop;
     };
 
-    let answer = asker.choose(&Question {
-        path: path.clone(),
-        target: target.clone(),
-        // Rename leads, so the answer Enter gives is the one the
-        // question was put about; quit trails, so it is never next to
-        // the default.
-        choices: vec![Answer::Rename, Answer::Skip, Answer::Quit],
-        // What the answer rests on, rendered by the run: the driver
-        // holds the file's resolution and the move being proposed, and
-        // the asker only draws what it is given.
-        description: describe(
-            &resolved_event(path, asking.file),
-            &name,
-            &Proposal {
-                target: beside(target, path),
-                rendered: asking.rendered.map(|rendered| beside(rendered, path)),
-            },
-            asking.position,
-            width,
-        ),
-    });
+    loop {
+        // Proposing claims nothing (`add-interactive-rename` D3), so a
+        // file goes round this loop as often as its operator likes and
+        // leaves the plan exactly as it found it.
+        let proposal = offer
+            .as_ref()
+            .map(|on| planning.proposed(about.path, &on.file, lookups));
+        let decision = proposal.as_ref().map(|proposed| &proposed.decision);
 
-    match answer {
-        Answer::Rename => Decided::CarryOut,
-        Answer::Skip => Decided::Declined,
-        Answer::Quit => Decided::Stop,
+        // A candidate there is no moving to is no offer at all: what
+        // became of it is reported, and the file's own situation — the
+        // one its own record left it in — is put again (design D1's
+        // second table).
+        if candidate && !matches!(decision, Some(PlannedRename::Rename { .. })) {
+            report = elsewhere(offer.as_ref(), decision, width);
+            offer = own.clone();
+            candidate = false;
+            continue;
+        }
+
+        let choices = match situation(
+            offer.as_ref(),
+            decision,
+            &held,
+            unresolved.as_ref(),
+            hash.is_some(),
+            about.passing_over,
+        ) {
+            Situation::Ask(choices) => choices,
+            Situation::Settle => {
+                return match (offer, proposal) {
+                    (Some(on), Some(proposed)) => Settled::CarryOut {
+                        file: on.file,
+                        decision: proposed.decision,
+                        // Nothing reaches here with a move on offer, so
+                        // there is no acceptance to keep: an operator
+                        // who was asked nothing has accepted nothing.
+                        remember: false,
+                    },
+                    _ => skipped(own, &held),
+                };
+            }
+            Situation::Report => return skipped(own, &held),
+        };
+
+        let answer = asker.choose(&Question {
+            path: about.path.to_path_buf(),
+            // Where the file would go, as the operator is shown it. A
+            // situation with no move on offer names the file itself:
+            // there is no other name in play.
+            target: match decision {
+                Some(PlannedRename::Rename { target, .. }) => target.clone(),
+                _ => about.path.to_path_buf(),
+            },
+            choices,
+            // What the answer rests on, rendered by the run: the
+            // driver holds the verdict and the move being proposed,
+            // and the asker only draws what it is given.
+            description: report
+                .iter()
+                .cloned()
+                .chain(describe(
+                    &described(about.path, offer.as_ref(), candidate, &held),
+                    &name,
+                    proposed_move(proposal.as_ref()).as_ref(),
+                    about.position,
+                    width,
+                ))
+                .collect(),
+        });
+
+        match answer {
+            Answer::Quit => return Settled::Stop,
+            Answer::Skip => return skipped(own, &held),
+            // The three answers that act on the record in hand, none
+            // of which is offered without a decision to carry out.
+            Answer::Rename | Answer::Override | Answer::Keep => {
+                return match (offer, proposal) {
+                    (Some(on), Some(proposed)) => {
+                        // A record the run resolved on its own was put
+                        // to the ledger as it resolved. One the
+                        // operator reached — supplied, retried, or
+                        // accepted over a conflict — never was, and
+                        // admitting a second copy of a work the
+                        // collection already holds is the one thing the
+                        // ledger exists to prevent. Its verdict is
+                        // about the collection, not about where the
+                        // identifier came from.
+                        let second_copy = (!on.kept)
+                            .then(|| {
+                                collection.and_then(|collection| {
+                                    crate::pipeline::work_duplicate(
+                                        about.path,
+                                        &on.file.record,
+                                        collection,
+                                    )
+                                })
+                            })
+                            .flatten();
+                        match second_copy {
+                            Some(reason) => Settled::Skip { file: None, reason },
+                            None => Settled::CarryOut {
+                                file: accepted(&on),
+                                decision: proposed.decision,
+                                remember: !on.kept,
+                            },
+                        }
+                    }
+                    _ => skipped(own, &held),
+                };
+            }
+            Answer::Supply => {
+                let Some(identifier) = supplied_identifier(asker) else {
+                    // Abandoned: nothing happened, so nothing is
+                    // reported and the question is put again exactly
+                    // as it was.
+                    continue;
+                };
+                match crate::pipeline::resolve_supplied(
+                    about.path,
+                    &identifier,
+                    adapters.library,
+                    adapters.sources,
+                ) {
+                    Ok(supplied) => {
+                        offer = Some(Offer {
+                            file: supplied.file,
+                            conflict: supplied.conflict,
+                            kept: false,
+                        });
+                        candidate = true;
+                        // The record itself is what the next question
+                        // describes; there is nothing left to report.
+                        report.clear();
+                    }
+                    Err(unheld) => {
+                        report = describe::reported(
+                            "supplied",
+                            &identifier.to_string(),
+                            &Candidate::Unheld {
+                                attempts: &crate::pipeline::attempts_of(&unheld),
+                            },
+                            width,
+                        );
+                        offer = own.clone();
+                        candidate = false;
+                    }
+                }
+            }
+            Answer::Retry => {
+                // Offered only where the services failed to answer, so
+                // there is an identifier of the file's own to ask them
+                // about again.
+                let Some((identifier, tier)) = found.clone() else {
+                    continue;
+                };
+                match crate::pipeline::resolve_supplied(
+                    about.path,
+                    &identifier,
+                    adapters.library,
+                    adapters.sources,
+                ) {
+                    Ok(supplied) => {
+                        let file = FileRecord {
+                            // The identifier was the file's own;
+                            // asking a second time does not make it
+                            // the operator's.
+                            tier: Some(Provenance::Extracted(tier)),
+                            ..supplied.file
+                        };
+                        held = match &supplied.conflict {
+                            Some(conflict) => Event::Skipped {
+                                path: about.path.to_path_buf(),
+                                reason: conflict.clone(),
+                            },
+                            None => resolved_event(about.path, &file),
+                        };
+                        own = Some(Offer {
+                            file,
+                            conflict: supplied.conflict,
+                            kept: false,
+                        });
+                        offer = own.clone();
+                        candidate = false;
+                        report.clear();
+                    }
+                    Err(unheld) => {
+                        report = describe::reported(
+                            "tried again",
+                            &identifier.to_string(),
+                            &Candidate::Unheld {
+                                attempts: &crate::pipeline::attempts_of(&unheld),
+                            },
+                            width,
+                        );
+                        // A retry is the file's own resolution rather
+                        // than a candidate, so what it came to is the
+                        // verdict the run now holds for it.
+                        held = Event::Skipped {
+                            path: about.path.to_path_buf(),
+                            reason: crate::pipeline::unresolvable(&unheld, &identifier, tier),
+                        };
+                        unresolved = Some(unheld);
+                        own = None;
+                        offer = None;
+                        candidate = false;
+                    }
+                }
+            }
+        }
     }
 }
 
-/// What the description of a question is made from, beyond the decision
-/// itself: the file's resolution, the name its record rendered where a
-/// collision moved the target aside, and where it sits in the run.
-struct Asking<'a> {
-    file: &'a FileRecord,
-    rendered: Option<&'a Path>,
-    position: Position,
+/// The menu `offer` and `decision` call for, or the outcome to settle
+/// for where no answer would change anything.
+///
+/// The first choice is the default an unadorned Enter takes, so it is
+/// never the answer that moves a file against a doubt: rename leads
+/// only where the record is the file's own and nothing stands against
+/// it, and a conflict defaults to skipping however plainly the move is
+/// on offer.
+///
+/// `supply` is whether an identifier may usefully be supplied for this
+/// file at all. A file whose content hash is unknown cannot be renamed
+/// in an applying run ([`SkipReason::Unrecordable`]), so supplying one
+/// could only lead to a move that then fails: it is left off the menu,
+/// and a file for which it would have been the only useful answer is
+/// not asked at all.
+fn situation(
+    offer: Option<&Offer>,
+    decision: Option<&PlannedRename>,
+    held: &Event,
+    unresolved: Option<&Unresolved>,
+    supply: bool,
+    passing_over: bool,
+) -> Situation {
+    let Some(offer) = offer else {
+        // Nothing was identified. The questions that offer to put that
+        // right, and no question for a verdict an identifier would not
+        // change: a duplicate is the ledger's word about the
+        // collection, not about what the file is.
+        if !supply {
+            return Situation::Report;
+        }
+        let Event::Skipped { reason, .. } = held else {
+            return Situation::Report;
+        };
+        return match reason {
+            SkipReason::NoIdentifier | SkipReason::Unreadable { .. } => {
+                Situation::Ask(vec![Answer::Supply, Answer::Skip, Answer::Quit])
+            }
+            // An outage is no evidence about the file, so the two are
+            // not presented alike: where the services merely failed to
+            // answer, asking them again is what failed and it leads.
+            SkipReason::Unresolvable { .. } => {
+                match unresolved.is_none_or(Unresolved::is_conclusive) {
+                    true => Situation::Ask(vec![Answer::Supply, Answer::Skip, Answer::Quit]),
+                    false => Situation::Ask(vec![
+                        Answer::Retry,
+                        Answer::Supply,
+                        Answer::Skip,
+                        Answer::Quit,
+                    ]),
+                }
+            }
+            _ => Situation::Report,
+        };
+    };
+
+    match (&offer.conflict, decision) {
+        // A conflict on a file nothing can be supplied for has only
+        // the answer a batch run gives.
+        (Some(_), _) if !supply => Situation::Report,
+        // Skip leads: Enter must never be the override.
+        (Some(_), Some(PlannedRename::Rename { .. })) => Situation::Ask(vec![
+            Answer::Skip,
+            Answer::Override,
+            Answer::Supply,
+            Answer::Quit,
+        ]),
+        // Nothing to override where there is no move to make.
+        (Some(_), _) => Situation::Ask(vec![Answer::Skip, Answer::Supply, Answer::Quit]),
+        // A file whose content hash is unknown is not asked about at
+        // all: an applying run refuses to move what it cannot record,
+        // so every answer but Skip would end in `Unrecordable`, and a
+        // question whose default answer cannot succeed is worse than
+        // the report a batch run gives.
+        (None, Some(PlannedRename::Rename { .. })) if !supply => Situation::Report,
+        (None, Some(PlannedRename::Rename { .. })) => Situation::Ask(vec![
+            Answer::Rename,
+            Answer::Supply,
+            Answer::Skip,
+            Answer::Quit,
+        ]),
+        // A file already named is asked about only where the run is
+        // not passing such files over: keeping the name is the default,
+        // and a name that came from the wrong record can be put right.
+        (None, Some(PlannedRename::AlreadyNamed { .. })) if !passing_over && supply => {
+            Situation::Ask(vec![Answer::Keep, Answer::Supply, Answer::Quit])
+        }
+        // A file passed over, a target taken, a record too sparse to
+        // name a file: no answer would change any of them.
+        (None, _) => Situation::Settle,
+    }
 }
+
+/// What a skip reports.
+///
+/// The reason borax had, where it had one: an operator's skip leaves
+/// the file exactly as a batch run would have left it, and for exactly
+/// that reason. A file that resolved had no reason of its own, and
+/// what was declined is the move that was on offer — so it is
+/// `declined`, and its record still stands and is still cited.
+///
+/// A candidate the operator supplied is nowhere in either answer. It
+/// was never the file's resolution and is not reported as one.
+fn skipped(own: Option<Offer>, held: &Event) -> Settled {
+    match held {
+        Event::Skipped { reason, .. } => Settled::Skip {
+            file: None,
+            reason: reason.clone(),
+        },
+        _ => Settled::Skip {
+            file: own.map(|on| on.file),
+            reason: SkipReason::Declined,
+        },
+    }
+}
+
+/// `offer`'s record as accepting it makes it: the conflict it was
+/// accepted over recorded on the record, in the vocabulary the skip
+/// would have used, and nothing recorded where the record
+/// cleared the check on its own.
+fn accepted(offer: &Offer) -> FileRecord {
+    FileRecord {
+        overrode: match &offer.conflict {
+            Some(SkipReason::Conflict {
+                field,
+                extracted,
+                resolved,
+                similarity,
+            }) => Some(Overridden {
+                field: field.clone(),
+                extracted: extracted.clone(),
+                resolved: resolved.clone(),
+                similarity: *similarity,
+            }),
+            _ => None,
+        },
+        ..offer.file.clone()
+    }
+}
+
+/// The event a question's description renders.
+///
+/// The verdict the run is holding, which is the whole of what it knows
+/// about the file — or, while a candidate is on offer, the `resolved`
+/// event that candidate would produce were the operator to accept it,
+/// conflict and all. A candidate has no verdict of its own, and what
+/// the operator is shown before deciding is what the stream carries
+/// after.
+fn described(path: &Path, offer: Option<&Offer>, candidate: bool, held: &Event) -> Event {
+    match offer {
+        Some(offer) if candidate => resolved_event(path, &accepted(offer)),
+        _ => held.clone(),
+    }
+}
+
+/// The move `proposal` puts on offer, as a description shows it, and
+/// `None` where there is no move to make: a question about a file
+/// staying where it is shows no new name.
+fn proposed_move(proposal: Option<&Proposed>) -> Option<Proposal> {
+    match proposal {
+        Some(Proposed {
+            decision: PlannedRename::Rename { path, target },
+            rendered,
+        }) => Some(Proposal {
+            target: beside(target, path),
+            rendered: rendered.as_deref().map(|rendered| beside(rendered, path)),
+        }),
+        _ => None,
+    }
+}
+
+/// What became of a candidate whose record leads somewhere other than
+/// a move, as the question put again reports it.
+fn elsewhere(offer: Option<&Offer>, decision: Option<&PlannedRename>, width: usize) -> Vec<String> {
+    let identifier = offer
+        .and_then(|offer| offer.file.found.as_ref())
+        .map(Identifier::to_string)
+        .unwrap_or_default();
+    // Rendered before the outcome that names it, so that the name
+    // outlives the value borrowing it. Named relative to the file's
+    // own directory, as every other name a question shows is.
+    let taken = match decision {
+        Some(PlannedRename::TargetTaken { path, target }) => beside(target, path),
+        _ => String::new(),
+    };
+    let outcome = match decision {
+        Some(PlannedRename::TargetTaken { .. }) => Candidate::NameTaken { target: &taken },
+        Some(PlannedRename::Unnameable { .. }) => Candidate::Unnameable,
+        _ => Candidate::AlreadyNamed,
+    };
+    describe::reported("supplied", &identifier, &outcome, width)
+}
+
+/// The identifier the operator types when asked for one, parsed.
+///
+/// `None` is their declining to answer — an escape, or an empty line —
+/// which leaves the file exactly as the question found it.
+///
+/// Input that names no identifier is refused where it was typed and
+/// asked for again, without the choice menu being reopened: somebody
+/// who asked to supply an identifier and mistyped it has not changed
+/// their mind. The refusal quotes what was typed and names the forms
+/// that are taken, and nothing reaches any service until something
+/// parses.
+fn supplied_identifier(asker: &mut dyn Asker) -> Option<Identifier> {
+    let mut refused: Option<String> = None;
+    loop {
+        let input = asker.text(&TextPrompt {
+            asking: ASKING.to_string(),
+            refused: refused.take(),
+        })?;
+        if let Some(identifier) = supplied(&input) {
+            return Some(identifier);
+        }
+        refused = Some(format!(
+            "\"{}\" is not a DOI, an arXiv identifier, or a pmid: or isbn: number.",
+            crate::describe::escaped(input.trim())
+        ));
+    }
+}
+
+/// The one line the prompt for an identifier asks with.
+///
+/// It names the forms that are taken rather than asking for "an
+/// identifier": the prefixes are required of a PMID and an ISBN
+/// because a bare run of digits is both, and somebody who is not told
+/// that types the digits.
+const ASKING: &str = "Identifier — a DOI, an arXiv id, or pmid:/isbn: and the number";
 
 /// Where the file at `at` — the group, and the file within it — sits
 /// among all of `groups`' files, counted from one.

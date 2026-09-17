@@ -1,65 +1,4 @@
-# resolution Specification
-
-## Purpose
-TBD - created by archiving change add-core-pipeline. Update Purpose after archive.
-## Requirements
-### Requirement: Sources are queried by identifier type and priority
-Resolution SHALL dispatch on identifier type: DOIs query Crossref first,
-falling back to OpenAlex; arXiv identifiers query the arXiv API first. A
-source failure (network error, HTTP error, record not found) SHALL fall
-through to the next source in priority order; only when all applicable
-sources fail is the file diverted to the skip queue.
-
-#### Scenario: Crossref outage falls back to OpenAlex
-- **WHEN** resolving a DOI while Crossref returns HTTP 503 and OpenAlex
-  holds the record
-- **THEN** resolution succeeds with a record whose provenance names
-  OpenAlex
-
-#### Scenario: Identifier unknown everywhere
-- **WHEN** a syntactically valid DOI is found in no configured source
-- **THEN** the file is diverted to the skip queue with reason
-  "identifier not resolvable" and the batch continues
-
-### Requirement: Responses are cached locally
-Successful source responses SHALL be cached on disk keyed by normalized
-identifier, and resolved records SHALL additionally be indexed by the
-source file's content hash. A cache hit SHALL be used without any network
-request. A bypass flag (`--no-cache`) SHALL force live queries, and a
-cache subcommand SHALL be able to clear the cache.
-
-#### Scenario: Re-run over the same directory is offline
-- **WHEN** a directory is processed a second time with an intact cache
-- **THEN** no network requests are made and results are identical to the
-  first run
-
-#### Scenario: Renamed file, same content
-- **WHEN** a previously resolved file is encountered again under a
-  different name with identical content
-- **THEN** its record is served from the content-hash index without
-  re-extraction or network access
-
-### Requirement: Network use is polite and bounded
-Every request SHALL carry a User-Agent identifying borax and its version
-and, when configured, a contact mailto (Crossref/OpenAlex polite pools).
-Requests SHALL be rate-limited per source, and concurrent resolution
-across files SHALL be bounded by a configurable limit.
-
-Concurrency SHALL NOT change what a run reports: results are ordered by
-their input position, so the event stream of a concurrent run is
-identical to a sequential one's over the same inputs. Rate limiting is
-per service and independent of the number of threads in flight.
-
-#### Scenario: Concurrency does not reorder the stream
-- **WHEN** the same batch is resolved with a concurrency of one and with
-  a concurrency of eight
-- **THEN** both runs emit the same events in the same order
-
-#### Scenario: Polite-pool identification
-- **WHEN** a contact address is set in configuration and a Crossref
-  request is issued
-- **THEN** the request carries the configured mailto and the borax
-  User-Agent
+## MODIFIED Requirements
 
 ### Requirement: Ambiguity is skipped, never guessed
 Resolution SHALL divert files with conflicting or low-confidence results
@@ -136,55 +75,7 @@ requirement describes.
 - **WHEN** the same file is reached by a batch run with `--apply`
 - **THEN** it is skipped with reason "metadata conflict" and not renamed
 
-### Requirement: The run summary reports the skip queue
-Every run SHALL end with a summary listing each skipped file with its
-reason, in both human and JSON output modes.
-
-#### Scenario: Summary after a mixed batch
-- **WHEN** a batch resolves 8 files and skips 2
-- **THEN** the summary lists the 2 skipped files with their reasons, and
-  the JSON stream contains one skip event per skipped file
-
-### Requirement: A resolution reports the evidence it was checked against
-A `resolved` event SHALL carry every title the file claims for itself, each with where it was read — the XMP packet or the document information dictionary — in the order they were read, including claims the conflict check did not count as evidence. A file that was not opened, because the content index answered, SHALL carry no claims.
-
-A `resolved` event SHALL carry the identifier the run looked up,
-alongside the identifiers the record itself holds. The two are not
-always the same — a record resolved from an arXiv identifier may carry
-a DOI, which is what the event reports as the record's — and only the
-former is evidence about the file.
-
-A `resolved` event SHALL name as its source the services that supplied
-the record. When the content index answered, those are the sources the
-record's per-field provenance names other than extraction itself, in a
-fixed order that does not depend on the identifier type: Crossref,
-OpenAlex, arXiv, DataCite, PubMed, then a sidecar. A record whose
-provenance names no such source SHALL report the content index itself.
-Whether the content index answered SHALL continue to be reported
-separately.
-
-#### Scenario: Claims reach the stream
-- **WHEN** a file whose XMP carries a title and whose document
-  information carries a producer's placeholder is resolved
-- **THEN** its `resolved` event carries both titles, marked XMP and
-  document information respectively
-
-#### Scenario: A content-index answer names its service
-- **WHEN** a file is resolved from the content index and its record's
-  provenance attributes its fields to Crossref
-- **THEN** its `resolved` event names Crossref as the source, reports
-  that the content index answered, and carries no claims
-
-#### Scenario: The looked-up identifier is carried
-- **WHEN** a file resolves from an arXiv identifier to a record that
-  also carries a DOI
-- **THEN** its `resolved` event reports the arXiv identifier as the one
-  found, and the record's DOI as the record's
-
-#### Scenario: A record built from two services
-- **WHEN** a record whose provenance names OpenAlex for some fields and
-  Crossref for others is served by the content index
-- **THEN** its `resolved` event names Crossref before OpenAlex
+## ADDED Requirements
 
 ### Requirement: An operator can supply an identifier
 In an interactive rename run, the operator SHALL be able to supply an identifier for a file, and resolution SHALL treat a supplied identifier as it treats an extracted one: parsed and normalised by the same rules, dispatched to the same services in the same priority order, and checked against the titles the file claims.
@@ -254,4 +145,3 @@ write it could not make as a failure of the rename it followed.
   index cannot be written
 - **THEN** the rename stands and is reported as any rename is, and the
   next run over that file asks about it again
-

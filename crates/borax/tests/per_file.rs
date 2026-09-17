@@ -271,6 +271,7 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
 
         tier: Some("embedded-metadata".to_string()),
         cached: false,
+        overrode: None,
     }
 }
 

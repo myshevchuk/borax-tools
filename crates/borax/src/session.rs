@@ -135,11 +135,35 @@ pub struct Question {
 pub enum Answer {
     /// Carry out the move the question named.
     Rename,
+    /// Carry it out although the record's title and the file's own
+    /// disagree. Offered only where they do, never the default, and
+    /// never given by anything but a person.
+    Override,
+    /// Leave the file with the name it has, which is already the name
+    /// its record implies. Offered where there was no move to make.
+    Keep,
+    /// Say what the file is, and decide again from the record that
+    /// identifier resolves to.
+    Supply,
+    /// Try the same lookup again, where what failed was the asking
+    /// rather than the answer.
+    Retry,
     /// Leave the file as it is and go on to the next.
     Skip,
     /// End the run here, leaving this file and every file after it
     /// untouched.
     Quit,
+}
+
+/// A request for text rather than a choice: what is being asked for,
+/// and what to say about the last answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextPrompt {
+    /// What is wanted, as one line.
+    pub asking: String,
+    /// What was wrong with the last attempt, where there was one. Shown
+    /// above the prompt so the operator reads it before typing again.
+    pub refused: Option<String>,
 }
 
 /// Where an interactive run's questions are put and answered.
@@ -155,6 +179,14 @@ pub trait Asker {
     /// answers [`Answer::Quit`], which is the answer that touches
     /// nothing further.
     fn choose(&mut self, question: &Question) -> Answer;
+
+    /// Ask for an identifier, and return what was typed.
+    ///
+    /// `None` is the operator declining to answer — an empty line, or
+    /// an escape — which leaves the file exactly as the question found
+    /// it. What comes back is text and not an identifier: the run
+    /// parses it, and says so again when it is not one.
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String>;
 }
 
 /// One invocation's relationship with its operator: which mode it runs
@@ -237,17 +269,56 @@ pub fn stdin_is_terminal() -> bool {
     io::stdin().is_terminal()
 }
 
-/// One menu entry, as [`inquire`] needs it: an answer and the word the
-/// operator reads for it.
-struct Choice(Answer);
+/// One menu entry, as [`inquire`] needs it: an answer and the words
+/// the operator reads for it.
+struct Choice {
+    answer: Answer,
+    /// The name the file would take, for the one choice that says what
+    /// it will do rather than what it is.
+    target: String,
+}
 
 impl fmt::Display for Choice {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self.0 {
-            Answer::Rename => "Rename",
-            Answer::Skip => "Skip",
-            Answer::Quit => "Quit",
-        })
+        match self.answer {
+            Answer::Rename => formatter.write_str("Rename"),
+            // The one choice that overrides a safety check names the
+            // target it would move the file to, so that the answer
+            // says exactly what it will do and the operator is not
+            // reading it against a description they may have scrolled
+            // past.
+            //
+            // Escaped for the reason the description is: a target is
+            // rendered from a record somebody else wrote, and
+            // `sanitize` replaces only the control characters below
+            // U+0020 — a C1 control such as U+009B survives into a
+            // filename, and this is the label of the one choice that
+            // overrides a check.
+            Answer::Override => {
+                write!(
+                    formatter,
+                    "Rename anyway, to {}",
+                    crate::describe::escaped(&self.target)
+                )
+            }
+            Answer::Keep => formatter.write_str("Keep this name"),
+            Answer::Supply => formatter.write_str("Supply an identifier"),
+            Answer::Retry => formatter.write_str("Try the services again"),
+            Answer::Skip => formatter.write_str("Skip"),
+            Answer::Quit => formatter.write_str("Quit"),
+        }
+    }
+}
+
+/// The name a question's target carries, as its menu names it:
+/// relative to the directory the file sits in, so a template filing it
+/// elsewhere keeps the subdirectory that says where it goes.
+fn target_of(question: &Question) -> String {
+    match question.path.parent() {
+        Some(parent) => crate::paths::route(&question.target, parent)
+            .display()
+            .to_string(),
+        None => question.target.display().to_string(),
     }
 }
 
@@ -286,17 +357,60 @@ impl Asker for TerminalAsker {
             return Answer::Quit;
         }
 
-        let choices: Vec<Choice> = question.choices.iter().copied().map(Choice).collect();
+        let target = target_of(question);
+        let choices: Vec<Choice> = question
+            .choices
+            .iter()
+            .map(|answer| Choice {
+                answer: *answer,
+                target: target.clone(),
+            })
+            .collect();
         // Without a help message, `inquire` offers its own, which
-        // advertises filtering by typing. Three choices do not need
+        // advertises filtering by typing. Four choices do not need
         // filtering, and the offer reads as though an answer could be
         // typed.
-        match inquire::Select::new("Rename this file?", choices)
+        //
+        // The prompt asks what should happen rather than whether to
+        // rename: the questions a run puts are about files it could
+        // not identify as much as about moves it proposes.
+        match inquire::Select::new("What should happen to this file?", choices)
             .with_help_message("↑↓ to move, enter to select")
             .prompt()
         {
-            Ok(choice) => choice.0,
+            Ok(choice) => choice.answer,
             Err(_) => Answer::Quit,
+        }
+    }
+
+    /// Ask for a line of text, and return it with its edges trimmed.
+    ///
+    /// An empty line and an interrupted prompt are both `None`: the
+    /// operator declining to answer leaves the file as the question
+    /// found it, which is what an unanswered question has always
+    /// meant. Esc, Ctrl-C and a terminal that cannot be read at all
+    /// are the interruptions [`inquire`] reports as errors, and they
+    /// are all the same answer here.
+    ///
+    /// What was wrong with the last attempt is written above the
+    /// prompt rather than put in it, as a question's description is
+    /// and for the same reason: a prompt is one line, and the operator
+    /// reads the refusal before typing again.
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
+        if let Some(refused) = &prompt.refused {
+            // A terminal that will not take the refusal is a terminal
+            // the question cannot be put on, so the prompt is
+            // abandoned rather than put unexplained.
+            writeln!(io::stderr(), "{refused}").ok()?;
+        }
+
+        let typed = inquire::Text::new(&prompt.asking)
+            .with_help_message("enter to look it up, esc to go back")
+            .prompt()
+            .ok()?;
+        match typed.trim() {
+            "" => None,
+            trimmed => Some(trimmed.to_string()),
         }
     }
 }

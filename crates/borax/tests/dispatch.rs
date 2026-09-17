@@ -14,12 +14,12 @@ use borax::config::{
     BibLayer, Effective, KeyColumns, Layer, Origin, RenameLayer, TableDeclaration, ValueKindName,
     resolve,
 };
-use borax::event::{Event, Level, SkipReason};
+use borax::event::{Event, Level, Overridden, SkipReason};
 use borax::ledger::{Ledger, Loaded};
 use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError, counts_for};
 use borax::run::{Adapters, Configs, Streams, dispatch, entry_type, events_for, templates};
-use borax::session::{Answer, Asker, Outcome, Question, Session};
+use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -62,6 +62,11 @@ impl FakePdf {
 
     fn with_pages(mut self, pages: Vec<Result<String, ExtractionError>>) -> FakePdf {
         self.pages = pages;
+        self
+    }
+
+    fn with_title(mut self, title: impl Into<String>) -> FakePdf {
+        self.info.title = Some(title.into());
         self
     }
 }
@@ -260,6 +265,24 @@ impl FakeFilesystem {
     fn renames(&self) -> Vec<(PathBuf, PathBuf)> {
         self.renames.borrow().clone()
     }
+
+    /// Populate `directory` with `names`, each paired with the content
+    /// hash known for it (`None` when unknown), following the shape of
+    /// the one in `renaming.rs`.
+    fn with_existing(
+        mut self,
+        directory: impl Into<PathBuf>,
+        names: impl IntoIterator<Item = (&'static str, Option<&'static str>)>,
+    ) -> FakeFilesystem {
+        self.existing.insert(
+            directory.into(),
+            names
+                .into_iter()
+                .map(|(name, hash)| (name.to_string(), hash.map(str::to_string)))
+                .collect(),
+        );
+        self
+    }
 }
 
 impl Filesystem for FakeFilesystem {
@@ -399,6 +422,7 @@ fn resolved_event(
 
         tier: tier.map(str::to_string),
         cached,
+        overrode: None,
     }
 }
 
@@ -2610,26 +2634,49 @@ fn the_target_pattern_names_every_journal_shape_from_one_template() {
 // fail against once the driver exists.
 // ---------------------------------------------------------------------
 
-/// A scripted [`Asker`]: answers a fixed list in order, records every
-/// [`Question`] it was asked, and panics with a clear message if asked
-/// for more answers than it was given — so a driver that asks about a
-/// file it should not have asked about fails loudly rather than
-/// silently consuming the wrong answer.
+/// A scripted [`Asker`]: answers a fixed list of choices and a fixed
+/// list of text answers, each in order, records every [`Question`] and
+/// [`TextPrompt`] it was asked, and panics with a clear message if asked
+/// for more of either than it was given — so a driver that asks about a
+/// file it should not have asked about, or that asks for text nobody
+/// scripted, fails loudly rather than silently consuming the wrong
+/// answer.
+///
+/// `texts` is empty by default ([`ScriptedAsker::new`]); a test that
+/// never expects a text prompt gets the same loud failure the old,
+/// choices-only double gave, and a test that supplies a `supply`
+/// answer scripts what comes back from it with
+/// [`ScriptedAsker::with_texts`].
 struct ScriptedAsker {
     answers: std::vec::IntoIter<Answer>,
+    texts: std::vec::IntoIter<Option<String>>,
     asked: RefCell<Vec<Question>>,
+    texts_asked: RefCell<Vec<TextPrompt>>,
 }
 
 impl ScriptedAsker {
     fn new(answers: Vec<Answer>) -> ScriptedAsker {
         ScriptedAsker {
             answers: answers.into_iter(),
+            texts: Vec::new().into_iter(),
             asked: RefCell::new(Vec::new()),
+            texts_asked: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Script what [`Asker::text`] returns, in order: `Some(input)` for
+    /// a line the operator typed, `None` for Esc or an empty line.
+    fn with_texts(mut self, texts: Vec<Option<String>>) -> ScriptedAsker {
+        self.texts = texts.into_iter();
+        self
     }
 
     fn questions_asked(&self) -> Vec<Question> {
         self.asked.borrow().clone()
+    }
+
+    fn texts_asked(&self) -> Vec<TextPrompt> {
+        self.texts_asked.borrow().clone()
     }
 }
 
@@ -2641,6 +2688,17 @@ impl Asker for ScriptedAsker {
                 "asked more questions than were scripted; question was {question:?}, \
                  already asked {:?}",
                 self.asked.borrow()
+            )
+        })
+    }
+
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
+        self.texts_asked.borrow_mut().push(prompt.clone());
+        self.texts.next().unwrap_or_else(|| {
+            panic!(
+                "asked for more text than was scripted; prompt was {prompt:?}, \
+                 already asked {:?}",
+                self.texts_asked.borrow()
             )
         })
     }
@@ -2658,6 +2716,14 @@ impl FakeLedger {
     fn empty() -> FakeLedger {
         FakeLedger {
             index: Index::build(&[]),
+            appended: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A ledger that has already admitted `entry`.
+    fn holding(entry: Entry) -> FakeLedger {
+        FakeLedger {
+            index: Index::build(std::slice::from_ref(&entry)),
             appended: RefCell::new(Vec::new()),
         }
     }
@@ -3450,8 +3516,16 @@ fn an_interactive_run_with_skip_named_renders_nothing_for_already_named_files() 
 }
 
 /// The setting's other half: `--no-skip-named` shows an already-named
-/// file exactly as a batch run does, while still asking nothing about
-/// it — there is nothing to decide about it either way.
+/// file exactly as a batch run does.
+///
+/// It is now also asked about — `supply-identifiers-interactively`
+/// amended the requirement this test was written against, because a
+/// file named from the wrong record is exactly what `--no-skip-named`
+/// is for and the operator had no way to say so. The keep/supply
+/// question it gets is pinned by
+/// [`an_already_named_file_under_no_skip_named_offers_to_keep_or_supply`];
+/// what this test still holds is that the batch rendering is
+/// unchanged.
 #[test]
 fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_does() {
     let smith = PathBuf::from("/lib/Smith2024.pdf");
@@ -3494,7 +3568,9 @@ fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_do
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
-    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+    // The already-named file is asked first and kept; the other is
+    // renamed.
+    let mut asker = ScriptedAsker::new(vec![Answer::Keep, Answer::Rename]);
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut streams = Streams {
@@ -3523,11 +3599,17 @@ fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_do
         text.contains("Smith2024.pdf: already named"),
         "with the setting off, an already-named file's outcome line must show: {text}"
     );
+    let questions = asker.questions_asked();
     assert_eq!(
-        asker.questions_asked().len(),
-        1,
-        "an already-named file is never asked about, setting or no: {:?}",
-        asker.questions_asked()
+        questions.len(),
+        2,
+        "with the setting off, both files are asked about: {questions:?}"
+    );
+    assert_eq!(questions[0].path, smith, "got {questions:?}");
+    assert_eq!(
+        questions[0].choices.first().copied(),
+        Some(Answer::Keep),
+        "keeping it is what Enter does: {questions:?}"
     );
 }
 
@@ -3638,6 +3720,7 @@ struct ObservingAsker {
     buffer: Rc<RefCell<Vec<u8>>>,
     answers: std::vec::IntoIter<Answer>,
     seen_at_first_question: RefCell<Option<String>>,
+    first_question: RefCell<Option<Question>>,
 }
 
 impl ObservingAsker {
@@ -3646,7 +3729,15 @@ impl ObservingAsker {
             buffer,
             answers: answers.into_iter(),
             seen_at_first_question: RefCell::new(None),
+            first_question: RefCell::new(None),
         }
+    }
+
+    fn first_question(&self) -> Question {
+        self.first_question
+            .borrow()
+            .clone()
+            .expect("must have been asked at least once")
     }
 
     fn seen_at_first_question(&self) -> String {
@@ -3662,10 +3753,17 @@ impl Asker for ObservingAsker {
         if self.seen_at_first_question.borrow().is_none() {
             let snapshot = String::from_utf8(self.buffer.borrow().clone()).unwrap();
             *self.seen_at_first_question.borrow_mut() = Some(snapshot);
+            *self.first_question.borrow_mut() = Some(question.clone());
         }
         self.answers.next().unwrap_or_else(|| {
             panic!("asked more questions than were scripted; question was {question:?}")
         })
+    }
+
+    /// This change puts no text prompt; a double that is asked for one
+    /// fails the test rather than inventing an answer.
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
+        panic!("asked for text, which no question here puts: {prompt:?}")
     }
 }
 
@@ -3732,10 +3830,21 @@ fn the_hold_ends_before_the_question_and_never_leaks_a_passed_over_files_lines()
     );
 
     let seen = asker.seen_at_first_question();
+    // The hold now lasts until the file's fate is settled, which is
+    // later than this change's predecessor allowed: a file the operator
+    // re-identifies must not have had its first record reported
+    // already. What reaches the operator before they decide is the
+    // question's description, which is not the stream — so that is
+    // where the file's own resolution has to be legible.
+    let asked = asker.first_question();
+    assert_eq!(asked.path, original, "got {asked:?}");
     assert!(
-        seen.contains("original.pdf: resolved"),
-        "the hold must have ended for the file's own resolution line before it is asked \
-         about: {seen}"
+        asked
+            .description
+            .iter()
+            .any(|line| line.contains("original.pdf")),
+        "the file's own resolution must be in front of the operator before \
+         they are asked about it: {asked:?}"
     );
     assert!(
         !seen.contains("Smith2024.pdf"),
@@ -4221,4 +4330,1892 @@ fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
          \"via cache\": got {text:?}"
     );
     assert!(!text.contains("via cache (cached)"), "got {text:?}");
+}
+
+// ---------------------------------------------------------------------
+// interactive rename: supplied identifiers (design D1/D2/D2a/D3/D5/D7,
+// tasks 3.2, 3.2a, 3.3, 3.4, 3.5, 4.1, 4.2)
+//
+// `decided` currently ends with
+// `Answer::Override | Answer::Keep | Answer::Supply | Answer::Retry => todo!(...)`,
+// so every test below that scripts one of those answers fails on that
+// panic today. Tests that never reach that arm (an ordinary rename or
+// skip) instead fail on their own assertion, most often because a menu
+// does not yet offer `Supply` at all — pinning what the finished driver
+// owes before the `Supply` loop exists to prove it.
+// ---------------------------------------------------------------------
+
+/// [`record_by`], with `title` set — the shape a conflict check needs.
+fn record_by_with_title(family: &str, year: i32, doi_value: &str, title: &str) -> Record {
+    Record {
+        title: Some(title.to_string()),
+        ..record_by(family, year, doi_value)
+    }
+}
+
+/// `question.choices` names exactly `default` followed by `rest`, in any
+/// order within `rest`: the first choice is the default an unadorned
+/// Enter would take, and every situation offers a fixed set with no
+/// choice that does not belong.
+fn assert_choices(question: &Question, default: Answer, rest: &[Answer]) {
+    assert_eq!(
+        question.choices.first().copied(),
+        Some(default),
+        "the first choice is the default and must be {default:?}: got {:?}",
+        question.choices
+    );
+    assert_eq!(
+        question.choices.len(),
+        rest.len() + 1,
+        "got {:?}",
+        question.choices
+    );
+    for answer in rest {
+        assert!(
+            question.choices.contains(answer),
+            "expected {answer:?} among the choices, got {:?}",
+            question.choices
+        );
+    }
+}
+
+/// A one-file [`Adapters`] rig shared by the tests below: a single PDF
+/// at `/lib/paper.pdf`, an empty content index, no ledger, no
+/// collection. `library` and `sources` are supplied by the caller since
+/// every test needs its own identifiers.
+struct SupplyFixture {
+    path: PathBuf,
+    library: FakeLibrary,
+    index: ContentIndex<MemoryCache>,
+    filesystem: FakeFilesystem,
+    bib_files: FakeBibFiles,
+}
+
+impl SupplyFixture {
+    fn new(library: FakeLibrary) -> SupplyFixture {
+        SupplyFixture {
+            path: PathBuf::from("/lib/paper.pdf"),
+            library,
+            index: ContentIndex::new(MemoryCache::new()),
+            filesystem: FakeFilesystem::new(),
+            bib_files: FakeBibFiles::new(),
+        }
+    }
+
+    fn adapters<'a>(&'a self, sources: &'a [&'a dyn Source]) -> Adapters<'a, MemoryCache> {
+        Adapters {
+            library: &self.library,
+            sources,
+            index: &self.index,
+            filesystem: &self.filesystem,
+            bib_files: &self.bib_files,
+            cache_root: None,
+            now: fixed_now,
+            ledger: None,
+            collection_root: None,
+            state_root: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// D1, first table: which files get which question
+// ---------------------------------------------------------------------
+
+/// "resolves, proposal is a move": rename · supply a different
+/// identifier · skip · quit, defaulting to rename.
+#[test]
+fn a_resolved_move_offers_supplying_a_different_identifier_alongside_rename() {
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("d1-resolved-move"),
+        pdf_with_embedded_doi("10.1000/d1-resolved-move"),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d1-resolved-move",
+        record_by("Smith", 2024, "10.1000/d1-resolved-move"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_choices(
+        &questions[0],
+        Answer::Rename,
+        &[Answer::Supply, Answer::Skip, Answer::Quit],
+    );
+}
+
+/// "no identifier found": supply an identifier · skip · quit.
+#[test]
+fn a_file_with_no_identifier_offers_to_supply_one() {
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("d1-no-identifier"),
+        pdf_with_no_identifier(),
+    ));
+    let sources: Vec<&dyn Source> = Vec::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_choices(&questions[0], Answer::Supply, &[Answer::Skip, Answer::Quit]);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::NoIdentifier,
+            } if *path == fixture.path
+        )),
+        "a plain skip leaves the reason a batch run would have given: got {events:?}"
+    );
+}
+
+/// "identifier found, no service holds it", the conclusive case: every
+/// source answered `NotFound`, so nothing offers a retry.
+#[test]
+fn an_identifier_no_service_holds_offers_no_retry_when_the_answer_is_conclusive() {
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("d1-conclusive-unresolvable"),
+        pdf_with_embedded_doi("10.1000/d1-conclusive-unresolvable"),
+    ));
+    let crossref = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_choices(&questions[0], Answer::Supply, &[Answer::Skip, Answer::Quit]);
+    assert!(
+        !questions[0].choices.contains(&Answer::Retry),
+        "a conclusive miss must not offer a retry: got {:?}",
+        questions[0].choices
+    );
+}
+
+/// The same row, inconclusive this time: a source that could not be
+/// reached offers a retry, first.
+#[test]
+fn an_unreachable_service_offers_a_retry_before_supplying_an_identifier() {
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("d1-inconclusive-unresolvable"),
+        pdf_with_embedded_doi("10.1000/d1-inconclusive-unresolvable"),
+    ));
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Err(SourceError::Unavailable {
+            message: "503".to_string(),
+        }),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_eq!(
+        questions[0].choices.first().copied(),
+        Some(Answer::Retry),
+        "an inconclusive miss offers a retry first: got {:?}",
+        questions[0].choices
+    );
+    assert!(
+        questions[0].choices.contains(&Answer::Supply),
+        "got {:?}",
+        questions[0].choices
+    );
+}
+
+/// "conflict, proposal is a move": rename anyway (never the default) ·
+/// supply a different identifier · skip · quit.
+#[test]
+fn a_conflict_with_a_free_target_offers_overriding_but_never_defaults_to_it() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("d1-conflict-move"),
+        pdf_with_embedded_doi("10.1000/d1-conflict-move")
+            .with_title("Old Title Extracted from the PDF"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d1-conflict-move",
+        record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/d1-conflict-move",
+            "A Completely Different Title About Something Else",
+        ),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_choices(
+        &questions[0],
+        Answer::Skip,
+        &[Answer::Override, Answer::Supply, Answer::Quit],
+    );
+}
+
+/// "conflict, proposal is not a move": no override is offered, and a
+/// plain skip is reported with the reason a batch run would have given
+/// — the conflict, not `declined`.
+#[test]
+fn a_conflict_whose_target_is_not_free_offers_no_override() {
+    // The file already sits at the name its (conflicting) record would
+    // render, so the proposal computed from it is not a move.
+    let path = PathBuf::from("/lib/Smith2024.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("d1-conflict-not-move"),
+        pdf_with_embedded_doi("10.1000/d1-conflict-not-move")
+            .with_title("Old Title Extracted from the PDF"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d1-conflict-not-move",
+        record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/d1-conflict-not-move",
+            "A Completely Different Title About Something Else",
+        ),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_choices(&questions[0], Answer::Skip, &[Answer::Supply, Answer::Quit]);
+    assert!(
+        !questions[0].choices.contains(&Answer::Override),
+        "nothing to override when the proposal is not a move: got {:?}",
+        questions[0].choices
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: skipped_path,
+                reason: SkipReason::Conflict { .. },
+            } if *skipped_path == path
+        )),
+        "a batch run reports every conflict this way, whether or not it \
+         would have been a move: got {events:?}"
+    );
+}
+
+/// "unreadable or encrypted, hash known": supply an identifier · skip ·
+/// quit.
+#[test]
+fn an_unreadable_file_with_a_known_hash_offers_to_supply_an_identifier() {
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_open_error(
+        "/lib/paper.pdf",
+        hash_for("d1-unreadable"),
+        ExtractionError::Encrypted,
+    ));
+    let sources: Vec<&dyn Source> = Vec::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_choices(&questions[0], Answer::Supply, &[Answer::Skip, Answer::Quit]);
+}
+
+/// "already named, `--no-skip-named`": keep · supply a different
+/// identifier · quit, defaulting to keep, and keeping emits
+/// `already-named` exactly as a batch run's outcome would.
+#[test]
+fn an_already_named_file_under_no_skip_named_offers_to_keep_or_supply() {
+    let path = PathBuf::from("/lib/Smith2024.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("d1-already-named"),
+        pdf_with_embedded_doi("10.1000/d1-already-named"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d1-already-named",
+        record_by("Smith", 2024, "10.1000/d1-already-named"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_skipping_named("[auth][year]", false);
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Keep]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_choices(&questions[0], Answer::Keep, &[Answer::Supply, Answer::Quit]);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::AlreadyNamed { path: named } if *named == path)),
+        "keeping an already-named file must emit already-named: got {events:?}"
+    );
+    assert!(
+        filesystem.renames().is_empty(),
+        "keeping must move nothing: got {:?}",
+        filesystem.renames()
+    );
+}
+
+// ---------------------------------------------------------------------
+// D1, second table: where a supplied identifier leads
+// ---------------------------------------------------------------------
+
+/// A supplied identifier nothing holds leaves the file's original record
+/// still on offer: the operator may accept it, supply another, or skip.
+#[test]
+fn a_supplied_identifier_that_does_not_resolve_leaves_the_original_record_on_offer() {
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("d1-transition-unresolvable"),
+        pdf_with_embedded_doi("10.1000/original-still-good"),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/original-still-good",
+        record_by("Smith", 2024, "10.1000/original-still-good"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.9999/nothing-holds-this".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        2,
+        "the menu is put again after the failed supply: got {questions:?}"
+    );
+    assert_eq!(
+        questions[1].target, questions[0].target,
+        "the file's original proposal is what is offered again: got {questions:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path, target, .. }
+                if *path == fixture.path && target == &PathBuf::from("/lib/Smith2024.pdf")
+        )),
+        "the original record is what ends up renamed: got {events:?}"
+    );
+}
+
+/// Escaping the text prompt leaves the question exactly as it was.
+#[test]
+fn abandoning_the_supply_prompt_changes_nothing() {
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("d1-transition-abandoned"),
+        pdf_with_embedded_doi("10.1000/abandoned-supply"),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/abandoned-supply",
+        record_by("Smith", 2024, "10.1000/abandoned-supply"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip]).with_texts(vec![None]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert_eq!(
+        questions[1], questions[0],
+        "an abandoned input must leave the question exactly as it was: got {questions:?}"
+    );
+}
+
+/// Input that names no identifier is refused in place, without ever
+/// reaching a service, and the operator is asked again.
+#[test]
+fn refused_input_is_asked_again_rather_than_reopening_the_menu() {
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("d1-transition-refused"),
+        pdf_with_embedded_doi("10.1000/refused-input"),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/refused-input",
+        record_by("Smith", 2024, "10.1000/refused-input"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("see email from Anna".to_string()), None]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert_eq!(
+        asker.texts_asked().len(),
+        2,
+        "unparseable input is asked again, not folded back into the choice \
+         menu: got {:?}",
+        asker.texts_asked()
+    );
+    assert!(
+        asker.texts_asked()[1].refused.is_some(),
+        "the second prompt must say what was wrong with the first: got {:?}",
+        asker.texts_asked()
+    );
+    // Two, not one: the menu that offered `Supply`, and the menu the
+    // Esc returned to — which is what consumes the scripted `Skip` and
+    // gives the file a fate. What "does not reopen the menu" forbids is
+    // a third, between the two text prompts; an implementation that put
+    // one would run out of scripted answers here.
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        2,
+        "refused input must not reopen the choice menu: got {questions:?}"
+    );
+    assert_eq!(
+        questions[1], questions[0],
+        "an abandoned input leaves the question exactly as it was: got {questions:?}"
+    );
+}
+
+/// design "A reference's DOI caught": supplying the file's own DOI over
+/// a proposal built from a citation's DOI produces a fresh proposal, and
+/// the first name proposed is never claimed.
+#[test]
+fn supplying_a_different_identifier_produces_a_fresh_proposal_leaving_the_first_name_unclaimed() {
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("d1-reference-doi"),
+        pdf_with_embedded_doi("10.1000/reference-doi"),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/reference-doi",
+            record_by("Wrong", 2020, "10.1000/reference-doi"),
+        )
+        .answering(
+            "doi:10.1000/the-files-own-doi",
+            record_by("Right", 2021, "10.1000/the-files-own-doi"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/the-files-own-doi".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { target, .. } if target == &PathBuf::from("/lib/Right2021.pdf")
+        )),
+        "got {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { target, .. } | Event::Planned { target, .. }
+                if target == &PathBuf::from("/lib/Wrong2020.pdf")
+        )),
+        "the first proposal's name must never be claimed: got {events:?}"
+    );
+}
+
+/// design "Re-identifying a named file": with `--no-skip-named`, an
+/// already-named file whose record was wrong can be supplied a better
+/// identifier and renamed under it.
+#[test]
+fn no_skip_named_supplying_and_renaming_re_identifies_a_wrongly_named_file() {
+    let path = PathBuf::from("/lib/Wrong2020.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("d1-reidentify"),
+        pdf_with_embedded_doi("10.1000/reidentify-wrong"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/reidentify-wrong",
+            record_by("Wrong", 2020, "10.1000/reidentify-wrong"),
+        )
+        .answering(
+            "doi:10.1000/reidentify-right",
+            record_by("Right", 2021, "10.1000/reidentify-right"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_skipping_named("[auth][year]", false);
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/reidentify-right".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert_choices(&questions[0], Answer::Keep, &[Answer::Supply, Answer::Quit]);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path: renamed, target, .. }
+                if *renamed == path && target == &PathBuf::from("/lib/Right2021.pdf")
+        )),
+        "got {events:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// D5: a file's verdict follows the operator's decision
+// ---------------------------------------------------------------------
+
+/// A conflict overridden by a fresh supplied identifier is reported
+/// once: one `resolved` (tier `supplied`), one `renamed`, and no
+/// `skipped` for the same file.
+#[test]
+fn a_file_settled_by_a_supplied_identifier_is_reported_once() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("d5-one-report"),
+        pdf_with_embedded_doi("10.1000/d5-original").with_title("Old Title Extracted from the PDF"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/d5-original",
+            record_by_with_title(
+                "Smith",
+                2024,
+                "10.1000/d5-original",
+                "A Completely Different Title About Something Else",
+            ),
+        )
+        .answering(
+            "doi:10.1000/d5-supplied",
+            record_by("Doe", 2023, "10.1000/d5-supplied"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/d5-supplied".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let resolved: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+        .collect();
+    let renamed: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Renamed { path: p, .. } if *p == path))
+        .collect();
+    let skipped: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
+        .collect();
+
+    assert_eq!(resolved.len(), 1, "got {events:?}");
+    assert_eq!(renamed.len(), 1, "got {events:?}");
+    assert!(skipped.is_empty(), "got {events:?}");
+    match resolved[0] {
+        Event::Resolved { tier, .. } => {
+            assert_eq!(
+                tier.as_deref(),
+                Some("supplied"),
+                "the tier reported must say the identifier was supplied: got {resolved:?}"
+            );
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// D7: an operator's answer is remembered in the content index, on
+// rename only
+// ---------------------------------------------------------------------
+
+/// A rename made from a supplied identifier writes its record to the
+/// content index under the file's hash, so a later run can resolve it
+/// from there without asking again.
+#[test]
+fn a_rename_from_a_supplied_identifier_is_written_to_the_content_index() {
+    let hash = hash_for("d7-write-on-rename");
+    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+        "/lib/paper.pdf",
+        hash.clone(),
+        pdf_with_no_identifier(),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d7-write-on-rename",
+        record_by("Smith", 2024, "10.1000/d7-write-on-rename"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/d7-write-on-rename".to_string())]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fixture.index.get(&hash),
+        Some(record_by("Smith", 2024, "10.1000/d7-write-on-rename")),
+        "the accepted record must be written under the file's hash"
+    );
+}
+
+/// An identifier supplied and then abandoned by skipping is never
+/// written to the content index, and a record the file already carried
+/// there is left untouched.
+#[test]
+fn skipping_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
+    let hash = hash_for("d7-abandoned-not-written");
+    // The library would fail loudly if opened: an already-indexed file
+    // is answered from the index and never touches the file at all,
+    // which is what this test needs to hold while the operator's
+    // candidate is abandoned.
+    let library = FakeLibrary::new().with_open_error(
+        "/lib/paper.pdf",
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let fixture = SupplyFixture::new(library);
+    let already_held = record_by("Roe", 2019, "10.1000/d7-already-held");
+    fixture.index.put(&hash, &already_held);
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d7-wrong-candidate",
+        record_by("Doe", 2023, "10.1000/d7-wrong-candidate"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/d7-wrong-candidate".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Declined,
+            } if *path == fixture.path
+        )),
+        "a move that was on offer and then abandoned is declined: got {events:?}"
+    );
+    assert_eq!(
+        fixture.index.get(&hash),
+        Some(already_held),
+        "the record the file already carried must be left exactly as it was"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Second red pass: overrode, the three "resolves, not a move" supply
+// transitions, the remaining 4.2 abandonment cases, citation (4.2a) and
+// a failing content-index write (4.2b)
+// ---------------------------------------------------------------------
+
+/// design D5/D6, task 3.6: accepting a conflict reports what was
+/// overridden on the record's own `resolved` event, in the vocabulary
+/// the skip would have used, followed by its `renamed` — never a
+/// `skipped` for the file.
+#[test]
+fn overriding_a_conflict_reports_what_was_overridden_and_renames() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("overrode-reports"),
+        pdf_with_embedded_doi("10.1000/overrode-reports")
+            .with_title("Old Title Extracted from the PDF"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/overrode-reports",
+        record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/overrode-reports",
+            "A Completely Different Title About Something Else",
+        ),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Override]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let resolved: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+        .collect();
+    let renamed: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Renamed { path: p, .. } if *p == path))
+        .collect();
+    let skipped: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
+        .collect();
+
+    assert_eq!(resolved.len(), 1, "got {events:?}");
+    assert_eq!(renamed.len(), 1, "got {events:?}");
+    assert!(skipped.is_empty(), "got {events:?}");
+    match resolved[0] {
+        Event::Resolved { overrode, .. } => {
+            assert_eq!(
+                *overrode,
+                Some(Overridden {
+                    field: "title".to_string(),
+                    extracted: "Old Title Extracted from the PDF".to_string(),
+                    resolved: "A Completely Different Title About Something Else".to_string(),
+                    similarity: 0.2,
+                }),
+                "must carry the same field, values and similarity the skip would have: \
+                 got {resolved:?}"
+            );
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+/// A conflict the operator could have overridden but chose instead to
+/// skip is abandoned exactly as any other candidate: nothing is written
+/// to the content index for it.
+#[test]
+fn skipping_a_conflict_that_could_have_been_overridden_writes_nothing() {
+    let path = PathBuf::from("/lib/original.pdf");
+    let hash = hash_for("d7-override-declined");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/d7-override-declined")
+            .with_title("Old Title Extracted from the PDF"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d7-override-declined",
+        record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/d7-override-declined",
+            "A Completely Different Title About Something Else",
+        ),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    // The free target means `Override` is on the menu; the operator
+    // declines it.
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    // Proves the scenario actually put the conflict question with
+    // `Override` on it, rather than this test passing vacuously because
+    // today's driver skips a conflicting file before ever asking
+    // anything.
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        1,
+        "the conflict must be asked about, with Override among its choices: got {questions:?}"
+    );
+    assert!(
+        questions[0].choices.contains(&Answer::Override),
+        "got {questions:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: p,
+                reason: SkipReason::Conflict { .. },
+            } if *p == path
+        )),
+        "got {events:?}"
+    );
+    assert_eq!(
+        index.get(&hash),
+        None,
+        "a conflict the operator declined to override must not be remembered"
+    );
+}
+
+// ---------------------------------------------------------------------
+// D1's second table: the three "resolves, proposal is not a move"
+// outcomes a supplied identifier can lead to
+// ---------------------------------------------------------------------
+
+/// A supplied identifier that resolves into a taken target reports that
+/// outcome and puts the file's own menu again, unchanged: the situation
+/// the operator is asked about is the one their file was already in,
+/// not a new one built from the failed candidate.
+#[test]
+fn a_supplied_identifier_resolving_into_a_taken_target_reports_and_reasks() {
+    const CANDIDATE: &str = "10.1000/would-collide";
+    const OUTCOME: &str = "name taken";
+
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("d1-transition-target-taken"),
+        pdf_with_no_identifier(),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/would-collide",
+        record_by("Doe", 2023, "10.1000/would-collide"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    // "Doe2023.pdf" — the name the supplied candidate would render — is
+    // already occupied by an unrelated file, and the policy is `skip`
+    // so a collision is a `TargetTaken`, not a suffix.
+    let filesystem =
+        FakeFilesystem::new().with_existing("/lib", [("Doe2023.pdf", Some("unrelated-hash"))]);
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.rename = Some(RenameLayer {
+            collision: Some("skip".to_string()),
+            batch: None,
+            skip_named: None,
+        });
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/would-collide".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        2,
+        "the file's menu is put again: got {questions:?}"
+    );
+    assert_eq!(
+        questions[1].choices, questions[0].choices,
+        "the situation the operator is asked about is unchanged: got {questions:?}"
+    );
+    assert_eq!(questions[1].path, questions[0].path, "got {questions:?}");
+    // The candidate's outcome is reported in the re-put question's
+    // description, which is the only channel left for it: design D5
+    // keeps an abandoned candidate out of the event stream entirely.
+    // Asserting only that the description changed would pass on any
+    // change at all, so the identifier tried and the outcome's own
+    // label both have to be there.
+    let reported = questions[1].description.join("\n");
+    assert!(
+        reported.contains(CANDIDATE) && reported.contains(OUTCOME),
+        "the re-put question must report {CANDIDATE} and {OUTCOME}: got {reported}"
+    );
+    assert!(
+        !questions[0].description.join("\n").contains(CANDIDATE),
+        "and must not have reported it before it was tried: got {questions:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: p,
+                reason: SkipReason::NoIdentifier,
+            } if *p == path
+        )),
+        "the file's own, undisturbed situation is what a plain skip reports: got {events:?}"
+    );
+    assert_eq!(
+        index.get(&hash_for("d1-transition-target-taken")),
+        None,
+        "a candidate that led to a taken target is never remembered"
+    );
+}
+
+/// A supplied identifier that resolves into a record the template
+/// renders no usable name from reports that outcome and puts the file's
+/// own menu again, unchanged.
+#[test]
+fn a_supplied_identifier_resolving_into_an_unnameable_record_reports_and_reasks() {
+    const CANDIDATE: &str = "10.1000/renders-empty";
+    const OUTCOME: &str = "no name";
+
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("d1-transition-unnameable"),
+        pdf_with_no_identifier(),
+    );
+    // No author and no issued date: `[auth][year]` renders empty.
+    let empty_record = Record {
+        doi: Some(doi("10.1000/renders-empty")),
+        ..Record::new(EntryType::Article)
+    };
+    let crossref =
+        KeyedSource::new(SourceName::Crossref).answering("doi:10.1000/renders-empty", empty_record);
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/renders-empty".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert_eq!(
+        questions[1].choices, questions[0].choices,
+        "got {questions:?}"
+    );
+    assert_eq!(questions[1].path, questions[0].path, "got {questions:?}");
+    // The candidate's outcome is reported in the re-put question's
+    // description, which is the only channel left for it: design D5
+    // keeps an abandoned candidate out of the event stream entirely.
+    // Asserting only that the description changed would pass on any
+    // change at all, so the identifier tried and the outcome's own
+    // label both have to be there.
+    let reported = questions[1].description.join("\n");
+    assert!(
+        reported.contains(CANDIDATE) && reported.contains(OUTCOME),
+        "the re-put question must report {CANDIDATE} and {OUTCOME}: got {reported}"
+    );
+    assert!(
+        !questions[0].description.join("\n").contains(CANDIDATE),
+        "and must not have reported it before it was tried: got {questions:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: p,
+                reason: SkipReason::NoIdentifier,
+            } if *p == path
+        )),
+        "got {events:?}"
+    );
+}
+
+/// A supplied identifier that resolves into a record whose name is the
+/// one the file already carries reports that outcome and puts the
+/// file's own menu again, unchanged.
+#[test]
+fn a_supplied_identifier_resolving_into_the_files_own_current_name_reports_and_reasks() {
+    const CANDIDATE: &str = "10.1000/renders-current-name";
+    const OUTCOME: &str = "same name";
+
+    let path = PathBuf::from("/lib/Smith2024.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("d1-transition-already-named"),
+        pdf_with_no_identifier(),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/renders-current-name",
+        record_by("Smith", 2024, "10.1000/renders-current-name"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/renders-current-name".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert_eq!(
+        questions[1].choices, questions[0].choices,
+        "got {questions:?}"
+    );
+    assert_eq!(questions[1].path, questions[0].path, "got {questions:?}");
+    // The candidate's outcome is reported in the re-put question's
+    // description, which is the only channel left for it: design D5
+    // keeps an abandoned candidate out of the event stream entirely.
+    // Asserting only that the description changed would pass on any
+    // change at all, so the identifier tried and the outcome's own
+    // label both have to be there.
+    let reported = questions[1].description.join("\n");
+    assert!(
+        reported.contains(CANDIDATE) && reported.contains(OUTCOME),
+        "the re-put question must report {CANDIDATE} and {OUTCOME}: got {reported}"
+    );
+    assert!(
+        !questions[0].description.join("\n").contains(CANDIDATE),
+        "and must not have reported it before it was tried: got {questions:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: p,
+                reason: SkipReason::NoIdentifier,
+            } if *p == path
+        )),
+        "got {events:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// task 4.2: the remaining abandonment cases — quitting after a supply,
+// and declining an override
+// ---------------------------------------------------------------------
+
+/// Quitting after a supplied identifier abandons it exactly as skipping
+/// does: nothing is written, and what the file's hash already held in
+/// the content index is untouched.
+#[test]
+fn quitting_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
+    let hash = hash_for("d7-quit-not-written");
+    // The library would fail loudly if opened: an already-indexed file
+    // is answered from the index and never touches the file, which is
+    // what must hold while the candidate is abandoned.
+    let library = FakeLibrary::new().with_open_error(
+        "/lib/paper.pdf",
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let fixture = SupplyFixture::new(library);
+    let already_held = record_by("Roe", 2019, "10.1000/d7-quit-already-held");
+    fixture.index.put(&hash, &already_held);
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d7-quit-candidate",
+        record_by("Doe", 2023, "10.1000/d7-quit-candidate"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Quit])
+        .with_texts(vec![Some("10.1000/d7-quit-candidate".to_string())]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fixture.index.get(&hash),
+        Some(already_held),
+        "the record the file already carried must be left exactly as it was"
+    );
+}
+
+// ---------------------------------------------------------------------
+// task 4.2a: an abandoned candidate is never cited
+// ---------------------------------------------------------------------
+
+/// design D5: "This is a rule the driver has to hold deliberately,
+/// because the batch path cites every file it resolves, including one
+/// whose move was declined." A record the operator supplied and then
+/// skipped produces no sidecar and no master-bibliography entry.
+#[test]
+fn an_abandoned_supplied_candidate_is_never_cited() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library =
+        FakeLibrary::new().with_file(&path, hash_for("cite-abandoned"), pdf_with_no_identifier());
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/cite-abandoned-candidate",
+        record_by("Doe", 2023, "10.1000/cite-abandoned-candidate"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.citation_keys = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.bib = Some(BibLayer {
+            path: Some(PathBuf::from("refs.bib")),
+            duplicates: None,
+            sidecars: Some(true),
+        });
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/cite-abandoned-candidate".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    // Proves the scenario actually reached the supply loop, rather than
+    // this test passing vacuously because today's driver skips a
+    // no-identifier file before ever asking anything.
+    assert_eq!(
+        asker.texts_asked().len(),
+        1,
+        "the operator must actually have been asked for an identifier: got {:?}",
+        asker.texts_asked()
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Sidecar { .. } | Event::BibEntry { .. })),
+        "an abandoned candidate must produce no citation: got {events:?}"
+    );
+    assert!(
+        bib_files.writes().is_empty(),
+        "got {:?}",
+        bib_files.writes()
+    );
+}
+
+/// The other half of the same rule: a file whose own resolution stands
+/// — even after a failed supply along the way — is cited from that
+/// record exactly as a batch run cites it.
+#[test]
+fn a_files_own_resolution_is_still_cited_after_a_failed_supply() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("cite-own-record"),
+        pdf_with_embedded_doi("10.1000/cite-own-record"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/cite-own-record",
+        record_by("Smith", 2024, "10.1000/cite-own-record"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.citation_keys = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.bib = Some(BibLayer {
+            path: Some(PathBuf::from("refs.bib")),
+            duplicates: None,
+            sidecars: Some(true),
+        });
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.9999/does-not-exist".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let renamed_to = PathBuf::from("/lib/Smith2024.pdf");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Sidecar { path: p, .. } if *p == renamed_to
+        )),
+        "got {events:?}"
+    );
+    assert!(
+        bib_files.writes().iter().any(|(written_path, content)| {
+            written_path == &sidecar_path(&renamed_to) && content.contains("Smith2024")
+        }),
+        "the sidecar must cite the file's own record: got {:?}",
+        bib_files.writes()
+    );
+}
+
+// ---------------------------------------------------------------------
+// task 4.2b: a content-index write that fails leaves the rename
+// standing
+// ---------------------------------------------------------------------
+
+/// A [`Cache`] whose every write is silently dropped, modelled on
+/// [`MemoryCache`] but never keeping what it is given — the shape
+/// [`Cache::put`]'s own contract allows ("failures are silent for the
+/// same reason").
+struct WriteFailingCache;
+
+impl borax_sources::cache::Cache for WriteFailingCache {
+    fn get(&self, _key: &str) -> Option<Record> {
+        None
+    }
+
+    fn put(&self, _key: &str, _record: &Record) {}
+}
+
+#[test]
+fn a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_next_time() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let hash = hash_for("d7-write-fails");
+    let library = FakeLibrary::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d7-write-fails",
+        record_by("Smith", 2024, "10.1000/d7-write-fails"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(WriteFailingCache);
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/d7-write-fails".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path: p, .. } if *p == path
+        )),
+        "the rename must stand even though the index write failed: got {events:?}"
+    );
+    assert_eq!(
+        index.get(&hash),
+        None,
+        "the write is not kept — this is the failure being modelled"
+    );
+
+    // The next run over the same file, with the same (still empty)
+    // index, must ask about it again rather than being answered from
+    // it.
+    let mut asker_again = ScriptedAsker::new(vec![Answer::Skip]);
+    let effective_again = effective_with_default_template("[auth][year]");
+    events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_again),
+        &adapters,
+        &mut Session::interactive(&mut asker_again),
+    )
+    .unwrap();
+
+    assert_eq!(
+        asker_again.questions_asked().len(),
+        1,
+        "an unremembered file must be asked about again: got {:?}",
+        asker_again.questions_asked()
+    );
+}
+
+/// The strongest form of the same rule, and the one D1's second table
+/// states outright: a candidate that *resolved* but led nowhere — here
+/// into a taken target — leaves the file's own record untouched, so
+/// renaming afterwards renames and cites from that record and not from
+/// the candidate.
+///
+/// The weaker case, a supply that never resolved, is covered by
+/// [`a_files_own_resolution_is_still_cited_after_a_failed_supply`].
+/// This one is harder for a driver to get right: it held a second,
+/// complete record in hand and has to discard it.
+#[test]
+fn a_resolved_candidate_that_led_nowhere_leaves_the_files_own_record_to_cite() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("resolved-candidate-discarded"),
+        pdf_with_embedded_doi("10.1000/the-files-own"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/the-files-own",
+            record_by("Smith", 2024, "10.1000/the-files-own"),
+        )
+        .answering(
+            "doi:10.1000/would-collide",
+            record_by("Doe", 2023, "10.1000/would-collide"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    // The candidate's name is taken; the file's own name is free.
+    let filesystem =
+        FakeFilesystem::new().with_existing("/lib", [("Doe2023.pdf", Some("unrelated-hash"))]);
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.citation_keys = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.rename = Some(RenameLayer {
+            collision: Some("skip".to_string()),
+            batch: None,
+            skip_named: None,
+        });
+        layer.bib = Some(BibLayer {
+            path: Some(PathBuf::from("refs.bib")),
+            duplicates: None,
+            sidecars: Some(true),
+        });
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/would-collide".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert_eq!(
+        asker.texts_asked().len(),
+        1,
+        "the operator must actually have been asked for an identifier: got {:?}",
+        asker.texts_asked()
+    );
+    let renamed_to = PathBuf::from("/lib/Smith2024.pdf");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path: p, target, .. } if *p == path && *target == renamed_to
+        )),
+        "the file's own record is what renames it: got {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Sidecar { path: p, .. } if *p == renamed_to
+        )),
+        "and what it is cited from: got {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Sidecar { path: p, .. } if p == Path::new("/lib/Doe2023.pdf")
+        )),
+        "the discarded candidate must be cited nowhere: got {events:?}"
+    );
+    assert_eq!(
+        index.get(&hash_for("resolved-candidate-discarded")),
+        Some(record_by("Smith", 2024, "10.1000/the-files-own")),
+        "the file keeps the record its own resolution wrote, not the candidate's"
+    );
+}
+
+/// Quitting an interactive run in human output still prints the run's
+/// summary.
+///
+/// A hold is open while each file's question is answered, and quitting
+/// leaves the per-file loop without a fate for that file. Nothing
+/// after it drains the hold, so before this was fixed every line the
+/// run had left to write — the summary, and any bibliography result —
+/// was buffered and silently dropped. The existing quit test runs in
+/// JSON, where a hold is a no-op, so it passed throughout.
+#[test]
+fn quitting_a_human_interactive_run_still_prints_the_summary() {
+    let first = PathBuf::from("/lib/first.pdf");
+    let second = PathBuf::from("/lib/second.pdf");
+    let library = FakeLibrary::new()
+        .with_file(
+            &first,
+            hash_for("quit-summary-first"),
+            pdf_with_embedded_doi("10.1000/quit-summary-first"),
+        )
+        .with_file(
+            &second,
+            hash_for("quit-summary-second"),
+            pdf_with_embedded_doi("10.1000/quit-summary-second"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/quit-summary-first",
+            record_by("Smith", 2024, "10.1000/quit-summary-first"),
+        )
+        .answering(
+            "doi:10.1000/quit-summary-second",
+            record_by("Doe", 2023, "10.1000/quit-summary-second"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Quit]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::rename(vec![first.clone(), second.clone()], false),
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("2 not reached"),
+        "the summary must reach the terminal after a quit: {text:?}"
+    );
+    assert!(
+        !text.contains("first.pdf: resolved"),
+        "the file the run stopped at was given no fate, so it has no \
+         verdict to report: {text:?}"
+    );
+}
+
+/// A record the operator reached is put to the ledger before it is
+/// admitted, exactly as one the run resolved on its own is.
+///
+/// `resolve_file_checking_ledger` runs the work check on a record it
+/// resolved, but a supplied one never went through it, and neither did
+/// a record the conflict check refused and the operator then accepted.
+/// Admitting a second copy of a work the collection already holds is
+/// the one thing the ledger exists to prevent, and the ledger's verdict
+/// is about the collection rather than about where the identifier came
+/// from.
+#[test]
+fn a_supplied_record_the_collection_already_holds_is_reported_a_duplicate() {
+    let path = PathBuf::from("/collection/incoming.pdf");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("supplied-work-duplicate"),
+        pdf_with_no_identifier(),
+    );
+    let mut held = record_by("Smith", 2024, "10.1000/already-in-the-collection");
+    held.doi = Doi::parse("10.1000/already-in-the-collection").ok();
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering("doi:10.1000/already-in-the-collection", held);
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem =
+        FakeFilesystem::new().with_existing("/collection", [("Smith2024.pdf", Some("other"))]);
+    let bib_files = FakeBibFiles::new();
+    // The collection already holds this work, at a different file.
+    let ledger = FakeLedger::holding(Entry {
+        hash: hash_for("the-copy-already-admitted"),
+        doi: Doi::parse("10.1000/already-in-the-collection").ok(),
+        arxiv: None,
+        pmid: None,
+        isbn: None,
+        path: "Smith2024.pdf".to_string(),
+        entry_type: EntryType::Article,
+        run: RunId::new("run-earlier"),
+        timestamp: "2026-08-19T00:00:00Z".to_string(),
+        tool_version: "0.4.0-test".to_string(),
+    });
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: Some(&ledger),
+        collection_root: Some(PathBuf::from("/collection")),
+        state_root: None,
+    };
+    // Supply the identifier, then accept the move it offers.
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/already-in-the-collection".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: p,
+                reason: SkipReason::Duplicate { .. },
+            } if *p == path
+        )),
+        "the collection's own copy must be reported, not a second one \
+         admitted: got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Renamed { .. })),
+        "nothing may move: got {events:?}"
+    );
+    assert!(
+        ledger.appended().is_empty(),
+        "and nothing may be admitted: got {:?}",
+        ledger.appended()
+    );
 }

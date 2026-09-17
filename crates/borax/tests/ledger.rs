@@ -156,6 +156,7 @@ fn file_record(record: Record, hash: Option<ContentHash>) -> FileRecord {
         tier: None,
         cached: false,
         hash,
+        overrode: None,
     }
 }
 
@@ -1370,6 +1371,7 @@ fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
 
                 tier: Some("embedded-metadata".to_string()),
                 cached: false,
+                overrode: None,
             },
             Event::Planned {
                 path,
@@ -1732,6 +1734,7 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
 
                 tier: Some("embedded-metadata".to_string()),
                 cached: false,
+                overrode: None,
             },
             Event::Renamed {
                 path,

@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use borax::event::{Attempt, Counts, Event, SkipReason};
+use borax::event::{Attempt, Claim, ClaimOrigin, Counts, Event, SkipReason};
 use borax::ledger::Collection;
 use borax::pipeline::{
-    FileOutcome, FileRecord, Library, RealLibrary, ResolveConfig, event_for, resolve_batch,
-    resolve_file, resolve_file_checking_ledger,
+    FileOutcome, FileRecord, Library, Provenance, RealLibrary, ResolveConfig, claims_of, event_for,
+    remember, resolve_batch, resolve_file, resolve_file_checking_ledger, resolve_supplied,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -403,7 +403,10 @@ fn embedded_metadata_identifier_resolves_via_the_first_source_uncached() {
 
     assert_eq!(file_record.record, record_with_doi("10.1000/embedded"));
     assert_eq!(file_record.source, Some(SourceName::Crossref));
-    assert_eq!(file_record.tier, Some(Tier::EmbeddedMetadata));
+    assert_eq!(
+        file_record.tier,
+        Some(Provenance::Extracted(Tier::EmbeddedMetadata))
+    );
     assert!(!file_record.cached);
 }
 
@@ -422,7 +425,10 @@ fn text_layer_identifier_reports_the_text_layer_tier() {
     let outcome = resolve_file(path, &library, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
-    assert_eq!(file_record.tier, Some(Tier::TextLayer));
+    assert_eq!(
+        file_record.tier,
+        Some(Provenance::Extracted(Tier::TextLayer))
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -656,6 +662,8 @@ fn an_identifier_no_source_holds_is_skipped_as_unresolvable_with_attempts_in_pri
     assert_eq!(
         reason,
         SkipReason::Unresolvable {
+            found: "doi:10.1000/nowhere".to_string(),
+            tier: Some("embedded-metadata".to_string()),
             attempts: vec![
                 Attempt {
                     source: "crossref".to_string(),
@@ -838,9 +846,10 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
 
         claims: Vec::new(),
 
-        tier: Some(Tier::EmbeddedMetadata),
+        tier: Some(Provenance::Extracted(Tier::EmbeddedMetadata)),
         cached: false,
         hash: Some(hash_for("paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -858,6 +867,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
 
             tier: Some(tier_str(Tier::EmbeddedMetadata).to_string()),
             cached: false,
+            overrode: None,
         }
     );
 }
@@ -875,6 +885,7 @@ fn a_content_index_hit_reports_its_source_as_cache() {
         tier: None,
         cached: true,
         hash: Some(hash_for("paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1540,9 +1551,10 @@ fn a_resolved_event_carries_the_whole_record() {
 
         claims: Vec::new(),
 
-        tier: Some(Tier::TextLayer),
+        tier: Some(Provenance::Extracted(Tier::TextLayer)),
         cached: false,
         hash: None,
+        overrode: None,
     });
 
     let Event::Resolved {
@@ -1570,9 +1582,10 @@ fn a_resolved_event_round_trips_its_record_through_json() {
 
             claims: Vec::new(),
 
-            tier: Some(Tier::TextLayer),
+            tier: Some(Provenance::Extracted(Tier::TextLayer)),
             cached: false,
             hash: None,
+            overrode: None,
         }),
     );
 
@@ -1951,4 +1964,219 @@ fn a_work_match_at_the_incoming_path_is_not_a_duplicate_after_a_changed_hash() {
         1,
         "resolution still runs once to learn the identifier the work check matches on"
     );
+}
+
+// ---------------------------------------------------------------------
+// claims_of: a file's own titles, read on their own (design D2a, task 2)
+// ---------------------------------------------------------------------
+
+#[test]
+fn claims_of_reads_the_xmp_and_info_titles_of_a_file_never_resolved() {
+    let path = Path::new("paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        path,
+        hash_for("claims-of-no-identifier"),
+        pdf_with_no_identifier()
+            .with_title("The Info Title")
+            .with_xmp("<dc:title><rdf:Alt><rdf:li>The Xmp Title</rdf:li></rdf:Alt></dc:title>"),
+    );
+
+    let claims = claims_of(path, &library);
+
+    assert_eq!(
+        claims,
+        vec![
+            Claim {
+                from: ClaimOrigin::Xmp,
+                title: "The Xmp Title".to_string(),
+            },
+            Claim {
+                from: ClaimOrigin::Info,
+                title: "The Info Title".to_string(),
+            },
+        ]
+    );
+}
+
+/// A file the content index answered for was never opened at all, so a
+/// caller comparing a supplied record against it has to be able to read
+/// its titles independently of whatever the content index said.
+#[test]
+fn claims_of_reads_titles_for_a_file_the_content_index_would_have_answered_for() {
+    let path = Path::new("paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        path,
+        hash_for("claims-of-indexed"),
+        pdf_with_embedded_doi("10.1000/indexed-but-still-readable")
+            .with_title("A Title The Index Never Saw"),
+    );
+
+    let claims = claims_of(path, &library);
+
+    assert_eq!(
+        claims,
+        vec![Claim {
+            from: ClaimOrigin::Info,
+            title: "A Title The Index Never Saw".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn claims_of_is_empty_for_a_file_that_cannot_be_opened() {
+    let path = Path::new("paper.pdf");
+    let library = FakeLibrary::new().with_open_error(
+        path,
+        hash_for("claims-of-unreadable"),
+        ExtractionError::Unreadable {
+            message: "corrupt stream".to_string(),
+        },
+    );
+
+    let claims = claims_of(path, &library);
+
+    assert_eq!(claims, Vec::new());
+}
+
+// ---------------------------------------------------------------------
+// resolve_supplied: resolving an identifier somebody typed (design D2,
+// D2a, D3; task 2.3)
+// ---------------------------------------------------------------------
+
+#[test]
+fn resolve_supplied_reports_a_title_conflict_rather_than_refusing() {
+    let path = Path::new("paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        path,
+        hash_for("resolve-supplied-conflict"),
+        pdf_with_no_identifier().with_title("Old Title Extracted from the PDF"),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/supplied-conflict"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1000/supplied-conflict",
+            "A Completely Different Title About Something Else",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let supplied = resolve_supplied(path, &identifier, &library, &sources).unwrap();
+
+    assert_eq!(
+        supplied.file.record,
+        record_with_doi_and_title(
+            "10.1000/supplied-conflict",
+            "A Completely Different Title About Something Else",
+        ),
+        "a conflicting record is still handed back, not refused"
+    );
+    let Some(SkipReason::Conflict { field, .. }) = supplied.conflict else {
+        panic!(
+            "expected the disagreement reported as a conflict, got {:?}",
+            supplied.conflict
+        );
+    };
+    assert_eq!(field, "title");
+}
+
+#[test]
+fn resolve_supplied_reports_no_conflict_when_the_titles_agree() {
+    let path = Path::new("paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        path,
+        hash_for("resolve-supplied-agrees"),
+        pdf_with_no_identifier().with_title("On the Structure of Borax"),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/supplied-agrees"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/supplied-agrees")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let supplied = resolve_supplied(path, &identifier, &library, &sources).unwrap();
+
+    assert_eq!(supplied.conflict, None);
+}
+
+#[test]
+fn resolve_supplied_returns_the_attempts_when_no_service_holds_the_identifier() {
+    let path = Path::new("paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        path,
+        hash_for("resolve-supplied-unresolvable"),
+        pdf_with_no_identifier(),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/nowhere-supplied"));
+    let (crossref, _calls) = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
+    let (openalex, _calls) = fake_source(SourceName::OpenAlex, Err(SourceError::NotFound));
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+
+    let unresolved = resolve_supplied(path, &identifier, &library, &sources).unwrap_err();
+
+    assert_eq!(
+        unresolved.attempts,
+        vec![
+            (SourceName::Crossref, SourceError::NotFound),
+            (SourceName::OpenAlex, SourceError::NotFound),
+        ]
+    );
+}
+
+/// The doc comment states this explicitly: "nothing is written to the
+/// content index here". `resolve_supplied` is not handed one at all, so
+/// there is no seam through which it could write — this pins the
+/// signature itself as the guarantee, rather than a side effect a future
+/// change could quietly add back.
+#[test]
+fn resolve_supplied_takes_no_content_index_to_write_to() {
+    let path = Path::new("paper.pdf");
+    let library = FakeLibrary::new().with_file(
+        path,
+        hash_for("resolve-supplied-no-index-seam"),
+        pdf_with_no_identifier(),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/no-index-seam"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/no-index-seam")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    // If this line compiles at all, it compiles without an index
+    // argument — the property under test.
+    let supplied = resolve_supplied(path, &identifier, &library, &sources).unwrap();
+
+    assert_eq!(
+        supplied.file.record,
+        record_with_doi("10.1000/no-index-seam")
+    );
+}
+
+// ---------------------------------------------------------------------
+// remember: keeping an operator's accepted record (design D7, task 4.3)
+// ---------------------------------------------------------------------
+
+#[test]
+fn remember_writes_a_record_a_later_resolve_then_answers_with() {
+    let hash = hash_for("remembered-by-hand");
+    let index = ContentIndex::new(MemoryCache::new());
+    let record = record_with_doi("10.1000/remembered-by-hand");
+    assert_eq!(index.get(&hash), None, "nothing written yet");
+
+    remember(&index, Some(&hash), &record);
+
+    assert_eq!(index.get(&hash), Some(record));
+}
+
+/// A hash `resolve_file` never learned — the file could not be hashed —
+/// has nowhere to be written. `remember` is handed `None` rather than
+/// panicking or inventing a place to keep the record.
+#[test]
+fn remember_with_no_hash_does_not_panic() {
+    let index = ContentIndex::new(MemoryCache::new());
+    let record = record_with_doi("10.1000/no-hash-to-remember-under");
+
+    remember(&index, None, &record);
 }

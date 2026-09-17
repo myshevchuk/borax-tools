@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use borax::describe::{DEFAULT_WIDTH, Position, Proposal, describe};
-use borax::event::{Claim, ClaimOrigin, Event};
+use borax::event::{Attempt, Claim, ClaimOrigin, Event, Overridden, SkipReason};
 use borax_core::identifier::{ArxivId, Doi};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
 
@@ -63,6 +63,7 @@ impl Fixture {
             found: self.found.clone(),
             claims: self.claims.clone(),
             tier: self.tier.clone(),
+            overrode: None,
             cached: self.cached,
         }
     }
@@ -124,10 +125,10 @@ fn a_full_journal_article_from_a_text_layer_doi() {
     let lines = describe(
         &fixture.event(),
         "smith2024_raw.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "smith2024_TestingStudy.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -203,10 +204,10 @@ fn a_content_index_answer_is_d1s_worked_example() {
     let lines = describe(
         &fixture.event(),
         "50-Article Text-95-2-10-20240507.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "lyutenko2023_ApplicationsChiralSulfinyl.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 3,
             total: 17,
@@ -265,10 +266,10 @@ fn a_preprint_with_no_container() {
     let lines = describe(
         &fixture.event(),
         "draft.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "preprint2024_PreliminaryReport.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 2,
             total: 5,
@@ -330,10 +331,10 @@ fn five_authors_show_three_names_and_a_count() {
     let lines = describe(
         &fixture.event(),
         "many_authors.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "adams2024_CollaborativeFindings.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -396,10 +397,10 @@ fn a_suffixed_proposal_notes_the_rendered_name_that_was_taken() {
     let lines = describe(
         &fixture.event(),
         "smith2024_raw.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "smith2024a.pdf".to_string(),
             rendered: Some("smith2024.pdf".to_string()),
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -455,10 +456,10 @@ fn a_title_wraps_at_width_60_with_a_hanging_indent_and_nothing_truncated() {
     let lines = describe(
         &fixture.event(),
         "widetitle.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "widetitle_2024.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -532,10 +533,10 @@ fn missing_fields_are_left_out_rather_than_shown_empty() {
     let lines = describe(
         &fixture.event(),
         "sparse.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "sparse_SparseRecord.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -617,10 +618,10 @@ fn a_producers_placeholder_claim_is_shown_not_filtered() {
     let lines = describe(
         &fixture.event(),
         "placeholder.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "author2024_GenuineTitle.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -681,10 +682,10 @@ fn a_cached_answer_names_no_origin_for_its_identifier() {
     let lines = describe(
         &fixture.event(),
         "paper.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "byron2024.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -722,10 +723,10 @@ fn control_characters_in_a_title_are_shown_rather_than_acted_on() {
     let lines = describe(
         &fixture.event(),
         "paper.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "author2024.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -758,10 +759,10 @@ fn a_volume_with_no_container_is_still_reported() {
     let lines = describe(
         &Fixture::new(record, "doi:10.1234/nocontainer.2024").event(),
         "paper.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "author2024.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -789,10 +790,10 @@ fn a_blank_field_is_absent_rather_than_an_empty_label() {
     let lines = describe(
         &Fixture::new(record, "doi:10.1234/blank.2024").event(),
         "paper.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "byron.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -822,10 +823,10 @@ fn a_word_longer_than_the_width_is_broken_rather_than_overrunning() {
     let lines = describe(
         &Fixture::new(record, "doi:10.1234/long.2024").event(),
         "paper.pdf",
-        &Proposal {
+        Some(&Proposal {
             target: "author2024.pdf".to_string(),
             rendered: None,
-        },
+        }),
         Position {
             of_this: 1,
             total: 1,
@@ -841,5 +842,273 @@ fn a_word_longer_than_the_width_is_broken_rather_than_overrunning() {
     assert!(
         overrunning.is_empty(),
         "nothing but an identifier may pass the width: got {overrunning:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Task 3.6a, design D8: the description renders whichever verdict the
+// driver is holding, not only a resolution.
+//
+// These are red until `describe` learns `Event::Skipped`, which it
+// currently falls through to `Vec::new()` for.
+// ---------------------------------------------------------------------
+
+/// A file whose identifier no service holds: the identifier that was
+/// looked up, then what each service answered, one to a line under a
+/// `no record` label that replaces the `record` line.
+#[test]
+fn a_file_no_service_holds_a_record_for_names_what_each_one_said() {
+    let skipped = Event::Skipped {
+        path: PathBuf::from("preprint-v2.pdf"),
+        reason: SkipReason::Unresolvable {
+            found: "arXiv:2401.12345".to_string(),
+            tier: Some("text-layer".to_string()),
+            attempts: vec![
+                Attempt {
+                    source: "crossref".to_string(),
+                    error: "not found".to_string(),
+                },
+                Attempt {
+                    source: "openalex".to_string(),
+                    error: "not found".to_string(),
+                },
+            ],
+        },
+    };
+
+    let lines = describe(
+        &skipped,
+        "preprint-v2.pdf",
+        None,
+        Position {
+            of_this: 4,
+            total: 17,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert_eq!(
+        lines,
+        vec![
+            rule(4, 17, DEFAULT_WIDTH),
+            label_line("file", "preprint-v2.pdf"),
+            label_line("identifier", "arXiv:2401.12345, from the text layer"),
+            label_line("no record", "crossref: not found"),
+            continuation("openalex: not found"),
+        ],
+        "design D8's worked example, and no `new name` line: there is \
+         no proposal to make for a file with no record"
+    );
+}
+
+/// The same file when the services could not be reached rather than
+/// answering: what each said is still what is shown, since that is the
+/// difference the operator is being asked to judge.
+#[test]
+fn an_unreachable_service_is_shown_saying_what_it_said() {
+    let skipped = Event::Skipped {
+        path: PathBuf::from("preprint-v2.pdf"),
+        reason: SkipReason::Unresolvable {
+            found: "arXiv:2401.12345".to_string(),
+            tier: Some("embedded-metadata".to_string()),
+            attempts: vec![Attempt {
+                source: "arxiv".to_string(),
+                error: "timed out".to_string(),
+            }],
+        },
+    };
+
+    let lines = describe(
+        &skipped,
+        "preprint-v2.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert_eq!(
+        lines,
+        vec![
+            rule(1, 1, DEFAULT_WIDTH),
+            label_line("file", "preprint-v2.pdf"),
+            label_line("identifier", "arXiv:2401.12345, from embedded metadata"),
+            label_line("no record", "arxiv: timed out"),
+        ]
+    );
+}
+
+/// A file with no identifier at all has nothing to say beyond which
+/// file it is: the reason names nothing by definition.
+#[test]
+fn a_file_with_no_identifier_describes_only_itself() {
+    let skipped = Event::Skipped {
+        path: PathBuf::from("scanned.pdf"),
+        reason: SkipReason::NoIdentifier,
+    };
+
+    let lines = describe(
+        &skipped,
+        "scanned.pdf",
+        None,
+        Position {
+            of_this: 2,
+            total: 9,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert_eq!(
+        lines,
+        vec![
+            rule(2, 9, DEFAULT_WIDTH),
+            label_line("file", "scanned.pdf"),
+            label_line("identifier", "none found in the file"),
+        ]
+    );
+}
+
+/// A conflict being asked about: both titles are already on the
+/// layout, as the record's `title` and the file's `file says`, so the
+/// `conflict` line carries only how close they were.
+#[test]
+fn a_conflict_asked_about_shows_how_close_the_two_titles_were() {
+    let skipped = Event::Skipped {
+        path: PathBuf::from("paper.pdf"),
+        reason: SkipReason::Conflict {
+            field: "title".to_string(),
+            extracted: "Preliminary Notes on Solvent Effects".to_string(),
+            resolved: "Asymmetric Synthesis of Fluorinated Amines".to_string(),
+            similarity: 0.08,
+        },
+    };
+
+    let lines = describe(
+        &skipped,
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert_eq!(
+        lines,
+        vec![
+            rule(1, 1, DEFAULT_WIDTH),
+            label_line("file", "paper.pdf"),
+            label_line("title", "Asymmetric Synthesis of Fluorinated Amines"),
+            label_line("file says", "Preliminary Notes on Solvent Effects"),
+            label_line("conflict", "titles 8% alike"),
+        ],
+        "a skipped conflict carries the two titles and the similarity \
+         and nothing else — there is no record on the event to draw the \
+         rest of the layout from"
+    );
+}
+
+/// A conflict the operator accepted, reported on the record that
+/// accepted it: the same `conflict` line, on a full resolved layout.
+#[test]
+fn an_overridden_conflict_shows_the_same_line_on_the_record_it_accepted() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("Asymmetric Synthesis of Fluorinated Amines".to_string());
+    record.doi = Some(Doi::parse("10.1021/jacs.4c01234").unwrap());
+
+    let mut fixture = Fixture::new(record, "doi:10.1021/jacs.4c01234");
+    fixture.tier = Some("embedded-metadata".to_string());
+    fixture.claims = vec![Claim {
+        from: ClaimOrigin::Info,
+        title: "Preliminary Notes on Solvent Effects".to_string(),
+    }];
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        source,
+        found,
+        claims,
+        tier,
+        cached,
+        ..
+    } = fixture.event()
+    else {
+        unreachable!("the fixture builds a resolved event")
+    };
+    let resolved = Event::Resolved {
+        path,
+        identifier,
+        record,
+        source,
+        found,
+        claims,
+        tier,
+        cached,
+        overrode: Some(Overridden {
+            field: "title".to_string(),
+            extracted: "Preliminary Notes on Solvent Effects".to_string(),
+            resolved: "Asymmetric Synthesis of Fluorinated Amines".to_string(),
+            similarity: 0.08,
+        }),
+    };
+
+    let lines = describe(
+        &resolved,
+        "paper.pdf",
+        Some(&Proposal {
+            target: "jacs2024.pdf".to_string(),
+            rendered: None,
+        }),
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line("conflict", "titles 8% alike")),
+        "one renderer serves the question and the record that accepted \
+         it: got {lines:#?}"
+    );
+}
+
+/// An identifier the operator supplied says so where a pass's name
+/// would go — a bare `supplied`, since the other values in that slot
+/// name where the identifier was read and this one names that it was
+/// not read at all.
+#[test]
+fn a_supplied_identifier_says_supplied_where_a_pass_would_be_named() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Published Version".to_string());
+    record.doi = Some(Doi::parse("10.1021/jacs.4c01234").unwrap());
+
+    let mut fixture = Fixture::new(record, "doi:10.1021/jacs.4c01234");
+    fixture.tier = Some("supplied".to_string());
+
+    let lines = describe(
+        &fixture.event(),
+        "paper.pdf",
+        Some(&Proposal {
+            target: "jacs2024.pdf".to_string(),
+            rendered: None,
+        }),
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line(
+            "identifier",
+            "doi:10.1021/jacs.4c01234, supplied"
+        )),
+        "got {lines:#?}"
     );
 }

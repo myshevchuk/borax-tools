@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use borax_core::identifier::{ArxivId, Doi, IdentifierError, Isbn, Pmid};
+use borax_core::identifier::{ArxivId, Doi, Identifier, IdentifierError, Isbn, Pmid, supplied};
 
 // ---------------------------------------------------------------------
 // Doi
@@ -266,4 +266,115 @@ fn isbn_parse_reports_checksum_failure() {
 fn isbn_parse_rejects_wrong_length_as_invalid() {
     let err = Isbn::parse("12345").unwrap_err();
     assert!(matches!(err, IdentifierError::Invalid { .. }));
+}
+
+// ---------------------------------------------------------------------
+// supplied: what an operator types, parsed into whichever kind of
+// identifier it names (design D2, task 2.1)
+// ---------------------------------------------------------------------
+
+#[test]
+fn supplied_parses_a_bare_doi() {
+    let identifier = supplied("10.1021/jacs.4c01234").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Doi(Doi::parse("10.1021/jacs.4c01234").unwrap())
+    );
+}
+
+#[test]
+fn supplied_parses_a_doi_scheme_prefixed_form() {
+    let identifier = supplied("doi:10.1021/jacs.4c01234").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Doi(Doi::parse("10.1021/jacs.4c01234").unwrap())
+    );
+}
+
+#[test]
+fn supplied_parses_a_pasted_doi_org_address() {
+    let identifier = supplied("https://doi.org/10.1021/JACS.4C01234").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Doi(Doi::parse("10.1021/jacs.4c01234").unwrap())
+    );
+}
+
+#[test]
+fn supplied_parses_a_new_style_arxiv_id_without_a_prefix() {
+    let identifier = supplied("2401.12345").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Arxiv(ArxivId::parse("2401.12345").unwrap())
+    );
+}
+
+#[test]
+fn supplied_parses_a_new_style_arxiv_id_with_its_prefix() {
+    let identifier = supplied("arXiv:2401.12345").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Arxiv(ArxivId::parse("2401.12345").unwrap())
+    );
+}
+
+#[test]
+fn supplied_parses_an_old_style_arxiv_id_without_a_prefix() {
+    let identifier = supplied("math.GT/0309136").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Arxiv(ArxivId::parse("math.GT/0309136").unwrap())
+    );
+}
+
+#[test]
+fn supplied_parses_an_old_style_arxiv_id_with_its_prefix() {
+    let identifier = supplied("arXiv:math.GT/0309136").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Arxiv(ArxivId::parse("math.GT/0309136").unwrap())
+    );
+}
+
+#[test]
+fn supplied_parses_a_pmid_prefixed_value() {
+    let identifier = supplied("pmid:12345678").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Pmid(Pmid::parse("12345678").unwrap())
+    );
+}
+
+#[test]
+fn supplied_parses_an_isbn_prefixed_value() {
+    let identifier = supplied("isbn:978-1-59327-828-1").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Isbn(Isbn::parse("978-1-59327-828-1").unwrap())
+    );
+}
+
+/// A bare run of digits is a syntactically valid PMID and, at thirteen
+/// digits, potentially a valid ISBN as well: guessing which one is the
+/// one guess this parser does not make, so unprefixed digits name
+/// nothing.
+#[test]
+fn supplied_refuses_bare_digits_that_could_be_a_pmid_or_an_isbn() {
+    assert!(supplied("12345678").is_none());
+    assert!(supplied("9781593278281").is_none());
+}
+
+#[test]
+fn supplied_refuses_prose_naming_no_identifier() {
+    assert!(supplied("see email from Anna").is_none());
+}
+
+#[test]
+fn supplied_refuses_an_empty_string() {
+    assert!(supplied("").is_none());
+}
+
+#[test]
+fn supplied_refuses_whitespace_only_input() {
+    assert!(supplied("   ").is_none());
 }

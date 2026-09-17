@@ -50,6 +50,7 @@ fn resolved() -> Event {
 
         tier: Some("first-page".to_string()),
         cached: false,
+        overrode: None,
     }
 }
 
@@ -155,6 +156,8 @@ fn all_events() -> Vec<Event> {
         renamed(),
         skipped(SkipReason::NoIdentifier),
         skipped(SkipReason::Unresolvable {
+            found: "doi:10.1000/xyz123".to_string(),
+            tier: Some("text-layer".to_string()),
             attempts: vec![Attempt {
                 source: "crossref".to_string(),
                 error: "not found".to_string(),
@@ -195,6 +198,8 @@ fn all_skip_reasons() -> Vec<SkipReason> {
     vec![
         SkipReason::NoIdentifier,
         SkipReason::Unresolvable {
+            found: "doi:10.1000/xyz123".to_string(),
+            tier: Some("text-layer".to_string()),
             attempts: vec![
                 Attempt {
                     source: "crossref".to_string(),
@@ -291,6 +296,7 @@ fn json_line_of_resolved_has_exactly_the_documented_field_set() {
             "event",
             "found",
             "identifier",
+            "overrode",
             "path",
             "record",
             "schema",
@@ -460,6 +466,8 @@ fn skipped_nests_the_reason_under_reason_with_a_kebab_case_kind_tag() {
         (SkipReason::NoIdentifier, "no-identifier"),
         (
             SkipReason::Unresolvable {
+                found: "doi:10.1000/xyz123".to_string(),
+                tier: Some("text-layer".to_string()),
                 attempts: Vec::new(),
             },
             "unresolvable",
@@ -524,6 +532,8 @@ fn unciteable_reason_carries_nothing_but_its_kind() {
 #[test]
 fn unresolvable_reason_carries_an_attempts_array_of_source_and_error_objects() {
     let reason = SkipReason::Unresolvable {
+        found: "doi:10.1000/xyz123".to_string(),
+        tier: Some("text-layer".to_string()),
         attempts: vec![
             Attempt {
                 source: "crossref".to_string(),
@@ -551,7 +561,7 @@ fn unresolvable_reason_carries_an_attempts_array_of_source_and_error_objects() {
         .map(String::as_str)
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, vec!["attempts", "kind"]);
+    assert_eq!(keys, vec!["attempts", "found", "kind", "tier"]);
 }
 
 // --- round-trip through Event's own (de)serialization ---
@@ -703,6 +713,8 @@ fn human_line_of_skipped_makes_the_reason_legible_for_every_variant() {
         (SkipReason::NoIdentifier, "identifier"),
         (
             SkipReason::Unresolvable {
+                found: "doi:10.1000/xyz123".to_string(),
+                tier: Some("text-layer".to_string()),
                 attempts: vec![Attempt {
                     source: "crossref".to_string(),
                     error: "not found".to_string(),
@@ -965,6 +977,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
 
             tier: Some("first-page".to_string()),
             cached: false,
+            overrode: None,
         },
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
@@ -977,6 +990,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
 
             tier: None,
             cached: true,
+            overrode: None,
         },
         Event::Renamed {
             path: PathBuf::from("a.pdf"),
@@ -1101,6 +1115,7 @@ fn resolved_serializes_claims_as_design_d3_shows() {
         ],
         tier: Some("text-layer".to_string()),
         cached: false,
+        overrode: None,
     };
 
     let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
@@ -1127,11 +1142,14 @@ fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
     let outcome = FileOutcome::Resolved(FileRecord {
         record,
         source: Some(borax_sources::source::SourceName::Arxiv),
-        tier: Some(borax_pdf::tiered::Tier::TextLayer),
+        tier: Some(borax::pipeline::Provenance::Extracted(
+            borax_pdf::tiered::Tier::TextLayer,
+        )),
         found: Some(Identifier::Arxiv(ArxivId::parse("2401.01234").unwrap())),
         claims: Vec::new(),
         cached: false,
         hash: Some(hash_bytes(b"paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1173,6 +1191,7 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
         claims: Vec::new(),
         cached: true,
         hash: Some(hash_bytes(b"paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1211,6 +1230,7 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
         claims: Vec::new(),
         cached: true,
         hash: Some(hash_bytes(b"paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1244,6 +1264,7 @@ fn a_record_whose_provenance_names_no_service_keeps_cache() {
         claims: Vec::new(),
         cached: true,
         hash: Some(hash_bytes(b"paper")),
+        overrode: None,
     });
 
     let event = event_for(&path, &outcome);

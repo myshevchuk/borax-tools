@@ -14,7 +14,7 @@ use borax::pipeline::Library;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Sink, Streams, dispatch, emit_events, preflight};
 use borax::runlog::{RUNS_DIR, destination, log_name, state_root};
-use borax::session::{Answer, Asker, Outcome, Question, Session};
+use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
@@ -218,6 +218,12 @@ impl Asker for ScriptedAsker {
                 self.asked.borrow()
             )
         })
+    }
+
+    /// This change puts no text prompt; a double that is asked for one
+    /// fails the test rather than inventing an answer.
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
+        panic!("asked for text, which no question here puts: {prompt:?}")
     }
 }
 

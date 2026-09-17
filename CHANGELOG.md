@@ -9,13 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING:** By default, `borax rename` now asks about each proposed
-  move when it runs on a terminal with human-readable output. `Rename`
-  moves that file immediately, `Skip` leaves it in place without
-  claiming its proposed name, and `Quit`, Ctrl-C, or Esc leaves that
-  file and every later file untouched and counts them as not reached.
-  Previously, `borax rename` printed the whole plan and required a
-  second invocation with `--apply` to move it.
+- **BREAKING:** By default, `borax rename` now asks about each file whose
+  outcome the operator can change when it runs on a terminal with
+  human-readable output. This includes a proposed move, no identifier,
+  an identifier no service holds, a failed service lookup, a title
+  conflict, and an unreadable file whose content hash is known. `Rename`
+  moves a file immediately. `Supply an identifier` accepts a DOI or
+  arXiv identifier, or a PMID or ISBN with its prefix. A transient lookup
+  failure can be retried, and a conflicting record can be accepted with
+  the target named in the choice. `Skip` leaves the file in place and
+  preserves the reason borax had for it; declining borax's own proposed
+  move still reports `declined`. `Quit`, Ctrl-C, or Esc at the file menu
+  leaves that file and every later file untouched and counts them as not
+  reached. Previously, `borax rename` printed the whole plan and required
+  a second invocation with `--apply` to move it.
 
   `--batch` selects the old preview behavior. `--apply` still selects an
   applying batch and asks nothing, so existing
@@ -24,13 +31,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--apply --no-batch` is a usage error and exits with code 1 before
   anything is read, resolved, or moved.
 
-  Before each question, borax now writes a twelve-line description to
-  standard error. It shows the file's position, the identifier borax
-  looked up and where it came from, the services and record behind the
-  proposed name, the titles claimed by the file's own metadata, and the
-  proposed name. A collision suffix gets a separate line naming the
-  rendered name that was already taken. Batch output keeps its
-  one-line-per-file shape.
+  Before each question, borax now writes a description to standard
+  error. For a resolved file it shows the file's position, the
+  identifier borax looked up and where it came from, the services and
+  record behind the proposed name, the titles claimed by the file's own
+  metadata, and the proposed name. For a failed file it shows the facts
+  available for that failure: no identifier, each service's answer, a
+  title conflict and its similarity, or an unreadable-file error. A
+  collision suffix gets a separate line naming the rendered name that
+  was already taken. Batch output keeps its one-line-per-file shape.
+
+  A rename made from a supplied identifier or over an accepted conflict
+  writes the accepted record to the content index under the file's hash.
+  Later interactive and batch runs can use it without extracting an
+  identifier, querying a service, checking the conflict, or asking
+  again. The write happens only after the rename is accepted and remains
+  best-effort; `borax cache --clear` removes it, and `--no-cache` bypasses
+  the read but still writes.
 
   The new Boolean setting `rename.batch`, exposed as `--batch` and
   `--no-batch` on `rename` and `config`, defaults to `false`. It chooses
@@ -53,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   A `resolved` event now includes `found`, the identifier borax looked
   up, and `claims`, the titles read from the file with their origins.
+  Its `tier` can be `supplied` when the operator entered the identifier,
+  and its new `overrode` field carries an accepted title conflict or is
+  `null`. The `unresolvable` skip reason now includes `found`, the
+  identifier that was looked up, and `tier`, the pass that read it,
+  alongside the service attempts. The schema version remains 2 for these
+  additions.
   When the content index answers, `source` now names the services in the
   record's per-field provenance instead of reading `cache`; only a
   record whose provenance names no service still reports `cache`. This
@@ -74,9 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   affects interactive runs only. With it on, an interactive run shows no
   resolution line, outcome line, or question for an already-named file;
   the summary reports how many were not shown. With it off, those files
-  are reported as they are in a batch, but are still not offered a
-  question. Batch output, JSONL output, run logs, and bibliography output
-  are unchanged by this setting.
+  are offered `Keep this name`, `Supply an identifier`, and `Quit`, with
+  keeping the name as the default. This lets an operator correct a file
+  that was named from the wrong record. Batch output, JSONL output, run
+  logs, and bibliography output are unchanged by this setting.
 
 - A ledger entry that records the incoming file at its own path no longer
   makes that file a content or work duplicate of itself. The lookup keeps

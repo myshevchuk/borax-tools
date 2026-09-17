@@ -13,7 +13,7 @@
 
 use borax_core::record::{DateParts, EntryType, Name, Record};
 
-use crate::event::{Claim, ClaimOrigin, Event};
+use crate::event::{Attempt, Claim, ClaimOrigin, Event, SkipReason};
 
 /// The move a description is about: where the file would go, and the
 /// name the template rendered before a collision moved it aside.
@@ -58,7 +58,9 @@ const MARGIN: usize = 4;
 const NAMED_AUTHORS: usize = 3;
 
 /// The lines shown above a question about `resolved`, proposing
-/// `proposal`.
+/// `proposal`, or naming no new name when there is no proposal to
+/// make — a file the run could not identify has nothing to be
+/// renamed to.
 ///
 /// `resolved` is the file's [`Event::Resolved`]; any other event has no
 /// description and yields no lines.
@@ -84,29 +86,33 @@ const NAMED_AUTHORS: usize = 3;
 pub fn describe(
     resolved: &Event,
     name: &str,
-    proposal: &Proposal,
+    proposal: Option<&Proposal>,
     position: Position,
     width: usize,
 ) -> Vec<String> {
+    let mut description = Description {
+        lines: vec![rule(position, width)],
+        width,
+    };
+    description.field("file", name);
+
     let Event::Resolved {
         record,
         source,
         found,
         claims,
         tier,
+        overrode,
         cached,
         ..
     } = resolved
     else {
+        if let Event::Skipped { reason, .. } = resolved {
+            failure(&mut description, reason);
+            return description.lines;
+        }
         return Vec::new();
     };
-
-    let mut description = Description {
-        lines: vec![rule(position, width)],
-        width,
-    };
-
-    description.field("file", name);
     if !found.is_empty() {
         // Whole, however long it runs. An identifier folded across two
         // lines cannot be read back or copied out, and it is the one
@@ -150,9 +156,14 @@ pub fn describe(
             }
         }
     }
-    description.field("new name", &proposal.target);
-    if let Some(rendered) = &proposal.rendered {
-        description.field("", &format!("({rendered} is taken)"));
+    if let Some(overrode) = overrode {
+        description.field("conflict", &alike(&overrode.field, overrode.similarity));
+    }
+    if let Some(proposal) = proposal {
+        description.field("new name", &proposal.target);
+        if let Some(rendered) = &proposal.rendered {
+            description.field("", &format!("({rendered} is taken)"));
+        }
     }
 
     description.lines
@@ -257,7 +268,11 @@ fn fold(text: &str, room: usize) -> Vec<String> {
 ///
 /// Whitespace is left alone: folding has already made the lines, and a
 /// space is not a command.
-fn escaped(text: &str) -> String {
+///
+/// Reachable from the run for the same reason: text the operator
+/// pasted is quoted back to them when it names no identifier, and a
+/// paste carries whatever was copied.
+pub(crate) fn escaped(text: &str) -> String {
     text.chars()
         .map(|character| match character.is_control() {
             true => format!("\\x{:02x}", character as u32),
@@ -274,12 +289,170 @@ fn whence(tier: Option<&str>) -> Option<&'static str> {
     match tier {
         Some("embedded-metadata") => Some("from embedded metadata"),
         Some("text-layer") => Some("from the text layer"),
+        // Not "supplied by hand" or "supplied by you": every other
+        // value in this slot names where the identifier was read, and
+        // this one names that it was not read at all.
+        Some("supplied") => Some("supplied"),
         Some(_) => Some("from the file"),
         // Nothing was looked up, so nothing is known about where the
         // record's identifier came from. [`record_from`] says what is
         // known: the record itself is from an earlier run.
         None => None,
     }
+}
+
+/// The lines describing a verdict that identified nothing, written
+/// after the `file` line.
+///
+/// A failed verdict carries less than a resolution does, and the
+/// description shows what it carries and no more: a `skipped` event
+/// holds a path and a reason, so there is no record to lay out and no
+/// name to propose. What the operator is being asked to judge is why
+/// the file got no further, which is exactly what the reason holds.
+fn failure(description: &mut Description, reason: &SkipReason) {
+    match reason {
+        // The identifier is the thing a person asked to supply a better
+        // one has to improve on, so it leads — and whole, as on a
+        // resolution.
+        SkipReason::Unresolvable {
+            found,
+            tier,
+            attempts,
+        } => {
+            description.whole(
+                "identifier",
+                &match whence(tier.as_deref()) {
+                    Some(whence) => format!("{found}, {whence}"),
+                    None => found.clone(),
+                },
+            );
+            no_record(description, attempts);
+        }
+        // The same slot as an identifier that was found: its question
+        // is what was looked up, and the answer here is nothing.
+        SkipReason::NoIdentifier => {
+            description.field("identifier", "none found in the file");
+        }
+        // Both titles are already labelled on a resolution's layout, so
+        // a conflict borrows those two labels and adds only how close
+        // the two were.
+        SkipReason::Conflict {
+            field,
+            extracted,
+            resolved,
+            similarity,
+        } => {
+            description.field("title", resolved);
+            description.field("file says", extracted);
+            description.field("conflict", &alike(field, *similarity));
+        }
+        SkipReason::Unreadable { message } => {
+            description.field("unreadable", message);
+        }
+        SkipReason::TargetTaken { target } => {
+            description.field("name taken", &target.display().to_string());
+        }
+        SkipReason::Unnameable => {
+            description.field("no name", "the record is too sparse to name a file");
+        }
+        // Every other reason is either an outcome no question follows
+        // (a duplicate, an unrecordable file) or a failure after a
+        // decision was already made. Naming the file is all the
+        // description has to say about it.
+        _ => {}
+    }
+}
+
+/// The `no record` block: what each service was asked and what it
+/// said, one to a line, in the order they were asked.
+///
+/// It replaces the `record` line rather than joining it — they answer
+/// the same question, and a file has either a record or the reasons it
+/// has none.
+fn no_record(description: &mut Description, attempts: &[Attempt]) {
+    match attempts.split_first() {
+        None => description.field("no record", "no source was asked"),
+        Some((first, rest)) => {
+            description.field("no record", &answered(first));
+            for attempt in rest {
+                description.field("", &answered(attempt));
+            }
+        }
+    }
+}
+
+/// One service's answer, as the `no record` block lists it.
+fn answered(attempt: &Attempt) -> String {
+    format!("{}: {}", attempt.source, attempt.error)
+}
+
+/// What became of a record an identifier the operator gave led to.
+///
+/// Every one of these is about a candidate rather than about the file,
+/// and a candidate the file's decision did not settle on reaches
+/// nobody through the event stream. The question put again
+/// is where the operator is told, and [`reported`] is what it says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Candidate<'a> {
+    /// No service held the identifier: what each of them answered.
+    Unheld { attempts: &'a [Attempt] },
+    /// The name its record renders is taken by another file.
+    NameTaken { target: &'a str },
+    /// Its record renders no usable name.
+    Unnameable,
+    /// Its record names the file exactly as it is called now.
+    AlreadyNamed,
+}
+
+/// The lines reporting what `identifier` came to, shown above the
+/// description of the question that is put again.
+///
+/// `lead` labels the identifier with how the operator reached it —
+/// `supplied` for one they typed, `tried again` for a lookup they had
+/// repeated — since the block otherwise says nothing about which of
+/// the two just happened.
+///
+/// A blank line closes the block, so the rule the description opens
+/// with reads as the beginning of the file's own account rather than
+/// as part of this one.
+pub fn reported(
+    lead: &str,
+    identifier: &str,
+    outcome: &Candidate<'_>,
+    width: usize,
+) -> Vec<String> {
+    let mut description = Description {
+        lines: Vec::new(),
+        width,
+    };
+    // Whole, for the reason a description writes an identifier whole:
+    // one folded across two lines cannot be read back.
+    description.whole(lead, identifier);
+    match outcome {
+        Candidate::Unheld { attempts } => no_record(&mut description, attempts),
+        Candidate::NameTaken { target } => description.field("name taken", target),
+        Candidate::Unnameable => {
+            description.field("no name", "the record is too sparse to name a file");
+        }
+        Candidate::AlreadyNamed => {
+            description.field(
+                "same name",
+                "the file already carries the name this record renders",
+            );
+        }
+    }
+    description.lines.push(String::new());
+    description.lines
+}
+
+/// How close two values were, as the `conflict` line puts it.
+///
+/// A percentage rather than the stored fraction: the number is being
+/// read by a person deciding whether two titles are the same work, and
+/// `8% alike` is a judgement they can make where `0.08` is a value they
+/// have to convert first.
+fn alike(field: &str, similarity: f64) -> String {
+    format!("{field}s {}% alike", (similarity * 100.0).round())
 }
 
 /// The services line: who supplied the record, and whether it was
