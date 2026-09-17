@@ -4,6 +4,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 08:32] -- interactive rename
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 17:28]
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 18:33]
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-09-17 Thu 02:41] -- supplying identifiers
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -125,9 +126,12 @@ how to install it, and a handful of examples.
 
 *** The interactive session
 
-    For each resolved file whose record produces a free target, borax
-    shows the evidence behind the proposed name and a menu on standard
-    error:
+    borax asks about every file whose outcome you can change: a file it
+    can rename, one with no identifier, one whose identifier did not
+    resolve, one with a title conflict, and an unreadable or encrypted
+    file whose content hash is known. It also asks about an already-named
+    file when you use ~--no-skip-named~. Before the question, borax shows
+    the evidence it has on standard error:
 
     #+begin_example
       ── 3 of 17 ──────────────────────────────────────────────────────────
@@ -143,8 +147,9 @@ how to install it, and a handful of examples.
       in          Ukrainica Bioorganica Acta 18(1), 10–21
       file says   nothing read
       new name    lyutenko2023_ApplicationsChiralSulfinyl.pdf
-      ? Rename this file?
+      ? What should happen to this file?
       > Rename
+        Supply an identifier
         Skip
         Quit
       [↑↓ to move, enter to select]
@@ -189,10 +194,91 @@ how to install it, and a handful of examples.
     immediately and reported as ~renamed to <name>~, just as it is in an
     applying batch.
 
-    Choose ~Skip~ to leave the file in place. borax reports ~skipped,
-    declined~. The proposed name remains free, so if the next file
-    produces the same name, borax offers that name without a suffix. A
-    name is claimed only after you accept its move.
+    Choose ~Skip~ to leave the file in place. If borax proposed a move
+    from a record it accepted on its own, the skip reason is ~declined~.
+    A file borax could not settle keeps that reason instead, such as ~no
+    identifier found~ or a title conflict. The proposed name remains
+    free, so if the next file produces the same name, borax offers that
+    name without a suffix. A name is claimed only after you accept its
+    move.
+
+    The choices depend on what borax knows. The first choice is what
+    Enter selects:
+
+    | Situation                                        | Choices                                                     |
+    |--------------------------------------------------+-------------------------------------------------------------|
+    | A record produces a move                         | Rename; Supply an identifier; Skip; Quit                     |
+    | No identifier was found                          | Supply an identifier; Skip; Quit                             |
+    | No service holds the identifier                  | Supply an identifier; Skip; Quit                             |
+    | Services could not give a usable answer          | Try the services again; Supply an identifier; Skip; Quit     |
+    | A conflicting record produces a move             | Skip; Rename anyway, to =<name>=; Supply an identifier; Quit |
+    | A conflicting record produces no move            | Skip; Supply an identifier; Quit                             |
+    | The file is unreadable, but its hash is known    | Supply an identifier; Skip; Quit                             |
+    | The file is already named under ~--no-skip-named~ | Keep this name; Supply an identifier; Quit                   |
+
+    A title conflict shows the record's ~title~, the file's ~file
+    says~ title, and their similarity on a ~conflict~ line. Skipping is
+    the default. ~Rename anyway, to <name>~ names the target explicitly,
+    so pressing Enter never overrides the conflict.
+
+    A file with no identifier shows ~identifier  none found in the
+    file~. If an identifier did not resolve, ~no record~ lists what each
+    service answered. ~Try the services again~ appears only when the
+    services were unavailable, rate-limited, or returned unusable data.
+    It does not appear when every service confirmed that it did not hold
+    the identifier. An unreadable file shows the error on an ~unreadable~
+    line.
+
+    *Supplying an identifier.* Choose ~Supply an identifier~ when you
+    know what the file is but borax did not find the right identifier.
+    borax prompts:
+
+    #+begin_example
+      ? Identifier — a DOI, an arXiv id, or pmid:/isbn: and the number
+    #+end_example
+
+    You can paste a DOI in any form borax extracts, including a
+    ~https://doi.org/...~ URL. You can enter an old-style or new-style
+    arXiv identifier, with or without the ~arXiv:~ prefix. A PMID or
+    ISBN must begin with ~pmid:~ or ~isbn:~. borax refuses bare digits
+    because they can be either a PMID or an ISBN.
+
+    If the input contains no accepted identifier, borax names the
+    accepted forms and asks again without contacting a service. An
+    empty line, Esc, or Ctrl-C abandons the input and returns to the
+    file's menu without changing it.
+
+    borax looks up an accepted identifier through the usual services.
+    If it resolves and produces a move, borax shows the record and asks
+    about that move. If it does not resolve or produces no move, borax
+    reports what happened and returns to the file's own menu. A file
+    that already had a usable record keeps it while you try other
+    identifiers.
+
+    borax compares the file's titles with a supplied record. If they
+    disagree, it shows both titles and their similarity. You may then
+    skip, accept the record with ~Rename anyway, to <name>~, or supply
+    another identifier. This check can catch a mistyped identifier that
+    resolves to an unrelated work.
+
+    Supplying an identifier does not make borax search by title. You
+    must provide the identifier yourself.
+
+    *Remembering your answer.* After you rename a file from a supplied
+    identifier or by accepting a title conflict, borax stores the record
+    under the file's content hash in the content index. A later
+    interactive or batch run can use that record without extraction, a
+    service lookup, a conflict check, or another question.
+
+    borax writes this entry only when you accept the rename. Supplying
+    an identifier and then skipping stores no candidate record and
+    produces no sidecar or master-bibliography entry for that candidate.
+    A record the content index already held for the file remains there.
+
+    This memory is best-effort. If the content index cannot be written,
+    or borax falls back to an in-memory cache, a later run asks again.
+    ~borax cache --clear~ removes stored answers. ~--no-cache~ bypasses
+    the read but still writes the accepted answer.
 
     By default, an interactive run passes over a file that already
     carries its rendered name without showing its resolution, outcome,
@@ -204,23 +290,27 @@ how to install it, and a handful of examples.
 
     If the run hides only some already-named files, the clause gives the
     number, for example ~12 already named (4 not shown)~. Use
-    ~--no-skip-named~ to show these files as a batch does. They are still
-    never offered a question. This setting changes only an interactive
-    run; a batch always reports every file.
+    ~--no-skip-named~ to show these files and choose ~Keep this name~,
+    ~Supply an identifier~, or ~Quit~. Keeping the name is the default.
+    This setting changes only an interactive run; a batch always reports
+    every file and asks nothing.
 
     Passing over a file changes only what the terminal shows. The JSONL
     event stream and run log still contain all of its events.
     Bibliography output is also still shown, including a sidecar written
     beside the file, a master ~.bib~ merge, or a failure to write either.
 
-    Other files with no move to decide are reported without a question.
-    This includes a target taken under the ~skip~ collision policy, a
-    record that renders no name, and a file that did not resolve.
+    borax reports without a question when no answer can lead to a move.
+    This includes a duplicate, a file whose content hash is unknown, a
+    target taken under the ~skip~ collision policy, and a record that
+    renders no name. A resolved file whose proposal is not a move is also
+    reported without a question, except for an already-named file shown
+    under ~--no-skip-named~.
 
-    Choose ~Quit~, press Ctrl-C, or press Esc to end the session. The
-    file at that question and every later file stay untouched and are
-    not resolved. Work already completed remains in place. The summary
-    counts the remainder as not reached:
+    At a file's menu, choose ~Quit~, press Ctrl-C, or press Esc to end
+    the session. The file at that question and every later file stay
+    untouched and are not resolved. Work already completed remains in
+    place. The summary counts the remainder as not reached:
 
     #+begin_example
       3 resolved, 1 renamed, 3 skipped, 2 not reached
@@ -1047,12 +1137,28 @@ how to install it, and a handful of examples.
   that provenance names none of them; ~cached~ separately records that
   the content index answered.
 
+  ~resolved.tier~ names the extraction pass that found the identifier.
+  It is ~supplied~ when you entered the identifier and ~null~ when the
+  content index answered. ~resolved.overrode~ records a title conflict
+  you accepted. It contains ~field~, ~extracted~, ~resolved~, and
+  ~similarity~, the same values carried by a skipped conflict, and is
+  ~null~ when you overrode nothing.
+
+  An ~unresolvable~ skip reason contains ~found~, the identifier that
+  was looked up, as well as ~attempts~, the answers from the services.
+  The corresponding human-readable line names the identifier too, for
+  example ~no source had a record for doi:... (crossref: not found;
+  openalex: not found)~.
+
   ~run-started~ includes the Boolean ~interactive~; an
   interactive run also reports ~applying: true~. A declined proposal is
   a ~skipped~ event with reason ~declined~, and the counts in
   ~run-finished~ include ~unreached~. An already-named file produces an
   ~already-named~ event carrying its path rather than a ~skipped~ event,
-  and the counts include ~named~. The event schema version is 2.
+  and the counts include ~named~. An interactive run waits until you
+  settle a file before it emits that file's outcome, so a supplied
+  identifier does not produce a second verdict. Questions are not
+  events. The event schema version remains 2.
 
 ** Recovering the names a run replaced
 

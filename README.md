@@ -17,10 +17,10 @@ do not promise compatibility yet.
 
 ## Examples
 
-Review a directory of downloads one file at a time. For each file it can
-rename, borax shows the identifier it looked up, the record it found,
-the file's own metadata, and the proposed name before it waits for your
-choice:
+Review a directory of downloads one file at a time. borax asks about
+each file it cannot settle on its own. When it finds a record and can
+rename the file, it shows the identifier, the record, the file's own
+metadata, and the proposed name before it waits for your choice:
 
 ```console
 $ borax rename papers/
@@ -40,15 +40,20 @@ issued      2023
 in          Ukrainica Bioorganica Acta 18(1), 10–21
 file says   nothing read
 new name    lyutenko2023_ApplicationsChiralSulfinyl.pdf
-? Rename this file?
+? What should happen to this file?
 > Rename
+  Supply an identifier
   Skip
   Quit
 [↑↓ to move, enter to select]
 ```
 
-Press Enter to rename, or choose `Skip` or `Quit`. To preview the whole
-plan without moving anything, use `--batch`:
+Press Enter to rename, or choose `Supply an identifier`, `Skip`, or
+`Quit`. You can supply a DOI, an arXiv identifier, or a prefixed PMID or
+ISBN when borax finds no identifier, finds the wrong one, cannot resolve
+one, or reports a title conflict. Accepted answers are remembered in the
+content index after the rename, so later runs can use them without asking
+again. To preview the whole plan without moving anything, use `--batch`:
 
 ```console
 $ borax rename --batch papers/

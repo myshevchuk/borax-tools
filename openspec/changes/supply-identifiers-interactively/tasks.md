@@ -110,7 +110,7 @@ block and amend it, rather than leaving the archive holding both:
 
 ## 6. Documents
 
-- [ ] 6.1 Run `codex-docs` update jobs on `docs/manual.org` (`borax
+- [x] 6.1 Run `codex-docs` update jobs on `docs/manual.org` (`borax
       rename`, a section on supplying identifiers and what the content
       index remembers), `README.md` and `CHANGELOG.md`, with this
       proposal as source; check the diff
