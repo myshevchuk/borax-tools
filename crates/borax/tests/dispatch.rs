@@ -3508,8 +3508,16 @@ fn an_interactive_run_with_skip_named_renders_nothing_for_already_named_files() 
 }
 
 /// The setting's other half: `--no-skip-named` shows an already-named
-/// file exactly as a batch run does, while still asking nothing about
-/// it — there is nothing to decide about it either way.
+/// file exactly as a batch run does.
+///
+/// It is now also asked about — `supply-identifiers-interactively`
+/// amended the requirement this test was written against, because a
+/// file named from the wrong record is exactly what `--no-skip-named`
+/// is for and the operator had no way to say so. The keep/supply
+/// question it gets is pinned by
+/// [`an_already_named_file_under_no_skip_named_offers_to_keep_or_supply`];
+/// what this test still holds is that the batch rendering is
+/// unchanged.
 #[test]
 fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_does() {
     let smith = PathBuf::from("/lib/Smith2024.pdf");
@@ -3552,7 +3560,9 @@ fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_do
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
-    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+    // The already-named file is asked first and kept; the other is
+    // renamed.
+    let mut asker = ScriptedAsker::new(vec![Answer::Keep, Answer::Rename]);
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut streams = Streams {
@@ -3581,11 +3591,17 @@ fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_do
         text.contains("Smith2024.pdf: already named"),
         "with the setting off, an already-named file's outcome line must show: {text}"
     );
+    let questions = asker.questions_asked();
     assert_eq!(
-        asker.questions_asked().len(),
-        1,
-        "an already-named file is never asked about, setting or no: {:?}",
-        asker.questions_asked()
+        questions.len(),
+        2,
+        "with the setting off, both files are asked about: {questions:?}"
+    );
+    assert_eq!(questions[0].path, smith, "got {questions:?}");
+    assert_eq!(
+        questions[0].choices.first().copied(),
+        Some(Answer::Keep),
+        "keeping it is what Enter does: {questions:?}"
     );
 }
 
@@ -3696,6 +3712,7 @@ struct ObservingAsker {
     buffer: Rc<RefCell<Vec<u8>>>,
     answers: std::vec::IntoIter<Answer>,
     seen_at_first_question: RefCell<Option<String>>,
+    first_question: RefCell<Option<Question>>,
 }
 
 impl ObservingAsker {
@@ -3704,7 +3721,15 @@ impl ObservingAsker {
             buffer,
             answers: answers.into_iter(),
             seen_at_first_question: RefCell::new(None),
+            first_question: RefCell::new(None),
         }
+    }
+
+    fn first_question(&self) -> Question {
+        self.first_question
+            .borrow()
+            .clone()
+            .expect("must have been asked at least once")
     }
 
     fn seen_at_first_question(&self) -> String {
@@ -3720,6 +3745,7 @@ impl Asker for ObservingAsker {
         if self.seen_at_first_question.borrow().is_none() {
             let snapshot = String::from_utf8(self.buffer.borrow().clone()).unwrap();
             *self.seen_at_first_question.borrow_mut() = Some(snapshot);
+            *self.first_question.borrow_mut() = Some(question.clone());
         }
         self.answers.next().unwrap_or_else(|| {
             panic!("asked more questions than were scripted; question was {question:?}")
@@ -3796,10 +3822,21 @@ fn the_hold_ends_before_the_question_and_never_leaks_a_passed_over_files_lines()
     );
 
     let seen = asker.seen_at_first_question();
+    // The hold now lasts until the file's fate is settled, which is
+    // later than this change's predecessor allowed: a file the operator
+    // re-identifies must not have had its first record reported
+    // already. What reaches the operator before they decide is the
+    // question's description, which is not the stream — so that is
+    // where the file's own resolution has to be legible.
+    let asked = asker.first_question();
+    assert_eq!(asked.path, original, "got {asked:?}");
     assert!(
-        seen.contains("original.pdf: resolved"),
-        "the hold must have ended for the file's own resolution line before it is asked \
-         about: {seen}"
+        asked
+            .description
+            .iter()
+            .any(|line| line.contains("original.pdf")),
+        "the file's own resolution must be in front of the operator before \
+         they are asked about it: {asked:?}"
     );
     assert!(
         !seen.contains("Smith2024.pdf"),
@@ -4851,11 +4888,20 @@ fn refused_input_is_asked_again_rather_than_reopening_the_menu() {
         "the second prompt must say what was wrong with the first: got {:?}",
         asker.texts_asked()
     );
+    // Two, not one: the menu that offered `Supply`, and the menu the
+    // Esc returned to — which is what consumes the scripted `Skip` and
+    // gives the file a fate. What "does not reopen the menu" forbids is
+    // a third, between the two text prompts; an implementation that put
+    // one would run out of scripted answers here.
+    let questions = asker.questions_asked();
     assert_eq!(
-        asker.questions_asked().len(),
-        1,
-        "refused input must not reopen the choice menu: got {:?}",
-        asker.questions_asked()
+        questions.len(),
+        2,
+        "refused input must not reopen the choice menu: got {questions:?}"
+    );
+    assert_eq!(
+        questions[1], questions[0],
+        "an abandoned input leaves the question exactly as it was: got {questions:?}"
     );
 }
 
