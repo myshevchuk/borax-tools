@@ -221,8 +221,9 @@ pattern to copy when a stacked change contradicts one below it.
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
   only extraction backend. The second one was always conditional on
   evidence that the first is insufficient, and that evidence has not
-  appeared: the fixture corpus and the live contract tests pass on all
-  three platforms without it. Picking a binding crate and a
+  appeared: the fixture corpus and the live contract tests passed on
+  all three platforms without it, as of 0.4.0, when CI still ran them
+  there. Picking a binding crate and a
   prebuilt-binary pipeline for three platforms is the cost being
   avoided; revisit only if real PDFs start failing extraction.
 
@@ -343,6 +344,18 @@ pattern to copy when a stacked change contradicts one below it.
   evidence-gated rather than open in the usual sense.
 
 ## Live risks
+
+- **CI runs on Linux alone.** The matrix in `.github/workflows/ci.yml`
+  was cut to `ubuntu-latest` during 0.5.0; the other two are commented
+  out a line above, so restoring them is one edit. macOS and Windows
+  are still supported targets and nothing was done to stop supporting
+  them — they are simply no longer checked, so a platform-specific
+  break will now reach a user rather than a run. The first push of the
+  interactive work found exactly one such break, a test that wrote a
+  rendered path with a slash where Windows spells it with a backslash,
+  and that class of mistake is the one to watch for: compare `PathBuf`
+  values, which treat both separators alike, and build any expected
+  *string* with the platform's own separator.
 
 - **The public surface is untested by users.** The JSONL event schemas
   are declared the stable integration contract, and no external consumer
