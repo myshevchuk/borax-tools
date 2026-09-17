@@ -30,7 +30,7 @@ block and amend it, rather than leaving the archive holding both:
 
 ## 1. Resolution in parts, batch unchanged
 
-- [ ] 1.1 Split `resolve_file` into steps a caller can drive — content
+- [x] 1.1 Split `resolve_file` into steps a caller can drive — content
       index, extraction (with claims), resolving an `Identifier`, the
       conflict check — and re-express `resolve_file` and
       `resolve_file_checking_ledger` as their composition; every
@@ -39,14 +39,14 @@ block and amend it, rather than leaving the archive holding both:
       a file the content index answered for and for one no identifier
       was found in (design D2a); `extract_from` collects them whether or
       not an identifier turns up
-- [ ] 1.3 Green: claims are read when a comparison needs them
+- [x] 1.3 Green: claims are read when a comparison needs them
 
 ## 2. Supplied identifiers
 
 - [x] 2.1 Red: `crates/borax-core/tests/identifier.rs` — the supplied
       input parser: DOI forms, arXiv forms, `pmid:` and `isbn:` prefixes,
       bare digits refused, prose refused with the accepted forms named
-- [ ] 2.2 Green: the parser, built from the existing `parse` functions
+- [x] 2.2 Green: the parser, built from the existing `parse` functions
       (design D2)
 - [x] 2.3 Red: `crates/borax/tests/pipeline.rs` — resolving a supplied
       identifier for a file: the record, `tier` `supplied`, the conflict
@@ -74,7 +74,7 @@ block and amend it, rather than leaving the archive holding both:
       unresolvable supplied identifier puts the menu again
 - [x] 3.5 Red: `--no-skip-named` — keep emits `already-named`; supplying
       and renaming re-identifies the file
-- [ ] 3.6 Green: the driver situations, the held verdict, `overrode` and
+- [x] 3.6 Green: the driver situations, the held verdict, `overrode` and
       `supplied` on `resolved`
 - [x] 3.6a Red: `crates/borax/tests/describe.rs` — `describe` renders
       the held verdict whichever it is (design D8): the services'
@@ -82,7 +82,7 @@ block and amend it, rather than leaving the archive holding both:
       for a conflict asked about or overridden, and `supplied` on the
       identifier line. `describe` is pure, so this is the one part of
       the change that can be pinned exactly
-- [ ] 3.7 Green: `describe` renders attempts, a conflict's two titles and
+- [x] 3.7 Green: `describe` renders attempts, a conflict's two titles and
       similarity, and a supplied identifier
 
 ## 4. Remembering
@@ -99,12 +99,12 @@ block and amend it, rather than leaving the archive holding both:
 - [x] 4.2b Red: a content-index write that fails leaves the rename
       standing and reported, and the next run asks about the file
       again
-- [ ] 4.3 Green: the content-index write on rename only (design D7)
+- [x] 4.3 Green: the content-index write on rename only (design D7)
 
 ## 5. The terminal
 
-- [ ] 5.1 The `inquire::Text` adapter for `Asker::text`; Esc is `None`
-- [ ] 5.2 Verify by hand on a copy of the real-PDF corpus: supply an
+- [x] 5.1 The `inquire::Text` adapter for `Asker::text`; Esc is `None`
+- [x] 5.2 Verify by hand on a copy of the real-PDF corpus: supply an
       arXiv identifier for a preprint with none, accept a conflict,
       catch a reference DOI, re-run in batch and see nothing asked
 
