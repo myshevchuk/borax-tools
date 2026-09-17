@@ -269,21 +269,43 @@ pub fn stdin_is_terminal() -> bool {
     io::stdin().is_terminal()
 }
 
-/// One menu entry, as [`inquire`] needs it: an answer and the word the
-/// operator reads for it.
-struct Choice(Answer);
+/// One menu entry, as [`inquire`] needs it: an answer and the words
+/// the operator reads for it.
+struct Choice {
+    answer: Answer,
+    /// The name the file would take, for the one choice that says what
+    /// it will do rather than what it is.
+    target: String,
+}
 
 impl fmt::Display for Choice {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self.0 {
-            Answer::Rename => "Rename",
-            Answer::Override => "Rename anyway",
-            Answer::Keep => "Keep this name",
-            Answer::Supply => "Supply an identifier",
-            Answer::Retry => "Try again",
-            Answer::Skip => "Skip",
-            Answer::Quit => "Quit",
-        })
+        match self.answer {
+            Answer::Rename => formatter.write_str("Rename"),
+            // The one choice that overrides a safety check names the
+            // target it would move the file to, so that the answer
+            // says exactly what it will do and the operator is not
+            // reading it against a description they may have scrolled
+            // past.
+            Answer::Override => write!(formatter, "Rename anyway, to {}", self.target),
+            Answer::Keep => formatter.write_str("Keep this name"),
+            Answer::Supply => formatter.write_str("Supply an identifier"),
+            Answer::Retry => formatter.write_str("Try the services again"),
+            Answer::Skip => formatter.write_str("Skip"),
+            Answer::Quit => formatter.write_str("Quit"),
+        }
+    }
+}
+
+/// The name a question's target carries, as its menu names it:
+/// relative to the directory the file sits in, so a template filing it
+/// elsewhere keeps the subdirectory that says where it goes.
+fn target_of(question: &Question) -> String {
+    match question.path.parent() {
+        Some(parent) => crate::paths::route(&question.target, parent)
+            .display()
+            .to_string(),
+        None => question.target.display().to_string(),
     }
 }
 
@@ -322,16 +344,28 @@ impl Asker for TerminalAsker {
             return Answer::Quit;
         }
 
-        let choices: Vec<Choice> = question.choices.iter().copied().map(Choice).collect();
+        let target = target_of(question);
+        let choices: Vec<Choice> = question
+            .choices
+            .iter()
+            .map(|answer| Choice {
+                answer: *answer,
+                target: target.clone(),
+            })
+            .collect();
         // Without a help message, `inquire` offers its own, which
-        // advertises filtering by typing. Three choices do not need
+        // advertises filtering by typing. Four choices do not need
         // filtering, and the offer reads as though an answer could be
         // typed.
-        match inquire::Select::new("Rename this file?", choices)
+        //
+        // The prompt asks what should happen rather than whether to
+        // rename: the questions a run puts are about files it could
+        // not identify as much as about moves it proposes.
+        match inquire::Select::new("What should happen to this file?", choices)
             .with_help_message("↑↓ to move, enter to select")
             .prompt()
         {
-            Ok(choice) => choice.0,
+            Ok(choice) => choice.answer,
             Err(_) => Answer::Quit,
         }
     }
@@ -341,9 +375,29 @@ impl Asker for TerminalAsker {
     /// An empty line and an interrupted prompt are both `None`: the
     /// operator declining to answer leaves the file as the question
     /// found it, which is what an unanswered question has always
-    /// meant.
+    /// meant. Esc, Ctrl-C and a terminal that cannot be read at all
+    /// are the interruptions [`inquire`] reports as errors, and they
+    /// are all the same answer here.
+    ///
+    /// What was wrong with the last attempt is written above the
+    /// prompt rather than put in it, as a question's description is
+    /// and for the same reason: a prompt is one line, and the operator
+    /// reads the refusal before typing again.
     fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
-        let _ = prompt;
-        todo!("text: draw the refusal, ask for a line, and trim it")
+        if let Some(refused) = &prompt.refused {
+            // A terminal that will not take the refusal is a terminal
+            // the question cannot be put on, so the prompt is
+            // abandoned rather than put unexplained.
+            writeln!(io::stderr(), "{refused}").ok()?;
+        }
+
+        let typed = inquire::Text::new(&prompt.asking)
+            .with_help_message("enter to look it up, esc to go back")
+            .prompt()
+            .ok()?;
+        match typed.trim() {
+            "" => None,
+            trimmed => Some(trimmed.to_string()),
+        }
     }
 }
