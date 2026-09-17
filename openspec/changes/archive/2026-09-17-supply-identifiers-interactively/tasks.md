@@ -116,5 +116,5 @@ block and amend it, rather than leaving the archive holding both:
       proposal as source; check the diff
 - [x] 6.2 Record the built state in `openspec/STATE.md`, including the
       deferred title search as the next step for the hit rate
-- [ ] 6.3 `openspec validate supply-identifiers-interactively --strict`
+- [x] 6.3 `openspec validate supply-identifiers-interactively --strict`
       and `scripts/check-spec-deltas.py` pass; full suite green
