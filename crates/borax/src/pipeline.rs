@@ -299,6 +299,10 @@ pub fn disagreement(claims: &[Claim], record: &Record) -> Option<SkipReason> {
 /// Never panics and never propagates an error: every failure is a
 /// [`FileOutcome::Skipped`] carrying the reason, because one unreadable
 /// file must not end a batch.
+///
+/// The verdict of [`standing`], which runs the same passes and keeps
+/// what they produced along the way. A caller that acts on the verdict
+/// alone wants this one.
 pub fn resolve_file<C: Cache>(
     path: &Path,
     library: &dyn Library,
@@ -306,42 +310,162 @@ pub fn resolve_file<C: Cache>(
     index: &ContentIndex<C>,
     config: &ResolveConfig,
 ) -> FileOutcome {
+    standing(path, library, sources, index, config, None).verdict
+}
+
+/// Everything the passes produced about one file, for a caller that
+/// may put the verdict to somebody instead of acting on it.
+///
+/// [`resolve_file`]'s working, kept rather than dropped. A batch run
+/// wants the verdict and nothing else; a run with an operator at it
+/// needs three more things, each for one decision it has to make
+/// (design D1):
+///
+/// - the hash, because a file nobody knows the hash of cannot be
+///   renamed and so is not asked about;
+/// - the record the conflict check refused, because the operator may
+///   accept it;
+/// - what the services said, because an outage is worth trying again
+///   and a confirmed absence is not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Standing {
+    /// What a run that asked nobody would report for the file.
+    pub verdict: FileOutcome,
+    /// The file's content hash, or `None` when it could not be
+    /// computed.
+    pub hash: Option<ContentHash>,
+    /// The identifier an extraction pass found and the pass that found
+    /// it. `None` when the content index answered, when the file could
+    /// not be read, or when it named no identifier — in none of which
+    /// is there anything to look up again.
+    pub found: Option<(Identifier, Tier)>,
+    /// What each service answered, where none of them held the
+    /// identifier. `Some` exactly when `verdict` is
+    /// [`SkipReason::Unresolvable`], and carried whole because whether
+    /// the answer was conclusive
+    /// ([`borax_sources::dispatch::Unresolved::is_conclusive`]) is not
+    /// recoverable from the skip reason.
+    pub unresolved: Option<Unresolved>,
+    /// The record the conflict check refused, with the claims it
+    /// disagrees with. `Some` exactly when `verdict` is
+    /// [`SkipReason::Conflict`], since that is the one verdict holding
+    /// a record a run declined to use.
+    pub refused: Option<FileRecord>,
+}
+
+impl Standing {
+    /// A verdict reached with nothing left over: the passes that would
+    /// have produced the rest never ran.
+    fn of(verdict: FileOutcome, hash: Option<ContentHash>) -> Standing {
+        Standing {
+            verdict,
+            hash,
+            found: None,
+            unresolved: None,
+            refused: None,
+        }
+    }
+}
+
+/// Resolve one file, keeping the working [`resolve_file`] discards.
+///
+/// The four passes in the order [`resolve_file`] documents, with
+/// `collection`'s two duplicate checks around them where there is a
+/// collection to check against — before the file is opened, on its
+/// content, and after resolution, on the record's identifiers. `None`
+/// is a run that admits nothing anywhere, which runs neither check.
+///
+/// The file is hashed once, whether or not the index is consulted and
+/// whether or not a duplicate check wants it: the hash identifies the
+/// file for every later decision about it.
+pub fn standing<C: Cache>(
+    path: &Path,
+    library: &dyn Library,
+    sources: &[&dyn Source],
+    index: &ContentIndex<C>,
+    config: &ResolveConfig,
+    collection: Option<&Collection<'_>>,
+) -> Standing {
     let Indexed { hash, record } = from_index(path, library, index, config);
+    if let Some(duplicate) =
+        collection.and_then(|collection| content_duplicate(path, hash.as_ref(), collection))
+    {
+        return Standing::of(FileOutcome::Skipped(duplicate), hash);
+    }
     if let Some(record) = record {
-        return FileOutcome::Resolved(indexed_record(record, hash));
+        let file = indexed_record(record, hash.clone());
+        return Standing::of(admissible(path, file, collection), hash);
     }
 
     let (extracted, claims) = match from_file(path, library, &config.extraction) {
         Ok(found) => found,
-        Err(error) => return FileOutcome::Skipped(skipped_for(&error)),
+        Err(error) => return Standing::of(FileOutcome::Skipped(skipped_for(&error)), hash),
     };
     let Extracted { identifier, tier } = extracted;
     let looked_up = Identifier::from(identifier);
+    let found = Some((looked_up.clone(), tier));
 
     let resolved = match from_sources(sources, &looked_up) {
         Ok(resolved) => resolved,
-        Err(unresolved) => return FileOutcome::Skipped(unresolvable(&unresolved, &looked_up)),
+        Err(unresolved) => {
+            return Standing {
+                verdict: FileOutcome::Skipped(unresolvable(&unresolved, &looked_up)),
+                hash,
+                found,
+                unresolved: Some(unresolved),
+                refused: None,
+            };
+        }
     };
 
-    if let Some(conflict) = disagreement(&claims, &resolved.record) {
-        return FileOutcome::Skipped(conflict);
-    }
-
-    if let Some(hash) = hash.as_ref() {
-        index.put(hash, &resolved.record);
-    }
-
-    FileOutcome::Resolved(FileRecord {
+    let file = FileRecord {
         record: resolved.record,
         source: Some(resolved.source),
         tier: Some(Provenance::Extracted(tier)),
         found: Some(looked_up),
         claims,
         cached: false,
-        hash,
-        // The conflict check has already passed; nothing was overridden.
+        hash: hash.clone(),
+        // Nothing has been overridden: either the conflict check is
+        // about to pass, or this record is refused below and whoever
+        // accepts it records what they accepted it over.
         overrode: None,
-    })
+    };
+
+    if let Some(conflict) = disagreement(&file.claims, &file.record) {
+        return Standing {
+            verdict: FileOutcome::Skipped(conflict),
+            hash,
+            found,
+            unresolved: None,
+            refused: Some(file),
+        };
+    }
+
+    if let Some(hash) = hash.as_ref() {
+        index.put(hash, &file.record);
+    }
+
+    Standing {
+        verdict: admissible(path, file, collection),
+        hash,
+        found,
+        unresolved: None,
+        refused: None,
+    }
+}
+
+/// `file` as the verdict it is, unless `collection` already holds
+/// another file for the same work.
+///
+/// The later of the two duplicate checks: it needs a record, so it is
+/// answerable only once one is in hand, which is the earliest a second
+/// PDF of one paper can be recognised at all.
+fn admissible(path: &Path, file: FileRecord, collection: Option<&Collection<'_>>) -> FileOutcome {
+    match collection.and_then(|collection| work_duplicate(path, &file.record, collection)) {
+        Some(duplicate) => FileOutcome::Skipped(duplicate),
+        None => FileOutcome::Resolved(file),
+    }
 }
 
 /// What a file says about itself, read from the file rather than from
@@ -462,19 +586,7 @@ pub fn resolve_file_checking_ledger<C: Cache>(
     config: &ResolveConfig,
     collection: &Collection<'_>,
 ) -> FileOutcome {
-    if let Some(duplicate) = content_duplicate(path, library.hash(path).ok().as_ref(), collection) {
-        return FileOutcome::Skipped(duplicate);
-    }
-
-    let outcome = resolve_file(path, library, sources, index, config);
-
-    let FileOutcome::Resolved(file) = &outcome else {
-        return outcome;
-    };
-    match work_duplicate(path, &file.record, collection) {
-        Some(duplicate) => FileOutcome::Skipped(duplicate),
-        None => outcome,
-    }
+    standing(path, library, sources, index, config, Some(collection)).verdict
 }
 
 /// The file `collection` already holds with the same content as the
@@ -594,15 +706,26 @@ fn skipped_for(error: &ExtractionError) -> SkipReason {
 pub fn unresolvable(unresolved: &Unresolved, found: &Identifier) -> SkipReason {
     SkipReason::Unresolvable {
         found: found.to_string(),
-        attempts: unresolved
-            .attempts
-            .iter()
-            .map(|(source, error)| Attempt {
-                source: source.to_string(),
-                error: error.to_string(),
-            })
-            .collect(),
+        attempts: attempts_of(unresolved),
     }
+}
+
+/// What each service answered, as a reader of the stream is told it:
+/// one entry per source, in the order they were asked.
+///
+/// Separate from [`unresolvable`] because a caller that is showing a
+/// failed lookup rather than reporting it has no skip to build — an
+/// identifier the operator supplied and nobody held is a candidate's
+/// outcome and not the file's verdict (design D5).
+pub fn attempts_of(unresolved: &Unresolved) -> Vec<Attempt> {
+    unresolved
+        .attempts
+        .iter()
+        .map(|(source, error)| Attempt {
+            source: source.to_string(),
+            error: error.to_string(),
+        })
+        .collect()
 }
 
 /// The services that supplied `file`'s record, as the event names them.
