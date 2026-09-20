@@ -84,7 +84,13 @@ is a run contradicting a living requirement.
       exclusion is obeyed by the orphan count, by an applying run's
       admissions and by reconcile — one test per operation, because the
       defect this rules out is the four disagreeing rather than the
-      walk alone being wrong.
+      walk alone being wrong. *Split across the batches that build the
+      four operations*, since three of them do not exist in group 2 and
+      writing their tests here would leave them red across three later
+      groups: the walk's own stop landed with group 2, the orphan
+      count's with group 4, and reconcile's and the admissions' land
+      with groups 6 and 7. The requirement is unchanged and all four
+      still get their test; this stays open until the last of them does.
 - [x] 2.6 Green: the walk, built from `documents` in
       `crates/borax/src/run.rs` rather than beside it, the nested-root
       stop shared by all four operations, plus the library-relative
@@ -114,35 +120,35 @@ is a run contradicting a living requirement.
 
 ## 4. `borax status`
 
-- [ ] 4.1 Red: `crates/borax/tests/dispatch.rs` — the Hyperbole test:
+- [x] 4.1 Red: `crates/borax/tests/dispatch.rs` — the Hyperbole test:
       over a marked directory of PDFs with no records and no items,
       `borax status` reports the artifact count, zero items, zero
       records and every artifact an orphan, with no preceding command,
       and opens no document while doing it.
-- [ ] 4.2 Red: `--identify` reports how many artifacts yield an
+- [x] 4.2 Red: `--identify` reports how many artifacts yield an
       identifier, runs the extraction passes and queries no service; a
       directory with no marker is reported on as given and nothing is
       written under it.
-- [ ] 4.3 Green: the `status` subcommand, its events and both
+- [x] 4.3 Green: the `status` subcommand, its events and both
       renderings.
 
 ## 5. `borax validate`
 
-- [ ] 5.1 Red: one test per finding in the requirement's list — a
+- [x] 5.1 Red: one test per finding in the requirement's list — a
       dangling item link, two records under one identity, an identity
       disagreeing with a file name, a path that is not
       library-relative, an empty and a malformed hash history, and a
       `.toml` in the item store that is not an item record.
-- [ ] 5.2 Red: what is not a finding — a library of nothing but orphans
+- [x] 5.2 Red: what is not a finding — a library of nothing but orphans
       validates clean and exits 0, a record whose artifact cannot be
       found is a count rather than a finding, and a half-written record
       is a finding about that file alone while the rest of the library
       is reported as it is.
-- [ ] 5.3 Red: validation repairs nothing and refuses nothing: the store
+- [x] 5.3 Red: validation repairs nothing and refuses nothing: the store
       is byte-identical after a `validate` that reported findings, and
       an applying `rename` over a library with a finding proceeds and
       records what it admits.
-- [ ] 5.4 Green: the `validate` subcommand, its findings, and the
+- [x] 5.4 Green: the `validate` subcommand, its findings, and the
       partial-success exit code when it reports any.
 
 ## 6. `borax reconcile`

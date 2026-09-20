@@ -143,6 +143,7 @@ fn run_finished() -> Event {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         },
     }
 }
@@ -337,7 +338,7 @@ fn json_line_of_run_finished_has_exactly_the_documented_field_set() {
 
     assert_eq!(
         object["counts"],
-        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1, "named": 0, "unmatched": 0, "unreached": 0})
+        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1, "named": 0, "unmatched": 0, "unreached": 0, "findings": 0})
     );
 }
 
@@ -793,6 +794,7 @@ fn counts_default_is_all_zeroes() {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
 }
@@ -806,11 +808,12 @@ fn counts_serializes_with_all_six_fields() {
         named: 0,
         unmatched: 4,
         unreached: 0,
+        findings: 0,
     };
     let value: Value = serde_json::to_value(counts).unwrap();
     assert_eq!(
         value,
-        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "named": 0, "unmatched": 4, "unreached": 0})
+        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "named": 0, "unmatched": 4, "unreached": 0, "findings": 0})
     );
 }
 
@@ -856,6 +859,7 @@ fn counts_observe_counts_a_lookup_missed_as_unmatched() {
             named: 0,
             unmatched: 2,
             unreached: 0,
+            findings: 0,
         }
     );
 }
@@ -872,6 +876,7 @@ fn the_summary_line_names_unmatched_lookups_when_there_were_any() {
             named: 0,
             unmatched: 1,
             unreached: 0,
+            findings: 0,
         },
     })
     .unwrap();
@@ -892,6 +897,7 @@ fn the_summary_line_says_nothing_about_unmatched_lookups_when_there_were_none() 
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         },
     })
     .unwrap();
@@ -1009,6 +1015,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
                 named: 0,
                 unmatched: 0,
                 unreached: 0,
+                findings: 0,
             },
         },
     ];

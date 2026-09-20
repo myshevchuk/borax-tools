@@ -15,7 +15,7 @@
 //! anywhere: it chooses the rendering of the event stream, which every
 //! subcommand honours and none of them interprets differently.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -128,6 +128,21 @@ pub struct AccountingOptions {
     pub no_ledger: bool,
 }
 
+/// What a subcommand needs to read a document for what it claims about
+/// itself.
+///
+/// The extraction settings alone, for a subcommand that opens files and
+/// asks no service anything. [`ResolutionOptions`] carries the same
+/// settings for the subcommands that go on to resolve what they
+/// extracted, so a command declares one group or the other and never
+/// both.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
+pub struct ExtractionOptions {
+    /// How many pages of a PDF the text pass reads.
+    #[arg(long, value_name = "N")]
+    pub page_limit: Option<usize>,
+}
+
 /// Whether a run keeps a log of its own event stream. Every subcommand
 /// takes these, since every subcommand is a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
@@ -228,6 +243,35 @@ pub enum Command {
         /// Empty the cache instead of reporting it.
         #[arg(long)]
         clear: bool,
+
+        #[command(flatten)]
+        run_log: RunLogOptions,
+    },
+    /// Report what a library holds.
+    Status {
+        /// The library to report on: the directory whose nearest
+        /// `.borax.toml` establishes the root, or the directory itself
+        /// when nothing above it is marked. The working directory by
+        /// default.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+
+        /// Additionally report how many artifacts an identifier can be
+        /// extracted from, which is a pass over the files.
+        #[arg(long)]
+        identify: bool,
+
+        #[command(flatten)]
+        extraction: ExtractionOptions,
+
+        #[command(flatten)]
+        run_log: RunLogOptions,
+    },
+    /// Report a library's findings, repairing nothing.
+    Validate {
+        /// The library to validate, as `status` takes it.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
 
         #[command(flatten)]
         run_log: RunLogOptions,
@@ -369,6 +413,13 @@ impl AccountingOptions {
     }
 }
 
+impl ExtractionOptions {
+    /// Copies this group's flags into the matching [`Settings`] fields.
+    fn fill(&self, settings: &mut Settings) {
+        settings.page_limit = self.page_limit;
+    }
+}
+
 impl RunLogOptions {
     /// Copies this group's flags into the matching [`Settings`] fields.
     fn fill(&self, settings: &mut Settings) {
@@ -443,6 +494,15 @@ impl Cli {
                 accounting.fill(&mut settings);
                 run_log.fill(&mut settings);
             }
+            Command::Status {
+                extraction,
+                run_log,
+                ..
+            } => {
+                extraction.fill(&mut settings);
+                run_log.fill(&mut settings);
+            }
+            Command::Validate { run_log, .. } => run_log.fill(&mut settings),
             Command::Cache { run_log, .. } => run_log.fill(&mut settings),
             Command::Ledger {
                 action: LedgerAction::Rebuild { run_log },
@@ -509,6 +569,26 @@ impl Command {
         }
     }
 
+    /// The `status` command over the library at `path`, reporting what
+    /// can be identified when `identify`, with no setting overridden.
+    pub fn status(path: Option<PathBuf>, identify: bool) -> Command {
+        Command::Status {
+            path,
+            identify,
+            extraction: ExtractionOptions::default(),
+            run_log: RunLogOptions::default(),
+        }
+    }
+
+    /// The `validate` command over the library at `path`, with no
+    /// setting overridden.
+    pub fn validate(path: Option<PathBuf>) -> Command {
+        Command::Validate {
+            path,
+            run_log: RunLogOptions::default(),
+        }
+    }
+
     /// The subcommand's name, as [`crate::event::Event::RunStarted`]
     /// reports it and as the user typed it. A subcommand with an
     /// action of its own is named by both words, as `ledger rebuild`.
@@ -519,6 +599,8 @@ impl Command {
             Command::Bib { .. } => "bib",
             Command::Config { .. } => "config",
             Command::Cache { .. } => "cache",
+            Command::Status { .. } => "status",
+            Command::Validate { .. } => "validate",
             Command::Ledger {
                 action: LedgerAction::Rebuild { .. },
             } => "ledger rebuild",
@@ -532,7 +614,26 @@ impl Command {
             Command::Resolve { paths, .. }
             | Command::Rename { paths, .. }
             | Command::Bib { paths, .. } => paths,
-            Command::Config { .. } | Command::Cache { .. } | Command::Ledger { .. } => &[],
+            Command::Config { .. }
+            | Command::Cache { .. }
+            | Command::Status { .. }
+            | Command::Validate { .. }
+            | Command::Ledger { .. } => &[],
+        }
+    }
+
+    /// The directory the subcommand works on as a library, or `None`
+    /// for a subcommand that works on files or on nothing.
+    ///
+    /// Not a path in [`Command::paths`]'s sense: these subcommands take
+    /// a library rather than input files, so nothing expands it to the
+    /// documents beneath it and no configuration is resolved per file
+    /// under it. What it decides is where the run's own configuration
+    /// is discovered from, and so which library the run is in.
+    pub fn directory(&self) -> Option<&Path> {
+        match self {
+            Command::Status { path, .. } | Command::Validate { path, .. } => path.as_deref(),
+            _ => None,
         }
     }
 }

@@ -62,15 +62,18 @@ impl Outcome {
 
 /// How a run that completed ended, from its totals.
 ///
-/// [`Counts::skipped`] and [`Counts::unreached`] decide it, and each
-/// means a file the run did not finish with: one it looked at and left,
-/// and one it never reached because the run ended early. A run over an
-/// empty directory resolves nothing, skips nothing, reaches the end of
-/// its inputs, and succeeds, because there was nothing it failed to do.
-/// [`Outcome::Fatal`] is not reachable from totals — a run that
+/// [`Counts::skipped`], [`Counts::unreached`] and [`Counts::findings`]
+/// decide it. The first two mean a file the run did not finish with:
+/// one it looked at and left, and one it never reached because the run
+/// ended early. The third is a library that needs attention rather
+/// than a file, which is the same answer to the shell: something the
+/// run was asked about is not settled. A run over an empty directory
+/// resolves nothing, skips nothing, finds nothing, reaches the end of
+/// its inputs, and succeeds, because there was nothing it failed to
+/// do. [`Outcome::Fatal`] is not reachable from totals — a run that
 /// produced totals is a run that happened.
 pub fn outcome_for(counts: &Counts) -> Outcome {
-    match counts.skipped + counts.unreached {
+    match counts.skipped + counts.unreached + counts.findings {
         0 => Outcome::Success,
         _ => Outcome::Partial,
     }

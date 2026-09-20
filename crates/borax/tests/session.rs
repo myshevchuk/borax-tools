@@ -38,6 +38,7 @@ fn a_batch_with_eight_successes_and_two_skipped_files_exits_with_the_partial_cod
         named: 0,
         unmatched: 0,
         unreached: 0,
+        findings: 0,
     };
 
     let code = outcome_for(&counts).code();
@@ -66,6 +67,7 @@ fn outcome_for_a_run_that_resolved_and_renamed_everything_with_nothing_skipped_i
         named: 0,
         unmatched: 0,
         unreached: 0,
+        findings: 0,
     };
 
     let outcome = outcome_for(&counts);
@@ -82,6 +84,7 @@ fn outcome_for_a_run_where_resolved_and_renamed_differ_but_skipped_is_zero_is_st
         named: 0,
         unmatched: 0,
         unreached: 0,
+        findings: 0,
     };
 
     let outcome = outcome_for(&counts);
@@ -102,6 +105,7 @@ fn outcome_for_a_run_with_a_single_skip_is_partial() {
         named: 0,
         unmatched: 0,
         unreached: 0,
+        findings: 0,
     };
 
     let outcome = outcome_for(&counts);
@@ -118,6 +122,7 @@ fn outcome_for_a_run_that_skipped_everything_is_partial() {
         named: 0,
         unmatched: 0,
         unreached: 0,
+        findings: 0,
     };
 
     let outcome = outcome_for(&counts);
@@ -134,6 +139,7 @@ fn outcome_for_eight_resolved_and_two_skipped_is_partial() {
         named: 0,
         unmatched: 0,
         unreached: 0,
+        findings: 0,
     };
 
     let outcome = outcome_for(&counts);
@@ -154,6 +160,7 @@ fn outcome_for_a_run_with_unreached_files_and_nothing_skipped_is_partial() {
         named: 0,
         unmatched: 0,
         unreached: 3,
+        findings: 0,
     };
 
     let outcome = outcome_for(&counts);

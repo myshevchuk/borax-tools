@@ -735,7 +735,13 @@ pub fn preflight<C: Cache>(
     adapters: &Adapters<C>,
 ) -> Result<Prepared, Diagnostic> {
     match command {
-        Command::Config { .. } | Command::Resolve { .. } => Ok(Prepared::Unchecked),
+        Command::Config { .. }
+        | Command::Resolve { .. }
+        // A library command has nothing that could refuse it: an
+        // absent store is an empty one, a file that will not parse is
+        // reported rather than fatal, and neither command writes.
+        | Command::Status { .. }
+        | Command::Validate { .. } => Ok(Prepared::Unchecked),
         // The root and the ledger are discovered together, so a run
         // holding one holds the other; either being absent is the one
         // situation of being outside a collection.
@@ -988,6 +994,14 @@ pub fn emit_events<C: Cache>(
         }
         (Command::Resolve { paths, .. }, _) => {
             resolve_events(paths, configs, adapters, sink);
+            Aftermath::default()
+        }
+        (Command::Status { identify, .. }, _) => {
+            status_events(command, *identify, configs, adapters, sink);
+            Aftermath::default()
+        }
+        (Command::Validate { .. }, _) => {
+            validation_events(command, adapters, sink);
             Aftermath::default()
         }
         (Command::Rename { apply, .. }, Prepared::Grouped { groups, ledger, .. }) => {
@@ -2892,7 +2906,66 @@ fn applying(command: &Command, mode: Mode) -> bool {
         Command::Rename { apply, .. } => *apply || mode == Mode::Interactive,
         Command::Cache { clear, .. } => *clear,
         Command::Bib { .. } | Command::Ledger { .. } => true,
-        Command::Resolve { .. } | Command::Config { .. } => false,
+        Command::Resolve { .. }
+        | Command::Config { .. }
+        | Command::Status { .. }
+        | Command::Validate { .. } => false,
+    }
+}
+
+/// The library `command` reports on.
+///
+/// The library root when a marker or a configured `library-root`
+/// established one — which is what `adapters` carries, discovered from
+/// the same directory the run's configuration was — and the directory
+/// the command was given when neither did. A directory nobody marked is
+/// reported on as given: the marker buys writing rather than seeing.
+fn reported_root<C: Cache>(command: &Command, adapters: &Adapters<'_, C>) -> PathBuf {
+    match &adapters.collection_root {
+        Some(root) => root.clone(),
+        None => library_directory(command.directory()),
+    }
+}
+
+/// Write `status`'s events into `sink`.
+///
+/// One event, carrying what [`crate::library::survey`] counted. When
+/// `identify`, each artifact is additionally opened and run through the
+/// extraction passes [`crate::pipeline::from_file`] runs, and how many
+/// yielded an identifier is reported alongside; no service is asked
+/// anything either way, and without the flag no document is opened at
+/// all.
+fn status_events<C: Cache>(
+    command: &Command,
+    identify: bool,
+    configs: &Configs,
+    adapters: &Adapters<'_, C>,
+    sink: &mut dyn Sink,
+) {
+    let surveyed = crate::library::survey(&reported_root(command, adapters));
+    // The extraction settings are the run's own: a library command is
+    // given a library rather than input files, so there is no per-file
+    // directory to resolve them from.
+    let extraction = resolving(configs.run().config()).extraction;
+    let identifiable = identify.then(|| {
+        surveyed
+            .artifacts
+            .iter()
+            .filter(|path| {
+                crate::pipeline::from_file(path, adapters.documents, &extraction).is_ok()
+            })
+            .count()
+    });
+
+    sink.emit(crate::library::status_event(&surveyed, identifiable));
+}
+
+/// Write `validate`'s events into `sink`: one per finding, then the
+/// totals ([`crate::library::validation_events`]).
+fn validation_events<C: Cache>(command: &Command, adapters: &Adapters<'_, C>, sink: &mut dyn Sink) {
+    let validation = crate::library::validate(&reported_root(command, adapters));
+    for event in crate::library::validation_events(&validation) {
+        sink.emit(event);
     }
 }
 
@@ -3104,7 +3177,15 @@ pub fn start_directory(
 /// [`start_directory`] over the real filesystem and working directory.
 fn start_directory_for(command: &Command) -> PathBuf {
     let working = std::env::current_dir().unwrap_or_default();
-    start_directory(command.paths(), &|path| path.is_dir(), &working)
+    // A library command names its library rather than input files, and
+    // that directory is where its configuration — and so its library
+    // root — is discovered from.
+    match command.directory() {
+        Some(directory) => {
+            start_directory(&[directory.to_path_buf()], &|path| path.is_dir(), &working)
+        }
+        None => start_directory(command.paths(), &|path| path.is_dir(), &working),
+    }
 }
 
 /// `command` with each path it was given replaced by the files that path
@@ -3156,7 +3237,37 @@ fn expanded(command: &Command) -> Command {
             run_log: run_log.clone(),
         },
         Command::Config { .. } | Command::Cache { .. } | Command::Ledger { .. } => command.clone(),
+        // A library command's path is a library and not an input file,
+        // so nothing expands it to the documents beneath it; what is
+        // settled here is the default, which is where the run was
+        // started.
+        Command::Status {
+            path,
+            identify,
+            extraction,
+            run_log,
+        } => Command::Status {
+            path: Some(library_directory(path.as_deref())),
+            identify: *identify,
+            extraction: extraction.clone(),
+            run_log: run_log.clone(),
+        },
+        Command::Validate { path, run_log } => Command::Validate {
+            path: Some(library_directory(path.as_deref())),
+            run_log: run_log.clone(),
+        },
     }
+}
+
+/// The library a command names: `path` when it was given one, and the
+/// working directory when it was not.
+///
+/// A working directory that cannot be read is the empty path, which
+/// holds no artifacts and no stores: a run with nowhere to stand
+/// reports an empty library rather than ending.
+fn library_directory(path: Option<&Path>) -> PathBuf {
+    path.map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
 }
 
 /// The time a real run stamps its records with: the current UTC

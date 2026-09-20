@@ -16,6 +16,7 @@ use borax::config::{
 };
 use borax::event::{Event, Level, Overridden, SkipReason};
 use borax::ledger::{Ledger, Loaded};
+use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RenameError, counts_for};
 use borax::run::{Adapters, Configs, Streams, dispatch, entry_type, events_for, templates};
@@ -24,6 +25,9 @@ use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::ledger::{Entry, Index, RunId};
+use borax_core::library::{
+    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, RunId as LibraryRunId,
+};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source as FieldSource};
 use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
 use borax_core::template::RenderInput;
@@ -6330,4 +6334,658 @@ fn a_supplied_record_the_collection_already_holds_is_reported_a_duplicate() {
         "and nothing may be admitted: got {:?}",
         ledger.appended()
     );
+}
+
+// ---------------------------------------------------------------------
+// Library fixtures — shared by the `status` and `validate` tests below
+// ---------------------------------------------------------------------
+
+const LIB_UUID_A: &str = "018f2b36-7f21-7abc-8def-0123456789ab";
+const LIB_UUID_B: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef0";
+
+fn lib_item_id(text: &str) -> ItemId {
+    ItemId::parse(text).unwrap()
+}
+
+fn lib_artifact_id(text: &str) -> ArtifactId {
+    ArtifactId::parse(text).unwrap()
+}
+
+/// A minimal but valid record, enough for an item to round-trip —
+/// following the shape of the one in `tests/library.rs`.
+fn lib_minimal_record(entry_type: EntryType) -> Record {
+    let mut record = Record::new(entry_type);
+    record.title = Some("A Title".to_string());
+    record
+}
+
+fn lib_hash_entry(seed: &str, run: &str) -> HashEntry {
+    HashEntry {
+        hash: hash_for(seed),
+        run: LibraryRunId::new(run),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        tool_version: "0.6.0-test".to_string(),
+    }
+}
+
+/// Writes `item` under `root`'s item store, named for its own identity
+/// so the fixture carries no unrelated `NameDisagrees` finding.
+fn write_lib_item(root: &Path, key: &str, item: &Item) {
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    fs::write(
+        items.join(format!("{key}.{}.toml", item.id)),
+        item.to_toml(),
+    )
+    .unwrap();
+}
+
+/// Writes `record` under `root`'s artifact-record store, named for its
+/// own identity as an applying run would name it.
+fn write_lib_artifact_record(root: &Path, record: &ArtifactRecord) {
+    let dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{}.toml", record.id)), record.to_toml()).unwrap();
+}
+
+/// An artifact record naming an item the library does not hold — the
+/// one library-level fixture the `validate` outcome tests below need,
+/// built once here rather than copied at each call site.
+fn write_dangling_artifact_record(root: &Path) {
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: Some(lib_item_id(LIB_UUID_B)),
+        path: "orphaned-link.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("dangling-item-link", "run-1")],
+    };
+    write_lib_artifact_record(root, &record);
+}
+
+/// Every file under `root`, with its bytes, including whatever
+/// `.borax/` holds — following the shape of the one in
+/// `tests/library.rs`, duplicated here since test binaries share no
+/// support module.
+fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.is_file() {
+                out.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+
+    let mut found = BTreeMap::new();
+    walk(root, &mut found);
+    found
+}
+
+/// A [`Documents`] fake that records how many times [`Documents::open`]
+/// was called, so `status`'s "opens no document" guarantee (design D5)
+/// can be asserted directly rather than only inferred from an error
+/// that never surfaced.
+struct CountingDocuments {
+    opens: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingDocuments {
+    fn new() -> CountingDocuments {
+        CountingDocuments {
+            opens: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn open_count(&self) -> usize {
+        self.opens.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Documents for CountingDocuments {
+    fn hash(&self, _path: &Path) -> Result<ContentHash, ExtractionError> {
+        Err(ExtractionError::Unreadable {
+            message: "status must not need a hash either".to_string(),
+        })
+    }
+
+    fn open(&self, _path: &Path) -> Result<Box<dyn PdfSource>, ExtractionError> {
+        self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ExtractionError::Unreadable {
+            message: "status must not open an artifact".to_string(),
+        })
+    }
+}
+
+/// A [`Source`] that panics if it is ever asked anything, for tests
+/// that must prove a source was never touched — following the shape of
+/// the one in `tests/pipeline.rs`.
+struct PanicSource {
+    name: SourceName,
+}
+
+impl Source for PanicSource {
+    fn name(&self) -> SourceName {
+        self.name
+    }
+
+    fn supports(&self, _identifier: &Identifier) -> bool {
+        panic!(
+            "{} was asked to support an identifier in an offline run",
+            self.name
+        )
+    }
+
+    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+        panic!("{} was asked to fetch in an offline run", self.name)
+    }
+}
+
+// ---------------------------------------------------------------------
+// events_for: Command::Status — task 4.1, the Hyperbole test
+// ---------------------------------------------------------------------
+
+/// The Hyperbole test (spec scenario "Two hundred files borax has never
+/// seen"), scaled down to a dozen: the scenario's number is about
+/// ceremony and not arithmetic. Every artifact is wired to fail loudly
+/// if it is ever opened, so a report of the right counts is proof
+/// `status` never tried, on no preceding command at all.
+#[test]
+fn status_over_a_marked_directory_of_new_pdfs_reports_every_count_unopened() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let mut documents = FakeDocuments::new();
+    for i in 0..12 {
+        let path = root.join(format!("paper-{i:02}.pdf"));
+        fs::write(&path, b"").unwrap();
+        documents = documents.with_open_error(
+            &path,
+            hash_for(&format!("hyperbole-{i}")),
+            ExtractionError::Unreadable {
+                message: "status must never open an artifact".to_string(),
+            },
+        );
+    }
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::LibraryStatus {
+            root: root.clone(),
+            artifacts: 12,
+            items: 0,
+            records: 0,
+            orphans: 12,
+            nested: Vec::new(),
+            identifiable: None,
+        }],
+        "got {events:?}"
+    );
+}
+
+/// The stronger form of the same guarantee: a recording fake shows
+/// `Documents::open` was never called at all, rather than only that
+/// every call would have failed.
+#[test]
+fn status_without_identify_never_calls_documents_open() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("paper.pdf"), b"").unwrap();
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let _ = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(documents.open_count(), 0, "got {}", documents.open_count());
+}
+
+// ---------------------------------------------------------------------
+// events_for: Command::Status --identify — task 4.2
+// ---------------------------------------------------------------------
+
+/// Scenario "What is identifiable is asked for": `--identify` reports
+/// how many artifacts yield an identifier, and queries no service — the
+/// source it is given panics if it is ever asked anything.
+#[test]
+fn status_identify_counts_artifacts_yielding_an_identifier_and_queries_no_source() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let identifiable = root.join("has-doi.pdf");
+    let not_identifiable = root.join("no-doi.pdf");
+    fs::write(&identifiable, b"").unwrap();
+    fs::write(&not_identifiable, b"").unwrap();
+    let documents = FakeDocuments::new()
+        .with_file(
+            &identifiable,
+            hash_for("identify-yes"),
+            pdf_with_embedded_doi("10.1000/identify"),
+        )
+        .with_file(
+            &not_identifiable,
+            hash_for("identify-no"),
+            pdf_with_no_identifier(),
+        );
+    let panicking = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panicking];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::LibraryStatus {
+            root: root.clone(),
+            artifacts: 2,
+            items: 0,
+            records: 0,
+            orphans: 2,
+            nested: Vec::new(),
+            identifiable: Some(1),
+        }],
+        "got {events:?}"
+    );
+}
+
+/// Scenario "A library nobody marked": a directory with no
+/// `.borax.toml` above it is reported on as given, and nothing is
+/// written to it — `.borax/` included, and the tree byte-identical
+/// throughout.
+#[test]
+fn status_over_an_unmarked_directory_is_reported_as_given_and_writes_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    // Deliberately no `.borax.toml`: nobody has marked this directory.
+    fs::write(root.join("paper.pdf"), b"").unwrap();
+    let before = snapshot(&root);
+
+    let documents = FakeDocuments::new().with_open_error(
+        root.join("paper.pdf"),
+        hash_for("unmarked-status"),
+        ExtractionError::Unreadable {
+            message: "status must not open an artifact".to_string(),
+        },
+    );
+    let panicking = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panicking];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        // Nothing above this directory is marked, and nothing configured
+        // a `library-root` either.
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::LibraryStatus {
+            root: root.clone(),
+            artifacts: 1,
+            items: 0,
+            records: 0,
+            orphans: 1,
+            nested: Vec::new(),
+            identifiable: None,
+        }],
+        "got {events:?}"
+    );
+    assert!(
+        !root.join(".borax").exists(),
+        "status over an unmarked directory must write nothing under it"
+    );
+    assert_eq!(
+        snapshot(&root),
+        before,
+        "the tree must be byte-identical after status"
+    );
+}
+
+// ---------------------------------------------------------------------
+// events_for / dispatch: Command::Validate — task 5.1/5.2 (exit codes)
+// ---------------------------------------------------------------------
+
+/// One event per finding, then the totals
+/// ([`borax::library::validation_events`]'s contract, exercised through
+/// the command).
+#[test]
+fn validate_emits_one_finding_event_then_the_totals() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    write_dangling_artifact_record(&root);
+    fs::write(root.join("orphan.pdf"), b"").unwrap();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::validate(Some(root.clone())),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(events.len(), 2, "got {events:?}");
+    assert!(
+        matches!(events[0], Event::LibraryFinding { .. }),
+        "got {:?}",
+        events[0]
+    );
+    assert_eq!(
+        events[1],
+        Event::LibraryValidated {
+            root: root.clone(),
+            findings: 1,
+            orphans: 1,
+            // The dangling record's own path holds no file either, so
+            // the same fixture carries one missing artifact — a count
+            // and not a second finding.
+            missing: 1,
+            unlinked: 0,
+        },
+        "got {:?}",
+        events[1]
+    );
+}
+
+/// Exit codes: a `validate` reporting any finding ends in
+/// `Outcome::Partial`.
+#[test]
+fn validate_with_a_finding_returns_partial_success() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    write_dangling_artifact_record(&root);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::validate(Some(root.clone())), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
+}
+
+/// Exit codes: a `validate` reporting no finding ends in
+/// `Outcome::Success`, whatever the orphan and unlinked counts —
+/// scenario "A clean library exits 0".
+#[test]
+fn validate_with_no_finding_returns_success_whatever_the_orphan_and_unlinked_counts() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join("orphan.pdf"), b"").unwrap();
+    let unlinked = Item {
+        id: lib_item_id(LIB_UUID_A),
+        record: lib_minimal_record(EntryType::Article),
+    };
+    write_lib_item(&root, "unlinked", &unlinked);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::validate(Some(root.clone())), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+}
+
+// ---------------------------------------------------------------------
+// dispatch: an applying rename over a library with a finding — task 5.3
+// ---------------------------------------------------------------------
+
+/// Scenario "Validation refuses nothing": an applying `rename` run made
+/// over a library holding a finding proceeds rather than being refused.
+///
+/// Task 7, which teaches an applying run to write artifact records, is
+/// not built yet, so this fixes only what is true today and will stay
+/// true afterwards — the move happens and the pre-existing finding is
+/// still there — and leaves the write half to the TODO below.
+#[test]
+fn an_applying_rename_over_a_library_with_a_finding_proceeds() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    // A pre-existing finding that nothing in this run can repair or
+    // remove: a half-written artifact record.
+    let store_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&store_dir).unwrap();
+    fs::write(
+        store_dir.join("half-written.toml"),
+        b"this is not [ valid toml",
+    )
+    .unwrap();
+
+    let path = root.join("original.pdf");
+    let documents = library_with_resolvable(
+        &path,
+        hash_for("validate-refuses-nothing"),
+        "10.1000/validate-refuses-nothing",
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/validate-refuses-nothing")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::rename(vec![path.clone()], true), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_ne!(
+        outcome,
+        Outcome::Fatal,
+        "a library holding a finding must not refuse the run: got {outcome:?}"
+    );
+    assert_eq!(
+        filesystem.renames(),
+        vec![(path.clone(), root.join("Smith2024.pdf"))],
+        "the move must proceed despite the finding: got {:?}",
+        filesystem.renames()
+    );
+
+    let after = library::validate(&root);
+    assert!(
+        after
+            .findings
+            .iter()
+            .any(|(file, _)| file == &store_dir.join("half-written.toml")),
+        "the pre-existing finding must still be reported afterwards: got {:?}",
+        after.findings
+    );
+
+    // TODO(batch E): once task 7.x lands, this run should also write an
+    // artifact record for `Smith2024.pdf` ("an applying run records what
+    // it admits") — the write path does not exist yet, so there is
+    // nothing to assert about it here.
 }

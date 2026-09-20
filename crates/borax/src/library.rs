@@ -15,15 +15,20 @@
 //! authoritative, so nothing here caches it beyond the call that read
 //! it.
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
-use borax_core::library::{ArtifactId, ArtifactRecord, Item, ItemId};
+use borax_core::library::{
+    ArtifactId, ArtifactRecord, Item, ItemId, is_library_relative, is_well_formed_hash, name_uuid,
+};
 use borax_core::record::Record;
+use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
+use crate::event::{Event, Finding};
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
 
@@ -107,24 +112,50 @@ pub fn relative_to(root: &Path, relative: &str) -> PathBuf {
         .fold(root.to_path_buf(), |path, segment| path.join(segment))
 }
 
-/// Whether the library rooted at `root` owns `directory` itself.
+/// Why the library rooted at `root` does not own `directory`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Excluded {
+    /// The library's own state directory, [`STATE_DIR`].
+    State,
+    /// The library's own item store, [`ITEM_STORE`].
+    Items,
+    /// A directory holding an [`OVERRIDE_FILE`] of its own, which makes
+    /// it a library in its own right.
+    Nested,
+}
+
+/// Why the library rooted at `root` does not own `directory`, or `None`
+/// when it does.
 ///
 /// The three subtrees it does not own are its own state directory, its
-/// item store, and any directory below the root holding an
-/// [`OVERRIDE_FILE`] of its own — that directory is a library in its
-/// own right and its files are its own. The root always owns itself,
+/// item store, and a nested library. The root always owns itself,
 /// whether or not it holds the marker that made it a root.
 ///
 /// This answers about `directory` alone and says nothing about what
 /// lies above it; [`excludes`] is the same rule applied to a whole
-/// path.
-fn owns(root: &Path, directory: &Path) -> bool {
+/// path. The reason is distinguished rather than collapsed because a
+/// walk reports the nested libraries it stopped at and must not report
+/// this library's own directories among them.
+fn ownership(root: &Path, directory: &Path) -> Option<Excluded> {
     if same_name(root, directory) {
-        return true;
+        return None;
     }
-    !same_name(directory, &root.join(STATE_DIR))
-        && !same_name(directory, &root.join(ITEM_STORE))
-        && !directory.join(OVERRIDE_FILE).is_file()
+    if same_name(directory, &root.join(STATE_DIR)) {
+        return Some(Excluded::State);
+    }
+    if same_name(directory, &root.join(ITEM_STORE)) {
+        return Some(Excluded::Items);
+    }
+    match directory.join(OVERRIDE_FILE).is_file() {
+        true => Some(Excluded::Nested),
+        false => None,
+    }
+}
+
+/// Whether the library rooted at `root` owns `directory` itself:
+/// [`ownership`] as the predicate a walk asks.
+fn owns(root: &Path, directory: &Path) -> bool {
+    ownership(root, directory).is_none()
 }
 
 /// Whether the library rooted at `root` excludes `path`.
@@ -167,10 +198,39 @@ pub fn excludes(root: &Path, path: &Path) -> bool {
 /// failing the walk, so one unreadable subtree costs its own files and
 /// no others.
 pub fn artifacts(root: &Path) -> Vec<PathBuf> {
+    walk(root).0
+}
+
+/// One walk of the library rooted at `root`: its artifacts sorted by
+/// path, and the nested libraries the walk stopped at, library-relative
+/// and in path order.
+///
+/// The two answers come of one descent under one rule ([`owns`]), so
+/// the files counted and the subtrees left out cannot disagree about
+/// where the library stops.
+fn walk(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let nested = RefCell::new(Vec::new());
     let mut found = Vec::new();
-    documents(root, &|directory| owns(root, directory), &mut found);
+    documents(
+        root,
+        &|directory| match ownership(root, directory) {
+            None => true,
+            Some(excluded) => {
+                if excluded == Excluded::Nested {
+                    if let Some(relative) = library_relative(root, directory) {
+                        nested.borrow_mut().push(relative);
+                    }
+                }
+                false
+            }
+        },
+        &mut found,
+    );
+
     found.sort();
-    found
+    let mut nested = nested.into_inner();
+    nested.sort();
+    (found, nested)
 }
 
 /// A file of a library's store that could not be read as the record it
@@ -241,7 +301,12 @@ fn identifier_of(record: &Record, wanted: &Identifier) -> Option<Identifier> {
 /// a later edit.
 #[derive(Debug, Clone, Default)]
 pub struct ItemStore {
-    items: Vec<Item>,
+    /// Every item read, each beside the file it was read from, in path
+    /// order. Validation is about files, so the path travels with the
+    /// record rather than being recoverable from it — an item file
+    /// renamed by hand is still the item it was, and saying so is a
+    /// finding about that name.
+    entries: Vec<(PathBuf, Item)>,
     /// The files that cost a record, and the source fields that were
     /// dropped from one that survived, in path order.
     pub faults: Vec<StoreFault>,
@@ -275,7 +340,7 @@ impl ItemStore {
                             path: path.clone(),
                             message: format!("dropped unreadable source field {:?}", fault.key),
                         }));
-                    store.items.push(parsed.item);
+                    store.entries.push((path, parsed.item));
                 }
                 Err(error) => store.faults.push(StoreFault {
                     path,
@@ -292,7 +357,7 @@ impl ItemStore {
     /// The identity is the one inside the file, never the one its name
     /// claims: an item file renamed by hand is still the item it was.
     pub fn by_id(&self, id: &ItemId) -> Option<&Item> {
-        self.items.iter().find(|item| &item.id == id)
+        self.iter().find(|item| &item.id == id)
     }
 
     /// The first item whose record carries `identifier`, or `None` when
@@ -302,25 +367,32 @@ impl ItemStore {
     /// is looked for among DOIs alone. Items are searched in the order
     /// they were read, which is the store's path order.
     pub fn by_identifier(&self, identifier: &Identifier) -> Option<&Item> {
-        self.items
-            .iter()
+        self.iter()
             .find(|item| identifier_of(&item.record, identifier).as_ref() == Some(identifier))
     }
 
     /// How many items were read.
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.entries.len()
     }
 
     /// Whether no item was read. A store with faults and no items is
     /// empty: a file that cost its record contributes none.
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.entries.is_empty()
     }
 
     /// Every item read, in the order they were read.
     pub fn iter(&self) -> impl Iterator<Item = &Item> {
-        self.items.iter()
+        self.entries.iter().map(|(_, item)| item)
+    }
+
+    /// Every item read, each beside the file it came from, in the order
+    /// they were read.
+    fn files(&self) -> impl Iterator<Item = (&Path, &Item)> {
+        self.entries
+            .iter()
+            .map(|(path, item)| (path.as_path(), item))
     }
 }
 
@@ -330,7 +402,9 @@ impl ItemStore {
 /// held by value on the same terms as [`ItemStore`].
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactStore {
-    records: Vec<ArtifactRecord>,
+    /// Every record read, each beside the file it was read from, in
+    /// path order, on the same terms as [`ItemStore`]'s.
+    entries: Vec<(PathBuf, ArtifactRecord)>,
     /// The files that cost a record, in path order.
     pub faults: Vec<StoreFault>,
 }
@@ -346,13 +420,14 @@ impl ArtifactStore {
         let mut store = ArtifactStore::default();
 
         for (path, text) in store_files(&root.join(STATE_DIR).join(ARTIFACT_STORE)) {
-            match text.and_then(|text| {
+            let parsed = text.and_then(|text| {
                 ArtifactRecord::from_toml(&text).map_err(|error| StoreFault {
                     path: path.clone(),
                     message: error.to_string(),
                 })
-            }) {
-                Ok(record) => store.records.push(record),
+            });
+            match parsed {
+                Ok(record) => store.entries.push((path, record)),
                 Err(fault) => store.faults.push(fault),
             }
         }
@@ -363,7 +438,7 @@ impl ArtifactStore {
     /// The record of identity `id`, or `None` when the store holds
     /// none.
     pub fn by_id(&self, id: &ArtifactId) -> Option<&ArtifactRecord> {
-        self.records.iter().find(|record| &record.id == id)
+        self.iter().find(|record| &record.id == id)
     }
 
     /// Every record whose history holds `hash`, in read order.
@@ -373,17 +448,13 @@ impl ArtifactStore {
     /// bytes it has. Several records can share a hash: two files of
     /// identical content are two artifacts.
     pub fn by_hash(&self, hash: &ContentHash) -> Vec<&ArtifactRecord> {
-        self.records
-            .iter()
-            .filter(|record| record.holds(hash))
-            .collect()
+        self.iter().filter(|record| record.holds(hash)).collect()
     }
 
     /// Every record linked to the item `item`, in read order. An item
     /// may have several artifacts.
     pub fn by_item(&self, item: &ItemId) -> Vec<&ArtifactRecord> {
-        self.records
-            .iter()
+        self.iter()
             .filter(|record| record.item.as_ref() == Some(item))
             .collect()
     }
@@ -396,22 +467,30 @@ impl ArtifactStore {
     /// was last seen and not where it must be, so a record answering
     /// here says nothing about whether the file is still there.
     pub fn by_path(&self, relative: &str) -> Option<&ArtifactRecord> {
-        self.records.iter().find(|record| record.path == relative)
+        self.iter().find(|record| record.path == relative)
     }
 
     /// How many records were read.
     pub fn len(&self) -> usize {
-        self.records.len()
+        self.entries.len()
     }
 
     /// Whether no record was read.
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.entries.is_empty()
     }
 
     /// Every record read, in the order they were read.
     pub fn iter(&self) -> impl Iterator<Item = &ArtifactRecord> {
-        self.records.iter()
+        self.entries.iter().map(|(_, record)| record)
+    }
+
+    /// Every record read, each beside the file it came from, in the
+    /// order they were read.
+    fn files(&self) -> impl Iterator<Item = (&Path, &ArtifactRecord)> {
+        self.entries
+            .iter()
+            .map(|(path, record)| (path.as_path(), record))
     }
 }
 
@@ -451,4 +530,307 @@ pub fn missing<'a>(
         .iter()
         .filter(|record| !exists(&relative_to(root, &record.path)))
         .collect()
+}
+
+/// What a library holds, as one walk of its tree and one read of its
+/// two stores found it.
+///
+/// The counts `borax status` reports, with the paths behind two of them
+/// kept rather than only their totals: a caller asked for more — the
+/// identifiable count — needs the artifacts themselves, and a walk is
+/// the one part of the survey worth not doing twice.
+///
+/// Nothing here opens a document. The cost of a survey is the directory
+/// walk and the store read, which is what lets a library borax has
+/// never seen be reported on as cheaply as one it wrote itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Survey {
+    /// The root of what was surveyed. The library root when a marker
+    /// or a configured `library-root` established one, and the
+    /// directory the run was given when neither did — a directory
+    /// nobody marked is reported on as given.
+    pub root: PathBuf,
+    /// Every artifact in the tree, sorted by path.
+    pub artifacts: Vec<PathBuf>,
+    /// The artifacts no record names, in the order [`Survey::artifacts`]
+    /// holds them.
+    pub orphans: Vec<PathBuf>,
+    /// The nested libraries the walk stopped at, library-relative and
+    /// in path order.
+    ///
+    /// A marker below the root takes its whole subtree out of every
+    /// count above it, so a reader who cannot see what was excluded
+    /// cannot tell a small library from a subdivided one.
+    pub nested: Vec<String>,
+    /// How many items the item store holds.
+    pub items: usize,
+    /// How many records the artifact store holds.
+    pub records: usize,
+}
+
+/// Survey the library rooted at `root`.
+///
+/// Never fails and opens no document: a store file that cannot be read
+/// costs its own record and no other ([`ItemStore::read`]), and a
+/// directory that cannot be listed contributes nothing ([`artifacts`]).
+/// A library with no store directories at all is a library of orphans,
+/// which is what a directory borax has never seen is.
+pub fn survey(root: &Path) -> Survey {
+    surveyed(root, &contents(root))
+}
+
+/// A library as read: one walk of its tree and one read of each of its
+/// stores, which is everything [`survey`] and [`validate`] are made of.
+struct Contents {
+    artifacts: Vec<PathBuf>,
+    nested: Vec<String>,
+    items: ItemStore,
+    records: ArtifactStore,
+}
+
+/// Read the library rooted at `root`. Never fails, and opens no
+/// document.
+fn contents(root: &Path) -> Contents {
+    let (artifacts, nested) = walk(root);
+    Contents {
+        artifacts,
+        nested,
+        items: ItemStore::read(root),
+        records: ArtifactStore::read(root),
+    }
+}
+
+/// What `contents`, read from the library rooted at `root`, amounts to
+/// as a survey.
+fn surveyed(root: &Path, contents: &Contents) -> Survey {
+    Survey {
+        root: root.to_path_buf(),
+        orphans: orphans(root, &contents.artifacts, &contents.records),
+        artifacts: contents.artifacts.clone(),
+        nested: contents.nested.clone(),
+        items: contents.items.len(),
+        records: contents.records.len(),
+    }
+}
+
+/// Whether the name of `path` carries an identity other than `id` —
+/// including a name carrying no canonical UUID at all, which carries
+/// none of them.
+fn name_disagrees(path: &Path, id: Uuid) -> bool {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    name_uuid(&name) != Some(id)
+}
+
+/// Every finding about the item store's own files, in path order.
+///
+/// A file that cost its record is reported by the fault the store
+/// already holds; a file that yielded one is judged on its name and on
+/// the identity inside it.
+fn item_findings(items: &ItemStore) -> Vec<(PathBuf, Finding)> {
+    let mut found: Vec<(PathBuf, Finding)> = items
+        .faults
+        .iter()
+        .map(|fault| {
+            (
+                fault.path.clone(),
+                Finding::Unreadable {
+                    message: fault.message.clone(),
+                },
+            )
+        })
+        .collect();
+
+    let mut seen: Vec<(&ItemId, &Path)> = Vec::new();
+    for (path, item) in items.files() {
+        let first = seen
+            .iter()
+            .find(|(id, _)| *id == &item.id)
+            .map(|(_, first)| first.to_path_buf());
+        match first {
+            Some(first) => found.push((
+                path.to_path_buf(),
+                Finding::DuplicateIdentity {
+                    id: item.id.to_string(),
+                    other: first,
+                },
+            )),
+            None => seen.push((&item.id, path)),
+        }
+        if name_disagrees(path, item.id.uuid()) {
+            found.push((
+                path.to_path_buf(),
+                Finding::NameDisagrees {
+                    id: item.id.to_string(),
+                },
+            ));
+        }
+    }
+
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    found
+}
+
+/// Every finding about the artifact store's own files, in path order.
+///
+/// `items` decides which item links dangle: a record naming an item no
+/// item file carries is a link to nothing.
+fn record_findings(records: &ArtifactStore, items: &ItemStore) -> Vec<(PathBuf, Finding)> {
+    let mut found: Vec<(PathBuf, Finding)> = records
+        .faults
+        .iter()
+        .map(|fault| {
+            (
+                fault.path.clone(),
+                Finding::Unreadable {
+                    message: fault.message.clone(),
+                },
+            )
+        })
+        .collect();
+
+    let mut seen: Vec<(&ArtifactId, &Path)> = Vec::new();
+    for (path, record) in records.files() {
+        let mut about = |finding| found.push((path.to_path_buf(), finding));
+
+        if let Some(item) = &record.item {
+            if items.by_id(item).is_none() {
+                about(Finding::DanglingItem {
+                    item: item.to_string(),
+                });
+            }
+        }
+        let first = seen
+            .iter()
+            .find(|(id, _)| *id == &record.id)
+            .map(|(_, first)| first.to_path_buf());
+        match first {
+            Some(first) => about(Finding::DuplicateIdentity {
+                id: record.id.to_string(),
+                other: first,
+            }),
+            None => seen.push((&record.id, path)),
+        }
+        if name_disagrees(path, record.id.uuid()) {
+            about(Finding::NameDisagrees {
+                id: record.id.to_string(),
+            });
+        }
+        if !is_library_relative(&record.path) {
+            about(Finding::PathNotRelative {
+                path: record.path.clone(),
+            });
+        }
+        if record.history.is_empty() {
+            about(Finding::EmptyHistory);
+        }
+        for entry in &record.history {
+            if !is_well_formed_hash(&entry.hash) {
+                about(Finding::MalformedHash {
+                    hash: entry.hash.to_string(),
+                });
+            }
+            if entry.run.as_str().is_empty() {
+                about(Finding::HistoryEntryWithoutRun {
+                    hash: entry.hash.to_string(),
+                });
+            }
+        }
+    }
+
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    found
+}
+
+/// The event reporting `survey`, carrying `identifiable` as the count
+/// of artifacts an identifier could be extracted from.
+///
+/// `identifiable` is `None` when the run was not asked for it: the
+/// survey itself never opens a document, so the count comes from the
+/// caller that did.
+pub fn status_event(survey: &Survey, identifiable: Option<usize>) -> Event {
+    Event::LibraryStatus {
+        root: survey.root.clone(),
+        artifacts: survey.artifacts.len(),
+        items: survey.items,
+        records: survey.records,
+        orphans: survey.orphans.len(),
+        nested: survey.nested.clone(),
+        identifiable,
+    }
+}
+
+/// What `borax validate` found about a library.
+///
+/// The findings are what is wrong with the library's own records. The
+/// three counts are not findings and never become them: an orphan is
+/// work to do, an artifact borax cannot find is history the library
+/// deliberately keeps, and an item nothing links to is an ordinary item
+/// for a work with no file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Validation {
+    /// The library the findings are about, as [`Survey::root`].
+    pub root: PathBuf,
+    /// Every finding, each with the file it is about, in the order the
+    /// stores were read: the item store first, then the artifact
+    /// records, each in path order.
+    pub findings: Vec<(PathBuf, Finding)>,
+    /// Artifacts no record names.
+    pub orphans: usize,
+    /// Records whose last-known path holds no file.
+    pub missing: usize,
+    /// Items no artifact record links to.
+    pub unlinked: usize,
+}
+
+/// Validate the library rooted at `root`.
+///
+/// Reads the tree and both stores and reports what it found. Repairs
+/// nothing, refuses nothing, writes nothing and holds no lock: a
+/// library has no single consistent state at any moment, its writers
+/// being peers, so a file observed half-written is a finding about that
+/// file and about nothing else.
+pub fn validate(root: &Path) -> Validation {
+    let contents = contents(root);
+    let survey = surveyed(root, &contents);
+
+    let mut findings = item_findings(&contents.items);
+    findings.extend(record_findings(&contents.records, &contents.items));
+
+    Validation {
+        root: survey.root,
+        findings,
+        orphans: survey.orphans.len(),
+        missing: missing(root, &contents.records, &|path| path.is_file()).len(),
+        unlinked: contents
+            .items
+            .iter()
+            .filter(|item| contents.records.by_item(&item.id).is_empty())
+            .count(),
+    }
+}
+
+/// The events reporting `validation`: one per finding in the order they
+/// were found, then the totals.
+///
+/// The totals come last so that a reader of the stream has the findings
+/// before the count of them, as every other run reports its files
+/// before its summary.
+pub fn validation_events(validation: &Validation) -> Vec<Event> {
+    let mut events: Vec<Event> = validation
+        .findings
+        .iter()
+        .map(|(path, finding)| Event::LibraryFinding {
+            path: path.clone(),
+            finding: finding.clone(),
+        })
+        .collect();
+
+    events.push(Event::LibraryValidated {
+        root: validation.root.clone(),
+        findings: validation.findings.len(),
+        orphans: validation.orphans,
+        missing: validation.missing,
+        unlinked: validation.unlinked,
+    });
+    events
 }

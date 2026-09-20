@@ -160,6 +160,41 @@ pub enum Event {
     /// which is the whole of what the ledger holds afterwards rather
     /// than an addition to what it held before.
     LedgerRebuilt { root: PathBuf, entries: usize },
+    /// What a library holds, counted from its tree and from its two
+    /// stores.
+    ///
+    /// `identifiable` is `None` when the run was not asked for it: a
+    /// count nobody asked for and a count of zero are different
+    /// answers, and only `--identify` opens a document.
+    LibraryStatus {
+        root: PathBuf,
+        artifacts: usize,
+        items: usize,
+        records: usize,
+        orphans: usize,
+        /// The nested libraries the walk stopped at, library-relative
+        /// and in path order. A marker below the root takes its whole
+        /// subtree out of every count above it, so the counts are only
+        /// legible beside the list of what they leave out.
+        nested: Vec<String>,
+        identifiable: Option<usize>,
+    },
+    /// Something wrong with a library's own records, about the file at
+    /// `path` and about no other.
+    LibraryFinding { path: PathBuf, finding: Finding },
+    /// What validating a library amounted to: how many findings were
+    /// reported, and the three counts that are not findings.
+    LibraryValidated {
+        root: PathBuf,
+        findings: usize,
+        orphans: usize,
+        /// Records whose last-known path holds no file. History the
+        /// library deliberately keeps, not a malformed record.
+        missing: usize,
+        /// Items no artifact record links to. An ordinary item for a
+        /// work the library holds no file for.
+        unlinked: usize,
+    },
     /// The run is over. Always the last event.
     RunFinished { counts: Counts },
 }
@@ -241,6 +276,48 @@ pub enum SkipReason {
     },
 }
 
+/// Something wrong with a library's own records.
+///
+/// A finding is a report about a library and never a rejected write:
+/// `borax validate` repairs nothing and refuses nothing, and every
+/// writer — borax's own CLI, a file manager, a text editor — is judged
+/// by the same list. An orphan, an artifact borax cannot find and an
+/// item nothing links to are counts rather than findings, so none of
+/// them is here.
+///
+/// Serialized with a `kind` tag, nested under the event's `finding`
+/// field, as [`SkipReason`] is under `reason`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Finding {
+    /// An artifact record naming an item the library does not hold.
+    DanglingItem { item: String },
+    /// Two files of one store carrying one identity. `other` is the
+    /// file the identity was first read from, so the pair is legible
+    /// from the finding alone.
+    DuplicateIdentity { id: String, other: PathBuf },
+    /// A file whose record carries an identity its own name does not,
+    /// including a name carrying no identity at all. `id` is what the
+    /// record says, which is the authoritative one.
+    NameDisagrees { id: String },
+    /// An artifact record whose last-known path is not a
+    /// library-relative path under the root.
+    PathNotRelative { path: String },
+    /// An artifact record with no hash history at all, which is a
+    /// record that is evidence about nothing.
+    EmptyHistory,
+    /// An artifact record holding a hash that is not one borax writes.
+    MalformedHash { hash: String },
+    /// A history entry naming no run, so what it records cannot be
+    /// attributed to anything the library did.
+    HistoryEntryWithoutRun { hash: String },
+    /// A file of one of the stores that does not parse as the record
+    /// it claims to be, including an item whose verbatim source fields
+    /// do not parse as JSON. One such file is a finding about itself
+    /// and about no other.
+    Unreadable { message: String },
+}
+
 /// A title a file claims for itself, and where it was read.
 ///
 /// Claims are reported as the file makes them, including one the
@@ -315,6 +392,12 @@ pub struct Counts {
     /// Not counted from an event, since no event is emitted for a file
     /// nothing happened to; the run sets it when it stops early.
     pub unreached: usize,
+
+    /// Findings reported about the library's own records. A run
+    /// reporting any ends in partial success, on the same terms as one
+    /// that skipped a file: something in what the run was asked about
+    /// needs attention.
+    pub findings: usize,
 }
 
 impl Counts {
@@ -331,6 +414,7 @@ impl Counts {
             Event::Skipped { .. } => self.skipped += 1,
             Event::AlreadyNamed { .. } => self.named += 1,
             Event::LookupMissed { .. } => self.unmatched += 1,
+            Event::LibraryFinding { .. } => self.findings += 1,
             _ => {}
         }
     }
@@ -469,6 +553,39 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: rebuilt with {entries} entries",
             root.display()
         )),
+        Event::LibraryStatus {
+            root,
+            artifacts,
+            items,
+            records,
+            orphans,
+            nested,
+            identifiable,
+        } => Some(format!(
+            "{}: {artifacts} artifacts, {items} items, {records} records, {orphans} orphans{}{}",
+            root.display(),
+            match identifiable {
+                None => String::new(),
+                Some(identifiable) => format!(", {identifiable} identifiable"),
+            },
+            match nested.is_empty() {
+                true => String::new(),
+                false => format!(" (excluding nested libraries: {})", nested.join(", ")),
+            }
+        )),
+        Event::LibraryFinding { path, finding } => {
+            Some(format!("{}: {}", path.display(), what_is_wrong(finding)))
+        }
+        Event::LibraryValidated {
+            root,
+            findings,
+            orphans,
+            missing,
+            unlinked,
+        } => Some(format!(
+            "{}: {findings} findings, {orphans} orphans, {missing} missing, {unlinked} unlinked",
+            root.display()
+        )),
         Event::RunFinished { counts } => Some(human_summary(counts, 0)),
     }
 }
@@ -484,10 +601,11 @@ pub fn human_line(event: &Event) -> Option<String> {
 /// a zero: the JSON summary carries it either way, and a run that
 /// looked nothing up has nothing to say about tables it never
 /// consulted. The same goes for files already named, renames not
-/// reached, and files passed over.
+/// reached, files passed over, and findings about a library the run
+/// never validated.
 pub fn human_summary(counts: &Counts, hidden: usize) -> String {
     format!(
-        "{} resolved, {} renamed, {} skipped{}{}{}",
+        "{} resolved, {} renamed, {} skipped{}{}{}{}",
         counts.resolved,
         counts.renamed,
         counts.skipped,
@@ -504,6 +622,10 @@ pub fn human_summary(counts: &Counts, hidden: usize) -> String {
         match counts.unreached {
             0 => String::new(),
             unreached => format!(", {unreached} not reached"),
+        },
+        match counts.findings {
+            0 => String::new(),
+            findings => format!(", {findings} findings"),
         }
     )
 }
@@ -559,6 +681,36 @@ fn skipped_because(reason: &SkipReason) -> String {
             "same work already archived at {} (different file)",
             existing_path.display()
         ),
+    }
+}
+
+/// What `finding` says is wrong with the file, as the clause following
+/// that file's name in a human rendering.
+///
+/// The record's own reading of an identity is given rather than the
+/// name's: a file whose name and contents disagree is named by the
+/// line already, and what the record says is the authoritative half.
+fn what_is_wrong(finding: &Finding) -> String {
+    match finding {
+        Finding::DanglingItem { item } => {
+            format!("names item {item}, which the library has none of")
+        }
+        Finding::DuplicateIdentity { id, other } => format!(
+            "carries identity {id}, which {} carries too",
+            other.display()
+        ),
+        Finding::NameDisagrees { id } => format!("carries identity {id}, which its name does not"),
+        Finding::PathNotRelative { path } => {
+            format!("records {path:?}, which is not a library-relative path")
+        }
+        Finding::EmptyHistory => "has no hash history, so it is evidence about nothing".to_string(),
+        Finding::MalformedHash { hash } => {
+            format!("holds {hash:?}, which is not a hash borax writes")
+        }
+        Finding::HistoryEntryWithoutRun { hash } => {
+            format!("records {hash} against no run")
+        }
+        Finding::Unreadable { message } => format!("unreadable ({message})"),
     }
 }
 

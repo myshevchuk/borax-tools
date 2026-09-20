@@ -1,11 +1,13 @@
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use borax::event::Finding;
 use borax::library::{
     ARTIFACT_STORE, ArtifactStore, ITEM_STORE, ItemStore, STATE_DIR, artifacts, contains, missing,
-    orphans,
+    orphans, survey, validate,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -30,6 +32,38 @@ fn artifact_id(text: &str) -> ArtifactId {
 
 fn hash(seed: &str) -> ContentHash {
     hash_bytes(seed.as_bytes())
+}
+
+/// A [`ContentHash`] built from arbitrary text rather than from real
+/// bytes, bypassing `hash_bytes` so a malformed shape can be written to
+/// an artifact record — following the shape of the one in
+/// `borax-core/tests/library.rs`.
+fn malformed_hash(text: &str) -> ContentHash {
+    serde_json::from_value(serde_json::json!(text)).unwrap()
+}
+
+/// Every file under `root`, with its bytes, keyed by path — including
+/// whatever `.borax/` holds — so a tree can be compared byte for byte
+/// before and after an operation rather than merely by whether it still
+/// exists.
+fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.is_file() {
+                out.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+
+    let mut found = BTreeMap::new();
+    walk(root, &mut found);
+    found
 }
 
 /// A minimal but valid record of `entry_type`, enough to round-trip.
@@ -659,4 +693,528 @@ fn missing_excludes_a_record_whose_path_holds_a_file() {
     let result = missing(root, &store, exists);
 
     assert_eq!(result, Vec::<&ArtifactRecord>::new(), "got {result:?}");
+}
+
+// ---------------------------------------------------------------------
+// 2.5 (re-scoped half): survey() keeps a nested library's subtree out
+// of the orphan count too, and names the nested root
+// ---------------------------------------------------------------------
+
+/// The other half of design D15, at the level `survey()` reports: a
+/// nested `.borax.toml` takes its subtree out of the orphan count the
+/// same way `artifacts_excludes_everything_beneath_a_nested_marker`
+/// already pins for the walk, and the nested root shows up in
+/// `Survey::nested` so a reader can tell a small library from a
+/// subdivided one.
+#[test]
+fn survey_excludes_a_nested_librarys_subtree_from_orphans_and_names_it_nested() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested/.borax.toml"), b"").unwrap();
+    fs::write(root.join("nested/inner.pdf"), b"").unwrap();
+    fs::write(root.join("outer.pdf"), b"").unwrap();
+
+    let found = survey(root);
+
+    assert_eq!(
+        found.artifacts,
+        vec![root.join("outer.pdf")],
+        "got {:?}",
+        found.artifacts
+    );
+    assert_eq!(
+        found.orphans,
+        vec![root.join("outer.pdf")],
+        "got {:?}",
+        found.orphans
+    );
+    assert_eq!(
+        found.nested,
+        vec!["nested".to_string()],
+        "got {:?}",
+        found.nested
+    );
+}
+
+// ---------------------------------------------------------------------
+// 5.1: validate() — one test per finding
+// ---------------------------------------------------------------------
+
+/// Scenario "A dangling item link": an artifact record naming an item
+/// the library does not hold.
+#[test]
+fn validate_reports_a_dangling_item_link() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "orphaned-link.pdf",
+        vec![hash_entry("bytes", "run-1")],
+    );
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            root.join(STATE_DIR)
+                .join(ARTIFACT_STORE)
+                .join(format!("{UUID_A}.toml")),
+            Finding::DanglingItem {
+                item: UUID_B.to_string()
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+/// Two item files carrying one item identity: the second is reported,
+/// naming the first as `other`.
+///
+/// Both file names carry `UUID_A` — matching the identity inside them —
+/// so this isolates the duplicate-identity finding from
+/// [`Finding::NameDisagrees`], which a name carrying no UUID at all
+/// would also trigger.
+#[test]
+fn validate_reports_two_item_files_carrying_one_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("a-first.{UUID_A}.toml"), &item);
+    write_item(root, &format!("b-second.{UUID_A}.toml"), &item);
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            root.join(ITEM_STORE)
+                .join(format!("b-second.{UUID_A}.toml")),
+            Finding::DuplicateIdentity {
+                id: UUID_A.to_string(),
+                other: root.join(ITEM_STORE).join(format!("a-first.{UUID_A}.toml")),
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+/// The same finding on the artifact-record side: two records under one
+/// artifact identity. Both file names carry `UUID_A`, for the same
+/// reason as the item-store version above.
+#[test]
+fn validate_reports_two_artifact_records_carrying_one_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "a.pdf",
+        vec![hash_entry("a", "run-1")],
+    );
+    let dir_path = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&dir_path).unwrap();
+    fs::write(
+        dir_path.join(format!("a-first.{UUID_A}.toml")),
+        record.to_toml(),
+    )
+    .unwrap();
+    let other_record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "b.pdf",
+        vec![hash_entry("b", "run-1")],
+    );
+    fs::write(
+        dir_path.join(format!("b-second.{UUID_A}.toml")),
+        other_record.to_toml(),
+    )
+    .unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            dir_path.join(format!("b-second.{UUID_A}.toml")),
+            Finding::DuplicateIdentity {
+                id: UUID_A.to_string(),
+                other: dir_path.join(format!("a-first.{UUID_A}.toml")),
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+/// Scenario "An item file renamed by hand": the store still finds the
+/// item by the `id` inside it (group 3's guarantee), and `validate`
+/// separately reports the name — carrying no UUID at all — as
+/// disagreeing with that field.
+#[test]
+fn validate_reports_an_item_renamed_by_hand_as_disagreeing_with_its_id() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, "notes-on-this.toml", &item);
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            root.join(ITEM_STORE).join("notes-on-this.toml"),
+            Finding::NameDisagrees {
+                id: UUID_A.to_string()
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+/// The artifact-record side of the same finding: the file is named for
+/// a UUID the record does not carry.
+#[test]
+fn validate_reports_an_artifact_record_whose_file_name_disagrees_with_the_id_inside_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "a.pdf",
+        vec![hash_entry("a", "run-1")],
+    );
+    let dir_path = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&dir_path).unwrap();
+    // Named for UUID_B, but the record inside carries UUID_A.
+    let path = dir_path.join(format!("{UUID_B}.toml"));
+    fs::write(&path, record.to_toml()).unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            path,
+            Finding::NameDisagrees {
+                id: UUID_A.to_string()
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+/// An artifact record whose last-known path is not library-relative.
+#[test]
+fn validate_reports_an_artifact_records_path_that_is_not_library_relative() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "/etc/passwd",
+        vec![hash_entry("a", "run-1")],
+    );
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            root.join(STATE_DIR)
+                .join(ARTIFACT_STORE)
+                .join(format!("{UUID_A}.toml")),
+            Finding::PathNotRelative {
+                path: "/etc/passwd".to_string()
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+/// An artifact record with an empty hash history: evidence about
+/// nothing.
+#[test]
+fn validate_reports_an_artifact_record_with_an_empty_hash_history() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let record = artifact_record(artifact_id(UUID_A), None, "a.pdf", Vec::new());
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            root.join(STATE_DIR)
+                .join(ARTIFACT_STORE)
+                .join(format!("{UUID_A}.toml")),
+            Finding::EmptyHistory
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+/// A history entry holding a hash that is not one borax writes.
+#[test]
+fn validate_reports_an_artifact_record_with_a_malformed_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut entry = hash_entry("a", "run-1");
+    entry.hash = malformed_hash("sha256-deadbeef");
+    let record = artifact_record(artifact_id(UUID_A), None, "a.pdf", vec![entry]);
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            root.join(STATE_DIR)
+                .join(ARTIFACT_STORE)
+                .join(format!("{UUID_A}.toml")),
+            Finding::MalformedHash {
+                hash: "sha256-deadbeef".to_string()
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+/// A history entry naming no run: what it recorded cannot be
+/// attributed to anything the library did.
+#[test]
+fn validate_reports_a_history_entry_naming_no_run() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut entry = hash_entry("a", "run-1");
+    entry.run = RunId::new("");
+    let record = artifact_record(artifact_id(UUID_A), None, "a.pdf", vec![entry]);
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            root.join(STATE_DIR)
+                .join(ARTIFACT_STORE)
+                .join(format!("{UUID_A}.toml")),
+            Finding::HistoryEntryWithoutRun {
+                hash: hash("a").to_string()
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+/// A `.toml` in the item store that does not parse as an item record.
+/// The well-formed item beside it costs nothing, following
+/// `item_store_reports_a_toml_file_that_is_not_an_item_record_as_a_fault`.
+#[test]
+fn validate_reports_an_item_store_file_that_does_not_parse_as_an_item_record() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    fs::write(items.join("bad.toml"), b"this is not [ valid toml").unwrap();
+    let good = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("good.{UUID_A}.toml"), &good);
+
+    let result = validate(root);
+
+    assert_eq!(result.findings.len(), 1, "got {:?}", result.findings);
+    let (path, finding) = &result.findings[0];
+    assert_eq!(path, &items.join("bad.toml"));
+    assert!(
+        matches!(finding, Finding::Unreadable { .. }),
+        "got {finding:?}"
+    );
+}
+
+/// An item whose verbatim source fields do not parse as JSON: the field
+/// is dropped by `ItemStore::read` and reported as a fault, which
+/// `validate` reports as a finding about that file.
+#[test]
+fn validate_reports_an_item_whose_source_fields_do_not_parse_as_json() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut record = minimal_record(EntryType::Article);
+    record
+        .borax
+        .source_fields
+        .insert("crossref-note".to_string(), serde_json::json!(42));
+    let item = Item {
+        id: item_id(UUID_A),
+        record,
+    };
+    let mut text = item.to_toml();
+    assert!(
+        text.contains("\"42\""),
+        "fixture assumption: a source field round-trips as its JSON text, got {text:?}"
+    );
+    text = text.replace("\"42\"", "\"not json {\"");
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    let path = items.join(format!("a.{UUID_A}.toml"));
+    fs::write(&path, text).unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            path,
+            Finding::Unreadable {
+                message: "dropped unreadable source field \"crossref-note\"".to_string()
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+}
+
+// ---------------------------------------------------------------------
+// 5.2: validate() — what is not a finding
+// ---------------------------------------------------------------------
+
+/// Scenario "A library of orphans validates": a library holding
+/// artifacts and no records reports no finding.
+#[test]
+fn validate_over_a_library_of_only_orphans_is_clean() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    for name in ["a.pdf", "b.pdf", "c.pdf"] {
+        fs::write(root.join(name), b"").unwrap();
+    }
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+    assert_eq!(result.orphans, 3, "got {}", result.orphans);
+}
+
+/// A record whose artifact cannot be found is the `missing` count, not
+/// a finding.
+#[test]
+fn validate_reports_a_records_missing_artifact_as_a_count_not_a_finding() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "gone.pdf",
+        vec![hash_entry("g", "run-1")],
+    );
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+    assert_eq!(result.missing, 1, "got {}", result.missing);
+}
+
+/// An item nothing links to is the `unlinked` count, not a finding.
+#[test]
+fn validate_reports_an_unlinked_item_as_a_count_not_a_finding() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("a.{UUID_A}.toml"), &item);
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+    assert_eq!(result.unlinked, 1, "got {}", result.unlinked);
+}
+
+/// Scenario "A library observed mid-edit": a half-written artifact
+/// record is a finding about that file alone, and the rest of the
+/// library — a good record and an orphan — is reported as it is.
+#[test]
+fn a_half_written_record_is_a_finding_about_itself_and_the_rest_of_the_library_is_unaffected() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("orphan.pdf"), b"").unwrap();
+    let good = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "recorded.pdf",
+        vec![hash_entry("r", "run-1")],
+    );
+    fs::write(root.join("recorded.pdf"), b"").unwrap();
+    write_artifact_record(root, &good);
+    let store_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&store_dir).unwrap();
+    let half_written = store_dir.join("half-written.toml");
+    fs::write(&half_written, b"id = \"not-even-a-uu").unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(result.findings.len(), 1, "got {:?}", result.findings);
+    assert_eq!(result.findings[0].0, half_written);
+    assert!(
+        matches!(result.findings[0].1, Finding::Unreadable { .. }),
+        "got {:?}",
+        result.findings[0].1
+    );
+    assert_eq!(result.orphans, 1, "got {}", result.orphans);
+    assert_eq!(result.missing, 0, "got {}", result.missing);
+}
+
+// ---------------------------------------------------------------------
+// 5.3 (first half): validate() repairs nothing
+// ---------------------------------------------------------------------
+
+/// Scenario "Validation refuses nothing", the read-only half of it: a
+/// `validate` that reports findings leaves the store byte-identical —
+/// compared by content, not merely by whether the files still exist.
+#[test]
+fn validate_leaves_the_store_byte_identical_even_when_it_reports_findings() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "orphaned-link.pdf",
+        vec![hash_entry("bytes", "run-1")],
+    );
+    write_artifact_record(root, &record);
+    let before = snapshot(root);
+
+    let result = validate(root);
+
+    assert!(
+        !result.findings.is_empty(),
+        "the fixture must carry a finding to be worth this test"
+    );
+    assert_eq!(
+        snapshot(root),
+        before,
+        "validate must write nothing to the store"
+    );
 }

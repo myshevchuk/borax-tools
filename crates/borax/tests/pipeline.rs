@@ -1005,6 +1005,7 @@ fn counts_reflect_the_outcomes_and_renamed_is_always_zero() {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
 }
@@ -1080,6 +1081,7 @@ fn a_mixed_batch_completes_and_an_unreadable_file_does_not_curtail_it() {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
     let paths: Vec<PathBuf> = run.events[..4]
@@ -1157,6 +1159,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
     assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -1444,6 +1447,7 @@ fn a_concurrency_of_zero_still_resolves_the_whole_batch() {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
     assert!(matches!(run.events[3], Event::RunFinished { .. }));
