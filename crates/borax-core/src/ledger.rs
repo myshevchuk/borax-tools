@@ -18,25 +18,7 @@ use crate::content::ContentHash;
 use crate::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
 use crate::record::EntryType;
 
-/// Which run admitted an entry.
-///
-/// Opaque and only ever compared, never parsed: uniqueness is the
-/// caller's to guarantee.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct RunId(String);
-
-impl RunId {
-    /// A run identifier reading exactly as `value`.
-    pub fn new(value: impl Into<String>) -> RunId {
-        RunId(value.into())
-    }
-
-    /// The identifier as it appears in the ledger.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+pub use crate::library::RunId;
 
 /// One admitted file.
 ///

@@ -37,7 +37,15 @@ serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 toml = "1"
+# `toml`'s sibling over the same parser, for the document model: a
+# record's comments, key order and formatting survive an edit to one
+# field, and an unchanged document renders back byte-identical.
+toml_edit = "0.23"
 ureq = "3"
+# Both library identities. `v7` is time-ordered, so a sorted item store
+# and a listing of `.borax/artifacts/` are roughly chronological; it
+# brings `getrandom`, which is borax's only entropy source.
+uuid = { version = "1", features = ["v7", "serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

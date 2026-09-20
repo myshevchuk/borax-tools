@@ -17,15 +17,15 @@ is a run contradicting a living requirement.
 
 ## 1. The two identities and the two records, as values
 
-- [ ] 1.1 Red: `crates/borax-core/tests/library.rs` — `ItemId` and
+- [x] 1.1 Red: `crates/borax-core/tests/library.rs` — `ItemId` and
       `ArtifactId` parse a UUID, render it back byte-identically, refuse
       a string that is not one, and compare and sort by their text.
-- [ ] 1.2 Green: the two identity types in
+- [x] 1.2 Green: the two identity types in
       `crates/borax-core/src/library.rs`, over the `uuid` crate's v7
       type (design D10). `uuid` and `toml` join the workspace and
       `borax-core`'s dependencies; `borax-core` performs no I/O still,
       since parsing text is not I/O and minting is the adapter's.
-- [ ] 1.3 Red: the `Item` value round-trips through TOML losslessly for
+- [x] 1.3 Red: the `Item` value round-trips through TOML losslessly for
       every entry type, including a record whose `borax.source-fields`
       holds values that must stay distinguishable through the JSON-text
       encoding of design D11 — `null` (the one value TOML cannot hold at
@@ -38,9 +38,9 @@ is a run contradicting a living requirement.
       object, both already gone before the store sees the value. A
       field whose JSON text does not parse reads as a finding rather
       than an error that loses the file.
-- [ ] 1.4 Green: `Item`, its TOML serialization, and the source-fields
+- [x] 1.4 Green: `Item`, its TOML serialization, and the source-fields
       encoding.
-- [ ] 1.5 Red: the `ArtifactRecord` value round-trips through TOML: the
+- [x] 1.5 Red: the `ArtifactRecord` value round-trips through TOML: the
       artifact identity, an optional item identity, a hash history of
       one and of several in order with each entry carrying the run, the
       timestamp and the tool version that recorded it, a
@@ -48,12 +48,12 @@ is a run contradicting a living requirement.
       modification time. A record with no item link is representable;
       one with an empty history, and one whose history entry names no
       run, each parse and are findings.
-- [ ] 1.6 Green: `ArtifactRecord` and its TOML serialization.
-- [ ] 1.7 Red: the pure predicates validation is made of — an identity
+- [x] 1.6 Green: `ArtifactRecord` and its TOML serialization.
+- [x] 1.7 Red: the pure predicates validation is made of — an identity
       that disagrees with a file name, a path that is not
       library-relative, a malformed hash, an empty history — each as a
       value-in/value-out function with no filesystem anywhere near it.
-- [ ] 1.8 Green: the predicates.
+- [x] 1.8 Green: the predicates.
 
 ## 2. The library boundary
 
