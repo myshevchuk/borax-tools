@@ -6,7 +6,7 @@
 //! composition: which order the passes run in, what short-circuits
 //! them, and which outcome each failure produces.
 //!
-//! The filesystem enters through [`Library`] alone. Every other input —
+//! The filesystem enters through [`Documents`] alone. Every other input —
 //! the sources, the cache, the extraction limits — is already a trait
 //! or a value, so a whole batch runs in a test with no disk and no
 //! network.
@@ -31,15 +31,18 @@ use borax_sources::store::{ContentIndex, hash_file};
 use crate::event::{Attempt, Claim, ClaimOrigin, Counts, Event, Overridden, SkipReason};
 use crate::ledger::Collection;
 
-/// The files a run works on, as something that can be read.
+/// The documents a run works on, as something that can be read.
+///
+/// Not the library a run writes to: this is the seam file bytes are
+/// read through, and [`crate::library`] is the tree they sit in.
 ///
 /// The one seam to the filesystem. A run hashes a file before it opens
 /// it, because a hash that matches the content index makes opening it
 /// unnecessary.
 ///
 /// `Sync` because resolution runs files on a bounded pool of threads
-/// ([`borax_sources::pace::map_bounded`]) that share one library.
-pub trait Library: Sync {
+/// ([`borax_sources::pace::map_bounded`]) that share one reader.
+pub trait Documents: Sync {
     /// The content hash of the file at `path`.
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError>;
 
@@ -176,11 +179,11 @@ pub struct Indexed {
 /// and the hash is taken either way.
 pub fn from_index<C: Cache>(
     path: &Path,
-    library: &dyn Library,
+    documents: &dyn Documents,
     index: &ContentIndex<C>,
     config: &ResolveConfig,
 ) -> Indexed {
-    let hash = library.hash(path).ok();
+    let hash = documents.hash(path).ok();
     let record = match config.cache {
         true => hash.as_ref().and_then(|hash| index.get(hash)),
         false => None,
@@ -220,10 +223,10 @@ pub fn indexed_record(record: Record, hash: Option<ContentHash>) -> FileRecord {
 /// has something to compare the record against.
 pub fn from_file(
     path: &Path,
-    library: &dyn Library,
+    documents: &dyn Documents,
     config: &ExtractionConfig,
 ) -> Result<(Extracted, Vec<Claim>), ExtractionError> {
-    let pdf = library.open(path)?;
+    let pdf = documents.open(path)?;
     let claims = claimed_titles(pdf.as_ref());
     Ok((extract(pdf.as_ref(), config)?, claims))
 }
@@ -305,12 +308,12 @@ pub fn disagreement(claims: &[Claim], record: &Record) -> Option<SkipReason> {
 /// alone wants this one.
 pub fn resolve_file<C: Cache>(
     path: &Path,
-    library: &dyn Library,
+    documents: &dyn Documents,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
     config: &ResolveConfig,
 ) -> FileOutcome {
-    standing(path, library, sources, index, config, None).verdict
+    standing(path, documents, sources, index, config, None).verdict
 }
 
 /// Everything the passes produced about one file, for a caller that
@@ -379,13 +382,13 @@ impl Standing {
 /// file for every later decision about it.
 pub fn standing<C: Cache>(
     path: &Path,
-    library: &dyn Library,
+    documents: &dyn Documents,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
     config: &ResolveConfig,
     collection: Option<&Collection<'_>>,
 ) -> Standing {
-    let Indexed { hash, record } = from_index(path, library, index, config);
+    let Indexed { hash, record } = from_index(path, documents, index, config);
     if let Some(duplicate) =
         collection.and_then(|collection| content_duplicate(path, hash.as_ref(), collection))
     {
@@ -396,7 +399,7 @@ pub fn standing<C: Cache>(
         return Standing::of(admissible(path, file, collection), hash);
     }
 
-    let (extracted, claims) = match from_file(path, library, &config.extraction) {
+    let (extracted, claims) = match from_file(path, documents, &config.extraction) {
         Ok(found) => found,
         Err(error) => return Standing::of(FileOutcome::Skipped(skipped_for(&error)), hash),
     };
@@ -478,8 +481,8 @@ fn admissible(path: &Path, file: FileRecord, collection: Option<&Collection<'_>>
 ///
 /// An unreadable file claims nothing, which is the same answer as a
 /// file carrying no titles: neither is evidence against a record.
-pub fn claims_of(path: &Path, library: &dyn Library) -> Vec<Claim> {
-    match library.open(path) {
+pub fn claims_of(path: &Path, documents: &dyn Documents) -> Vec<Claim> {
+    match documents.open(path) {
         Ok(pdf) => claimed_titles(pdf.as_ref()),
         Err(_) => Vec::new(),
     }
@@ -500,7 +503,7 @@ pub fn claims_of(path: &Path, library: &dyn Library) -> Vec<Claim> {
 pub fn resolve_supplied(
     path: &Path,
     identifier: &Identifier,
-    library: &dyn Library,
+    documents: &dyn Documents,
     sources: &[&dyn Source],
 ) -> Result<Supplied, Unresolved> {
     let resolved = from_sources(sources, identifier)?;
@@ -508,7 +511,7 @@ pub fn resolve_supplied(
     // answered for was never opened, and one no identifier was found in
     // was never asked about its titles, so the comparison has nothing
     // to work from until it is wanted (design D2a).
-    let claims = claims_of(path, library);
+    let claims = claims_of(path, documents);
     let conflict = disagreement(&claims, &resolved.record);
 
     Ok(Supplied {
@@ -522,7 +525,7 @@ pub fn resolve_supplied(
             // Taken here because a rename needs it: the planner
             // recognises an already-named file by content, and a record
             // the operator then accepts is remembered under it.
-            hash: library.hash(path).ok(),
+            hash: documents.hash(path).ok(),
             // Nothing has been overridden yet. Accepting this record
             // over `conflict` is the caller's decision, and the caller
             // records it.
@@ -579,13 +582,13 @@ pub fn remember<C: Cache>(index: &ContentIndex<C>, hash: Option<&ContentHash>, r
 /// ledger with no entries — is [`resolve_file`]'s outcome unchanged.
 pub fn resolve_file_checking_ledger<C: Cache>(
     path: &Path,
-    library: &dyn Library,
+    documents: &dyn Documents,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
     config: &ResolveConfig,
     collection: &Collection<'_>,
 ) -> FileOutcome {
-    standing(path, library, sources, index, config, Some(collection)).verdict
+    standing(path, documents, sources, index, config, Some(collection)).verdict
 }
 
 /// The file `collection` already holds with the same content as the
@@ -870,14 +873,14 @@ pub struct Run {
 /// faster than it allows.
 pub fn resolve_batch<C: Cache>(
     paths: &[PathBuf],
-    library: &dyn Library,
+    documents: &dyn Documents,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
     config: &(dyn Fn(&Path) -> ResolveConfig + Sync),
     concurrency: usize,
 ) -> Run {
     let outcomes = map_bounded(paths.to_vec(), concurrency, |path| {
-        let outcome = resolve_file(&path, library, sources, index, &config(&path));
+        let outcome = resolve_file(&path, documents, sources, index, &config(&path));
         (path, outcome)
     });
 
@@ -895,12 +898,12 @@ pub fn resolve_batch<C: Cache>(
     Run { events, counts }
 }
 
-/// A [`Library`] backed by the real filesystem and the pure-Rust PDF
+/// [`Documents`] backed by the real filesystem and the pure-Rust PDF
 /// engine.
 #[derive(Debug, Clone, Copy)]
-pub struct RealLibrary;
+pub struct RealDocuments;
 
-impl Library for RealLibrary {
+impl Documents for RealDocuments {
     /// The file's content hash, read in chunks so a large PDF is never
     /// held in memory whole.
     ///

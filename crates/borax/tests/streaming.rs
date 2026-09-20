@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use borax::bib::BibFiles;
 use borax::cli::{Cli, Command};
 use borax::config::{Effective, Layer, Origin, resolve};
-use borax::pipeline::Library;
+use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Streams, dispatch};
 use borax::session::{Outcome, Session};
@@ -76,28 +76,28 @@ fn pdf_with_embedded_doi(value: &str) -> FakePdf {
     }
 }
 
-/// What [`LiveLibrary`] answers for one path.
+/// What [`LiveDocuments`] answers for one path.
 struct LibraryEntry {
     hash: ContentHash,
     pdf: FakePdf,
 }
 
-/// A [`Library`] fake that, each time a file's hash is requested,
+/// A [`Documents`] fake that, each time a file's hash is requested,
 /// records everything `out` holds at that moment before answering.
 ///
 /// The record is what proves events reach the writer as they happen
 /// rather than being assembled into a value first: a run that buffers
 /// its whole stream and writes it only at the end leaves every snapshot
 /// here identical, however many files came before the one being hashed.
-struct LiveLibrary {
+struct LiveDocuments {
     entries: BTreeMap<PathBuf, LibraryEntry>,
     out: Arc<Mutex<Vec<u8>>>,
     snapshots: Mutex<Vec<(PathBuf, String)>>,
 }
 
-impl LiveLibrary {
-    fn new(out: Arc<Mutex<Vec<u8>>>) -> LiveLibrary {
-        LiveLibrary {
+impl LiveDocuments {
+    fn new(out: Arc<Mutex<Vec<u8>>>) -> LiveDocuments {
+        LiveDocuments {
             entries: BTreeMap::new(),
             out,
             snapshots: Mutex::new(Vec::new()),
@@ -109,7 +109,7 @@ impl LiveLibrary {
         path: impl Into<PathBuf>,
         hash: ContentHash,
         pdf: FakePdf,
-    ) -> LiveLibrary {
+    ) -> LiveDocuments {
         self.entries.insert(path.into(), LibraryEntry { hash, pdf });
         self
     }
@@ -121,7 +121,7 @@ impl LiveLibrary {
     }
 }
 
-impl Library for LiveLibrary {
+impl Documents for LiveDocuments {
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
         let seen = String::from_utf8(self.out.lock().unwrap().clone()).unwrap();
         self.snapshots
@@ -323,7 +323,7 @@ fn rename_preview_writes_each_file_s_resolved_line_before_the_next_file_is_hashe
     let c = PathBuf::from("/lib/c.pdf");
 
     let buffer = Arc::new(Mutex::new(Vec::new()));
-    let library = LiveLibrary::new(Arc::clone(&buffer))
+    let documents = LiveDocuments::new(Arc::clone(&buffer))
         .with_file(
             &a,
             hash_for("streaming-a"),
@@ -351,7 +351,7 @@ fn rename_preview_writes_each_file_s_resolved_line_before_the_next_file_is_hashe
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -381,7 +381,7 @@ fn rename_preview_writes_each_file_s_resolved_line_before_the_next_file_is_hashe
         &mut streams,
     );
 
-    let snapshots = library.snapshots();
+    let snapshots = documents.snapshots();
     assert_eq!(
         snapshots.len(),
         3,
@@ -425,14 +425,14 @@ fn rename_preview_writes_each_file_s_resolved_line_before_the_next_file_is_hashe
 #[test]
 fn an_uncompilable_template_is_fatal_and_opens_no_stream() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = LiveLibrary::new(Arc::new(Mutex::new(Vec::new())));
+    let documents = LiveDocuments::new(Arc::new(Mutex::new(Vec::new())));
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem;
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[nonexistentfield]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -474,14 +474,14 @@ fn an_uncompilable_template_is_fatal_and_opens_no_stream() {
 #[test]
 fn apply_with_nowhere_to_record_itself_is_fatal_and_opens_no_stream() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = LiveLibrary::new(Arc::new(Mutex::new(Vec::new())));
+    let documents = LiveDocuments::new(Arc::new(Mutex::new(Vec::new())));
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem;
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -522,14 +522,14 @@ fn apply_with_nowhere_to_record_itself_is_fatal_and_opens_no_stream() {
 
 #[test]
 fn cache_with_no_cache_root_is_fatal_and_opens_no_stream() {
-    let library = LiveLibrary::new(Arc::new(Mutex::new(Vec::new())));
+    let documents = LiveDocuments::new(Arc::new(Mutex::new(Vec::new())));
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem;
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -568,14 +568,14 @@ fn cache_with_no_cache_root_is_fatal_and_opens_no_stream() {
 /// fatal about it does open the stream, on both ends.
 #[test]
 fn a_normal_json_run_emits_both_run_started_and_run_finished() {
-    let library = LiveLibrary::new(Arc::new(Mutex::new(Vec::new())));
+    let documents = LiveDocuments::new(Arc::new(Mutex::new(Vec::new())));
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem;
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,

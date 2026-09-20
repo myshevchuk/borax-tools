@@ -49,7 +49,7 @@ use crate::event::{
 };
 use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
-    FileOutcome, FileRecord, Library, Provenance, RealLibrary, ResolveConfig, Standing,
+    Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, Standing,
     resolve_batch, resolve_file, resolve_file_checking_ledger, resolved_event,
 };
 use crate::renaming::{
@@ -400,7 +400,7 @@ pub struct Streams<'a> {
 /// invocation runs in a test with neither a network, a PDF engine, nor
 /// a disk.
 pub struct Adapters<'a, C: Cache> {
-    pub library: &'a dyn Library,
+    pub documents: &'a dyn Documents,
     pub sources: &'a [&'a dyn Source],
     pub index: &'a ContentIndex<C>,
     pub filesystem: &'a dyn Filesystem,
@@ -1118,7 +1118,7 @@ fn resolve_events<C: Cache>(
 ) {
     let mut run = resolve_batch(
         paths,
-        adapters.library,
+        adapters.documents,
         adapters.sources,
         adapters.index,
         &|path| resolving(configs.for_path(path).config()),
@@ -1308,7 +1308,7 @@ fn rename_events<C: Cache>(
                 // for an interactive one is settled by its operator.
                 let standing = crate::pipeline::standing(
                     path,
-                    adapters.library,
+                    adapters.documents,
                     adapters.sources,
                     adapters.index,
                     &resolving(effective.config()),
@@ -1791,7 +1791,7 @@ fn asked<C: Cache>(
                 match crate::pipeline::resolve_supplied(
                     about.path,
                     &identifier,
-                    adapters.library,
+                    adapters.documents,
                     adapters.sources,
                 ) {
                     Ok(supplied) => {
@@ -1829,7 +1829,7 @@ fn asked<C: Cache>(
                 match crate::pipeline::resolve_supplied(
                     about.path,
                     &identifier,
-                    adapters.library,
+                    adapters.documents,
                     adapters.sources,
                 ) {
                     Ok(supplied) => {
@@ -2412,7 +2412,7 @@ fn resolved_record<C: Cache>(
     let outcome = match collection {
         Some(collection) => resolve_file_checking_ledger(
             path,
-            adapters.library,
+            adapters.documents,
             adapters.sources,
             adapters.index,
             &config,
@@ -2420,7 +2420,7 @@ fn resolved_record<C: Cache>(
         ),
         None => resolve_file(
             path,
-            adapters.library,
+            adapters.documents,
             adapters.sources,
             adapters.index,
             &config,
@@ -2979,7 +2979,7 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
         },
         &configs,
         &Adapters {
-            library: &RealLibrary,
+            documents: &RealDocuments,
             sources: &sources,
             index: &index,
             filesystem: &RealFilesystem,

@@ -25,7 +25,7 @@ use borax::bib::BibFiles;
 use borax::cli::Command;
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
 use borax::event::{Event, SkipReason};
-use borax::pipeline::Library;
+use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, events_for};
 use borax::session::Session;
@@ -87,21 +87,21 @@ fn pdf_with_no_identifier() -> FakePdf {
     }
 }
 
-/// What [`FakeLibrary`] answers for one path.
+/// What [`FakeDocuments`] answers for one path.
 struct LibraryEntry {
     hash: ContentHash,
     pdf: FakePdf,
 }
 
-/// A [`Library`] fake backed by a map from path to a fixed `(hash, PDF
+/// A [`Documents`] fake backed by a map from path to a fixed `(hash, PDF
 /// content)` pair, following the shape of the one in `dispatch.rs`.
-struct FakeLibrary {
+struct FakeDocuments {
     entries: BTreeMap<PathBuf, LibraryEntry>,
 }
 
-impl FakeLibrary {
-    fn new() -> FakeLibrary {
-        FakeLibrary {
+impl FakeDocuments {
+    fn new() -> FakeDocuments {
+        FakeDocuments {
             entries: BTreeMap::new(),
         }
     }
@@ -111,13 +111,13 @@ impl FakeLibrary {
         path: impl Into<PathBuf>,
         hash: ContentHash,
         pdf: FakePdf,
-    ) -> FakeLibrary {
+    ) -> FakeDocuments {
         self.entries.insert(path.into(), LibraryEntry { hash, pdf });
         self
     }
 }
 
-impl Library for FakeLibrary {
+impl Documents for FakeDocuments {
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
         self.entries
             .get(path)
@@ -376,7 +376,7 @@ fn each_files_resolution_plan_and_sidecar_are_adjacent_in_input_order() {
     let paper2 = PathBuf::from("/lib/paper2.pdf");
     let already = PathBuf::from("/lib/Jones2020.pdf");
 
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(&blank, hash_for("per-file-blank"), pdf_with_no_identifier())
         .with_file(
             &paper1,
@@ -426,7 +426,7 @@ fn each_files_resolution_plan_and_sidecar_are_adjacent_in_input_order() {
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -481,13 +481,20 @@ fn each_files_resolution_plan_and_sidecar_are_adjacent_in_input_order() {
 /// equality: the interleaving 3.1 requires must not be reachable by
 /// assigning `paper2` the unsuffixed name, or by leaving `already`
 /// unskipped.
-fn mixed_batch() -> (PathBuf, PathBuf, PathBuf, PathBuf, FakeLibrary, KeyedSource) {
+fn mixed_batch() -> (
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    FakeDocuments,
+    KeyedSource,
+) {
     let blank = PathBuf::from("/lib/blank.pdf");
     let paper1 = PathBuf::from("/lib/paper1.pdf");
     let paper2 = PathBuf::from("/lib/paper2.pdf");
     let already = PathBuf::from("/lib/Jones2020.pdf");
 
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(&blank, hash_for("per-file-blank"), pdf_with_no_identifier())
         .with_file(
             &paper1,
@@ -522,19 +529,19 @@ fn mixed_batch() -> (PathBuf, PathBuf, PathBuf, PathBuf, FakeLibrary, KeyedSourc
         ],
     );
 
-    (blank, paper1, paper2, already, library, crossref)
+    (blank, paper1, paper2, already, documents, crossref)
 }
 
 #[test]
 fn the_same_mixed_batch_keeps_its_names_and_suffix_in_preview() {
-    let (blank, paper1, paper2, already, library, crossref) = mixed_batch();
+    let (blank, paper1, paper2, already, documents, crossref) = mixed_batch();
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -603,14 +610,14 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_in_preview() {
 
 #[test]
 fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
-    let (blank, paper1, paper2, already, library, crossref) = mixed_batch();
+    let (blank, paper1, paper2, already, documents, crossref) = mixed_batch();
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -698,7 +705,7 @@ fn a_parent_and_its_subdirectory_report_as_two_uninterleaved_groups_each_under_i
     let c = PathBuf::from("/library/sub/c.pdf");
     let d = PathBuf::from("/library/sub/d.pdf");
 
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &a,
             hash_for("per-file-a"),
@@ -765,7 +772,7 @@ fn a_parent_and_its_subdirectory_report_as_two_uninterleaved_groups_each_under_i
     let configs =
         Configs::resolve(&paths, Path::new("/library"), vec![], &Vec::new(), &read).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -835,7 +842,7 @@ fn master_bib_entries_trail_every_files_resolve_plan_and_sidecar_block_in_input_
     let paper2 = PathBuf::from("/lib/paper2.pdf");
     let paper3 = PathBuf::from("/lib/paper3.pdf");
 
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &paper1,
             hash_for("per-file-bib-1"),
@@ -884,7 +891,7 @@ fn master_bib_entries_trail_every_files_resolve_plan_and_sidecar_block_in_input_
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,

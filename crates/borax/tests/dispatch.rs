@@ -16,7 +16,7 @@ use borax::config::{
 };
 use borax::event::{Event, Level, Overridden, SkipReason};
 use borax::ledger::{Ledger, Loaded};
-use borax::pipeline::Library;
+use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RenameError, counts_for};
 use borax::run::{Adapters, Configs, Streams, dispatch, entry_type, events_for, templates};
 use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
@@ -100,22 +100,22 @@ fn pdf_with_no_identifier() -> FakePdf {
     FakePdf::new().with_pages(vec![Ok("just some prose, no identifiers here".to_string())])
 }
 
-/// What [`FakeLibrary`] answers for one path.
+/// What [`FakeDocuments`] answers for one path.
 struct LibraryEntry {
     hash: Result<ContentHash, ExtractionError>,
     pdf: Result<FakePdf, ExtractionError>,
 }
 
-/// A [`Library`] fake backed by a map from path to a fixed `(hash, PDF
+/// A [`Documents`] fake backed by a map from path to a fixed `(hash, PDF
 /// content or error)` pair, following the shape of the one in
 /// `pipeline.rs`.
-struct FakeLibrary {
+struct FakeDocuments {
     entries: BTreeMap<PathBuf, LibraryEntry>,
 }
 
-impl FakeLibrary {
-    fn new() -> FakeLibrary {
-        FakeLibrary {
+impl FakeDocuments {
+    fn new() -> FakeDocuments {
+        FakeDocuments {
             entries: BTreeMap::new(),
         }
     }
@@ -126,7 +126,7 @@ impl FakeLibrary {
         path: impl Into<PathBuf>,
         hash: ContentHash,
         pdf: FakePdf,
-    ) -> FakeLibrary {
+    ) -> FakeDocuments {
         self.entries.insert(
             path.into(),
             LibraryEntry {
@@ -145,7 +145,7 @@ impl FakeLibrary {
         path: impl Into<PathBuf>,
         hash: ContentHash,
         error: ExtractionError,
-    ) -> FakeLibrary {
+    ) -> FakeDocuments {
         self.entries.insert(
             path.into(),
             LibraryEntry {
@@ -157,7 +157,7 @@ impl FakeLibrary {
     }
 }
 
-impl Library for FakeLibrary {
+impl Documents for FakeDocuments {
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
         self.entries.get(path).map_or_else(
             || {
@@ -821,13 +821,13 @@ fn changing_templates_default_does_not_change_the_compiled_citation_key_table() 
 #[test]
 fn config_emits_one_config_setting_event_per_setting_matching_effective_events() {
     let effective = resolve(Vec::new()).unwrap();
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -863,13 +863,13 @@ fn cache_status_without_clear_emits_a_single_cache_status_event() {
     let stats_before = inspect(&root).unwrap();
 
     let effective = resolve(Vec::new()).unwrap();
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -902,13 +902,13 @@ fn cache_clear_emits_a_single_cache_cleared_event_and_empties_the_directory() {
     let stats_before = inspect(&root).unwrap();
 
     let effective = resolve(Vec::new()).unwrap();
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -941,13 +941,13 @@ fn cache_clear_emits_a_single_cache_cleared_event_and_empties_the_directory() {
 #[test]
 fn cache_with_no_cache_root_is_a_diagnostic() {
     let effective = resolve(Vec::new()).unwrap();
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -978,7 +978,7 @@ fn cache_with_no_cache_root_is_a_diagnostic() {
 fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
     let good = PathBuf::from("/lib/good.pdf");
     let bad = PathBuf::from("/lib/bad.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &good,
             hash_for("events-for-resolve-good"),
@@ -999,7 +999,7 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
     let bib_files = FakeBibFiles::new();
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1046,7 +1046,7 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
 #[test]
 fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("events-for-rename-preview"),
         pdf_with_embedded_doi("10.1000/rename-preview"),
@@ -1061,7 +1061,7 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1108,7 +1108,7 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
 #[test]
 fn rename_preview_with_no_journal_succeeds() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("events-for-rename-preview-no-journal"),
         pdf_with_embedded_doi("10.1000/rename-preview-no-journal"),
@@ -1127,7 +1127,7 @@ fn rename_preview_with_no_journal_succeeds() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1175,7 +1175,7 @@ fn rename_preview_with_no_journal_succeeds() {
 fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
     let path = PathBuf::from("/lib/original.pdf");
     let hash = hash_for("events-for-rename-apply");
-    let library = library_with_resolvable(&path, hash.clone(), "10.1000/rename-apply");
+    let documents = library_with_resolvable(&path, hash.clone(), "10.1000/rename-apply");
     let crossref = fake_source(
         SourceName::Crossref,
         Ok(record_by("Smith", 2024, "10.1000/rename-apply")),
@@ -1186,7 +1186,7 @@ fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1229,11 +1229,11 @@ fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
     assert_eq!(filesystem.renames(), vec![(path.clone(), target.clone())]);
 }
 
-/// A [`FakeLibrary`] with one file whose embedded DOI is `doi_value`,
+/// A [`FakeDocuments`] with one file whose embedded DOI is `doi_value`,
 /// factored out because the apply test needs the hash again to build its
 /// expected `Renamed` event.
-fn library_with_resolvable(path: &Path, hash: ContentHash, doi_value: &str) -> FakeLibrary {
-    FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi(doi_value))
+fn library_with_resolvable(path: &Path, hash: ContentHash, doi_value: &str) -> FakeDocuments {
+    FakeDocuments::new().with_file(path, hash, pdf_with_embedded_doi(doi_value))
 }
 
 // ---------------------------------------------------------------------
@@ -1244,7 +1244,7 @@ fn library_with_resolvable(path: &Path, hash: ContentHash, doi_value: &str) -> F
 fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_writes() {
     let path = PathBuf::from("/lib/paper.pdf");
     let record = record_by("Smith", 2024, "10.1000/bib");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("events-for-bib"),
         pdf_with_embedded_doi("10.1000/bib"),
@@ -1266,7 +1266,7 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1308,7 +1308,7 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
     );
 }
 
-/// library spec: "No route from an artifactless item to a
+/// documents spec: "No route from an artifactless item to a
 /// bibliography" — `borax bib` takes files, so a library holding an
 /// item with no artifact contributes nothing to its output. The item
 /// is written to the item store and confirmed there through
@@ -1345,7 +1345,7 @@ fn bib_over_a_library_holding_an_artifactless_item_emits_no_entry_for_it() {
 
     let path = root.join("paper.pdf");
     let record = record_by("Smith", 2024, "10.1000/bib");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("bib-over-artifactless-item"),
         pdf_with_embedded_doi("10.1000/bib"),
@@ -1367,7 +1367,7 @@ fn bib_over_a_library_holding_an_artifactless_item_emits_no_entry_for_it() {
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1421,7 +1421,7 @@ fn bib_over_a_library_holding_an_artifactless_item_emits_no_entry_for_it() {
 #[test]
 fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("events-for-rename-bad-template"),
         pdf_with_embedded_doi("10.1000/rename-bad-template"),
@@ -1436,7 +1436,7 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[nonexistentfield]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1466,7 +1466,7 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
 #[test]
 fn bib_with_an_uncompilable_filename_template_runs_anyway() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("events-for-bib-bad-template"),
         pdf_with_embedded_doi("10.1000/bib-bad-template"),
@@ -1481,7 +1481,7 @@ fn bib_with_an_uncompilable_filename_template_runs_anyway() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[nonexistentfield]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1512,7 +1512,7 @@ fn bib_with_an_uncompilable_filename_template_runs_anyway() {
 #[test]
 fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("events-for-rename-bad-citation-key-template"),
         pdf_with_embedded_doi("10.1000/rename-bad-citation-key-template"),
@@ -1531,7 +1531,7 @@ fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic()
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_citation_key_template("[nonexistentfield]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1561,7 +1561,7 @@ fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic()
 #[test]
 fn bib_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("events-for-bib-bad-citation-key-template"),
         pdf_with_embedded_doi("10.1000/bib-bad-citation-key-template"),
@@ -1580,7 +1580,7 @@ fn bib_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_citation_key_template("[nonexistentfield]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1615,7 +1615,7 @@ fn bib_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
 #[test]
 fn bib_with_a_citation_key_naming_no_entry_type_propagates_the_diagnostic() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("events-for-bib-citation-key-bad-entry-type"),
         pdf_with_embedded_doi("10.1000/bib-citation-key-bad-entry-type"),
@@ -1639,7 +1639,7 @@ fn bib_with_a_citation_key_naming_no_entry_type_propagates_the_diagnostic() {
         ]));
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1673,13 +1673,13 @@ fn bib_with_a_citation_key_naming_no_entry_type_propagates_the_diagnostic() {
 #[test]
 fn json_format_opens_with_run_started_and_closes_with_run_finished_and_every_line_carries_schema() {
     let effective = resolve(Vec::new()).unwrap();
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1737,7 +1737,7 @@ fn json_format_opens_with_run_started_and_closes_with_run_finished_and_every_lin
 fn json_stdout_is_entirely_well_formed_json_lines_and_nothing_else() {
     let good = PathBuf::from("/lib/good.pdf");
     let bad = PathBuf::from("/lib/bad.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &good,
             hash_for("dispatch-json-good"),
@@ -1758,7 +1758,7 @@ fn json_stdout_is_entirely_well_formed_json_lines_and_nothing_else() {
     let bib_files = FakeBibFiles::new();
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1803,7 +1803,7 @@ fn json_stdout_is_entirely_well_formed_json_lines_and_nothing_else() {
 #[test]
 fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("dispatch-human"),
         pdf_with_embedded_doi("10.1000/dispatch-human"),
@@ -1818,7 +1818,7 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
     let bib_files = FakeBibFiles::new();
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1863,7 +1863,7 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
 fn run_finished_counts_match_counts_for_over_the_body_events() {
     let good = PathBuf::from("/lib/good.pdf");
     let bad = PathBuf::from("/lib/bad.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &good,
             hash_for("dispatch-counts-good"),
@@ -1884,7 +1884,7 @@ fn run_finished_counts_match_counts_for_over_the_body_events() {
     let bib_files = FakeBibFiles::new();
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1930,7 +1930,7 @@ fn run_finished_counts_match_counts_for_over_the_body_events() {
 #[test]
 fn a_clean_run_returns_success() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("dispatch-success"),
         pdf_with_embedded_doi("10.1000/dispatch-success"),
@@ -1945,7 +1945,7 @@ fn a_clean_run_returns_success() {
     let bib_files = FakeBibFiles::new();
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1978,7 +1978,7 @@ fn a_clean_run_returns_success() {
 fn a_run_with_a_skip_returns_partial() {
     let good = PathBuf::from("/lib/good.pdf");
     let bad = PathBuf::from("/lib/bad.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &good,
             hash_for("dispatch-partial-good"),
@@ -1999,7 +1999,7 @@ fn a_run_with_a_skip_returns_partial() {
     let bib_files = FakeBibFiles::new();
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2040,7 +2040,7 @@ fn a_run_with_a_skip_returns_partial() {
 #[test]
 fn a_refusal_dispatch_alone_makes_is_fatal_and_writes_nothing_to_stdout() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("dispatch-fatal"),
         pdf_with_embedded_doi("10.1000/dispatch-fatal"),
@@ -2055,7 +2055,7 @@ fn a_refusal_dispatch_alone_makes_is_fatal_and_writes_nothing_to_stdout() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2103,7 +2103,7 @@ fn a_refusal_dispatch_alone_makes_is_fatal_and_writes_nothing_to_stdout() {
 #[test]
 fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
@@ -2112,7 +2112,7 @@ fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() 
     // from: the check has to be one this command actually makes.
     let effective = effective_with_default_citation_key_template("[nonexistentfield]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2197,7 +2197,7 @@ fn a_lookup_that_hits_names_the_file_with_the_table_value() {
 
     let path = PathBuf::from("/lib/paper.pdf");
     let record = article_in("Amino Acids", "10.1000/lookup-hit");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("lookup-hit"),
         pdf_with_embedded_doi("10.1000/lookup-hit"),
@@ -2208,7 +2208,7 @@ fn a_lookup_that_hits_names_the_file_with_the_table_value() {
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2248,7 +2248,7 @@ fn two_files_in_one_unlisted_journal_produce_one_lookup_missed_event() {
     let first = PathBuf::from("/lib/one.pdf");
     let second = PathBuf::from("/lib/two.pdf");
     let record = article_in("Journal of Unlisted Results", "10.1000/unlisted");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &first,
             hash_for("unlisted-one"),
@@ -2265,7 +2265,7 @@ fn two_files_in_one_unlisted_journal_produce_one_lookup_missed_event() {
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2311,7 +2311,7 @@ fn two_unlisted_journals_produce_one_event_each_in_input_order() {
 
     let first = PathBuf::from("/lib/one.pdf");
     let second = PathBuf::from("/lib/two.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &first,
             hash_for("two-unlisted-one"),
@@ -2336,7 +2336,7 @@ fn two_unlisted_journals_produce_one_event_each_in_input_order() {
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2385,7 +2385,7 @@ fn run_started_names_each_table_read_by_path_and_digest() {
 
     let path = PathBuf::from("/lib/paper.pdf");
     let record = article_in("Amino Acids", "10.1000/run-started-tables");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("run-started-tables"),
         pdf_with_embedded_doi("10.1000/run-started-tables"),
@@ -2396,7 +2396,7 @@ fn run_started_names_each_table_read_by_path_and_digest() {
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2440,13 +2440,13 @@ fn run_started_names_each_table_read_by_path_and_digest() {
 #[test]
 fn a_run_that_reads_no_table_opens_with_an_empty_table_list() {
     let effective = resolve(Vec::new()).unwrap();
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2485,7 +2485,7 @@ fn a_declared_table_that_cannot_be_read_ends_the_run_naming_the_table_and_the_pa
     let table = directory.path().join("absent.tsv");
 
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("table-missing"),
         pdf_with_embedded_doi("10.1000/table-missing"),
@@ -2495,7 +2495,7 @@ fn a_declared_table_that_cannot_be_read_ends_the_run_naming_the_table_and_the_pa
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2530,7 +2530,7 @@ fn a_header_without_the_declared_value_column_ends_the_run_naming_the_table() {
     fs::write(&table, "title\tshorttitle\nAmino Acids\tAmino Acids\n").unwrap();
 
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("table-column"),
         pdf_with_embedded_doi("10.1000/table-column"),
@@ -2540,7 +2540,7 @@ fn a_header_without_the_declared_value_column_ends_the_run_naming_the_table() {
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2657,10 +2657,10 @@ fn the_target_pattern_names_every_journal_shape_from_one_template() {
         ),
     ];
 
-    let mut library = FakeLibrary::new();
+    let mut documents = FakeDocuments::new();
     let mut crossref = KeyedSource::new(SourceName::Crossref);
     for (path, doi_value, journal, volume, _) in &batch {
-        library = library.with_file(
+        documents = documents.with_file(
             PathBuf::from(path),
             hash_for(doi_value),
             pdf_with_embedded_doi(doi_value),
@@ -2675,7 +2675,7 @@ fn the_target_pattern_names_every_journal_shape_from_one_template() {
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2864,7 +2864,7 @@ impl Ledger for FakeLedger {
 fn a_rename_answer_moves_the_file_and_a_skip_answer_declines_it() {
     let a = PathBuf::from("/lib/a.pdf");
     let b = PathBuf::from("/lib/b.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &a,
             hash_for("interactive-rename-a"),
@@ -2890,7 +2890,7 @@ fn a_rename_answer_moves_the_file_and_a_skip_answer_declines_it() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2947,7 +2947,7 @@ fn a_rename_answer_moves_the_file_and_a_skip_answer_declines_it() {
 fn a_file_with_nothing_to_decide_is_never_asked_about() {
     let already_named = PathBuf::from("/lib/Smith2024.pdf");
     let needs_a_decision = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &already_named,
             hash_for("interactive-already-named"),
@@ -2973,7 +2973,7 @@ fn a_file_with_nothing_to_decide_is_never_asked_about() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3023,7 +3023,7 @@ fn a_file_with_nothing_to_decide_is_never_asked_about() {
 fn a_declined_proposal_leaves_the_next_files_target_unsuffixed() {
     let a = PathBuf::from("/lib/a.pdf");
     let b = PathBuf::from("/lib/b.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &a,
             hash_for("interactive-decline-a"),
@@ -3050,7 +3050,7 @@ fn a_declined_proposal_leaves_the_next_files_target_unsuffixed() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3085,7 +3085,7 @@ fn a_declined_proposal_leaves_the_next_files_target_unsuffixed() {
 fn an_accepted_proposal_suffixes_the_next_files_colliding_target() {
     let a = PathBuf::from("/lib/a.pdf");
     let b = PathBuf::from("/lib/b.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &a,
             hash_for("interactive-accept-a"),
@@ -3111,7 +3111,7 @@ fn an_accepted_proposal_suffixes_the_next_files_colliding_target() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3153,7 +3153,7 @@ fn an_accepted_proposal_suffixes_the_next_files_colliding_target() {
 fn an_interactive_proposal_into_a_subdirectory_claims_the_right_key_and_suffixes_a_second() {
     let a = PathBuf::from("/lib/a.pdf");
     let b = PathBuf::from("/lib/b.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &a,
             hash_for("interactive-subdir-a"),
@@ -3179,7 +3179,7 @@ fn an_interactive_proposal_into_a_subdirectory_claims_the_right_key_and_suffixes
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("sub/[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3237,7 +3237,7 @@ fn each_files_events_stay_adjacent_and_in_input_order() {
     let a = PathBuf::from("/lib/a.pdf");
     let b = PathBuf::from("/lib/b.pdf");
     let c = PathBuf::from("/lib/c.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &a,
             hash_for("interactive-adjacency-a"),
@@ -3272,7 +3272,7 @@ fn each_files_events_stay_adjacent_and_in_input_order() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3319,7 +3319,7 @@ fn each_files_events_stay_adjacent_and_in_input_order() {
 fn an_accepted_interactive_rename_is_admitted_to_the_ledger_exactly_as_an_apply_run_admits_it() {
     let path = PathBuf::from("/collection/original.pdf");
     let hash = hash_for("interactive-ledger-admission");
-    let library = library_with_resolvable(&path, hash.clone(), "10.1000/interactive-admission");
+    let documents = library_with_resolvable(&path, hash.clone(), "10.1000/interactive-admission");
     let crossref = fake_source(
         SourceName::Crossref,
         Ok(record_by("Smith", 2024, "10.1000/interactive-admission")),
@@ -3331,7 +3331,7 @@ fn an_accepted_interactive_rename_is_admitted_to_the_ledger_exactly_as_an_apply_
     let ledger = FakeLedger::empty();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3389,11 +3389,11 @@ fn quitting_counts_unreached_and_still_merges_the_bib_for_the_visited_files() {
     let paths: Vec<PathBuf> = (1..=5)
         .map(|n| PathBuf::from(format!("/lib/{n}.pdf")))
         .collect();
-    let mut library = FakeLibrary::new();
+    let mut documents = FakeDocuments::new();
     let mut crossref = KeyedSource::new(SourceName::Crossref);
     for (n, path) in paths.iter().enumerate() {
         let doi_value = format!("10.1000/interactive-quit-{n}");
-        library = library.with_file(
+        documents = documents.with_file(
             path,
             hash_for(&format!("interactive-quit-{n}")),
             pdf_with_embedded_doi(&doi_value),
@@ -3426,7 +3426,7 @@ fn quitting_counts_unreached_and_still_merges_the_bib_for_the_visited_files() {
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3522,7 +3522,7 @@ fn an_interactive_run_with_skip_named_renders_nothing_for_already_named_files() 
     let smith = PathBuf::from("/lib/Smith2024.pdf");
     let doe = PathBuf::from("/lib/Doe2023.pdf");
     let original = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &smith,
             hash_for("skip-named-smith"),
@@ -3558,7 +3558,7 @@ fn an_interactive_run_with_skip_named_renders_nothing_for_already_named_files() 
     let state = tempdir().unwrap();
     let effective = effective_skipping_named("[auth][year]", true);
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3635,7 +3635,7 @@ fn an_interactive_run_with_skip_named_renders_nothing_for_already_named_files() 
 fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_does() {
     let smith = PathBuf::from("/lib/Smith2024.pdf");
     let original = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &smith,
             hash_for("no-skip-named-smith"),
@@ -3662,7 +3662,7 @@ fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_do
     let state = tempdir().unwrap();
     let effective = effective_skipping_named("[auth][year]", false);
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3725,7 +3725,7 @@ fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_do
 fn the_json_stream_carries_a_passed_over_files_events_in_full() {
     let smith = PathBuf::from("/lib/Smith2024.pdf");
     let original = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &smith,
             hash_for("json-skip-named-smith"),
@@ -3752,7 +3752,7 @@ fn the_json_stream_carries_a_passed_over_files_events_in_full() {
     let state = tempdir().unwrap();
     let effective = effective_skipping_named("[auth][year]", true);
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3876,7 +3876,7 @@ impl Asker for ObservingAsker {
 fn the_hold_ends_before_the_question_and_never_leaks_a_passed_over_files_lines() {
     let smith = PathBuf::from("/lib/Smith2024.pdf");
     let original = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &smith,
             hash_for("hold-smith"),
@@ -3903,7 +3903,7 @@ fn the_hold_ends_before_the_question_and_never_leaks_a_passed_over_files_lines()
     let state = tempdir().unwrap();
     let effective = effective_skipping_named("[auth][year]", true);
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -3968,7 +3968,7 @@ fn the_hold_ends_before_the_question_and_never_leaks_a_passed_over_files_lines()
 #[test]
 fn a_sidecar_for_a_passed_over_file_is_still_reported() {
     let smith = PathBuf::from("/lib/Smith2024.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &smith,
         hash_for("sidecar-passed-over"),
         pdf_with_embedded_doi("10.1000/sidecar-passed-over"),
@@ -3999,7 +3999,7 @@ fn a_sidecar_for_a_passed_over_file_is_still_reported() {
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -4047,7 +4047,7 @@ fn a_sidecar_for_a_passed_over_file_is_still_reported() {
 #[test]
 fn a_sidecar_write_failure_for_a_passed_over_file_is_still_reported() {
     let smith = PathBuf::from("/lib/Smith2024.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &smith,
         hash_for("sidecar-failure-passed-over"),
         pdf_with_embedded_doi("10.1000/sidecar-failure-passed-over"),
@@ -4082,7 +4082,7 @@ fn a_sidecar_write_failure_for_a_passed_over_file_is_still_reported() {
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -4137,7 +4137,7 @@ fn a_sidecar_write_failure_for_a_passed_over_file_is_still_reported() {
 #[test]
 fn the_description_reaches_the_question_and_stdout_still_carries_resolved() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("description-reaches-question"),
         pdf_with_embedded_doi("10.1000/description-reaches-question"),
@@ -4157,7 +4157,7 @@ fn the_description_reaches_the_question_and_stdout_still_carries_resolved() {
     let state = tempdir().unwrap();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -4213,7 +4213,7 @@ fn the_description_reaches_the_question_and_stdout_still_carries_resolved() {
 #[test]
 fn the_description_does_not_reach_the_json_event_stream() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("description-not-in-stream"),
         pdf_with_embedded_doi("10.1000/description-not-in-stream"),
@@ -4233,7 +4233,7 @@ fn the_description_does_not_reach_the_json_event_stream() {
     let state = tempdir().unwrap();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -4292,7 +4292,7 @@ fn the_description_does_not_reach_the_json_event_stream() {
 fn two_files_of_one_name_in_two_directories_are_asked_about_distinguishably() {
     let one = PathBuf::from("/lib/tree-a/paper.pdf");
     let other = PathBuf::from("/lib/tree-b/paper.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &one,
             hash_for("tree-a-paper"),
@@ -4319,7 +4319,7 @@ fn two_files_of_one_name_in_two_directories_are_asked_about_distinguishably() {
     let state = tempdir().unwrap();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -4385,10 +4385,10 @@ fn two_files_of_one_name_in_two_directories_are_asked_about_distinguishably() {
 fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
     let path = PathBuf::from("/lib/paper.pdf");
     let hash = hash_for("batch-cached-provenance");
-    // The library would fail loudly if opened, so an accidental open
+    // The documents would fail loudly if opened, so an accidental open
     // (rather than a content-index hit) shows up as a failure, not a
     // silently-live resolution.
-    let library = FakeLibrary::new().with_open_error(
+    let documents = FakeDocuments::new().with_open_error(
         &path,
         hash.clone(),
         ExtractionError::Unreadable {
@@ -4409,7 +4409,7 @@ fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -4493,21 +4493,21 @@ fn assert_choices(question: &Question, default: Answer, rest: &[Answer]) {
 
 /// A one-file [`Adapters`] rig shared by the tests below: a single PDF
 /// at `/lib/paper.pdf`, an empty content index, no ledger, no
-/// collection. `library` and `sources` are supplied by the caller since
+/// collection. `documents` and `sources` are supplied by the caller since
 /// every test needs its own identifiers.
 struct SupplyFixture {
     path: PathBuf,
-    library: FakeLibrary,
+    documents: FakeDocuments,
     index: ContentIndex<MemoryCache>,
     filesystem: FakeFilesystem,
     bib_files: FakeBibFiles,
 }
 
 impl SupplyFixture {
-    fn new(library: FakeLibrary) -> SupplyFixture {
+    fn new(documents: FakeDocuments) -> SupplyFixture {
         SupplyFixture {
             path: PathBuf::from("/lib/paper.pdf"),
-            library,
+            documents,
             index: ContentIndex::new(MemoryCache::new()),
             filesystem: FakeFilesystem::new(),
             bib_files: FakeBibFiles::new(),
@@ -4516,7 +4516,7 @@ impl SupplyFixture {
 
     fn adapters<'a>(&'a self, sources: &'a [&'a dyn Source]) -> Adapters<'a, MemoryCache> {
         Adapters {
-            library: &self.library,
+            documents: &self.documents,
             sources,
             index: &self.index,
             filesystem: &self.filesystem,
@@ -4538,7 +4538,7 @@ impl SupplyFixture {
 /// identifier · skip · quit, defaulting to rename.
 #[test]
 fn a_resolved_move_offers_supplying_a_different_identifier_alongside_rename() {
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("d1-resolved-move"),
         pdf_with_embedded_doi("10.1000/d1-resolved-move"),
@@ -4571,7 +4571,7 @@ fn a_resolved_move_offers_supplying_a_different_identifier_alongside_rename() {
 /// "no identifier found": supply an identifier · skip · quit.
 #[test]
 fn a_file_with_no_identifier_offers_to_supply_one() {
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("d1-no-identifier"),
         pdf_with_no_identifier(),
@@ -4607,7 +4607,7 @@ fn a_file_with_no_identifier_offers_to_supply_one() {
 /// source answered `NotFound`, so nothing offers a retry.
 #[test]
 fn an_identifier_no_service_holds_offers_no_retry_when_the_answer_is_conclusive() {
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("d1-conclusive-unresolvable"),
         pdf_with_embedded_doi("10.1000/d1-conclusive-unresolvable"),
@@ -4639,7 +4639,7 @@ fn an_identifier_no_service_holds_offers_no_retry_when_the_answer_is_conclusive(
 /// reached offers a retry, first.
 #[test]
 fn an_unreachable_service_offers_a_retry_before_supplying_an_identifier() {
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("d1-inconclusive-unresolvable"),
         pdf_with_embedded_doi("10.1000/d1-inconclusive-unresolvable"),
@@ -4682,7 +4682,7 @@ fn an_unreachable_service_offers_a_retry_before_supplying_an_identifier() {
 #[test]
 fn a_conflict_with_a_free_target_offers_overriding_but_never_defaults_to_it() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("d1-conflict-move"),
         pdf_with_embedded_doi("10.1000/d1-conflict-move")
@@ -4703,7 +4703,7 @@ fn a_conflict_with_a_free_target_offers_overriding_but_never_defaults_to_it() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -4741,7 +4741,7 @@ fn a_conflict_whose_target_is_not_free_offers_no_override() {
     // The file already sits at the name its (conflicting) record would
     // render, so the proposal computed from it is not a move.
     let path = PathBuf::from("/lib/Smith2024.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("d1-conflict-not-move"),
         pdf_with_embedded_doi("10.1000/d1-conflict-not-move")
@@ -4762,7 +4762,7 @@ fn a_conflict_whose_target_is_not_free_offers_no_override() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -4808,7 +4808,7 @@ fn a_conflict_whose_target_is_not_free_offers_no_override() {
 /// quit.
 #[test]
 fn an_unreadable_file_with_a_known_hash_offers_to_supply_an_identifier() {
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_open_error(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_open_error(
         "/lib/paper.pdf",
         hash_for("d1-unreadable"),
         ExtractionError::Encrypted,
@@ -4836,7 +4836,7 @@ fn an_unreadable_file_with_a_known_hash_offers_to_supply_an_identifier() {
 #[test]
 fn an_already_named_file_under_no_skip_named_offers_to_keep_or_supply() {
     let path = PathBuf::from("/lib/Smith2024.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("d1-already-named"),
         pdf_with_embedded_doi("10.1000/d1-already-named"),
@@ -4851,7 +4851,7 @@ fn an_already_named_file_under_no_skip_named_offers_to_keep_or_supply() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_skipping_named("[auth][year]", false);
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -4896,7 +4896,7 @@ fn an_already_named_file_under_no_skip_named_offers_to_keep_or_supply() {
 /// still on offer: the operator may accept it, supply another, or skip.
 #[test]
 fn a_supplied_identifier_that_does_not_resolve_leaves_the_original_record_on_offer() {
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("d1-transition-unresolvable"),
         pdf_with_embedded_doi("10.1000/original-still-good"),
@@ -4941,7 +4941,7 @@ fn a_supplied_identifier_that_does_not_resolve_leaves_the_original_record_on_off
 /// Escaping the text prompt leaves the question exactly as it was.
 #[test]
 fn abandoning_the_supply_prompt_changes_nothing() {
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("d1-transition-abandoned"),
         pdf_with_embedded_doi("10.1000/abandoned-supply"),
@@ -4974,7 +4974,7 @@ fn abandoning_the_supply_prompt_changes_nothing() {
 /// reaching a service, and the operator is asked again.
 #[test]
 fn refused_input_is_asked_again_rather_than_reopening_the_menu() {
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("d1-transition-refused"),
         pdf_with_embedded_doi("10.1000/refused-input"),
@@ -5030,7 +5030,7 @@ fn refused_input_is_asked_again_rather_than_reopening_the_menu() {
 /// the first name proposed is never claimed.
 #[test]
 fn supplying_a_different_identifier_produces_a_fresh_proposal_leaving_the_first_name_unclaimed() {
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("d1-reference-doi"),
         pdf_with_embedded_doi("10.1000/reference-doi"),
@@ -5080,7 +5080,7 @@ fn supplying_a_different_identifier_produces_a_fresh_proposal_leaving_the_first_
 #[test]
 fn no_skip_named_supplying_and_renaming_re_identifies_a_wrongly_named_file() {
     let path = PathBuf::from("/lib/Wrong2020.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("d1-reidentify"),
         pdf_with_embedded_doi("10.1000/reidentify-wrong"),
@@ -5100,7 +5100,7 @@ fn no_skip_named_supplying_and_renaming_re_identifies_a_wrongly_named_file() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_skipping_named("[auth][year]", false);
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -5145,7 +5145,7 @@ fn no_skip_named_supplying_and_renaming_re_identifies_a_wrongly_named_file() {
 #[test]
 fn a_file_settled_by_a_supplied_identifier_is_reported_once() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("d5-one-report"),
         pdf_with_embedded_doi("10.1000/d5-original").with_title("Old Title Extracted from the PDF"),
@@ -5170,7 +5170,7 @@ fn a_file_settled_by_a_supplied_identifier_is_reported_once() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -5231,7 +5231,7 @@ fn a_file_settled_by_a_supplied_identifier_is_reported_once() {
 #[test]
 fn a_rename_from_a_supplied_identifier_is_written_to_the_content_index() {
     let hash = hash_for("d7-write-on-rename");
-    let fixture = SupplyFixture::new(FakeLibrary::new().with_file(
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash.clone(),
         pdf_with_no_identifier(),
@@ -5266,18 +5266,18 @@ fn a_rename_from_a_supplied_identifier_is_written_to_the_content_index() {
 #[test]
 fn skipping_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
     let hash = hash_for("d7-abandoned-not-written");
-    // The library would fail loudly if opened: an already-indexed file
+    // The documents would fail loudly if opened: an already-indexed file
     // is answered from the index and never touches the file at all,
     // which is what this test needs to hold while the operator's
     // candidate is abandoned.
-    let library = FakeLibrary::new().with_open_error(
+    let documents = FakeDocuments::new().with_open_error(
         "/lib/paper.pdf",
         hash.clone(),
         ExtractionError::Unreadable {
             message: "must never be opened".to_string(),
         },
     );
-    let fixture = SupplyFixture::new(library);
+    let fixture = SupplyFixture::new(documents);
     let already_held = record_by("Roe", 2019, "10.1000/d7-already-held");
     fixture.index.put(&hash, &already_held);
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
@@ -5327,7 +5327,7 @@ fn skipping_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
 #[test]
 fn overriding_a_conflict_reports_what_was_overridden_and_renames() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("overrode-reports"),
         pdf_with_embedded_doi("10.1000/overrode-reports")
@@ -5348,7 +5348,7 @@ fn overriding_a_conflict_reports_what_was_overridden_and_renames() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -5410,7 +5410,7 @@ fn overriding_a_conflict_reports_what_was_overridden_and_renames() {
 fn skipping_a_conflict_that_could_have_been_overridden_writes_nothing() {
     let path = PathBuf::from("/lib/original.pdf");
     let hash = hash_for("d7-override-declined");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash.clone(),
         pdf_with_embedded_doi("10.1000/d7-override-declined")
@@ -5431,7 +5431,7 @@ fn skipping_a_conflict_that_could_have_been_overridden_writes_nothing() {
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -5500,7 +5500,7 @@ fn a_supplied_identifier_resolving_into_a_taken_target_reports_and_reasks() {
     const OUTCOME: &str = "name taken";
 
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("d1-transition-target-taken"),
         pdf_with_no_identifier(),
@@ -5529,7 +5529,7 @@ fn a_supplied_identifier_resolving_into_a_taken_target_reports_and_reasks() {
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -5603,7 +5603,7 @@ fn a_supplied_identifier_resolving_into_an_unnameable_record_reports_and_reasks(
     const OUTCOME: &str = "no name";
 
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("d1-transition-unnameable"),
         pdf_with_no_identifier(),
@@ -5621,7 +5621,7 @@ fn a_supplied_identifier_resolving_into_an_unnameable_record_reports_and_reasks(
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -5686,7 +5686,7 @@ fn a_supplied_identifier_resolving_into_the_files_own_current_name_reports_and_r
     const OUTCOME: &str = "same name";
 
     let path = PathBuf::from("/lib/Smith2024.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("d1-transition-already-named"),
         pdf_with_no_identifier(),
@@ -5701,7 +5701,7 @@ fn a_supplied_identifier_resolving_into_the_files_own_current_name_reports_and_r
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -5768,17 +5768,17 @@ fn a_supplied_identifier_resolving_into_the_files_own_current_name_reports_and_r
 #[test]
 fn quitting_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
     let hash = hash_for("d7-quit-not-written");
-    // The library would fail loudly if opened: an already-indexed file
+    // The documents would fail loudly if opened: an already-indexed file
     // is answered from the index and never touches the file, which is
     // what must hold while the candidate is abandoned.
-    let library = FakeLibrary::new().with_open_error(
+    let documents = FakeDocuments::new().with_open_error(
         "/lib/paper.pdf",
         hash.clone(),
         ExtractionError::Unreadable {
             message: "must never be opened".to_string(),
         },
     );
-    let fixture = SupplyFixture::new(library);
+    let fixture = SupplyFixture::new(documents);
     let already_held = record_by("Roe", 2019, "10.1000/d7-quit-already-held");
     fixture.index.put(&hash, &already_held);
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
@@ -5816,8 +5816,8 @@ fn quitting_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
 #[test]
 fn an_abandoned_supplied_candidate_is_never_cited() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library =
-        FakeLibrary::new().with_file(&path, hash_for("cite-abandoned"), pdf_with_no_identifier());
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_for("cite-abandoned"), pdf_with_no_identifier());
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/cite-abandoned-candidate",
         record_by("Doe", 2023, "10.1000/cite-abandoned-candidate"),
@@ -5842,7 +5842,7 @@ fn an_abandoned_supplied_candidate_is_never_cited() {
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -5892,7 +5892,7 @@ fn an_abandoned_supplied_candidate_is_never_cited() {
 #[test]
 fn a_files_own_resolution_is_still_cited_after_a_failed_supply() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("cite-own-record"),
         pdf_with_embedded_doi("10.1000/cite-own-record"),
@@ -5921,7 +5921,7 @@ fn a_files_own_resolution_is_still_cited_after_a_failed_supply() {
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -5983,7 +5983,7 @@ impl borax_sources::cache::Cache for WriteFailingCache {
 fn a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_next_time() {
     let path = PathBuf::from("/lib/paper.pdf");
     let hash = hash_for("d7-write-fails");
-    let library = FakeLibrary::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/d7-write-fails",
         record_by("Smith", 2024, "10.1000/d7-write-fails"),
@@ -5994,7 +5994,7 @@ fn a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_ne
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -6063,7 +6063,7 @@ fn a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_ne
 #[test]
 fn a_resolved_candidate_that_led_nowhere_leaves_the_files_own_record_to_cite() {
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("resolved-candidate-discarded"),
         pdf_with_embedded_doi("10.1000/the-files-own"),
@@ -6104,7 +6104,7 @@ fn a_resolved_candidate_that_led_nowhere_leaves_the_files_own_record_to_cite() {
         });
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -6174,7 +6174,7 @@ fn a_resolved_candidate_that_led_nowhere_leaves_the_files_own_record_to_cite() {
 fn quitting_a_human_interactive_run_still_prints_the_summary() {
     let first = PathBuf::from("/lib/first.pdf");
     let second = PathBuf::from("/lib/second.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &first,
             hash_for("quit-summary-first"),
@@ -6201,7 +6201,7 @@ fn quitting_a_human_interactive_run_still_prints_the_summary() {
     let state = tempdir().unwrap();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -6256,7 +6256,7 @@ fn quitting_a_human_interactive_run_still_prints_the_summary() {
 #[test]
 fn a_supplied_record_the_collection_already_holds_is_reported_a_duplicate() {
     let path = PathBuf::from("/collection/incoming.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_for("supplied-work-duplicate"),
         pdf_with_no_identifier(),
@@ -6285,7 +6285,7 @@ fn a_supplied_record_the_collection_already_holds_is_reported_a_duplicate() {
     });
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,

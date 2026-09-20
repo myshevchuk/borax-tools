@@ -12,7 +12,7 @@ use borax::ledger::{
     ACCOUNTING_DIR, Collection, FileLedger, LEDGER_FILE, Ledger, LedgerWarning, Loaded, Scanned,
     admission_entry, duplicate_is_live, prepare, rebuild, relative_to, scan_collection,
 };
-use borax::pipeline::{FileRecord, Library};
+use borax::pipeline::{Documents, FileRecord};
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Streams, dispatch, events_for};
 use borax::session::{Outcome, Session};
@@ -229,22 +229,22 @@ fn pdf_with_embedded_doi(value: &str) -> FakePdf {
     }
 }
 
-/// What [`FakeLibrary`] answers for one path.
+/// What [`FakeDocuments`] answers for one path.
 struct LibraryEntry {
     hash: Result<ContentHash, ExtractionError>,
     pdf: Result<FakePdf, ExtractionError>,
 }
 
-/// A [`Library`] fake backed by a map from path to a fixed `(hash, PDF
+/// A [`Documents`] fake backed by a map from path to a fixed `(hash, PDF
 /// content or error)` pair, following the shape of the one in
 /// `dispatch.rs`.
-struct FakeLibrary {
+struct FakeDocuments {
     entries: BTreeMap<PathBuf, LibraryEntry>,
 }
 
-impl FakeLibrary {
-    fn new() -> FakeLibrary {
-        FakeLibrary {
+impl FakeDocuments {
+    fn new() -> FakeDocuments {
+        FakeDocuments {
             entries: BTreeMap::new(),
         }
     }
@@ -255,7 +255,7 @@ impl FakeLibrary {
         path: impl Into<PathBuf>,
         hash: ContentHash,
         pdf: FakePdf,
-    ) -> FakeLibrary {
+    ) -> FakeDocuments {
         self.entries.insert(
             path.into(),
             LibraryEntry {
@@ -273,7 +273,7 @@ impl FakeLibrary {
         path: impl Into<PathBuf>,
         hash: ContentHash,
         error: ExtractionError,
-    ) -> FakeLibrary {
+    ) -> FakeDocuments {
         self.entries.insert(
             path.into(),
             LibraryEntry {
@@ -285,7 +285,7 @@ impl FakeLibrary {
     }
 }
 
-impl Library for FakeLibrary {
+impl Documents for FakeDocuments {
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
         self.entries.get(path).map_or_else(
             || {
@@ -1194,7 +1194,7 @@ fn admission_entry_stamps_the_given_run_timestamp_and_tool_version() {
 fn a_content_duplicate_is_skipped_with_the_existing_files_full_path_and_the_source_untouched() {
     let path = PathBuf::from("/lib/original.pdf");
     let hash = hash_of("dup-content");
-    let library = FakeLibrary::new().with_open_error(
+    let documents = FakeDocuments::new().with_open_error(
         &path,
         hash,
         ExtractionError::Unreadable {
@@ -1211,7 +1211,7 @@ fn a_content_duplicate_is_skipped_with_the_existing_files_full_path_and_the_sour
     });
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1251,7 +1251,7 @@ fn a_content_duplicate_is_skipped_with_the_existing_files_full_path_and_the_sour
 #[test]
 fn a_work_duplicate_is_skipped_with_the_work_reason() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("work-dup-incoming"),
         pdf_with_embedded_doi("10.1000/work-dup"),
@@ -1274,7 +1274,7 @@ fn a_work_duplicate_is_skipped_with_the_work_reason() {
     });
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1315,7 +1315,7 @@ fn a_work_duplicate_is_skipped_with_the_work_reason() {
 #[test]
 fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("stale-dup"),
         pdf_with_embedded_doi("10.1000/stale-dup"),
@@ -1337,7 +1337,7 @@ fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
     });
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1391,7 +1391,7 @@ fn a_duplicate_whose_recorded_file_is_gone_is_processed_normally() {
 #[test]
 fn a_stale_duplicate_warns_that_the_ledger_holds_stale_entries() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("stale-warns"),
         pdf_with_embedded_doi("10.1000/stale-warns"),
@@ -1412,7 +1412,7 @@ fn a_stale_duplicate_warns_that_the_ledger_holds_stale_entries() {
     });
     let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1474,7 +1474,7 @@ fn a_stale_duplicate_warns_that_the_ledger_holds_stale_entries() {
 fn a_live_duplicate_emits_no_stale_warning() {
     let path = PathBuf::from("/lib/original.pdf");
     let hash = hash_of("live-dup-no-warning");
-    let library = FakeLibrary::new().with_open_error(
+    let documents = FakeDocuments::new().with_open_error(
         &path,
         hash,
         ExtractionError::Unreadable {
@@ -1493,7 +1493,7 @@ fn a_live_duplicate_emits_no_stale_warning() {
         layer.run_log = Some(false);
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1531,7 +1531,7 @@ fn a_live_duplicate_emits_no_stale_warning() {
 #[test]
 fn no_match_emits_no_stale_warning() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("no-match-incoming"),
         pdf_with_embedded_doi("10.1000/no-match"),
@@ -1552,7 +1552,7 @@ fn no_match_emits_no_stale_warning() {
     });
     let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1592,7 +1592,7 @@ fn no_match_emits_no_stale_warning() {
 fn several_stale_duplicates_in_one_run_still_produce_exactly_one_warning() {
     let first = PathBuf::from("/lib/first.pdf");
     let second = PathBuf::from("/lib/second.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &first,
             hash_of("stale-first"),
@@ -1622,7 +1622,7 @@ fn several_stale_duplicates_in_one_run_still_produce_exactly_one_warning() {
     });
     let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1681,7 +1681,7 @@ fn several_stale_duplicates_in_one_run_still_produce_exactly_one_warning() {
 fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root() {
     let path = PathBuf::from("/collection/sub/original.pdf");
     let hash = hash_of("apply-admission");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash.clone(),
         pdf_with_embedded_doi("10.1000/apply-admission"),
@@ -1700,7 +1700,7 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
     });
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1768,7 +1768,7 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
 #[test]
 fn a_preview_run_appends_nothing_to_the_ledger_even_when_it_plans_a_rename() {
     let path = PathBuf::from("/collection/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("preview-no-append"),
         pdf_with_embedded_doi("10.1000/preview-no-append"),
@@ -1787,7 +1787,7 @@ fn a_preview_run_appends_nothing_to_the_ledger_even_when_it_plans_a_rename() {
     });
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1825,7 +1825,7 @@ fn a_preview_run_appends_nothing_to_the_ledger_even_when_it_plans_a_rename() {
 fn a_disabled_ledger_neither_checks_nor_appends() {
     let path = PathBuf::from("/collection/original.pdf");
     let hash = hash_of("disabled-ledger");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash,
         pdf_with_embedded_doi("10.1000/disabled-ledger"),
@@ -1853,7 +1853,7 @@ fn a_disabled_ledger_neither_checks_nor_appends() {
         )]));
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1891,7 +1891,7 @@ fn a_disabled_ledger_neither_checks_nor_appends() {
 #[test]
 fn outside_a_collection_the_run_checks_nothing_appends_nothing_and_warns_nothing() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("no-collection"),
         pdf_with_embedded_doi("10.1000/no-collection"),
@@ -1906,7 +1906,7 @@ fn outside_a_collection_the_run_checks_nothing_appends_nothing_and_warns_nothing
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1944,7 +1944,7 @@ fn outside_a_collection_the_run_checks_nothing_appends_nothing_and_warns_nothing
 #[test]
 fn an_absent_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("absent-ledger"),
         pdf_with_embedded_doi("10.1000/absent-ledger"),
@@ -1963,7 +1963,7 @@ fn an_absent_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
     });
     let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2016,7 +2016,7 @@ fn an_absent_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
 #[test]
 fn an_unparsable_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("unparsable-ledger"),
         pdf_with_embedded_doi("10.1000/unparsable-ledger"),
@@ -2035,7 +2035,7 @@ fn an_unparsable_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
     });
     let effective = effective_with_default_template_and_no_run_log("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2090,7 +2090,7 @@ fn an_unparsable_ledger_warns_exactly_once_and_the_run_proceeds_unaffected() {
 fn a_content_duplicate_skip_counts_toward_a_partial_outcome() {
     let path = PathBuf::from("/lib/original.pdf");
     let hash = hash_of("partial-dup");
-    let library = FakeLibrary::new().with_open_error(
+    let documents = FakeDocuments::new().with_open_error(
         &path,
         hash,
         ExtractionError::Unreadable {
@@ -2107,7 +2107,7 @@ fn a_content_duplicate_skip_counts_toward_a_partial_outcome() {
     });
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2170,14 +2170,14 @@ fn rebuild_replaces_the_ledger_with_one_entry_per_scanned_file_and_reports_the_c
         index: Index::build(&[]),
         warning: None,
     });
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2235,14 +2235,14 @@ fn rebuild_compacts_away_entries_for_files_no_longer_on_disk() {
         index: Index::build(&[]),
         warning: None,
     });
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2297,14 +2297,14 @@ fn rebuilding_an_unchanged_collection_twice_through_dispatch_is_byte_identical()
 
     let ledger_path = dir.path().join(ACCOUNTING_DIR).join(LEDGER_FILE);
     let real_ledger = FileLedger::new(&ledger_path);
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2369,14 +2369,14 @@ fn rebuild_skips_files_scan_collection_would_not_count() {
         index: Index::build(&[]),
         warning: None,
     });
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2428,14 +2428,14 @@ fn rebuild_outside_a_collection_is_refused_and_writes_nothing() {
         index: Index::build(&[]),
         warning: None,
     });
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2500,14 +2500,14 @@ fn a_failing_replace_refuses_the_run_rather_than_reporting_a_clean_rebuild() {
         warning: None,
     })
     .with_replace_failure("disk full");
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2566,7 +2566,7 @@ fn a_disabled_ledger_setting_does_not_prevent_a_rebuild() {
         index: Index::build(&[]),
         warning: None,
     });
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
@@ -2575,7 +2575,7 @@ fn a_disabled_ledger_setting_does_not_prevent_a_rebuild() {
         layer.ledger = Some(false);
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -2628,14 +2628,14 @@ fn dispatching_a_rebuild_writes_ledger_rebuilt_on_stdout_carrying_the_schema_fie
         index: Index::build(&[]),
         warning: None,
     });
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,

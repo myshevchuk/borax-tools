@@ -26,7 +26,7 @@ use tempfile::tempdir;
 
 /// A [`Filesystem`] fake backed by a map from directory to the names
 /// present there (with optional content hashes), following the shape of
-/// `FakeLibrary` in `pipeline.rs`.
+/// `FakeDocuments` in `pipeline.rs`.
 ///
 /// Every [`Filesystem::rename`] call is recorded in order, so a test can
 /// assert exactly which moves happened — including that none did. A

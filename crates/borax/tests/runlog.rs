@@ -10,7 +10,7 @@ use borax::cli::{Cli, Command, LedgerAction};
 use borax::config::{Layer, Origin, resolve};
 use borax::event::{Diagnostic, Event, Level};
 use borax::ledger::ACCOUNTING_DIR;
-use borax::pipeline::Library;
+use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, Sink, Streams, dispatch, emit_events, preflight};
 use borax::runlog::{RUNS_DIR, destination, log_name, state_root};
@@ -67,13 +67,13 @@ struct LibraryEntry {
     pdf: Result<FakePdf, ExtractionError>,
 }
 
-struct FakeLibrary {
+struct FakeDocuments {
     entries: BTreeMap<PathBuf, LibraryEntry>,
 }
 
-impl FakeLibrary {
-    fn new() -> FakeLibrary {
-        FakeLibrary {
+impl FakeDocuments {
+    fn new() -> FakeDocuments {
+        FakeDocuments {
             entries: BTreeMap::new(),
         }
     }
@@ -83,7 +83,7 @@ impl FakeLibrary {
         path: impl Into<PathBuf>,
         hash: ContentHash,
         pdf: FakePdf,
-    ) -> FakeLibrary {
+    ) -> FakeDocuments {
         self.entries.insert(
             path.into(),
             LibraryEntry {
@@ -95,7 +95,7 @@ impl FakeLibrary {
     }
 }
 
-impl Library for FakeLibrary {
+impl Documents for FakeDocuments {
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
         self.entries.get(path).map_or_else(
             || {
@@ -599,7 +599,7 @@ fn destination_in_a_collection_at_a_drive_root_does_not_double_the_separator_on_
 fn run_log_contains_exactly_the_json_stdout_stream_including_framing_events() {
     let dir = tempdir().unwrap();
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("run-log-equals-json"),
         pdf_with_embedded_doi("10.1000/run-log-equals-json"),
@@ -614,7 +614,7 @@ fn run_log_contains_exactly_the_json_stdout_stream_including_framing_events() {
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -667,7 +667,7 @@ fn a_human_format_run_still_writes_a_json_run_log_identical_to_the_json_runs() {
     let record = record_by("Smith", 2024, "10.1000/human-still-json");
 
     for (dir, json) in [(&json_dir, true), (&human_dir, false)] {
-        let library = FakeLibrary::new().with_file(
+        let documents = FakeDocuments::new().with_file(
             &path,
             hash_of("human-still-json"),
             pdf_with_embedded_doi("10.1000/human-still-json"),
@@ -679,7 +679,7 @@ fn a_human_format_run_still_writes_a_json_run_log_identical_to_the_json_runs() {
         let bib_files = FakeBibFiles;
         let effective = resolve(Vec::new()).unwrap();
         let adapters = Adapters {
-            library: &library,
+            documents: &documents,
             sources: &sources,
             index: &index,
             filesystem: &filesystem,
@@ -726,7 +726,7 @@ fn a_human_format_run_still_writes_a_json_run_log_identical_to_the_json_runs() {
 fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
     let dir = tempdir().unwrap();
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("dry-apply-pair"),
         pdf_with_embedded_doi("10.1000/dry-apply-pair"),
@@ -742,7 +742,7 @@ fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
     let effective = effective_with_default_template("[auth][year]");
 
     let preview_adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -768,7 +768,7 @@ fn a_preview_followed_by_its_apply_leaves_two_files_that_sort_adjacently() {
     );
 
     let apply_adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -813,7 +813,7 @@ fn an_unwritable_mandatory_log_aborts_before_any_rename() {
     std::fs::write(dir.path().join(ACCOUNTING_DIR), b"not a directory").unwrap();
 
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("unwritable-log"),
         pdf_with_embedded_doi("10.1000/unwritable-log"),
@@ -828,7 +828,7 @@ fn an_unwritable_mandatory_log_aborts_before_any_rename() {
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -894,7 +894,7 @@ fn a_mandatory_log_whose_own_name_is_taken_by_a_directory_aborts_before_any_rena
     std::fs::create_dir(runs.join(log_name(&fixed_now(), "rename", true))).unwrap();
 
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("occupied-log"),
         pdf_with_embedded_doi("10.1000/occupied-log"),
@@ -909,7 +909,7 @@ fn a_mandatory_log_whose_own_name_is_taken_by_a_directory_aborts_before_any_rena
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -952,7 +952,7 @@ fn a_mandatory_log_whose_own_name_is_taken_by_a_directory_aborts_before_any_rena
 fn no_run_log_with_apply_still_writes_the_mandatory_log() {
     let dir = tempdir().unwrap();
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("no-run-log-apply"),
         pdf_with_embedded_doi("10.1000/no-run-log-apply"),
@@ -973,7 +973,7 @@ fn no_run_log_with_apply_still_writes_the_mandatory_log() {
         )]));
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1010,7 +1010,7 @@ fn no_run_log_with_apply_still_writes_the_mandatory_log() {
 fn no_run_log_on_a_preview_writes_nothing_and_the_run_still_succeeds() {
     let dir = tempdir().unwrap();
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("no-run-log-preview"),
         pdf_with_embedded_doi("10.1000/no-run-log-preview"),
@@ -1031,7 +1031,7 @@ fn no_run_log_on_a_preview_writes_nothing_and_the_run_still_succeeds() {
         )]));
     });
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1076,7 +1076,7 @@ fn a_failed_optional_log_warns_but_the_run_still_succeeds() {
     std::fs::write(dir.path().join(ACCOUNTING_DIR), b"not a directory").unwrap();
 
     let path = PathBuf::from("/lib/paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("failed-optional-log"),
         pdf_with_embedded_doi("10.1000/failed-optional-log"),
@@ -1091,7 +1091,7 @@ fn a_failed_optional_log_warns_but_the_run_still_succeeds() {
     let bib_files = FakeBibFiles;
     let effective = resolve(Vec::new()).unwrap();
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1133,7 +1133,7 @@ fn a_failed_optional_log_warns_but_the_run_still_succeeds() {
 fn an_apply_rename_outside_a_collection_writes_its_log_under_the_state_root() {
     let state_dir = tempdir().unwrap();
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("xdg-fallback"),
         pdf_with_embedded_doi("10.1000/xdg-fallback"),
@@ -1148,7 +1148,7 @@ fn an_apply_rename_outside_a_collection_writes_its_log_under_the_state_root() {
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1184,7 +1184,7 @@ fn an_apply_rename_outside_a_collection_writes_its_log_under_the_state_root() {
 #[test]
 fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving_anything() {
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("no-root-at-all"),
         pdf_with_embedded_doi("10.1000/no-root-at-all"),
@@ -1199,7 +1199,7 @@ fn an_apply_rename_with_no_collection_and_no_state_root_is_refused_before_moving
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1332,7 +1332,7 @@ fn an_interactive_rename_with_an_unwritable_log_aborts_before_any_question() {
     std::fs::write(dir.path().join(ACCOUNTING_DIR), b"not a directory").unwrap();
 
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("interactive-unwritable-log"),
         pdf_with_embedded_doi("10.1000/interactive-unwritable-log"),
@@ -1351,7 +1351,7 @@ fn an_interactive_rename_with_an_unwritable_log_aborts_before_any_question() {
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1403,7 +1403,7 @@ fn a_session_that_declines_everything_still_leaves_an_apply_suffixed_log() {
     let dir = tempdir().unwrap();
     let a = PathBuf::from("/lib/a.pdf");
     let b = PathBuf::from("/lib/b.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &a,
             hash_of("interactive-moves-nothing-a"),
@@ -1428,7 +1428,7 @@ fn a_session_that_declines_everything_still_leaves_an_apply_suffixed_log() {
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1531,7 +1531,7 @@ impl Filesystem for LoggingAwareFilesystem {
 fn a_rename_event_is_flushed_to_the_log_before_the_move_it_records_is_made() {
     let dir = tempdir().unwrap();
     let path = PathBuf::from("/lib/original.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         &path,
         hash_of("record-before-move"),
         pdf_with_embedded_doi("10.1000/record-before-move"),
@@ -1557,7 +1557,7 @@ fn a_rename_event_is_flushed_to_the_log_before_the_move_it_records_is_made() {
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,
@@ -1654,9 +1654,9 @@ fn a_move_whose_record_cannot_be_written_is_not_made_and_stops_the_run() {
     let paths: Vec<PathBuf> = (1..=3)
         .map(|n| PathBuf::from(format!("/lib/{n}.pdf")))
         .collect();
-    let mut library = FakeLibrary::new();
+    let mut documents = FakeDocuments::new();
     for (n, path) in paths.iter().enumerate() {
-        library = library.with_file(
+        documents = documents.with_file(
             path,
             hash_of(&format!("record-refused-{n}")),
             pdf_with_embedded_doi("10.1000/record-refused"),
@@ -1672,7 +1672,7 @@ fn a_move_whose_record_cannot_be_written_is_not_made_and_stops_the_run() {
     let bib_files = FakeBibFiles;
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
-        library: &library,
+        documents: &documents,
         sources: &sources,
         index: &index,
         filesystem: &filesystem,

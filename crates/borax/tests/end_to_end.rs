@@ -25,7 +25,7 @@ use borax::bib::{RealBibFiles, sidecar_path};
 use borax::cli::{Cli, Command, LedgerAction};
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
 use borax::ledger::{FileLedger, Ledger};
-use borax::pipeline::RealLibrary;
+use borax::pipeline::RealDocuments;
 use borax::renaming::RealFilesystem;
 use borax::run::{Adapters, Configs, Streams, dispatch};
 use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
@@ -297,7 +297,7 @@ fn invoke(
         &cli,
         &Configs::uniform(effective),
         &Adapters {
-            library: &RealLibrary,
+            documents: &RealDocuments,
             sources: &sources,
             index: &index,
             filesystem: &RealFilesystem,
@@ -1162,7 +1162,7 @@ fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_ru
         },
         &Configs::uniform(effective_with(&master)),
         &Adapters {
-            library: &RealLibrary,
+            documents: &RealDocuments,
             sources: &sources,
             index: &index,
             filesystem: &RealFilesystem,
@@ -1213,7 +1213,7 @@ fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_ru
         },
         &Configs::uniform(effective_with(&master)),
         &Adapters {
-            library: &RealLibrary,
+            documents: &RealDocuments,
             sources: &sources,
             index: &index,
             filesystem: &RealFilesystem,
