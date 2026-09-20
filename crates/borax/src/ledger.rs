@@ -33,8 +33,9 @@ use crate::pipeline::FileRecord;
 use crate::run::inputs;
 
 /// The directory a collection keeps its accounting in, directly under
-/// the collection root.
-pub const ACCOUNTING_DIR: &str = ".borax";
+/// the collection root: the library's own state directory, under the
+/// name this module's callers know it by.
+pub use crate::library::STATE_DIR as ACCOUNTING_DIR;
 
 /// The ledger's name within that directory.
 pub const LEDGER_FILE: &str = "ledger.jsonl";
@@ -268,18 +269,9 @@ pub fn stale_entries_warning() -> Diagnostic {
     }
 }
 
-/// The full path of `relative`, which is `/`-separated and relative to
-/// `collection_root` as a ledger entry's path is.
-///
-/// The separator is the ledger's own rather than the platform's, so an
-/// entry written on one machine names the same file on another.
-pub fn relative_to(collection_root: &Path, relative: &str) -> PathBuf {
-    relative
-        .split('/')
-        .fold(collection_root.to_path_buf(), |path, segment| {
-            path.join(segment)
-        })
-}
+/// The full path of a `/`-separated path relative to the collection
+/// root, which is a library-relative path under another name.
+pub use crate::library::relative_to;
 
 /// Whether the file `duplicate` names is still in the collection.
 ///
@@ -426,19 +418,9 @@ pub fn scan_collection(root: &Path) -> Vec<Scanned> {
         .collect()
 }
 
-/// `path` as a ledger entry's path: relative to `root` and
-/// `/`-separated whatever the platform writes.
-///
-/// `None` when `path` is not below `root`, which no ledger entry can
-/// describe.
-pub(crate) fn collection_relative(root: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(root).ok()?;
-    let segments: Vec<String> = relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    Some(segments.join("/"))
-}
+/// `path` as a ledger entry's path, which is the library-relative
+/// rendering under another name.
+pub(crate) use crate::library::library_relative as collection_relative;
 
 /// The ledger entry an applied admission of `file` to `path` appends.
 ///

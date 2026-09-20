@@ -67,10 +67,10 @@ pub struct Config {
     /// The contact address sent to the Crossref and OpenAlex polite
     /// pools.
     pub mailto: Option<String>,
-    /// The directory anchoring the collection's `.borax/` accounting,
-    /// or `None` when nothing configured one and
-    /// [`collection_root`]'s discovery decides it.
-    pub collection_root: Option<PathBuf>,
+    /// The directory anchoring the library's `.borax/` state, or `None`
+    /// when nothing configured one and [`library_root`]'s discovery
+    /// decides it.
+    pub library_root: Option<PathBuf>,
     /// How many files may be resolved at once.
     pub concurrency: usize,
     /// The floor on the gap between two requests to the same service,
@@ -116,8 +116,8 @@ impl Default for Config {
     /// `[auth:lower][year]_[shorttitle3:camel]`, and `citation_keys`
     /// holds `default` alone, as `[auth:lower][year]`; every service borax
     /// speaks to is enabled ([`SourceName::SUPPORTED`]); there is no
-    /// contact address, no master `.bib`, no configured collection
-    /// root, and no sidecars. Concurrency and pacing take
+    /// contact address, no master `.bib`, no configured library root,
+    /// and no sidecars. Concurrency and pacing take
     /// [`borax_sources::pace::DEFAULT_CONCURRENCY`] and
     /// [`borax_sources::pace::DEFAULT_MIN_INTERVAL`], extraction takes
     /// [`borax_pdf::tiered::DEFAULT_PAGE_LIMIT`], collisions are
@@ -136,7 +136,7 @@ impl Default for Config {
             tables: BTreeMap::new(),
             sources: SourceName::SUPPORTED.to_vec(),
             mailto: None,
-            collection_root: None,
+            library_root: None,
             concurrency: DEFAULT_CONCURRENCY,
             min_interval_ms: DEFAULT_MIN_INTERVAL.as_millis() as u64,
             page_limit: DEFAULT_PAGE_LIMIT,
@@ -173,8 +173,8 @@ pub struct Layer {
     pub sources: Option<Vec<String>>,
     #[serde(default)]
     pub mailto: Option<String>,
-    #[serde(default, rename = "collection-root")]
-    pub collection_root: Option<PathBuf>,
+    #[serde(default, rename = "library-root")]
+    pub library_root: Option<PathBuf>,
     #[serde(default)]
     pub ledger: Option<bool>,
     #[serde(default, rename = "run-log")]
@@ -553,9 +553,9 @@ const SETTINGS: &[Setting] = &[
         render: |config| config.sidecars.to_string(),
     },
     Setting {
-        key: "collection-root",
-        slot: |layer| Slot::Path(&mut layer.collection_root),
-        render: |config| match &config.collection_root {
+        key: "library-root",
+        slot: |layer| Slot::Path(&mut layer.library_root),
+        render: |config| match &config.library_root {
             Some(path) => quote(&path.to_string_lossy()),
             None => String::new(),
         },
@@ -914,8 +914,8 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
     if let Some(mailto) = winning.mailto {
         config.mailto = Some(mailto);
     }
-    if let Some(collection_root) = winning.collection_root {
-        config.collection_root = Some(collection_root);
+    if let Some(library_root) = winning.library_root {
+        config.library_root = Some(library_root);
     }
     if let Some(skip_named) = winning
         .rename
@@ -1015,9 +1015,9 @@ pub fn nearest_override(start: &Path, exists: impl Fn(&Path) -> bool) -> Option<
         .find(|candidate| exists(candidate))
 }
 
-/// The directory anchoring the collection a run in `start` belongs to.
+/// The directory anchoring the library a run in `start` belongs to.
 ///
-/// `configured` is the `collection-root` setting, and when it is set it
+/// `configured` is the `library-root` setting, and when it is set it
 /// is the answer outright: the search is replaced, not merely
 /// outranked, so an unusual layout can put the accounting somewhere no
 /// override file sits. Otherwise the root is the directory holding the
@@ -1027,9 +1027,9 @@ pub fn nearest_override(start: &Path, exists: impl Fn(&Path) -> bool) -> Option<
 /// [`nearest_override`].
 ///
 /// `None` when nothing is configured and no override file is found up
-/// to the filesystem root, which is a run outside any collection: no
-/// ledger is read or written for it.
-pub fn collection_root(
+/// to the filesystem root, which is a run outside any library: no state
+/// is read or written for it.
+pub fn library_root(
     start: &Path,
     configured: Option<&Path>,
     exists: impl Fn(&Path) -> bool,

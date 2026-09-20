@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use borax::config::{
     BibLayer, Config, ConfigError, ExtractionLayer, KeyColumns, Layer, NetworkLayer, OVERRIDE_FILE,
-    Origin, RenameLayer, TableDeclaration, ValueKindName, collection_root, global_config_path,
-    layer_from_env, layer_from_toml, nearest_override, resolve, table_path,
+    Origin, RenameLayer, TableDeclaration, ValueKindName, global_config_path, layer_from_env,
+    layer_from_toml, library_root, nearest_override, resolve, table_path,
 };
 use borax::event::Event;
 use borax_core::bib_output::DuplicatePolicy;
@@ -59,10 +59,10 @@ fn default_has_no_mailto_and_no_bib_path() {
 }
 
 /// No configuration means no override: discovery decides the
-/// collection root on its own.
+/// library root on its own.
 #[test]
-fn default_has_no_collection_root() {
-    assert_eq!(Config::default().collection_root, None);
+fn default_has_no_library_root() {
+    assert_eq!(Config::default().library_root, None);
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn layer_from_toml_parses_a_full_document_into_the_expected_layer() {
     let text = r#"
         sources = ["crossref", "arxiv"]
         mailto = "test@example.org"
-        collection-root = "/archive"
+        library-root = "/archive"
 
         [templates]
         default = "[auth:lower][year]"
@@ -156,7 +156,7 @@ fn layer_from_toml_parses_a_full_document_into_the_expected_layer() {
             tables: None,
             sources: Some(vec!["crossref".to_string(), "arxiv".to_string()]),
             mailto: Some("test@example.org".to_string()),
-            collection_root: Some(PathBuf::from("/archive")),
+            library_root: Some(PathBuf::from("/archive")),
             ledger: None,
             run_log: None,
             rename: Some(RenameLayer {
@@ -195,7 +195,7 @@ fn layer_from_toml_setting_one_key_leaves_every_other_field_none() {
     assert_eq!(layer.templates, None);
     assert_eq!(layer.citation_keys, None);
     assert_eq!(layer.sources, None);
-    assert_eq!(layer.collection_root, None);
+    assert_eq!(layer.library_root, None);
     assert_eq!(layer.rename, None);
     assert_eq!(layer.bib, None);
     assert_eq!(layer.extraction, None);
@@ -203,18 +203,36 @@ fn layer_from_toml_setting_one_key_leaves_every_other_field_none() {
 }
 
 #[test]
-fn layer_from_toml_reads_a_solo_collection_root_key() {
+fn layer_from_toml_reads_a_solo_library_root_key() {
     let layer = layer_from_toml(
-        r#"collection-root = "/archive/papers""#,
+        r#"library-root = "/archive/papers""#,
         Path::new("/solo.toml"),
     )
     .unwrap();
 
-    assert_eq!(
-        layer.collection_root,
-        Some(PathBuf::from("/archive/papers"))
-    );
+    assert_eq!(layer.library_root, Some(PathBuf::from("/archive/papers")));
     assert_eq!(layer.mailto, None);
+}
+
+/// design D1: `collection-root` becomes `library-root` outright rather
+/// than gaining a second, accepted spelling — there is no compatibility
+/// to keep before `1.0.0`, so the old key is unknown like any other
+/// misspelling and not read as an alias.
+#[test]
+fn layer_from_toml_rejects_the_retired_collection_root_key_as_unknown() {
+    let err = layer_from_toml(
+        r#"collection-root = "/archive""#,
+        Path::new("/old-key.toml"),
+    )
+    .unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("collection-root"), "got {message:?}");
+            assert!(message.contains("unknown field"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
 }
 
 #[test]
@@ -717,9 +735,9 @@ fn layer_from_env_reads_borax_bib_sidecars() {
 }
 
 #[test]
-fn layer_from_env_reads_borax_collection_root() {
-    let layer = layer_from_env([("BORAX_COLLECTION_ROOT", "/archive")]).unwrap();
-    assert_eq!(layer.collection_root, Some(PathBuf::from("/archive")));
+fn layer_from_env_reads_borax_library_root() {
+    let layer = layer_from_env([("BORAX_LIBRARY_ROOT", "/archive")]).unwrap();
+    assert_eq!(layer.library_root, Some(PathBuf::from("/archive")));
 }
 
 #[test]
@@ -825,9 +843,9 @@ fn resolve_with_no_layers_gives_defaults_with_default_origin_everywhere() {
         "bib.path",
         "bib.sidecars",
         "citation-keys.default",
-        "collection-root",
         "extraction.page-limit",
         "ledger",
+        "library-root",
         "mailto",
         "network.cache",
         "network.concurrency",
@@ -968,17 +986,17 @@ fn resolve_full_precedence_chain_defaults_through_flag() {
     );
 }
 
-/// cli spec scenario "Collection root from config discovery" hinges on
+/// cli spec scenario "Library root from config discovery" hinges on
 /// this key being resolvable and reportable exactly like every other
-/// setting — a `.borax.toml` setting `collection-root` wins over the
+/// setting — a `.borax.toml` setting `library-root` wins over the
 /// global file and reports its own origin.
 #[test]
-fn resolve_reports_a_collection_root_override_with_its_file_origin() {
+fn resolve_reports_a_library_root_override_with_its_file_origin() {
     let dir_path = PathBuf::from("/proj/.borax.toml");
     let layers = vec![(
         Origin::DirectoryFile(dir_path.clone()),
         Layer {
-            collection_root: Some(PathBuf::from("/archive/unusual-layout")),
+            library_root: Some(PathBuf::from("/archive/unusual-layout")),
             ..Layer::default()
         },
     )];
@@ -986,11 +1004,11 @@ fn resolve_reports_a_collection_root_override_with_its_file_origin() {
     let effective = resolve(layers).unwrap();
 
     assert_eq!(
-        effective.config().collection_root,
+        effective.config().library_root,
         Some(PathBuf::from("/archive/unusual-layout"))
     );
     assert_eq!(
-        effective.origin("collection-root"),
+        effective.origin("library-root"),
         Some(&Origin::DirectoryFile(dir_path))
     );
 }
@@ -1469,9 +1487,9 @@ fn entries_are_ordered_by_key_and_cover_every_setting() {
             "bib.path",
             "bib.sidecars",
             "citation-keys.default",
-            "collection-root",
             "extraction.page-limit",
             "ledger",
+            "library-root",
             "mailto",
             "network.cache",
             "network.concurrency",
@@ -1486,24 +1504,24 @@ fn entries_are_ordered_by_key_and_cover_every_setting() {
     );
 }
 
-/// `collection-root` renders like `bib.path`: quoted TOML text when set,
+/// `library-root` renders like `bib.path`: quoted TOML text when set,
 /// the empty string — never a bare `None` — when it is not, since that
 /// is the one form `borax config` output cannot be mistaken for a
 /// value pasted back into a configuration file.
 #[test]
-fn collection_root_renders_as_a_quoted_path_when_set_and_empty_when_unset() {
+fn library_root_renders_as_a_quoted_path_when_set_and_empty_when_unset() {
     let unset = resolve(vec![]).unwrap();
     let (_, value, _) = unset
         .entries()
         .into_iter()
-        .find(|(key, _, _)| key == "collection-root")
+        .find(|(key, _, _)| key == "library-root")
         .unwrap();
     assert_eq!(value, "");
 
     let layers = vec![(
-        Origin::Flag("collection-root".to_string()),
+        Origin::Flag("library-root".to_string()),
         Layer {
-            collection_root: Some(PathBuf::from("/archive")),
+            library_root: Some(PathBuf::from("/archive")),
             ..Layer::default()
         },
     )];
@@ -1511,7 +1529,7 @@ fn collection_root_renders_as_a_quoted_path_when_set_and_empty_when_unset() {
     let (_, value, _) = set
         .entries()
         .into_iter()
-        .find(|(key, _, _)| key == "collection-root")
+        .find(|(key, _, _)| key == "library-root")
         .unwrap();
     assert_eq!(value, "\"/archive\"");
 }
@@ -1939,14 +1957,14 @@ fn nearest_override_path_ends_in_the_override_file() {
     assert!(found.ends_with(OVERRIDE_FILE));
 }
 
-// --- collection_root() ---
+// --- library_root() ---
 
-/// cli spec scenario "Collection root from config discovery": the
-/// directory holding the nearest `.borax.toml` is the collection root
+/// cli spec scenario "Library root from config discovery": the
+/// directory holding the nearest `.borax.toml` is the library root
 /// when nothing overrides it.
 #[test]
-fn collection_root_is_the_directory_holding_the_nearest_override_file() {
-    let root = collection_root(
+fn library_root_is_the_directory_holding_the_nearest_override_file() {
+    let root = library_root(
         Path::new("/proj/sub/deeper"),
         None,
         exists_at(&["/proj/.borax.toml"]),
@@ -1955,14 +1973,14 @@ fn collection_root_is_the_directory_holding_the_nearest_override_file() {
 }
 
 #[test]
-fn collection_root_is_none_when_no_override_file_exists_up_to_the_root() {
-    let root = collection_root(Path::new("/proj/sub"), None, exists_at(&[]));
+fn library_root_is_none_when_no_override_file_exists_up_to_the_root() {
+    let root = library_root(Path::new("/proj/sub"), None, exists_at(&[]));
     assert_eq!(root, None);
 }
 
 #[test]
-fn collection_root_prefers_the_nearest_override_file() {
-    let root = collection_root(
+fn library_root_prefers_the_nearest_override_file() {
+    let root = library_root(
         Path::new("/proj/sub"),
         None,
         exists_at(&["/proj/sub/.borax.toml", "/proj/.borax.toml"]),
@@ -1970,12 +1988,12 @@ fn collection_root_prefers_the_nearest_override_file() {
     assert_eq!(root, Some(PathBuf::from("/proj/sub")));
 }
 
-/// The design's "unusual layouts" case: an explicit `collection-root`
+/// The design's "unusual layouts" case: an explicit `library-root`
 /// key wins over discovery even when a `.borax.toml` sits somewhere
 /// else entirely.
 #[test]
-fn collection_root_configured_overrides_discovery() {
-    let root = collection_root(
+fn library_root_configured_overrides_discovery() {
+    let root = library_root(
         Path::new("/proj/sub"),
         Some(Path::new("/archive/unusual-layout")),
         exists_at(&["/proj/.borax.toml"]),
@@ -1986,8 +2004,8 @@ fn collection_root_configured_overrides_discovery() {
 /// The override wins even when discovery would otherwise find nothing
 /// at all: it does not merely break ties, it replaces the search.
 #[test]
-fn collection_root_configured_wins_even_with_no_override_file_anywhere() {
-    let root = collection_root(
+fn library_root_configured_wins_even_with_no_override_file_anywhere() {
+    let root = library_root(
         Path::new("/proj/sub"),
         Some(Path::new("/archive")),
         exists_at(&[]),
@@ -1995,23 +2013,23 @@ fn collection_root_configured_wins_even_with_no_override_file_anywhere() {
     assert_eq!(root, Some(PathBuf::from("/archive")));
 }
 
-// --- collection_root() on Windows path shapes ---
+// --- library_root() on Windows path shapes ---
 //
 // The cases above spell their paths POSIX-style. Windows accepts those
 // — `/proj/sub` is rooted, just drive-less — and the ancestors walk
 // terminates on them, so they pass there without the discovery loop
 // ever meeting a drive letter or a UNC share, which are the two shapes
-// a Windows collection actually has. These are the same cases in those
+// a Windows library actually has. These are the same cases in those
 // shapes; they are gated because `\` separates components only on
 // Windows, so on Unix `C:\proj\sub` is one filename and every
 // assertion below would be about nothing.
 
 /// The drive-rooted counterpart of
-/// `collection_root_is_the_directory_holding_the_nearest_override_file`.
+/// `library_root_is_the_directory_holding_the_nearest_override_file`.
 #[cfg(windows)]
 #[test]
-fn collection_root_is_the_directory_holding_the_nearest_override_file_on_windows() {
-    let root = collection_root(
+fn library_root_is_the_directory_holding_the_nearest_override_file_on_windows() {
+    let root = library_root(
         Path::new(r"C:\proj\sub\deeper"),
         None,
         exists_at(&[r"C:\proj\.borax.toml"]),
@@ -2021,8 +2039,8 @@ fn collection_root_is_the_directory_holding_the_nearest_override_file_on_windows
 
 #[cfg(windows)]
 #[test]
-fn collection_root_prefers_the_nearest_override_file_on_windows() {
-    let root = collection_root(
+fn library_root_prefers_the_nearest_override_file_on_windows() {
+    let root = library_root(
         Path::new(r"C:\proj\sub"),
         None,
         exists_at(&[r"C:\proj\sub\.borax.toml", r"C:\proj\.borax.toml"]),
@@ -2036,19 +2054,19 @@ fn collection_root_prefers_the_nearest_override_file_on_windows() {
 /// at `C:\` instead of spinning on the prefix.
 #[cfg(windows)]
 #[test]
-fn collection_root_is_none_up_to_the_drive_root_on_windows() {
-    let root = collection_root(Path::new(r"C:\proj\sub"), None, exists_at(&[]));
+fn library_root_is_none_up_to_the_drive_root_on_windows() {
+    let root = library_root(Path::new(r"C:\proj\sub"), None, exists_at(&[]));
     assert_eq!(root, None);
 }
 
 /// An override file at the drive root still yields a root. Worth its
 /// own case because the answer is `nearest_override(..)?.parent()?`,
 /// and a `parent()` that gave `None` for `C:\.borax.toml` would turn a
-/// collection anchored at the drive root into no collection at all.
+/// library anchored at the drive root into no library at all.
 #[cfg(windows)]
 #[test]
-fn collection_root_can_be_the_drive_root_itself_on_windows() {
-    let root = collection_root(Path::new(r"C:\proj"), None, exists_at(&[r"C:\.borax.toml"]));
+fn library_root_can_be_the_drive_root_itself_on_windows() {
+    let root = library_root(Path::new(r"C:\proj"), None, exists_at(&[r"C:\.borax.toml"]));
     assert_eq!(root, Some(PathBuf::from(r"C:\")));
 }
 
@@ -2057,8 +2075,8 @@ fn collection_root_can_be_the_drive_root_itself_on_windows() {
 /// layout" usually is on Windows.
 #[cfg(windows)]
 #[test]
-fn collection_root_configured_may_be_on_another_drive_on_windows() {
-    let root = collection_root(
+fn library_root_configured_may_be_on_another_drive_on_windows() {
+    let root = library_root(
         Path::new(r"C:\proj\sub"),
         Some(Path::new(r"D:\archive\unusual-layout")),
         exists_at(&[r"C:\proj\.borax.toml"]),
@@ -2066,12 +2084,12 @@ fn collection_root_configured_may_be_on_another_drive_on_windows() {
     assert_eq!(root, Some(PathBuf::from(r"D:\archive\unusual-layout")));
 }
 
-/// A collection on a network share: the walk climbs it the same way it
+/// A library on a network share: the walk climbs it the same way it
 /// climbs a local tree.
 #[cfg(windows)]
 #[test]
-fn collection_root_climbs_a_unc_share_on_windows() {
-    let root = collection_root(
+fn library_root_climbs_a_unc_share_on_windows() {
+    let root = library_root(
         Path::new(r"\\server\share\proj\sub"),
         None,
         exists_at(&[r"\\server\share\proj\.borax.toml"]),
@@ -2084,17 +2102,17 @@ fn collection_root_climbs_a_unc_share_on_windows() {
 /// above the share is ever tried and the search terminates.
 #[cfg(windows)]
 #[test]
-fn collection_root_is_none_up_to_the_unc_share_root_on_windows() {
-    let root = collection_root(Path::new(r"\\server\share\proj\sub"), None, exists_at(&[]));
+fn library_root_is_none_up_to_the_unc_share_root_on_windows() {
+    let root = library_root(Path::new(r"\\server\share\proj\sub"), None, exists_at(&[]));
     assert_eq!(root, None);
 }
 
 /// The share-root counterpart of the drive-root case: an override file
-/// directly under the share anchors the collection at the share.
+/// directly under the share anchors the library at the share.
 #[cfg(windows)]
 #[test]
-fn collection_root_can_be_a_unc_share_root_itself_on_windows() {
-    let root = collection_root(
+fn library_root_can_be_a_unc_share_root_itself_on_windows() {
+    let root = library_root(
         Path::new(r"\\server\share\proj"),
         None,
         exists_at(&[r"\\server\share\.borax.toml"]),

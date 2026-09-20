@@ -93,7 +93,7 @@ pub fn inputs(paths: &[PathBuf]) -> Vec<PathBuf> {
         let mut reached = Vec::new();
         match fs::metadata(path) {
             Ok(metadata) if metadata.is_dir() => {
-                documents(path, &mut reached);
+                documents(path, &|_| true, &mut reached);
                 reached.sort();
             }
             _ => reached.push(path.clone()),
@@ -112,13 +112,21 @@ pub fn inputs(paths: &[PathBuf]) -> Vec<PathBuf> {
 /// Add every file below `directory` whose extension is
 /// [`PDF_EXTENSION`], ignoring case, to `found`.
 ///
+/// `descend` decides which subdirectories the walk enters; one it
+/// refuses contributes nothing, itself or below it. A walk that enters
+/// everything passes `&|_| true`.
+///
 /// A directory that cannot be read adds nothing, so one unreadable
 /// subtree costs its own files and no others.
 ///
 /// Metadata is read without following symlinks, so a link is neither a
 /// file nor a directory here: it cannot send the walk round a loop, and
 /// naming it directly is still how a user says they meant it.
-fn documents(directory: &Path, found: &mut Vec<PathBuf>) {
+pub(crate) fn documents(
+    directory: &Path,
+    descend: &dyn Fn(&Path) -> bool,
+    found: &mut Vec<PathBuf>,
+) {
     let Ok(listing) = fs::read_dir(directory) else {
         return;
     };
@@ -129,7 +137,9 @@ fn documents(directory: &Path, found: &mut Vec<PathBuf>) {
         };
         let path = entry.path();
         if metadata.is_dir() {
-            documents(&path, found);
+            if descend(&path) {
+                documents(&path, descend, found);
+            }
         } else if metadata.is_file()
             && path
                 .extension()
@@ -2936,13 +2946,12 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
     let sources: Vec<&dyn Source> = owned.iter().map(Box::as_ref).collect();
 
     let index = ContentIndex::new(response_cache());
-    // The collection the run sits in decides where its accounting
-    // goes, so it is discovered from the same directory the
-    // configuration was, under the `collection-root` that configuration
-    // may have named.
-    let collection_root = crate::config::collection_root(
+    // The library the run sits in decides where its state goes, so it
+    // is discovered from the same directory the configuration was,
+    // under the `library-root` that configuration may have named.
+    let collection_root = crate::config::library_root(
         &working,
-        effective.config().collection_root.as_deref(),
+        effective.config().library_root.as_deref(),
         |candidate| candidate.is_file(),
     );
     let ledger = collection_root

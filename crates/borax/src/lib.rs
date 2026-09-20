@@ -12,6 +12,7 @@ pub mod config;
 pub mod describe;
 pub mod event;
 pub mod ledger;
+pub mod library;
 pub mod paths;
 pub mod pipeline;
 pub mod renaming;

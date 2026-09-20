@@ -57,24 +57,24 @@ is a run contradicting a living requirement.
 
 ## 2. The library boundary
 
-- [ ] 2.1 Red: `crates/borax/tests/library.rs` — the library root is the
+- [x] 2.1 Red: `crates/borax/tests/library.rs` — the library root is the
       directory holding the nearest `.borax.toml`, `library-root`
       replaces the search outright, and a tree with no marker above it
       has no root. This is `collection_root`'s behaviour under its new
       name, so the existing discovery tests are renamed rather than
       rewritten and one new case covers the key's new name.
-- [ ] 2.2 Red: containment is lexical and symlinks are not resolved: a
+- [x] 2.2 Red: containment is lexical and symlinks are not resolved: a
       path under the root is inside, a path outside is outside, a
       symlink inside the tree pointing out does not bring its target
       in, and a symlink is neither an artifact nor an orphan. Asserted
       against the real filesystem, which a fake cannot establish, and
       skipped on a platform that cannot create a link.
-- [ ] 2.3 Green: `library_root` and the containment predicate in
+- [x] 2.3 Green: `library_root` and the containment predicate in
       `crates/borax/src/library.rs`; `collection_root` and the
       `collection-root` key are renamed in
       `crates/borax/src/config.rs`, with `borax config` reporting
       `library-root`.
-- [ ] 2.4 Red: the artifact walk — every `.pdf` under the root at any
+- [x] 2.4 Red: the artifact walk — every `.pdf` under the root at any
       depth, case-insensitively, in sorted order; nothing under
       `.borax/`, nothing at all under `items/` whatever its extension
       (a PDF placed there is not an artifact, which an earlier draft of
@@ -85,27 +85,27 @@ is a run contradicting a living requirement.
       admissions and by reconcile — one test per operation, because the
       defect this rules out is the four disagreeing rather than the
       walk alone being wrong.
-- [ ] 2.6 Green: the walk, built from `documents` in
+- [x] 2.6 Green: the walk, built from `documents` in
       `crates/borax/src/run.rs` rather than beside it, the nested-root
       stop shared by all four operations, plus the library-relative
       rendering of a path.
 
 ## 3. Reading the store
 
-- [ ] 3.1 Red: the item store reads every `items/*.toml` that parses as
+- [x] 3.1 Red: the item store reads every `items/*.toml` that parses as
       an item and finds an item by the `id` inside it, not by its file
       name; an item file renamed by hand is still found; a `.toml` that
       is not an item record is reported rather than skipped silently.
-- [ ] 3.2 Red: the artifact-record store reads every
+- [x] 3.2 Red: the artifact-record store reads every
       `.borax/artifacts/*.toml`, answers by artifact identity, by any
       hash in a record's history, and by item identity; one file that
       does not parse costs its own record and no other.
-- [ ] 3.3 Green: both stores, reading files directly with no index.
-- [ ] 3.4 Red: an orphan is an artifact with no record naming it, and an
+- [x] 3.3 Green: both stores, reading files directly with no index.
+- [x] 3.4 Red: an orphan is an artifact with no record naming it, and an
       artifact record whose last-known path holds no file is *not* an
       orphan but a record whose artifact cannot be found.
-- [ ] 3.5 Green: the orphan and missing-artifact computations.
-- [ ] 3.6 Red: `borax bib` over a library holding an item with no
+- [x] 3.5 Green: the orphan and missing-artifact computations.
+- [x] 3.6 Red: `borax bib` over a library holding an item with no
       artifact emits no entry for it. The command takes files, and this
       pins the gap the `library` requirement states rather than letting
       a later reader assume the store is wired into bibliography output.

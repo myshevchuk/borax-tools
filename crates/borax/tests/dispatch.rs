@@ -1308,6 +1308,111 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
     );
 }
 
+/// library spec: "No route from an artifactless item to a
+/// bibliography" — `borax bib` takes files, so a library holding an
+/// item with no artifact contributes nothing to its output. The item
+/// is written to the item store and confirmed there through
+/// [`borax::library::ItemStore`] before `bib` runs, so the absence of
+/// its entry is a fact about `bib` and not an accident of the item
+/// never having existed.
+#[test]
+fn bib_over_a_library_holding_an_artifactless_item_emits_no_entry_for_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let items = root.join("items");
+    fs::create_dir_all(&items).unwrap();
+
+    let artifactless = borax_core::library::Item {
+        id: borax_core::library::ItemId::from_uuid(
+            uuid::Uuid::parse_str("018f2b36-7f21-7abc-8def-0123456789ab").unwrap(),
+        ),
+        record: record_by("Jones", 2020, "10.1000/no-file"),
+    };
+    fs::write(
+        items.join(format!("jones2020.{}.toml", artifactless.id)),
+        artifactless.to_toml(),
+    )
+    .unwrap();
+
+    let store = borax::library::ItemStore::read(root);
+    assert_eq!(
+        store.len(),
+        1,
+        "setup: the item store must hold the artifactless item"
+    );
+    assert!(store.by_id(&artifactless.id).is_some());
+
+    let path = root.join("paper.pdf");
+    let record = record_by("Smith", 2024, "10.1000/bib");
+    let library = FakeLibrary::new().with_file(
+        &path,
+        hash_for("bib-over-artifactless-item"),
+        pdf_with_embedded_doi("10.1000/bib"),
+    );
+    let crossref = fake_source(SourceName::Crossref, Ok(record.clone()));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.citation_keys = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.bib = Some(BibLayer {
+            path: Some(PathBuf::from("refs.bib")),
+            duplicates: None,
+            sidecars: Some(false),
+        });
+    });
+    let adapters = Adapters {
+        library: &library,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::bib(vec![path.clone()]),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let expected_merge = merge("", &[("Smith2024", &record)], DuplicatePolicy::Skip);
+    let mut expected = vec![resolved_event(
+        &path,
+        "doi:10.1000/bib",
+        &record,
+        "crossref",
+        Some("embedded-metadata"),
+        false,
+    )];
+    expected.extend(
+        expected_merge
+            .outcomes
+            .iter()
+            .map(|outcome| bib_entry_event(&path, outcome)),
+    );
+    // The assertion that matters: exactly the events the one given file
+    // produces, with nothing added for `jones2020` — no `BibEntry` for a
+    // work the run was never given a file for.
+    assert_eq!(events, expected, "got {events:?}");
+    let entries: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::BibEntry { .. }))
+        .collect();
+    assert_eq!(entries.len(), 1, "got {events:?}");
+}
+
 // ---------------------------------------------------------------------
 // events_for: an uncompilable filename template propagates as a
 // Diagnostic, for the commands that render a filename
