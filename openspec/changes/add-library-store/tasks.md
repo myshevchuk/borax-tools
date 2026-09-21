@@ -80,7 +80,7 @@ is a run contradicting a living requirement.
       (a PDF placed there is not an artifact, which an earlier draft of
       this task contradicted), no sidecar, no symlink, no file of
       another extension.
-- [ ] 2.5 Red: the walk stops at a nested `.borax.toml`, and the same
+- [x] 2.5 Red: the walk stops at a nested `.borax.toml`, and the same
       exclusion is obeyed by the orphan count, by an applying run's
       admissions and by reconcile — one test per operation, because the
       defect this rules out is the four disagreeing rather than the
@@ -203,22 +203,22 @@ is a run contradicting a living requirement.
 
 ## 7. The write path, and the ledger's retirement
 
-- [ ] 7.1 Red: an applying run over a library writes an artifact record
+- [x] 7.1 Red: an applying run over a library writes an artifact record
       for a file it moved — the new library-relative path, the file's
       hash as the history's first entry, the size and modification
       time, and an item link — and mints the item when the library
       holds none for the record's identifiers.
-- [ ] 7.2 Red: an applying run reuses an item the library already holds
+- [x] 7.2 Red: an applying run reuses an item the library already holds
       for one of the record's identifiers, so a second PDF of one work
       is a second record naming one item; a record with no identifier
       at all still gets an item, and two different such files get two.
-- [ ] 7.2a Red: an artifact that already has a record keeps its item
+- [x] 7.2a Red: an artifact that already has a record keeps its item
       link. Re-run an applying run three times over one recorded file
       whose record resolves to no identifier: the link is the same
       after each, the item count never rises, and no item is left with
       nothing pointing at it. This is the accumulation design D4 rules
       out, and one repetition is not enough to see it.
-- [ ] 7.2b Red: an operator's re-identification moves the item link, and
+- [x] 7.2b Red: an operator's re-identification moves the item link, and
       only an operator's. With a scripted asker and `--no-skip-named`,
       supplying the right identifier for a recorded file named from the
       wrong record renames it *and* re-links its artifact record to the
@@ -227,18 +227,18 @@ is a run contradicting a living requirement.
       `borax validate` and is not a finding. The same file re-run
       without a supplied identifier re-links nothing, which is task
       7.2a's property and must still hold.
-- [ ] 7.2c Red: an item with no artifact takes the incoming file as its
+- [x] 7.2c Red: an item with no artifact takes the incoming file as its
       first artifact — not a duplicate at either level, no question put,
       a minted record naming that same item, and no second item. Repeat
       for an item whose every artifact record names a path holding no
       file: admitted the same way, the absent artifact's record left
       exactly as it is, and the run reporting that there are paths to
       reconcile.
-- [ ] 7.3 Red: an already-named file inside the library is recorded by an
+- [x] 7.3 Red: an already-named file inside the library is recorded by an
       applying run, a preview writes no artifact record and no item,
       `--no-record` writes neither either, and a file renamed outside
       the library gets no record and is reported as outside it.
-- [ ] 7.3a Red: what `--no-record` does and does not suppress. Under the
+- [x] 7.3a Red: what `--no-record` does and does not suppress. Under the
       flag: no artifact record and no item is written and neither
       duplicate check is made; an artifact no record names the path of
       is moved; an artifact whose record's history holds that file's
@@ -258,7 +258,7 @@ is a run contradicting a living requirement.
       inputs without the flag: the move happens and the file's hash is
       written into the history, so the refusal is the flag's and not the
       file's.
-- [ ] 7.3b Red: an update describes the file it names. After an applying
+- [x] 7.3b Red: an update describes the file it names. After an applying
       run moves an artifact edited in place to the same length with its
       modification time preserved, its record's newest hash is the
       file's, the earlier hashes are still there, and the path, size and
@@ -266,7 +266,7 @@ is a run contradicting a living requirement.
       it on the fast path and hashes nothing. This is the silent half of
       the same defect: nothing reports a record whose newest hash is not
       its file's, so only an assertion on the history catches it.
-- [ ] 7.4 Red: durability — a store write that fails leaves the rename
+- [x] 7.4 Red: durability — a store write that fails leaves the rename
       standing and reported, and the next run over the file records it
       again; a write interrupted part-way leaves the previous record
       byte-identical with its identity, its whole hash history and its
@@ -274,7 +274,7 @@ is a run contradicting a living requirement.
       a record; an admission interrupted between its two writes leaves
       an item nothing links to and never an artifact record naming an
       item that does not exist, whichever write is made to fail.
-- [ ] 7.5 Green: `admit` writes an artifact record and mints or reuses
+- [x] 7.5 Green: `admit` writes an artifact record and mints or reuses
       an item, item first; every store write is `write_atomically` over
       a document edited through `toml_edit`; the outside-the-library
       report.

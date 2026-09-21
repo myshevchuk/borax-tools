@@ -29,12 +29,13 @@ use borax_core::library::{
     is_well_formed_hash, name_uuid,
 };
 use borax_core::record::Record;
+use borax_core::template::slug;
 use borax_sources::store::{hash_file, write_atomically};
 use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, value};
 use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
-use crate::event::{Event, Finding, Repair};
+use crate::event::{Admission, Event, Finding, Repair};
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
 
@@ -935,19 +936,34 @@ fn append_history(document: &mut DocumentMut, history: &[HashEntry]) -> io::Resu
 /// reconcile that decided nothing with no diff and no touched
 /// modification time.
 ///
-/// The write is a whole-file atomic replacement
-/// ([`write_atomically`]): a reader either sees the record as it was or
-/// the record as it now is, and an interrupted write leaves the
-/// previous one intact.
+/// The write goes through `write`, which in a run is a whole-file
+/// atomic replacement ([`store_write`]): a reader either sees the
+/// record as it was or the record as it now is, and an interrupted
+/// write leaves the previous one intact.
+///
+/// The item link is set only when `record` names an item other than
+/// the one the document names, so a write that leaves the link where
+/// it was leaves its spelling alone too. A record naming no item never
+/// removes one from the document.
 ///
 /// Fails with what the filesystem said, which the caller reports as
-/// [`Repair::Unwritten`]. A file that cannot be read or does not parse
-/// is such a failure: this rewrites a record borax read, and nothing
-/// here creates one.
-fn rewrite(path: &Path, record: &ArtifactRecord) -> io::Result<()> {
+/// [`Repair::Unwritten`] or [`Admission::Unwritten`]. A file that
+/// cannot be read or does not parse is such a failure: this rewrites a
+/// record borax read, and nothing here creates one.
+fn rewrite(
+    path: &Path,
+    record: &ArtifactRecord,
+    write: &dyn Fn(&Path, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
     let text = fs::read_to_string(path)?;
     let mut document: DocumentMut = text.parse().map_err(io::Error::other)?;
 
+    if let Some(item) = &record.item {
+        let linked = document.get("item").and_then(TomlItem::as_str);
+        if linked != Some(item.to_string().as_str()) {
+            document["item"] = value(item.to_string());
+        }
+    }
     document["path"] = value(record.path.as_str());
     document["size"] = value(i64::try_from(record.size).map_err(io::Error::other)?);
     document["modified_millis"] = value(record.modified_millis);
@@ -956,7 +972,7 @@ fn rewrite(path: &Path, record: &ArtifactRecord) -> io::Result<()> {
     let rendered = document.to_string();
     match rendered == text {
         true => Ok(()),
-        false => write_atomically(path, rendered.as_bytes()),
+        false => write(path, rendered.as_bytes()),
     }
 }
 
@@ -1266,7 +1282,7 @@ pub fn reconcile(
             }
         };
 
-        match rewrite(file, &record) {
+        match rewrite(file, &record, &store_write) {
             Ok(()) => {
                 if let Some(repair) = repair {
                     reconciliation
@@ -1325,4 +1341,399 @@ pub fn reconciliation_events(reconciliation: &Reconciliation) -> Vec<Event> {
         hashed: reconciliation.hashed,
     });
     events
+}
+
+/// The artifact record naming `path` in the library rooted at `root`,
+/// or `None` when no record names it.
+///
+/// This is how an applying run finds the record of a file it is about
+/// to move, and it asks before the move, while the path the record
+/// names is still the path the file holds. Identification is by path
+/// alone: a record's identity is stable across a change to its
+/// artifact's bytes, so a file whose bytes no recorded hash matches is
+/// still that record's artifact and not a second one.
+///
+/// What confirms the record — the fast path, or one of its hashes — is
+/// a separate question, and [`strands`] is the only place this change
+/// asks it.
+///
+/// `path` is a full path; a path outside the library names no record.
+/// The store is read afresh, so a caller asking about several files
+/// sees what each admission before it wrote.
+pub fn recorded_at(root: &Path, path: &Path) -> Option<ArtifactRecord> {
+    let relative = library_relative(root, path)?;
+    ArtifactStore::read(root).by_path(&relative).cloned()
+}
+
+/// Whether moving the file whose hash is `hash`, with nothing written
+/// to the store afterwards, would leave `record` unable to name its
+/// artifact again.
+///
+/// `record` is what [`recorded_at`] found for the file's current path,
+/// and `None` — no record names the path — strands nothing. A record
+/// whose history holds `hash` survives the move: the bytes are
+/// evidence a move does not touch, so reconciliation's bounded walk
+/// finds the file by them wherever it lands.
+///
+/// A record whose history does not hold it does not survive. After the
+/// move its path holds nothing, and reconciliation has no route left:
+/// the walk matches by hash and finds none of its hashes anywhere,
+/// and its edited-in-place step needs a file at the recorded path.
+///
+/// The fast path is deliberately not consulted. It compares size and
+/// modification time, which a same-length in-place edit leaves alone,
+/// so it can confirm a record whose every recorded hash is stale — and
+/// confirmation is evidence that a record still describes a file, never
+/// evidence about what the file now contains. A move is exactly what
+/// takes the path away, so only content evidence counts here.
+pub fn strands(record: Option<&ArtifactRecord>, hash: &ContentHash) -> bool {
+    record.is_some_and(|record| !record.holds(hash))
+}
+
+/// The file name an item minted under `key` with identity `id` is
+/// written with, within the library's [`ITEM_STORE`].
+///
+/// `<key>.<uuid>.toml`, where `<key>` is `key` folded by
+/// [`borax_core::template::slug`] — so the name a person reads sorts
+/// the way their bibliography sorts. `key` is the citation key the
+/// `citation-keys` templates render for the item's record, given as
+/// rendered; the fold is applied here so one function owns the name.
+///
+/// `<uuid>.toml` when `key` is `None` or folds to nothing: a name has
+/// to be unique, and only the UUID makes it so.
+///
+/// The name is a creation-time label. Nothing renames an item file
+/// afterwards, so a key that no longer matches what the templates
+/// would render is not a finding; the `id` field inside the file is
+/// what every reference names.
+pub fn item_file_name(key: Option<&str>, id: &ItemId) -> String {
+    match key.map(slug).filter(|folded| !folded.is_empty()) {
+        Some(folded) => format!("{folded}.{id}.{RECORD_EXTENSION}"),
+        None => format!("{id}.{RECORD_EXTENSION}"),
+    }
+}
+
+/// One file's admission to a library, as an applying run settles it.
+///
+/// The fields travel together because no one of them answers anything
+/// alone: the record decides which item the file belongs to, the hash
+/// and the path decide what the artifact record says, and `held` is
+/// what the library already knew about the file before the run touched
+/// it.
+pub struct Admitting<'a> {
+    /// Where the file sits after the run's work on it — the path it
+    /// was moved to, or the one it already carried. A full path, and
+    /// one inside the library: a caller does not admit a file the
+    /// library does not own.
+    pub path: &'a Path,
+    /// The record the run settled the file on. What an item minted
+    /// here holds, and what the identifiers an existing item is looked
+    /// up by are read from.
+    pub record: &'a Record,
+    /// The file's content hash, as the run computed it before the
+    /// move.
+    pub hash: &'a ContentHash,
+    /// The artifact record naming the file before the run moved it, as
+    /// [`recorded_at`] found it, and `None` when the library had none.
+    pub held: Option<&'a ArtifactRecord>,
+    /// Whether the operator re-identified the file in this run: they
+    /// supplied the identifier it was resolved by, or accepted the
+    /// record over a conflict.
+    ///
+    /// The one thing that moves an existing record's item link. An
+    /// ordinary re-run never moves one, whatever the file resolves to.
+    pub reidentified: bool,
+    /// The citation key an item minted here is named by, as the
+    /// templates rendered it and before [`item_file_name`] folds it.
+    pub key: Option<&'a str>,
+    /// The run a hash entry written here is stamped with.
+    pub run: RunId,
+    /// The timestamp a hash entry written here is stamped with.
+    pub timestamp: &'a str,
+    /// The borax version a hash entry written here is stamped with.
+    pub tool_version: &'a str,
+}
+
+/// What an admission wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Admitted {
+    /// The artifact record's identity: the one the library already
+    /// held for the file, or the one minted for it.
+    pub artifact: ArtifactId,
+    /// The item the artifact record names afterwards.
+    pub item: ItemId,
+    /// The item it named before, when the admission moved the link,
+    /// and `None` when the link is where it was or the record is new.
+    pub relinked_from: Option<ItemId>,
+}
+
+/// A store write that did not land, with `message` as the filesystem
+/// put it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unrecorded {
+    pub message: String,
+}
+
+/// Record the admission of one file to the library rooted at `root`.
+///
+/// Writes the item first and the artifact record second, through
+/// `write`. Nothing makes the two writes one transaction — the writers
+/// are peers and no lock may be a precondition — so the order is
+/// chosen for what an interruption leaves: an item nothing links to,
+/// which is an ordinary library state `borax validate` counts, rather
+/// than an artifact record naming an item that does not exist, which
+/// is a dangling link and a finding.
+///
+/// **Which item.** A record the library already holds for the file
+/// keeps the item it names, whatever the file resolved to this time:
+/// selection happens when a record is minted, so an ordinary re-run
+/// cannot move an artifact to another item and cannot accumulate a
+/// fresh item behind a file carrying no identifier. The two exceptions
+/// select as a mint does: a re-identification
+/// ([`Admitting::reidentified`]), which is the operator correcting
+/// what the file is, and a held record naming no item at all.
+///
+/// Selecting means the item the library already holds carrying one of
+/// the resolved record's identifiers — searched DOI, arXiv, PMID,
+/// ISBN, over the item store in read order, first match winning — or
+/// an item minted from that record when the library holds none. A
+/// record with no identifier at all still gets an item, since an
+/// item's identity is its minted UUID and identifiers are optional: two
+/// different files carrying no identifier become two items, which
+/// states what borax knows rather than guessing a match.
+///
+/// An item the library holds with no artifact recorded against it is
+/// selected like any other. Such an item is the case the model exists
+/// for — a work cited before its PDF was had — so the file that
+/// finally supplies it is its first artifact and no second item is
+/// minted.
+///
+/// A minted item is written at [`ITEM_STORE`]`/`[`item_file_name`];
+/// an item that was already there is not rewritten, an admission
+/// having nothing to add to it.
+///
+/// **What the artifact record says.** Its identity is the held
+/// record's, or one minted for a file that had none. Its path is
+/// `path` rendered library-relative, its size and modification time
+/// are the file's as it stands now, and the file's hash is appended to
+/// its history when that hash is not already the history's newest. So
+/// a record this touched describes the file it names: the next
+/// reconcile settles it on the fast path and hashes nothing, and the
+/// file's bytes appear in a record rather than in none.
+///
+/// A minted record is written at
+/// [`STATE_DIR`]`/`[`ARTIFACT_STORE`]`/<artifact-uuid>.toml`, flat and
+/// named for the identity inside it; a record the library already held
+/// is written back to the file it was read from, whatever that file is
+/// called.
+///
+/// A record the library already held is edited as a document through
+/// `toml_edit`, so its key order, its formatting and any comment a
+/// person left in it survive; a minted one is written whole. Either
+/// way the bytes are handed to `write`, which is
+/// [`write_atomically`] in a run and a failing stand-in in a test.
+///
+/// **Failure.** Fails with [`Unrecorded`] on the first write that does
+/// not land, and on a file that cannot be stat'd — a record with no
+/// size and no modification time would be one reconciliation's fast
+/// path can never settle. A held record no longer in the store, with
+/// the identity and the path it was read with, fails too: its file is
+/// gone, and writing one back would restore a record someone removed.
+/// An item write that fails writes no artifact
+/// record. An artifact write that fails leaves the item, which is the
+/// residue the order was chosen for. Nothing is retried: the caller
+/// reports the failure and the next applying run over the file records
+/// it again.
+pub fn admit(
+    root: &Path,
+    admitting: &Admitting<'_>,
+    write: &dyn Fn(&Path, &[u8]) -> io::Result<()>,
+) -> Result<Admitted, Unrecorded> {
+    let unrecorded = |message: String| Unrecorded { message };
+    let relative = library_relative(root, admitting.path).ok_or_else(|| {
+        unrecorded(format!(
+            "{} is not inside the library at {}",
+            admitting.path.display(),
+            root.display()
+        ))
+    })?;
+    let (size, modified_millis) = seen(admitting.path).ok_or_else(|| {
+        unrecorded(format!(
+            "cannot read the size and modification time of {}",
+            admitting.path.display()
+        ))
+    })?;
+
+    let kept = admitting
+        .held
+        .and_then(|held| held.item.clone())
+        .filter(|_| !admitting.reidentified);
+    let item = match kept {
+        Some(item) => item,
+        None => {
+            select_item(root, admitting, write).map_err(|error| unrecorded(error.to_string()))?
+        }
+    };
+
+    let entry = HashEntry {
+        hash: admitting.hash.clone(),
+        run: admitting.run.clone(),
+        timestamp: admitting.timestamp.to_string(),
+        tool_version: admitting.tool_version.to_string(),
+    };
+
+    let Some(held) = admitting.held else {
+        let record = ArtifactRecord {
+            id: ArtifactId::from_uuid(Uuid::now_v7()),
+            item: Some(item.clone()),
+            path: relative,
+            size,
+            modified_millis,
+            history: vec![entry],
+        };
+        let file = root
+            .join(STATE_DIR)
+            .join(ARTIFACT_STORE)
+            .join(format!("{}.{RECORD_EXTENSION}", record.id));
+        write_whole(&file, &record.to_toml(), write)
+            .map_err(|error| unrecorded(error.to_string()))?;
+        return Ok(Admitted {
+            artifact: record.id,
+            item,
+            relinked_from: None,
+        });
+    };
+
+    let store = ArtifactStore::read(root);
+    let file = store
+        .files()
+        .find(|(_, record)| record.id == held.id && record.path == held.path)
+        .map(|(file, _)| file.to_path_buf())
+        .ok_or_else(|| {
+            unrecorded(format!(
+                "artifact record {} is no longer in the store",
+                held.id
+            ))
+        })?;
+
+    let mut record = held.clone();
+    record.item = Some(item.clone());
+    record.path = relative;
+    record.size = size;
+    record.modified_millis = modified_millis;
+    if record.current_hash() != Some(admitting.hash) {
+        record.history.push(entry);
+    }
+    rewrite(&file, &record, write).map_err(|error| unrecorded(error.to_string()))?;
+
+    Ok(Admitted {
+        artifact: record.id,
+        relinked_from: held.item.clone().filter(|before| before != &item),
+        item,
+    })
+}
+
+/// The identifiers of `record` an item is looked up by, in the order
+/// they are searched: DOI, arXiv, PMID, ISBN. Empty for a record
+/// carrying none.
+fn identifiers(record: &Record) -> Vec<Identifier> {
+    [
+        record.doi.clone().map(Identifier::Doi),
+        record.borax.arxiv.clone().map(Identifier::Arxiv),
+        record.pmid.map(Identifier::Pmid),
+        record.isbn.clone().map(Identifier::Isbn),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The item an admission of `admitting` links to when it selects one:
+/// the first item of the library rooted at `root` carrying one of the
+/// record's [`identifiers`], or an item minted from the record and
+/// written through `write` when the library holds none.
+///
+/// A minted item is written whole at [`ITEM_STORE`]`/`
+/// [`item_file_name`]. Fails with what `write` said, in which case no
+/// item carries the identity minted for it.
+fn select_item(
+    root: &Path,
+    admitting: &Admitting<'_>,
+    write: &dyn Fn(&Path, &[u8]) -> io::Result<()>,
+) -> io::Result<ItemId> {
+    let items = ItemStore::read(root);
+    if let Some(found) = identifiers(admitting.record)
+        .iter()
+        .find_map(|identifier| items.by_identifier(identifier))
+    {
+        return Ok(found.id.clone());
+    }
+
+    let item = Item {
+        id: ItemId::from_uuid(Uuid::now_v7()),
+        record: admitting.record.clone(),
+    };
+    let file = root
+        .join(ITEM_STORE)
+        .join(item_file_name(admitting.key, &item.id));
+    write_whole(&file, &item.to_toml(), write)?;
+    Ok(item.id)
+}
+
+/// Write `text` to `path` through `write`, as a whole new file.
+///
+/// Fails without writing when `text` is empty, which is what a record's
+/// rendering yields for a value TOML cannot hold: an empty file would
+/// be one no reader takes for a record.
+fn write_whole(
+    path: &Path,
+    text: &str,
+    write: &dyn Fn(&Path, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    if text.is_empty() {
+        return Err(io::Error::other(format!(
+            "{} could not be rendered as TOML",
+            path.display()
+        )));
+    }
+    write(path, text.as_bytes())
+}
+
+/// Write `bytes` to `path` as a store write: atomically, creating the
+/// store's directory if this is the library's first record.
+///
+/// The seam [`admit`] takes in a run. A reader sees either the file as
+/// it was or the file as it now is, and an interrupted write leaves
+/// the previous one intact with no temporary a reader would take for a
+/// record.
+pub fn store_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomically(path, bytes)
+}
+
+/// The event reporting what an admission of the file now at `path`
+/// came to, or `None` when it came to nothing worth reporting.
+///
+/// An admission that minted or updated a record and left its link
+/// where it was says nothing: the file's own outcome event already
+/// reports that borax settled it.
+pub fn admission_event(path: &Path, admitted: &Result<Admitted, Unrecorded>) -> Option<Event> {
+    let admission = match admitted {
+        Ok(Admitted {
+            artifact,
+            item,
+            relinked_from: Some(from),
+        }) => Admission::Relinked {
+            id: artifact.to_string(),
+            from: from.to_string(),
+            to: item.to_string(),
+        },
+        Ok(_) => return None,
+        Err(unrecorded) => Admission::Unwritten {
+            message: unrecorded.message.clone(),
+        },
+    };
+    Some(Event::LibraryAdmission {
+        path: path.to_path_buf(),
+        admission,
+    })
 }

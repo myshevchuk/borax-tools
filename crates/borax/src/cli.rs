@@ -114,18 +114,18 @@ pub struct BibliographyOptions {
     pub no_sidecars: bool,
 }
 
-/// What a subcommand needs to consult and update the collection's
-/// record of what it has admitted.
+/// What a subcommand needs to consult and add to the library's record
+/// of what it holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
-pub struct AccountingOptions {
-    /// Check the collection's ledger for duplicates and record what an
-    /// applied run admits.
+pub struct RecordOptions {
+    /// Check the library's records for duplicates and record what an
+    /// applying run admits.
     #[arg(long)]
-    pub ledger: bool,
+    pub record: bool,
 
-    /// Neither read nor write the collection's ledger.
-    #[arg(long, conflicts_with = "ledger")]
-    pub no_ledger: bool,
+    /// Neither read nor write the library's records.
+    #[arg(long, conflicts_with = "record")]
+    pub no_record: bool,
 }
 
 /// What a subcommand needs to read a document for what it claims about
@@ -198,7 +198,7 @@ pub enum Command {
         bibliography: BibliographyOptions,
 
         #[command(flatten)]
-        accounting: AccountingOptions,
+        record: RecordOptions,
 
         #[command(flatten)]
         run_log: RunLogOptions,
@@ -233,7 +233,7 @@ pub enum Command {
         bibliography: BibliographyOptions,
 
         #[command(flatten)]
-        accounting: AccountingOptions,
+        record: RecordOptions,
 
         #[command(flatten)]
         run_log: RunLogOptions,
@@ -316,7 +316,7 @@ pub enum LedgerAction {
 /// command line was silent about that setting and a lower layer shows
 /// through. Every configurable boolean is offered as a two-flag pair
 /// (`--sidecars` / `--no-sidecars`, `--cache` / `--no-cache`,
-/// `--ledger` / `--no-ledger`, `--run-log` / `--no-run-log`), which is
+/// `--record` / `--no-record`, `--run-log` / `--no-run-log`), which is
 /// how a boolean says all three things — on, off, and silent — with
 /// flags that take no value, and what lets the command line override a
 /// configured value in both directions. Naming both halves of a pair
@@ -372,12 +372,12 @@ pub struct Settings {
     /// Ask every service again and open every file again.
     pub no_cache: bool,
 
-    /// Check the collection's ledger for duplicates and record what an
-    /// applied run admits.
-    pub ledger: bool,
+    /// Check the library's records for duplicates and record what an
+    /// applying run admits.
+    pub record: bool,
 
-    /// Neither read nor write the collection's ledger.
-    pub no_ledger: bool,
+    /// Neither read nor write the library's records.
+    pub no_record: bool,
 
     /// Write the run's event stream to a log in the collection.
     pub run_log: bool,
@@ -420,11 +420,11 @@ impl BibliographyOptions {
     }
 }
 
-impl AccountingOptions {
+impl RecordOptions {
     /// Copies this group's flags into the matching [`Settings`] fields.
     fn fill(&self, settings: &mut Settings) {
-        settings.ledger = self.ledger;
-        settings.no_ledger = self.no_ledger;
+        settings.record = self.record;
+        settings.no_record = self.no_record;
     }
 }
 
@@ -474,14 +474,14 @@ impl Cli {
                 resolution,
                 rename,
                 bibliography,
-                accounting,
+                record,
                 run_log,
                 ..
             } => {
                 resolution.fill(&mut settings);
                 rename.fill(&mut settings);
                 bibliography.fill(&mut settings);
-                accounting.fill(&mut settings);
+                record.fill(&mut settings);
                 run_log.fill(&mut settings);
             }
             Command::Bib {
@@ -499,14 +499,14 @@ impl Cli {
                 resolution,
                 rename,
                 bibliography,
-                accounting,
+                record,
                 run_log,
             } => {
                 settings.concurrency = *concurrency;
                 resolution.fill(&mut settings);
                 rename.fill(&mut settings);
                 bibliography.fill(&mut settings);
-                accounting.fill(&mut settings);
+                record.fill(&mut settings);
                 run_log.fill(&mut settings);
             }
             Command::Status {
@@ -550,7 +550,7 @@ impl Command {
             resolution: ResolutionOptions::default(),
             rename: RenameOptions::default(),
             bibliography: BibliographyOptions::default(),
-            accounting: AccountingOptions::default(),
+            record: RecordOptions::default(),
             run_log: RunLogOptions::default(),
         }
     }
@@ -572,7 +572,7 @@ impl Command {
             resolution: ResolutionOptions::default(),
             rename: RenameOptions::default(),
             bibliography: BibliographyOptions::default(),
-            accounting: AccountingOptions::default(),
+            record: RecordOptions::default(),
             run_log: RunLogOptions::default(),
         }
     }
@@ -855,20 +855,20 @@ pub fn flag_layers(settings: &Settings) -> Vec<(Origin, Layer)> {
             },
         );
     }
-    if settings.ledger {
+    if settings.record {
         push(
-            "ledger",
+            "record",
             Layer {
-                ledger: Some(true),
+                record: Some(true),
                 ..Layer::default()
             },
         );
     }
-    if settings.no_ledger {
+    if settings.no_record {
         push(
-            "no-ledger",
+            "no-record",
             Layer {
-                ledger: Some(false),
+                record: Some(false),
                 ..Layer::default()
             },
         );

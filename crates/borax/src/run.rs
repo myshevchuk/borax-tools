@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Identifier, supplied};
 use borax_core::ledger::Index;
+use borax_core::library::ArtifactRecord;
 use borax_core::record::{EntryType, Record};
 use borax_core::tables::{LookupTables, Lookups, Table, TableSpec};
 use borax_core::template::{Miss, Template, TemplateTable};
@@ -44,8 +45,8 @@ use crate::config::{
 };
 use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
-    Counts, Diagnostic, Event, Format, Level, Overridden, SkipReason, TableUsed, human_summary,
-    render,
+    Admission, Counts, Diagnostic, Event, Format, Level, Overridden, SkipReason, TableUsed,
+    human_summary, render,
 };
 use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
 use crate::pipeline::{
@@ -766,7 +767,7 @@ pub fn preflight<C: Cache>(
         Command::Rename { paths, .. } => {
             let (groups, mut warnings) =
                 compiled_groups(paths, configs, Renders::FilenamesAndCitationKeys)?;
-            let prepared = crate::ledger::prepare(configs.run().config().ledger, adapters.ledger);
+            let prepared = crate::ledger::prepare(configs.run().config().record, adapters.ledger);
             // After the tables', because a run that cannot trust its
             // ledger should hear that before it hears about a row.
             warnings.extend(prepared.diagnostic);
@@ -1225,11 +1226,19 @@ fn rename_events<C: Cache>(
     let at = (adapters.now)();
     // Whether the ledger is in play at all: the setting says so, and
     // the run is in a collection that has one.
-    let ledger = match configs.run().config().ledger {
+    let ledger = match configs.run().config().record {
         true => adapters.ledger,
         false => None,
     };
     let root = adapters.collection_root.clone().unwrap_or_default();
+    // Whether the moves this run makes are carried out at all, which an
+    // interactive run's are one yes at a time.
+    let carrying_out = apply || session.mode == Mode::Interactive;
+    // Whether the library's record is written to: only by a run that
+    // carries its moves out, and only with the record gate on. A
+    // preview reports the same outcomes and records none of them.
+    let recording = carrying_out && configs.run().config().record;
+    let library = adapters.collection_root.as_deref();
     // `exists` is asked about a ledger entry that matched and about
     // nothing else, so an answer of "not there" is exactly an entry
     // that outlived its file. A file matching no entry never reaches
@@ -1299,10 +1308,7 @@ fn rename_events<C: Cache>(
         // A yes is the authorisation for one move, so an interactive
         // run carries its accepted decisions out as an applying run
         // does; `--apply` is what authorises a batch one.
-        let mut applying = Applying::new(
-            adapters.filesystem,
-            apply || session.mode == Mode::Interactive,
-        );
+        let mut applying = Applying::new(adapters.filesystem, carrying_out);
         let mut cited = Citations::default();
         // Whether a file this directory's configuration reports as
         // already named is passed over without a line of its own. Only
@@ -1353,6 +1359,23 @@ fn rename_events<C: Cache>(
                         checked,
                     ),
                 };
+
+                // Asked before the move, while the path a record names is
+                // still the path the file holds, and whatever the record
+                // gate says: the gate stops the writing and never this
+                // read.
+                let held = match &settled {
+                    Settled::CarryOut { .. } if carrying_out => library
+                        .filter(|library| !crate::library::excludes(library, path))
+                        .and_then(|library| crate::library::recorded_at(library, path)),
+                    _ => None,
+                };
+                // A move the run would not record, of a file whose record
+                // holds none of its bytes, is refused and reported as a
+                // skip: it would leave that record naming nothing and
+                // matching nothing. The target is not claimed, so it stays
+                // free for the files after this one.
+                let settled = refused(settled, configs.run().config().record, held.as_ref());
 
                 let (file, event) = match settled {
                     // This file and every file after it are left as they
@@ -1414,8 +1437,43 @@ fn rename_events<C: Cache>(
                                 });
                             }
                         };
+                        // Within the file's own run of events, so a file
+                        // passed over is passed over with its admission —
+                        // unless the admission is a record that could not
+                        // be written, which is shown whatever the hold.
+                        let admission = match recording {
+                            true => recorded(
+                                library,
+                                &event,
+                                &file,
+                                held.as_ref(),
+                                || {
+                                    crate::bib::citation_key(
+                                        &file.record,
+                                        file.hash.as_ref(),
+                                        &group.citation_keys,
+                                        &mut lookups,
+                                    )
+                                },
+                                &at,
+                            ),
+                            false => None,
+                        };
+                        let unwritten = matches!(
+                            admission,
+                            Some(Event::LibraryAdmission {
+                                admission: Admission::Unwritten { .. },
+                                ..
+                            })
+                        );
+                        if let Some(admission) = admission {
+                            sink.emit(admission);
+                        }
                         if named {
-                            sink.withhold();
+                            match unwritten {
+                                true => sink.release(),
+                                false => sink.withhold(),
+                            }
                         }
                         // On the move and never before: an operator who
                         // supplies an identifier and then walks away
@@ -2409,6 +2467,112 @@ fn admit(ledger: Option<&dyn Ledger>, root: &Path, file: &FileRecord, path: &Pat
     let _ = ledger.append(&[entry]);
 }
 
+/// `settled`, or a skip in its place when carrying it out would strand
+/// `held`.
+///
+/// Only a move is refused, and only in a run that writes no record
+/// (`record` off): a run that records rewrites the record after the
+/// move, so nothing is stranded. `held` is the record naming the file's
+/// current path, and a move strands it when its history does not hold
+/// the file's hash ([`crate::library::strands`]). A file whose hash is
+/// unknown is not refused, there being no bytes to compare.
+///
+/// The skip keeps the file's record, so the file is reported resolved
+/// and is cited as any resolved file left where it is.
+fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Settled {
+    let Settled::CarryOut {
+        file,
+        decision,
+        remember,
+    } = settled
+    else {
+        return settled;
+    };
+    let stranding = match (record, &decision, held, &file.hash) {
+        (false, PlannedRename::Rename { .. }, Some(held), Some(hash))
+            if crate::library::strands(Some(held), hash) =>
+        {
+            Some(held.id.to_string())
+        }
+        _ => None,
+    };
+    match stranding {
+        Some(id) => Settled::Skip {
+            file: Some(file),
+            reason: SkipReason::Stranding { id },
+        },
+        None => Settled::CarryOut {
+            file,
+            decision,
+            remember,
+        },
+    }
+}
+
+/// Record in the library rooted at `library` the file `event` reports
+/// the fate of, and hand back what is worth reporting about it.
+///
+/// Only a file the run renamed or found already named is recorded: it
+/// is at the target of a `renamed` event and where it was for an
+/// `already-named` one. Every other outcome, a run with no library, and
+/// a file whose content hash is unknown record nothing and report
+/// nothing.
+///
+/// A file outside the library, or inside a subtree it does not own, is
+/// reported as [`Admission::Outside`] and recorded nowhere. Otherwise
+/// the file is admitted ([`crate::library::admit`]) under the record
+/// `held` it had before the run moved it, with the item a mint names
+/// keyed by what `key` renders — asked only when the file is admitted.
+/// An operator who supplied the identifier or accepted the record over
+/// a conflict has re-identified the file. The hash entry written is
+/// stamped with `at` as both the run and the timestamp.
+///
+/// The event is [`crate::library::admission_event`]'s: `None` for an
+/// ordinary admission.
+fn recorded(
+    library: Option<&Path>,
+    event: &Event,
+    file: &FileRecord,
+    held: Option<&ArtifactRecord>,
+    key: impl FnOnce() -> Option<String>,
+    at: &str,
+) -> Option<Event> {
+    let current = match event {
+        Event::Renamed { target, .. } => target,
+        Event::AlreadyNamed { path } => path,
+        _ => return None,
+    };
+    let library = library?;
+    let hash = file.hash.as_ref()?;
+
+    if crate::library::excludes(library, current)
+        || crate::library::library_relative(library, current).is_none()
+    {
+        return Some(Event::LibraryAdmission {
+            path: current.clone(),
+            admission: Admission::Outside,
+        });
+    }
+
+    let key = key();
+    let admitted = crate::library::admit(
+        library,
+        &crate::library::Admitting {
+            path: current,
+            record: &file.record,
+            hash,
+            held,
+            reidentified: file.tier == Some(Provenance::Supplied) || file.overrode.is_some(),
+            key: key.as_deref(),
+            run: borax_core::library::RunId::new(at),
+            timestamp: at,
+            tool_version: env!("CARGO_PKG_VERSION"),
+        },
+        &crate::library::store_write,
+    );
+    crate::library::admission_event(current, &admitted)
+}
+
 /// Resolve the file at `path` under `effective`, writing its verdict
 /// into `sink`, and hand back the record when there is one.
 ///
@@ -3252,7 +3416,7 @@ fn expanded(command: &Command) -> Command {
             resolution,
             rename,
             bibliography,
-            accounting,
+            record,
             run_log,
         } => Command::Rename {
             paths: inputs(paths),
@@ -3260,7 +3424,7 @@ fn expanded(command: &Command) -> Command {
             resolution: resolution.clone(),
             rename: rename.clone(),
             bibliography: bibliography.clone(),
-            accounting: accounting.clone(),
+            record: record.clone(),
             run_log: run_log.clone(),
         },
         Command::Bib {

@@ -5,10 +5,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borax::event::{Event, Finding, Repair};
+use borax::event::{Admission, Event, Finding, Repair};
 use borax::library::{
-    ARTIFACT_STORE, ArtifactStore, ITEM_STORE, ItemStore, STATE_DIR, artifacts, contains, missing,
-    orphans, reconcile, reconciliation_events, relative_to, survey, validate,
+    ARTIFACT_STORE, Admitted, Admitting, ArtifactStore, ITEM_STORE, ItemStore, STATE_DIR,
+    Unrecorded, admission_event, admit, artifacts, contains, item_file_name, missing, orphans,
+    reconcile, reconciliation_events, recorded_at, relative_to, store_write, strands, survey,
+    validate,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -2153,5 +2155,690 @@ fn reconciliation_events_emits_one_repair_event_then_the_totals() {
         },
         "got {:?}",
         events[1]
+    );
+}
+
+// ---------------------------------------------------------------------
+// group 7 fixtures — writing real files for `admit`'s stat, and a
+// record carrying a chosen identifier
+// ---------------------------------------------------------------------
+
+/// Writes `bytes` at `relative` under `root`, creating whatever
+/// directories it needs, and hands back the full path — the file
+/// `admit` and `recorded_at` need present on disk, since both stat or
+/// hash it.
+fn write_file(root: &Path, relative: &str, bytes: &[u8]) -> PathBuf {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// A minimal record carrying `doi_value` as its DOI, the one identifier
+/// these fixtures need.
+fn record_with_doi(doi_value: &str) -> Record {
+    let mut record = minimal_record(EntryType::Article);
+    record.doi = Some(Doi::parse(doi_value).unwrap());
+    record
+}
+
+// ---------------------------------------------------------------------
+// 7.1/7.3a: recorded_at
+// ---------------------------------------------------------------------
+
+/// [`recorded_at`] finds the record whose last-known path is the file's
+/// current path — the lookup an applying run makes before it moves a
+/// file, and the one `--no-record`'s pre-move check is built on.
+#[test]
+fn recorded_at_finds_the_record_naming_the_current_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = fresh_record(
+        root,
+        artifact_id(UUID_A),
+        None,
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = recorded_at(root, &path);
+
+    assert_eq!(
+        found,
+        Some(record),
+        "the record naming the file's current path must be found"
+    );
+}
+
+/// A file no record names yields `None`: a move nothing has recorded
+/// strands nothing.
+#[test]
+fn recorded_at_is_none_when_no_record_names_the_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "untouched.pdf", b"untouched bytes");
+
+    assert_eq!(
+        recorded_at(root, &path),
+        None,
+        "a file with no record must not be found by an unrelated one"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 7.3a: strands
+// ---------------------------------------------------------------------
+
+/// No record names the file's path: moving it strands nothing.
+#[test]
+fn strands_is_false_when_no_record_names_the_path() {
+    assert!(
+        !strands(None, &hash("anything")),
+        "a move with no record in the way must never be refused"
+    );
+}
+
+/// A record whose history holds the file's hash survives the move: the
+/// bytes are evidence a move does not touch.
+#[test]
+fn strands_is_false_when_the_history_holds_the_hash() {
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+
+    assert!(
+        !strands(Some(&record), &hash("paper bytes")),
+        "a hash already in the history must not strand the record"
+    );
+}
+
+/// A record whose history does not hold the file's hash cannot survive
+/// the move: after it, the record's path holds nothing and none of its
+/// hashes match anything.
+#[test]
+fn strands_is_true_when_the_history_does_not_hold_the_hash() {
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "paper.pdf",
+        vec![hash_entry("stale bytes", "run-0")],
+    );
+
+    assert!(
+        strands(Some(&record), &hash("fresh bytes")),
+        "a move that would leave no matching hash behind must be refused"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 7.1: item_file_name
+// ---------------------------------------------------------------------
+
+/// A key that folds to something names the file alongside the item's
+/// full UUID.
+#[test]
+fn item_file_name_uses_the_folded_key_and_full_uuid() {
+    let id = item_id(UUID_A);
+
+    assert_eq!(
+        item_file_name(Some("Milner 1978"), &id),
+        format!("milner-1978.{UUID_A}.toml")
+    );
+}
+
+/// No key at all: the UUID alone has to be unique on its own.
+#[test]
+fn item_file_name_falls_back_to_the_uuid_alone_when_key_is_none() {
+    let id = item_id(UUID_A);
+
+    assert_eq!(item_file_name(None, &id), format!("{UUID_A}.toml"));
+}
+
+/// A key that folds to nothing — punctuation alone — is the same as no
+/// key at all.
+#[test]
+fn item_file_name_falls_back_to_the_uuid_alone_when_the_key_folds_to_nothing() {
+    let id = item_id(UUID_A);
+
+    assert_eq!(item_file_name(Some("???"), &id), format!("{UUID_A}.toml"));
+}
+
+// ---------------------------------------------------------------------
+// 7.1/7.2/7.2a/7.2b: admit — minting, reuse, and re-linking
+// ---------------------------------------------------------------------
+
+/// task 7.1: an applying run's admission of a new file mints an item and
+/// an artifact record naming the file's new path, its hash, and its
+/// current size and modification time.
+#[test]
+fn admit_mints_an_item_and_an_artifact_record_for_a_new_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = record_with_doi("10.1000/admit-mint");
+    let hash = hash("paper bytes");
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: Some("smith2024"),
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .expect("admission of a plain new file must succeed");
+
+    assert_eq!(
+        admitted.relinked_from, None,
+        "minting is not a relink: got {admitted:?}"
+    );
+
+    let items = ItemStore::read(root);
+    assert_eq!(items.len(), 1, "exactly one item must be minted");
+    let item = items
+        .by_id(&admitted.item)
+        .expect("the minted item must be found by the id admit reported");
+    assert_eq!(item.record.doi, record.doi);
+
+    let records = ArtifactStore::read(root);
+    let saved = records
+        .by_id(&admitted.artifact)
+        .expect("the minted artifact record must be found by the id admit reported");
+    assert_eq!(saved.path, "paper.pdf");
+    assert_eq!(saved.item, Some(admitted.item.clone()));
+    assert_eq!(saved.history.len(), 1, "got {:?}", saved.history);
+    assert_eq!(saved.history[0].hash, hash);
+    assert_eq!(saved.history[0].run, RunId::new("run-1"));
+    let (size, modified_millis) = stat(&path);
+    assert_eq!(saved.size, size);
+    assert_eq!(saved.modified_millis, modified_millis);
+}
+
+/// task 7.2: a second PDF of one work reuses the item the library
+/// already holds for one of the record's identifiers, so it becomes a
+/// second record naming that one item rather than a second item.
+#[test]
+fn admit_reuses_the_item_the_library_already_holds_for_the_records_identifier() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "second.pdf", b"second bytes");
+    let record = record_with_doi("10.1000/admit-reuse");
+    let hash = hash("second bytes");
+    let existing = Item {
+        id: item_id(UUID_A),
+        record: record.clone(),
+    };
+    write_item(root, &format!("first.{UUID_A}.toml"), &existing);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: Some("second-key"),
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(
+        admitted.item, existing.id,
+        "the second PDF of one work must name the item already held for its identifier"
+    );
+    assert_eq!(
+        ItemStore::read(root).len(),
+        1,
+        "no second item may be minted for a work the library already has"
+    );
+}
+
+/// task 7.2: a record with no identifier at all still gets an item, and
+/// two different such files become two different items — an item's
+/// identity is its minted UUID, and identifiers are optional.
+#[test]
+fn admit_gives_two_files_with_no_identifier_two_different_items() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let record = minimal_record(EntryType::Article);
+
+    let path_a = write_file(root, "a.pdf", b"a bytes");
+    let hash_a = hash("a bytes");
+    let admitted_a = admit(
+        root,
+        &Admitting {
+            path: &path_a,
+            record: &record,
+            hash: &hash_a,
+            held: None,
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let path_b = write_file(root, "b.pdf", b"b bytes");
+    let hash_b = hash("b bytes");
+    let admitted_b = admit(
+        root,
+        &Admitting {
+            path: &path_b,
+            record: &record,
+            hash: &hash_b,
+            held: None,
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_ne!(
+        admitted_a.item, admitted_b.item,
+        "two identifier-less files must not collapse onto one item"
+    );
+    assert_eq!(ItemStore::read(root).len(), 2, "each must get its own item");
+}
+
+/// task 7.2a: an artifact that already has a record keeps its item link
+/// across three ordinary re-admissions of a file resolving to no
+/// identifier — one repetition would not show the accumulation design
+/// D4 rules out.
+#[test]
+fn admit_keeps_the_held_records_item_link_over_three_ordinary_reruns() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "steady.pdf", b"steady bytes");
+    let hash = hash("steady bytes");
+    let record = minimal_record(EntryType::Article);
+    let item = Item {
+        id: item_id(UUID_A),
+        record: record.clone(),
+    };
+    write_item(root, &format!("steady.{UUID_A}.toml"), &item);
+    let held = fresh_record(
+        root,
+        artifact_id(UUID_B),
+        Some(item.id.clone()),
+        "steady.pdf",
+        vec![hash_entry("steady bytes", "run-0")],
+    );
+    write_artifact_record(root, &held);
+
+    for run in 1..=3 {
+        let held_now = ArtifactStore::read(root)
+            .by_id(&artifact_id(UUID_B))
+            .cloned();
+        let admitted = admit(
+            root,
+            &Admitting {
+                path: &path,
+                record: &record,
+                hash: &hash,
+                held: held_now.as_ref(),
+                reidentified: false,
+                key: None,
+                run: RunId::new(format!("run-{run}")),
+                timestamp: TIMESTAMP,
+                tool_version: TOOL_VERSION,
+            },
+            &store_write,
+        )
+        .unwrap();
+
+        assert_eq!(admitted.item, item.id, "run {run}: the link must not move");
+        assert_eq!(
+            admitted.relinked_from, None,
+            "run {run}: an ordinary rerun must never report a relink"
+        );
+    }
+
+    assert_eq!(
+        ItemStore::read(root).len(),
+        1,
+        "no item may accumulate behind a file nobody re-identified"
+    );
+    assert_eq!(
+        ArtifactStore::read(root).len(),
+        1,
+        "no second artifact record may be minted for the same file"
+    );
+}
+
+/// task 7.2b: an operator's re-identification, and only an operator's,
+/// re-links a recorded artifact to the item for the record they
+/// settled on, keeping the artifact's own identity and leaving the item
+/// it came from nameless but intact.
+#[test]
+fn admit_relinks_to_the_supplied_records_item_when_reidentified() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "wrong.pdf", b"wrong bytes");
+    let hash = hash("wrong bytes");
+    let wrong_item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("wrong.{UUID_A}.toml"), &wrong_item);
+    let right_record = record_with_doi("10.1000/admit-relink");
+    let right_item = Item {
+        id: item_id(UUID_B),
+        record: right_record.clone(),
+    };
+    write_item(root, &format!("right.{UUID_B}.toml"), &right_item);
+    let held = fresh_record(
+        root,
+        artifact_id(UUID_C),
+        Some(wrong_item.id.clone()),
+        "wrong.pdf",
+        vec![hash_entry("wrong bytes", "run-0")],
+    );
+    write_artifact_record(root, &held);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &right_record,
+            hash: &hash,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.item, right_item.id, "got {admitted:?}");
+    assert_eq!(
+        admitted.relinked_from,
+        Some(wrong_item.id.clone()),
+        "the run must report which item the record was moved from"
+    );
+
+    let records = ArtifactStore::read(root);
+    assert_eq!(
+        records.by_id(&artifact_id(UUID_C)).unwrap().id,
+        artifact_id(UUID_C),
+        "the artifact keeps its own identity across the relink"
+    );
+    assert_eq!(
+        records.by_id(&artifact_id(UUID_C)).unwrap().item,
+        Some(right_item.id.clone())
+    );
+    assert!(
+        records.by_item(&wrong_item.id).is_empty(),
+        "the artifact must no longer name the item it left"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 7.4: durability
+// ---------------------------------------------------------------------
+
+/// task 7.4: an item write that fails leaves no artifact record behind
+/// — the reverse order would leave a record naming an item that does
+/// not exist.
+#[test]
+fn admit_writes_no_artifact_record_when_the_item_write_fails() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "durable.pdf", b"durable bytes");
+    let hash = hash("durable bytes");
+    let record = record_with_doi("10.1000/admit-durability-item");
+    let item_store = root.join(ITEM_STORE);
+
+    let write = |target: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        if target.starts_with(&item_store) {
+            Err(std::io::Error::other("simulated item write failure"))
+        } else {
+            store_write(target, bytes)
+        }
+    };
+
+    let result = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: Some("durable"),
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &write,
+    );
+
+    assert!(result.is_err(), "a failed item write must fail admission");
+    assert!(
+        ItemStore::read(root).is_empty(),
+        "no item may be left by a failed write"
+    );
+    assert!(
+        ArtifactStore::read(root).is_empty(),
+        "an item write that fails must never be followed by an artifact write"
+    );
+}
+
+/// task 7.4: an artifact write that fails leaves the item — the
+/// residue the write order is chosen for, and never a dangling link the
+/// other order would leave.
+#[test]
+fn admit_leaves_the_item_when_the_artifact_write_fails() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "durable2.pdf", b"durable2 bytes");
+    let hash = hash("durable2 bytes");
+    let record = record_with_doi("10.1000/admit-durability-artifact");
+    let artifact_store_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+
+    let write = |target: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        if target.starts_with(&artifact_store_dir) {
+            Err(std::io::Error::other("simulated artifact write failure"))
+        } else {
+            store_write(target, bytes)
+        }
+    };
+
+    let result = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: Some("durable2"),
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &write,
+    );
+
+    assert!(
+        result.is_err(),
+        "a failed artifact write must fail admission"
+    );
+    assert_eq!(
+        ItemStore::read(root).len(),
+        1,
+        "the item write must stand even though the artifact write after it failed"
+    );
+    assert!(
+        ArtifactStore::read(root).is_empty(),
+        "no artifact record may exist when its own write failed"
+    );
+}
+
+/// task 7.4: a write interrupted part-way leaves the previous record
+/// byte-identical, with no temporary a reader would take for a record
+/// left behind under `.borax/artifacts/`.
+#[test]
+fn admit_leaves_the_previous_record_untouched_when_the_write_is_interrupted() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "edited.pdf", b"edited bytes v2");
+    let new_hash = hash("edited bytes v2");
+    let record = minimal_record(EntryType::Article);
+    let item = Item {
+        id: item_id(UUID_A),
+        record: record.clone(),
+    };
+    write_item(root, &format!("edited.{UUID_A}.toml"), &item);
+    let held = fresh_record(
+        root,
+        artifact_id(UUID_B),
+        Some(item.id.clone()),
+        "edited.pdf",
+        vec![hash_entry("edited bytes v1", "run-0")],
+    );
+    write_artifact_record(root, &held);
+    let store_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    let record_file = store_dir.join(format!("{UUID_B}.toml"));
+    let before = fs::read(&record_file).unwrap();
+
+    let write = |_target: &Path, _bytes: &[u8]| -> std::io::Result<()> {
+        Err(std::io::Error::other("simulated interruption"))
+    };
+
+    let result = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &new_hash,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &write,
+    );
+
+    assert!(result.is_err());
+    let after = fs::read(&record_file).unwrap();
+    assert_eq!(
+        before, after,
+        "the previous record must be byte-identical after an interrupted write"
+    );
+
+    let strays: Vec<PathBuf> = fs::read_dir(&store_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path != &record_file)
+        .filter(|path| {
+            let text = fs::read_to_string(path).unwrap_or_default();
+            ArtifactRecord::from_toml(&text).is_err()
+        })
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "no temporary a reader would mistake for a record may remain: got {strays:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// admission_event
+// ---------------------------------------------------------------------
+
+/// An admission that minted or updated a record and left its item link
+/// where it was reports nothing beyond the file's own outcome event.
+#[test]
+fn admission_event_is_none_for_an_ordinary_admission() {
+    let admitted = Admitted {
+        artifact: artifact_id(UUID_A),
+        item: item_id(UUID_B),
+        relinked_from: None,
+    };
+
+    let event = admission_event(Path::new("/lib/paper.pdf"), &Ok(admitted));
+
+    assert_eq!(
+        event, None,
+        "an ordinary admission has nothing to add to the file's own outcome event"
+    );
+}
+
+/// A relinked admission is reported naming both items.
+#[test]
+fn admission_event_reports_a_relink() {
+    let admitted = Admitted {
+        artifact: artifact_id(UUID_A),
+        item: item_id(UUID_C),
+        relinked_from: Some(item_id(UUID_B)),
+    };
+
+    let event = admission_event(Path::new("/lib/paper.pdf"), &Ok(admitted));
+
+    assert_eq!(
+        event,
+        Some(Event::LibraryAdmission {
+            path: PathBuf::from("/lib/paper.pdf"),
+            admission: Admission::Relinked {
+                id: artifact_id(UUID_A).to_string(),
+                from: item_id(UUID_B).to_string(),
+                to: item_id(UUID_C).to_string(),
+            },
+        }),
+        "got {event:?}"
+    );
+}
+
+/// A store write that failed is reported naming the file, with the
+/// filesystem's own message.
+#[test]
+fn admission_event_reports_an_unwritten_record() {
+    let event = admission_event(
+        Path::new("/lib/paper.pdf"),
+        &Err(Unrecorded {
+            message: "disk full".to_string(),
+        }),
+    );
+
+    assert_eq!(
+        event,
+        Some(Event::LibraryAdmission {
+            path: PathBuf::from("/lib/paper.pdf"),
+            admission: Admission::Unwritten {
+                message: "disk full".to_string(),
+            },
+        }),
+        "got {event:?}"
     );
 }

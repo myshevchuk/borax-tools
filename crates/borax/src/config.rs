@@ -98,10 +98,11 @@ pub struct Config {
     /// On by default: such a file needs no decision, and a collection
     /// mostly in order would otherwise bury the files that do.
     pub skip_named: bool,
-    /// Whether the collection's ledger is consulted for duplicates and
-    /// added to by an applied run. Off means the run keeps no
-    /// accounting and reports none missing.
-    pub ledger: bool,
+    /// Whether the library's record of what it holds is consulted for
+    /// duplicates and written to by an applying run. Off means the run
+    /// writes no artifact record and no item, and checks no file
+    /// against what the library already has.
+    pub record: bool,
     /// Whether a run writes its event stream to a run log. An applying
     /// rename writes one regardless, since that log is the only record
     /// of what it moved; this setting is what a preview run obeys.
@@ -121,8 +122,8 @@ impl Default for Config {
     /// [`borax_sources::pace::DEFAULT_CONCURRENCY`] and
     /// [`borax_sources::pace::DEFAULT_MIN_INTERVAL`], extraction takes
     /// [`borax_pdf::tiered::DEFAULT_PAGE_LIMIT`], collisions are
-    /// suffixed, duplicate entries skipped, and the cache, the ledger
-    /// and the run log are on.
+    /// suffixed, duplicate entries skipped, and the cache, the record
+    /// gate and the run log are on.
     fn default() -> Config {
         Config {
             templates: BTreeMap::from([(
@@ -147,7 +148,7 @@ impl Default for Config {
             cache: true,
             batch: false,
             skip_named: true,
-            ledger: true,
+            record: true,
             run_log: true,
         }
     }
@@ -176,7 +177,7 @@ pub struct Layer {
     #[serde(default, rename = "library-root")]
     pub library_root: Option<PathBuf>,
     #[serde(default)]
-    pub ledger: Option<bool>,
+    pub record: Option<bool>,
     #[serde(default, rename = "run-log")]
     pub run_log: Option<bool>,
     #[serde(default)]
@@ -571,9 +572,9 @@ const SETTINGS: &[Setting] = &[
         render: |config| config.batch.to_string(),
     },
     Setting {
-        key: "ledger",
-        slot: |layer| Slot::Flag(&mut layer.ledger),
-        render: |config| config.ledger.to_string(),
+        key: "record",
+        slot: |layer| Slot::Flag(&mut layer.record),
+        render: |config| config.record.to_string(),
     },
     Setting {
         key: "mailto",
@@ -931,8 +932,8 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
     {
         config.batch = batch;
     }
-    if let Some(ledger) = winning.ledger {
-        config.ledger = ledger;
+    if let Some(record) = winning.record {
+        config.record = record;
     }
     if let Some(run_log) = winning.run_log {
         config.run_log = run_log;

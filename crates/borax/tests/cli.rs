@@ -231,7 +231,7 @@ fn rename_accepts_every_setting_it_consumes() {
         "--duplicates",
         "skip",
         "--sidecars",
-        "--ledger",
+        "--record",
         "--run-log",
         "f.pdf",
     ]);
@@ -248,7 +248,7 @@ fn rename_accepts_every_setting_it_consumes() {
             bib: Some(PathBuf::from("refs.bib")),
             duplicates: Some("skip".to_string()),
             sidecars: true,
-            ledger: true,
+            record: true,
             run_log: true,
             ..Settings::default()
         },
@@ -320,7 +320,7 @@ fn config_accepts_every_setting() {
         "--sidecars",
         "--concurrency",
         "4",
-        "--ledger",
+        "--record",
         "--run-log",
     ]);
 
@@ -337,7 +337,7 @@ fn config_accepts_every_setting() {
             duplicates: Some("skip".to_string()),
             sidecars: true,
             concurrency: Some(4),
-            ledger: true,
+            record: true,
             run_log: true,
             ..Settings::default()
         },
@@ -409,12 +409,12 @@ fn rename_refuses_concurrency_as_an_unknown_argument() {
 }
 
 #[test]
-fn bib_refuses_no_ledger_as_an_unknown_argument() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "bib", "--no-ledger", "f.pdf"]);
+fn bib_refuses_no_record_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "bib", "--no-record", "f.pdf"]);
     assert!(result.is_err(), "got {result:?}");
 
     let message = result.unwrap_err().to_string();
-    assert!(message.contains("--no-ledger"), "got {message:?}");
+    assert!(message.contains("--no-record"), "got {message:?}");
 }
 
 #[test]
@@ -428,12 +428,12 @@ fn bib_refuses_collision_as_an_unknown_argument() {
 }
 
 #[test]
-fn ledger_rebuild_refuses_no_ledger_as_an_unknown_argument() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "ledger", "rebuild", "--no-ledger"]);
+fn ledger_rebuild_refuses_no_record_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "ledger", "rebuild", "--no-record"]);
     assert!(result.is_err(), "got {result:?}");
 
     let message = result.unwrap_err().to_string();
-    assert!(message.contains("--no-ledger"), "got {message:?}");
+    assert!(message.contains("--no-record"), "got {message:?}");
 }
 
 #[test]
@@ -491,7 +491,7 @@ fn ledger_rebuild_help_lists_only_the_run_log_pair_and_json() {
         "--collision",
         "--bib",
         "--sidecars",
-        "--ledger",
+        "--record",
         "--concurrency",
     ] {
         assert!(
@@ -670,14 +670,14 @@ fn rename_refuses_sidecars_and_no_sidecars_together() {
 }
 
 #[test]
-fn rename_refuses_ledger_and_no_ledger_together() {
+fn rename_refuses_record_and_no_record_together() {
     let result =
-        <Cli as Parser>::try_parse_from(["borax", "rename", "--ledger", "--no-ledger", "f.pdf"]);
+        <Cli as Parser>::try_parse_from(["borax", "rename", "--record", "--no-record", "f.pdf"]);
     assert!(result.is_err(), "got {result:?}");
 
     let message = result.unwrap_err().to_string();
     assert!(
-        message.contains("--ledger") && message.contains("--no-ledger"),
+        message.contains("--record") && message.contains("--no-record"),
         "got {message:?}"
     );
 }
@@ -731,7 +731,7 @@ fn no_flag_can_produce_a_templates_layer() {
             "--sidecars",
             "--concurrency",
             "4",
-            "--ledger",
+            "--record",
             "--run-log",
         ])
         .settings(),
@@ -1111,23 +1111,23 @@ fn cache_and_no_cache_together_is_a_parse_error() {
 }
 
 // ---------------------------------------------------------------------
-// flag_layers: --ledger / --no-ledger and --run-log / --no-run-log
+// flag_layers: --record / --no-record and --run-log / --no-run-log
 //
 // design "Config hardening": "Every config-settable boolean flag has an
-// auto-generated --no-* negation" — the ledger and run-log booleans this
+// auto-generated --no-* negation" — the record and run-log booleans this
 // change adds follow the same two-flag shape as sidecars and cache.
 // ---------------------------------------------------------------------
 
 #[test]
-fn ledger_alone_sets_ledger_true() {
-    let layers = flag_layers(&parse(&["config", "--ledger"]).settings());
+fn record_alone_sets_record_true() {
+    let layers = flag_layers(&parse(&["config", "--record"]).settings());
 
     assert_eq!(
         layers,
         vec![(
-            Origin::Flag("ledger".to_string()),
+            Origin::Flag("record".to_string()),
             Layer {
-                ledger: Some(true),
+                record: Some(true),
                 ..Layer::default()
             },
         )],
@@ -1136,15 +1136,15 @@ fn ledger_alone_sets_ledger_true() {
 }
 
 #[test]
-fn no_ledger_alone_sets_ledger_false() {
-    let layers = flag_layers(&parse(&["config", "--no-ledger"]).settings());
+fn no_record_alone_sets_record_false() {
+    let layers = flag_layers(&parse(&["config", "--no-record"]).settings());
 
     assert_eq!(
         layers,
         vec![(
-            Origin::Flag("no-ledger".to_string()),
+            Origin::Flag("no-record".to_string()),
             Layer {
-                ledger: Some(false),
+                record: Some(false),
                 ..Layer::default()
             },
         )],
@@ -1153,8 +1153,8 @@ fn no_ledger_alone_sets_ledger_false() {
 }
 
 #[test]
-fn ledger_and_no_ledger_together_is_a_parse_error() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "config", "--ledger", "--no-ledger"]);
+fn record_and_no_record_together_is_a_parse_error() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "config", "--record", "--no-record"]);
     assert!(result.is_err(), "got {result:?}");
 }
 
@@ -1342,13 +1342,13 @@ fn run_log_and_no_run_log_together_is_a_parse_error() {
 }
 
 // ---------------------------------------------------------------------
-// the CLI overrides a configured ledger/run-log value in both directions
+// the CLI overrides a configured record/run-log value in both directions
 // ---------------------------------------------------------------------
 
 #[test]
-fn no_ledger_flag_overrides_a_configured_ledger_true() {
-    let settings = parse(&["config", "--no-ledger"]).settings();
-    let file_layer = layer_from_toml("ledger = true", Path::new("/config.toml")).unwrap();
+fn no_record_flag_overrides_a_configured_record_true() {
+    let settings = parse(&["config", "--no-record"]).settings();
+    let file_layer = layer_from_toml("record = true", Path::new("/config.toml")).unwrap();
 
     let mut layers = vec![(
         Origin::GlobalFile(PathBuf::from("/config.toml")),
@@ -1358,17 +1358,17 @@ fn no_ledger_flag_overrides_a_configured_ledger_true() {
 
     let effective = resolve(layers).unwrap();
 
-    assert!(!effective.config().ledger);
+    assert!(!effective.config().record);
     assert_eq!(
-        effective.origin("ledger"),
-        Some(&Origin::Flag("no-ledger".to_string()))
+        effective.origin("record"),
+        Some(&Origin::Flag("no-record".to_string()))
     );
 }
 
 #[test]
-fn ledger_flag_overrides_a_configured_ledger_false() {
-    let settings = parse(&["config", "--ledger"]).settings();
-    let file_layer = layer_from_toml("ledger = false", Path::new("/config.toml")).unwrap();
+fn record_flag_overrides_a_configured_record_false() {
+    let settings = parse(&["config", "--record"]).settings();
+    let file_layer = layer_from_toml("record = false", Path::new("/config.toml")).unwrap();
 
     let mut layers = vec![(
         Origin::GlobalFile(PathBuf::from("/config.toml")),
@@ -1378,10 +1378,10 @@ fn ledger_flag_overrides_a_configured_ledger_false() {
 
     let effective = resolve(layers).unwrap();
 
-    assert!(effective.config().ledger);
+    assert!(effective.config().record);
     assert_eq!(
-        effective.origin("ledger"),
-        Some(&Origin::Flag("ledger".to_string()))
+        effective.origin("record"),
+        Some(&Origin::Flag("record".to_string()))
     );
 }
 

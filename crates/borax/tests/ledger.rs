@@ -1719,6 +1719,14 @@ fn an_applied_rename_appends_the_files_new_path_relative_to_the_collection_root(
         &mut Session::batch(),
     )
     .unwrap();
+    // The artifact store is written to disk, which the fake filesystem
+    // this run moved on is not, so its admission reports itself
+    // unwritten. That is the library's business and not this test's,
+    // which is about the ledger append.
+    let events: Vec<Event> = events
+        .into_iter()
+        .filter(|event| !matches!(event, Event::LibraryAdmission { .. }))
+        .collect();
 
     assert_eq!(
         events,
@@ -1846,7 +1854,7 @@ fn a_disabled_ledger_neither_checks_nor_appends() {
         warning: None,
     });
     let effective = effective_with(|layer| {
-        layer.ledger = Some(false);
+        layer.record = Some(false);
         layer.templates = Some(BTreeMap::from([(
             "default".to_string(),
             "[auth][year]".to_string(),
@@ -2572,7 +2580,7 @@ fn a_disabled_ledger_setting_does_not_prevent_a_rebuild() {
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles;
     let effective = effective_with(|layer| {
-        layer.ledger = Some(false);
+        layer.record = Some(false);
     });
     let adapters = Adapters {
         documents: &documents,

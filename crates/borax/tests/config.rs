@@ -94,13 +94,13 @@ fn default_has_no_sidecars_and_the_cache_is_on() {
     assert!(config.cache);
 }
 
-/// design: "The ledger is an append-only JSONL file" and "Run logs are
-/// the event stream, persisted" are both on by default, degrading loudly
-/// rather than opting in.
+/// design: "The record of admissions is optional and degrades loudly"
+/// and "Run logs are the event stream, persisted" are both on by
+/// default, degrading loudly rather than opting in.
 #[test]
-fn default_has_the_ledger_and_the_run_log_on() {
+fn default_has_the_record_gate_and_the_run_log_on() {
     let config = Config::default();
-    assert!(config.ledger);
+    assert!(config.record);
     assert!(config.run_log);
 }
 
@@ -157,7 +157,7 @@ fn layer_from_toml_parses_a_full_document_into_the_expected_layer() {
             sources: Some(vec!["crossref".to_string(), "arxiv".to_string()]),
             mailto: Some("test@example.org".to_string()),
             library_root: Some(PathBuf::from("/archive")),
-            ledger: None,
+            record: None,
             run_log: None,
             rename: Some(RenameLayer {
                 collision: Some("skip".to_string()),
@@ -236,20 +236,20 @@ fn layer_from_toml_rejects_the_retired_collection_root_key_as_unknown() {
 }
 
 #[test]
-fn layer_from_toml_reads_the_ledger_and_run_log_keys() {
+fn layer_from_toml_reads_the_record_and_run_log_keys() {
     let layer =
-        layer_from_toml("ledger = false\nrun-log = false\n", Path::new("/solo.toml")).unwrap();
+        layer_from_toml("record = false\nrun-log = false\n", Path::new("/solo.toml")).unwrap();
 
-    assert_eq!(layer.ledger, Some(false));
+    assert_eq!(layer.record, Some(false));
     assert_eq!(layer.run_log, Some(false));
 }
 
 #[test]
-fn layer_from_toml_setting_only_run_log_leaves_ledger_unset() {
+fn layer_from_toml_setting_only_run_log_leaves_the_record_gate_unset() {
     let layer = layer_from_toml("run-log = true", Path::new("/solo.toml")).unwrap();
 
     assert_eq!(layer.run_log, Some(true));
-    assert_eq!(layer.ledger, None);
+    assert_eq!(layer.record, None);
 }
 
 #[test]
@@ -327,29 +327,29 @@ fn layer_from_toml_rejects_an_unknown_key_inside_a_table_naming_it() {
 /// A typo of one of the two keys this change adds is still an unknown
 /// key, the same as any other misspelled setting.
 #[test]
-fn layer_from_toml_rejects_a_typo_of_the_new_ledger_key() {
-    let err = layer_from_toml("ledgerz = true", Path::new("/unknown-ledger.toml")).unwrap_err();
+fn layer_from_toml_rejects_a_typo_of_the_new_record_key() {
+    let err = layer_from_toml("recordz = true", Path::new("/unknown-record.toml")).unwrap_err();
 
     match err {
         ConfigError::Unreadable { message, .. } => {
-            assert!(message.contains("ledgerz"), "got {message:?}");
-            assert!(message.contains("ledger"), "got {message:?}");
+            assert!(message.contains("recordz"), "got {message:?}");
+            assert!(message.contains("record"), "got {message:?}");
         }
         other => panic!("expected Unreadable, got {other:?}"),
     }
 }
 
-/// cli spec 5.1 / design "one schema, typed values": `ledger` takes a
+/// cli spec 5.1 / design "one schema, typed values": `record` takes a
 /// boolean, and a string in its place is a load-time error naming both
 /// the key and the type it expected — not a value silently coerced or
 /// accepted.
 #[test]
-fn layer_from_toml_rejects_ledger_set_to_a_non_boolean_value() {
-    let err = layer_from_toml(r#"ledger = "yes""#, Path::new("/bad-ledger.toml")).unwrap_err();
+fn layer_from_toml_rejects_record_set_to_a_non_boolean_value() {
+    let err = layer_from_toml(r#"record = "yes""#, Path::new("/bad-record.toml")).unwrap_err();
 
     match err {
         ConfigError::Unreadable { message, .. } => {
-            assert!(message.contains("ledger"), "got {message:?}");
+            assert!(message.contains("record"), "got {message:?}");
             assert!(message.to_lowercase().contains("bool"), "got {message:?}");
         }
         other => panic!("expected Unreadable, got {other:?}"),
@@ -844,12 +844,12 @@ fn resolve_with_no_layers_gives_defaults_with_default_origin_everywhere() {
         "bib.sidecars",
         "citation-keys.default",
         "extraction.page-limit",
-        "ledger",
         "library-root",
         "mailto",
         "network.cache",
         "network.concurrency",
         "network.min-interval-ms",
+        "record",
         "rename.batch",
         "rename.collision",
         "rename.skip-named",
@@ -1013,16 +1013,16 @@ fn resolve_reports_a_library_root_override_with_its_file_origin() {
     );
 }
 
-/// design "Config hardening": the `ledger` and `run-log` booleans this
+/// design "Config hardening": the `record` and `run-log` booleans this
 /// change adds resolve and report their origin exactly like every other
 /// setting.
 #[test]
-fn resolve_applies_configured_ledger_and_run_log_values_with_their_origin() {
+fn resolve_applies_configured_record_and_run_log_values_with_their_origin() {
     let dir_path = PathBuf::from("/proj/.borax.toml");
     let layers = vec![(
         Origin::DirectoryFile(dir_path.clone()),
         Layer {
-            ledger: Some(false),
+            record: Some(false),
             run_log: Some(false),
             ..Layer::default()
         },
@@ -1030,10 +1030,10 @@ fn resolve_applies_configured_ledger_and_run_log_values_with_their_origin() {
 
     let effective = resolve(layers).unwrap();
 
-    assert!(!effective.config().ledger);
+    assert!(!effective.config().record);
     assert!(!effective.config().run_log);
     assert_eq!(
-        effective.origin("ledger"),
+        effective.origin("record"),
         Some(&Origin::DirectoryFile(dir_path.clone()))
     );
     assert_eq!(
@@ -1488,12 +1488,12 @@ fn entries_are_ordered_by_key_and_cover_every_setting() {
             "bib.sidecars",
             "citation-keys.default",
             "extraction.page-limit",
-            "ledger",
             "library-root",
             "mailto",
             "network.cache",
             "network.concurrency",
             "network.min-interval-ms",
+            "record",
             "rename.batch",
             "rename.collision",
             "rename.skip-named",
@@ -1623,16 +1623,16 @@ fn events_reports_a_citation_keys_override_with_its_file_origin() {
     );
 }
 
-/// `borax config` reports the `ledger` and `run-log` booleans this
+/// `borax config` reports the `record` and `run-log` booleans this
 /// change adds with the same key/value/origin shape as `network.cache`
 /// and every other setting.
 #[test]
-fn events_reports_a_ledger_and_run_log_override_with_its_file_origin() {
+fn events_reports_a_record_and_run_log_override_with_its_file_origin() {
     let config_path = PathBuf::from("/proj/.borax.toml");
     let layers = vec![(
         Origin::DirectoryFile(config_path.clone()),
         Layer {
-            ledger: Some(false),
+            record: Some(false),
             run_log: Some(false),
             ..Layer::default()
         },
@@ -1640,19 +1640,19 @@ fn events_reports_a_ledger_and_run_log_override_with_its_file_origin() {
     let effective = resolve(layers).unwrap();
 
     let events = effective.events();
-    let ledger_event = events
+    let record_event = events
         .iter()
-        .find(|event| matches!(event, Event::ConfigSetting { key, .. } if key == "ledger"))
-        .unwrap_or_else(|| panic!("no ConfigSetting for ledger in {events:?}"));
+        .find(|event| matches!(event, Event::ConfigSetting { key, .. } if key == "record"))
+        .unwrap_or_else(|| panic!("no ConfigSetting for record in {events:?}"));
     let run_log_event = events
         .iter()
         .find(|event| matches!(event, Event::ConfigSetting { key, .. } if key == "run-log"))
         .unwrap_or_else(|| panic!("no ConfigSetting for run-log in {events:?}"));
 
     assert_eq!(
-        *ledger_event,
+        *record_event,
         Event::ConfigSetting {
-            key: "ledger".to_string(),
+            key: "record".to_string(),
             value: "false".to_string(),
             origin: Origin::DirectoryFile(config_path.clone()).to_string(),
         }

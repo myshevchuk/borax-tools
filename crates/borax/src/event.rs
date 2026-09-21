@@ -182,6 +182,22 @@ pub enum Event {
     /// Something wrong with a library's own records, about the file at
     /// `path` and about no other.
     LibraryFinding { path: PathBuf, finding: Finding },
+    /// What an applying run's admission of one file came to, beyond
+    /// the record it wrote.
+    ///
+    /// An ordinary admission emits nothing. The file's own outcome —
+    /// `renamed`, or `already-named` — is what says borax settled it,
+    /// and the record written for it is the library's state rather
+    /// than news. What is reported here is what a reader could not
+    /// work out from the rest of the stream: a link the run moved, a
+    /// file it settled outside the library and recorded nothing for,
+    /// and a record it could not write.
+    LibraryAdmission {
+        /// The file the admission was about, at the path it holds
+        /// after the run's work on it.
+        path: PathBuf,
+        admission: Admission,
+    },
     /// What validating a library amounted to: how many findings were
     /// reported, and the three counts that are not findings.
     LibraryValidated {
@@ -317,6 +333,22 @@ pub enum SkipReason {
         reason: DuplicateReason,
         existing_path: PathBuf,
     },
+    /// The move was not made because the run writes no record and
+    /// making it would leave an artifact record unable to name its
+    /// artifact again.
+    ///
+    /// Only a run with the record gate off reports this. The record
+    /// named here names the file's current path and holds no hash of
+    /// the bytes the file has now, so a move that wrote nothing
+    /// afterwards would take away the one path it can be found by
+    /// while leaving nothing in it that matches the file's content.
+    ///
+    /// `id` is the artifact identity, which is the record's file name
+    /// under `.borax/artifacts/`. The remedy named is
+    /// `borax reconcile --rehash`, which records the file's current
+    /// bytes and lets the move proceed under either setting; re-running
+    /// without the gate is not named, because it does not always work.
+    Stranding { id: String },
 }
 
 /// Something wrong with a library's own records.
@@ -394,6 +426,53 @@ pub enum Repair {
     /// The repair was decided and the file could not be written, with
     /// `message` as the filesystem put it. The record is as it was, and
     /// the next reconcile decides the same thing again.
+    Unwritten { message: String },
+}
+
+/// What an applying run's admission of one file came to, for the
+/// admissions it has something to say about.
+///
+/// Every variant is about an admission that did not simply happen:
+/// nothing is written for a file outside the library, nothing lands
+/// when the store refuses the write, and a link only moves when the
+/// operator re-identified the file. An admission that minted or
+/// updated a record and left its link where it was produces no event
+/// at all. Serialized with a `kind` tag, nested under the event's
+/// `admission` field, as [`Repair`] is under `repair`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Admission {
+    /// The operator re-identified a file that already had an artifact
+    /// record, so the record was re-linked to the item for the record
+    /// they settled it on.
+    ///
+    /// `id` is the artifact's own identity, which the re-link leaves
+    /// alone; `from` is the item the record named before and `to` the
+    /// item it names now. Both are named because the item left behind
+    /// may now have nothing linking to it, which is an ordinary
+    /// library state `borax validate` counts.
+    Relinked {
+        id: String,
+        from: String,
+        to: String,
+    },
+    /// The file the run settled is not in the library, so nothing was
+    /// recorded for it.
+    ///
+    /// borax brings no file into a library: a file named as input from
+    /// outside the tree is renamed where it sits, and so is one inside
+    /// a subtree this library does not own — its own state directory,
+    /// its item store, or a nested library. The rename stands and is
+    /// reported; what this adds is that no artifact record and no item
+    /// were written for it.
+    Outside,
+    /// The record could not be written, with `message` as the
+    /// filesystem put it.
+    ///
+    /// The rename stands and is reported: a write to the store costs
+    /// the file its record and never its rename. borax retries
+    /// nothing within a run, and the next applying run over the file
+    /// records it again.
     Unwritten { message: String },
 }
 
@@ -668,6 +747,11 @@ pub fn human_line(event: &Event) -> Option<String> {
         Event::LibraryRepair { path, repair, .. } => {
             Some(format!("{path}: {}", what_was_repaired(repair)))
         }
+        Event::LibraryAdmission { path, admission } => Some(format!(
+            "{}: {}",
+            path.display(),
+            what_was_admitted(admission)
+        )),
         Event::LibraryReconciled {
             root,
             records,
@@ -778,6 +862,10 @@ fn skipped_because(reason: &SkipReason) -> String {
             "same work already archived at {} (different file)",
             existing_path.display()
         ),
+        SkipReason::Stranding { id } => format!(
+            "artifact record {id} holds no hash of these bytes, and this run writes none, so \
+             moving it would strand the record; borax reconcile --rehash records them"
+        ),
     }
 }
 
@@ -826,6 +914,20 @@ fn what_was_repaired(repair: &Repair) -> String {
         ),
         Repair::Missing => "is recorded and is nowhere in the library".to_string(),
         Repair::Unwritten { message } => format!("could not be put right ({message})"),
+    }
+}
+
+/// `admission` as the clause following the file's name in the human
+/// rendering of [`Event::LibraryAdmission`].
+fn what_was_admitted(admission: &Admission) -> String {
+    match admission {
+        Admission::Relinked { id, from, to } => {
+            format!("artifact {id} moved from item {from} to item {to}")
+        }
+        Admission::Outside => "outside the library, so nothing was recorded".to_string(),
+        Admission::Unwritten { message } => {
+            format!("renamed but not recorded ({message})")
+        }
     }
 }
 
