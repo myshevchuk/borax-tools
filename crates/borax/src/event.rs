@@ -195,6 +195,49 @@ pub enum Event {
         /// work the library holds no file for.
         unlinked: usize,
     },
+    /// What a reconcile made of one artifact record.
+    ///
+    /// Only a record the run had something to do about produces one: a
+    /// record its own path still holds is confirmed silently, so a
+    /// reconcile over a library nothing has touched emits nothing
+    /// between its first event and its last.
+    LibraryRepair {
+        /// The record this is about, by the identity it carries. A
+        /// record outlives every path its artifact has had, so the
+        /// identity is the one handle that follows it across runs.
+        id: String,
+        /// Where the artifact stands after the run, library-relative:
+        /// the path repaired to for a repair, and the record's own
+        /// last-known path for every other outcome.
+        path: String,
+        repair: Repair,
+    },
+    /// What reconciling a library amounted to.
+    LibraryReconciled {
+        root: PathBuf,
+        /// How many records the artifact store holds.
+        records: usize,
+        /// Records whose artifact was where the record said it would
+        /// be, whether the fast path settled it or the hash confirmed
+        /// it after the fast path missed.
+        confirmed: usize,
+        /// Records whose last-known path was brought to an artifact
+        /// found elsewhere in the library.
+        repaired: usize,
+        /// Records whose artifact was edited since borax last saw it,
+        /// and whose new hash was appended.
+        changed: usize,
+        /// Records left exactly as they were because the match was
+        /// ambiguous.
+        ambiguous: usize,
+        /// Records whose artifact is nowhere in the library.
+        missing: usize,
+        /// Artifacts the run hashed. The fast path exists to keep this
+        /// far below the artifact count, so a reader of the stream can
+        /// see whether it did its job — and a second pass over an
+        /// untouched library reports zero.
+        hashed: usize,
+    },
     /// The run is over. Always the last event.
     RunFinished { counts: Counts },
 }
@@ -316,6 +359,42 @@ pub enum Finding {
     /// do not parse as JSON. One such file is a finding about itself
     /// and about no other.
     Unreadable { message: String },
+}
+
+/// What a reconcile made of one artifact record.
+///
+/// Every variant is about a record the run did not simply confirm:
+/// what it repaired, what it found changed, and what it deliberately
+/// left alone. Serialized with a `kind` tag, nested under the event's
+/// `repair` field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Repair {
+    /// The artifact was found elsewhere in the library and the record's
+    /// last-known path was brought to it. `from` is the path the record
+    /// named, library-relative, so the move is legible from the event
+    /// alone.
+    Repaired { from: String },
+    /// The artifact at the record's own path has bytes no hash in its
+    /// history held: it was edited since borax last saw it, and `hash`
+    /// was appended after the hashes already recorded.
+    Changed { hash: String },
+    /// The record matched more than one unclaimed artifact, or its one
+    /// match is a match for another record too. Nothing was written:
+    /// a stale path is repaired by the next pass, and an item link
+    /// given to the wrong artifact is not detectable at all.
+    /// `candidates` names what it matched, library-relative and in path
+    /// order.
+    Ambiguous { candidates: Vec<String> },
+    /// The record's last-known path holds no file and no artifact in
+    /// the library matches its history. The record is kept as it is,
+    /// path included: a record outliving its artifact is the library
+    /// saying it once held one.
+    Missing,
+    /// The repair was decided and the file could not be written, with
+    /// `message` as the filesystem put it. The record is as it was, and
+    /// the next reconcile decides the same thing again.
+    Unwritten { message: String },
 }
 
 /// A title a file claims for itself, and where it was read.
@@ -586,6 +665,24 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: {findings} findings, {orphans} orphans, {missing} missing, {unlinked} unlinked",
             root.display()
         )),
+        Event::LibraryRepair { path, repair, .. } => {
+            Some(format!("{path}: {}", what_was_repaired(repair)))
+        }
+        Event::LibraryReconciled {
+            root,
+            records,
+            confirmed,
+            repaired,
+            changed,
+            ambiguous,
+            missing,
+            hashed,
+        } => Some(format!(
+            "{}: {records} records, {confirmed} confirmed, {repaired} repaired, \
+             {changed} changed, {ambiguous} ambiguous, {missing} missing, \
+             {hashed} hashed",
+            root.display()
+        )),
         Event::RunFinished { counts } => Some(human_summary(counts, 0)),
     }
 }
@@ -711,6 +808,24 @@ fn what_is_wrong(finding: &Finding) -> String {
             format!("records {hash} against no run")
         }
         Finding::Unreadable { message } => format!("unreadable ({message})"),
+    }
+}
+
+/// `repair` as the end of a sentence whose subject is the artifact the
+/// record is about, for the human rendering of
+/// [`Event::LibraryRepair`].
+fn what_was_repaired(repair: &Repair) -> String {
+    match repair {
+        Repair::Repaired { from } => format!("was recorded at {from:?} and is here now"),
+        Repair::Changed { hash } => {
+            format!("has changed since borax last saw it; {hash} recorded")
+        }
+        Repair::Ambiguous { candidates } => format!(
+            "could be any of {}, so nothing was changed",
+            candidates.join(", ")
+        ),
+        Repair::Missing => "is recorded and is nowhere in the library".to_string(),
+        Repair::Unwritten { message } => format!("could not be put right ({message})"),
     }
 }
 

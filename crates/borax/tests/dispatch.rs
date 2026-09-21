@@ -14,7 +14,7 @@ use borax::config::{
     BibLayer, Effective, KeyColumns, Layer, Origin, RenameLayer, TableDeclaration, ValueKindName,
     resolve,
 };
-use borax::event::{Event, Level, Overridden, SkipReason};
+use borax::event::{Event, Level, Overridden, Repair, SkipReason};
 use borax::ledger::{Ledger, Loaded};
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -6893,6 +6893,328 @@ fn validate_with_no_finding_returns_success_whatever_the_orphan_and_unlinked_cou
     );
 
     assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+}
+
+// ---------------------------------------------------------------------
+// events_for / dispatch: Command::Reconcile — group 6
+// ---------------------------------------------------------------------
+
+/// `borax reconcile` through the command line: one `LibraryRepair` event
+/// per record repaired, then the totals
+/// ([`borax::library::reconciliation_events`]'s contract, exercised
+/// through the command).
+#[test]
+fn reconcile_emits_one_repair_event_then_the_totals() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"moved bytes").unwrap();
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "old/paper.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("moved bytes", "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(events.len(), 2, "got {events:?}");
+    assert_eq!(
+        events[0],
+        Event::LibraryRepair {
+            id: LIB_UUID_A.to_string(),
+            path: "new/paper.pdf".to_string(),
+            repair: Repair::Repaired {
+                from: "old/paper.pdf".to_string()
+            },
+        },
+        "got {:?}",
+        events[0]
+    );
+    assert_eq!(
+        events[1],
+        Event::LibraryReconciled {
+            root: root.clone(),
+            records: 1,
+            confirmed: 0,
+            repaired: 1,
+            changed: 0,
+            ambiguous: 0,
+            missing: 0,
+            hashed: 1,
+        },
+        "got {:?}",
+        events[1]
+    );
+}
+
+/// A clean library — every record's own path already agrees with its
+/// file — emits only the totals: confirmed and nothing else.
+#[test]
+fn reconcile_over_a_clean_library_emits_only_the_totals() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let path = root.join("paper.pdf");
+    fs::write(&path, b"steady bytes").unwrap();
+    let metadata = fs::metadata(&path).unwrap();
+    let modified_millis = metadata
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size: metadata.len(),
+        modified_millis,
+        history: vec![lib_hash_entry("steady bytes", "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![Event::LibraryReconciled {
+            root: root.clone(),
+            records: 1,
+            confirmed: 1,
+            repaired: 0,
+            changed: 0,
+            ambiguous: 0,
+            missing: 0,
+            hashed: 0,
+        }],
+        "a clean library must emit nothing besides the totals, got {events:?}"
+    );
+}
+
+/// `--rehash` reaches the library: over a fixture whose bytes changed
+/// while its recorded size and modification time did not, the plain
+/// command reports nothing and `--rehash` reports the change.
+#[test]
+fn reconcile_rehash_flag_reaches_the_library() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let path = root.join("paper.pdf");
+    let original: &[u8] = b"original content, unedited!";
+    fs::write(&path, original).unwrap();
+    let metadata = fs::metadata(&path).unwrap();
+    let modified = metadata.modified().unwrap();
+    let modified_millis = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size: metadata.len(),
+        modified_millis,
+        history: vec![lib_hash_entry("original content, unedited!", "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+    // Edit the bytes to the same length, put the mtime back exactly.
+    let mut edited = original.to_vec();
+    edited[0] = b'X';
+    assert_eq!(edited.len(), original.len(), "fixture must keep the length");
+    fs::write(&path, &edited).unwrap();
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let plain = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        plain,
+        vec![Event::LibraryReconciled {
+            root: root.clone(),
+            records: 1,
+            confirmed: 1,
+            repaired: 0,
+            changed: 0,
+            ambiguous: 0,
+            missing: 0,
+            hashed: 0,
+        }],
+        "without --rehash the fast path must hide the change, got {plain:?}"
+    );
+
+    let rehashed = events_for(
+        &Command::reconcile(Some(root.clone()), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let new_hash = hash_bytes(&edited);
+    assert_eq!(rehashed.len(), 2, "got {rehashed:?}");
+    assert_eq!(
+        rehashed[0],
+        Event::LibraryRepair {
+            id: LIB_UUID_A.to_string(),
+            path: "paper.pdf".to_string(),
+            repair: Repair::Changed {
+                hash: new_hash.to_string()
+            },
+        },
+        "got {:?}",
+        rehashed[0]
+    );
+    assert_eq!(
+        rehashed[1],
+        Event::LibraryReconciled {
+            root: root.clone(),
+            records: 1,
+            confirmed: 0,
+            repaired: 0,
+            changed: 1,
+            ambiguous: 0,
+            missing: 0,
+            hashed: 1,
+        },
+        "got {:?}",
+        rehashed[1]
+    );
+}
+
+/// Reconciliation is a routine library operation and not an error path:
+/// a reconcile reporting an ambiguity or a missing artifact still
+/// succeeds, unlike `validate`'s findings which end in `Outcome::Partial`.
+#[test]
+fn reconcile_reporting_ambiguity_or_a_missing_artifact_still_succeeds() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "gone.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("gone bytes", "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        ledger: None,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::reconcile(Some(root.clone()), false), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(
+        outcome,
+        Outcome::Success,
+        "a missing artifact is a routine report, not a failure: got {outcome:?}"
+    );
 }
 
 // ---------------------------------------------------------------------

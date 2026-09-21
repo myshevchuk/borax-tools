@@ -276,6 +276,21 @@ pub enum Command {
         #[command(flatten)]
         run_log: RunLogOptions,
     },
+    /// Bring artifact records back into agreement with the library's
+    /// tree.
+    Reconcile {
+        /// The library to reconcile, as `status` takes it.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+
+        /// Hash every artifact rather than trusting a recorded size and
+        /// modification time that match the file.
+        #[arg(long)]
+        rehash: bool,
+
+        #[command(flatten)]
+        run_log: RunLogOptions,
+    },
     /// Work on the collection's record of what it has admitted.
     Ledger {
         #[command(subcommand)]
@@ -502,7 +517,9 @@ impl Cli {
                 extraction.fill(&mut settings);
                 run_log.fill(&mut settings);
             }
-            Command::Validate { run_log, .. } => run_log.fill(&mut settings),
+            Command::Validate { run_log, .. } | Command::Reconcile { run_log, .. } => {
+                run_log.fill(&mut settings)
+            }
             Command::Cache { run_log, .. } => run_log.fill(&mut settings),
             Command::Ledger {
                 action: LedgerAction::Rebuild { run_log },
@@ -589,6 +606,16 @@ impl Command {
         }
     }
 
+    /// The `reconcile` command over the library at `path`, hashing
+    /// every artifact when `rehash`, with no setting overridden.
+    pub fn reconcile(path: Option<PathBuf>, rehash: bool) -> Command {
+        Command::Reconcile {
+            path,
+            rehash,
+            run_log: RunLogOptions::default(),
+        }
+    }
+
     /// The subcommand's name, as [`crate::event::Event::RunStarted`]
     /// reports it and as the user typed it. A subcommand with an
     /// action of its own is named by both words, as `ledger rebuild`.
@@ -601,6 +628,7 @@ impl Command {
             Command::Cache { .. } => "cache",
             Command::Status { .. } => "status",
             Command::Validate { .. } => "validate",
+            Command::Reconcile { .. } => "reconcile",
             Command::Ledger {
                 action: LedgerAction::Rebuild { .. },
             } => "ledger rebuild",
@@ -618,6 +646,7 @@ impl Command {
             | Command::Cache { .. }
             | Command::Status { .. }
             | Command::Validate { .. }
+            | Command::Reconcile { .. }
             | Command::Ledger { .. } => &[],
         }
     }
@@ -632,7 +661,9 @@ impl Command {
     /// is discovered from, and so which library the run is in.
     pub fn directory(&self) -> Option<&Path> {
         match self {
-            Command::Status { path, .. } | Command::Validate { path, .. } => path.as_deref(),
+            Command::Status { path, .. }
+            | Command::Validate { path, .. }
+            | Command::Reconcile { path, .. } => path.as_deref(),
             _ => None,
         }
     }

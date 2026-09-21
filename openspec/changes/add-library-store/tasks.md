@@ -153,10 +153,10 @@ is a run contradicting a living requirement.
 
 ## 6. `borax reconcile`
 
-- [ ] 6.1 Red: a record whose artifact was moved out of band is repaired
+- [x] 6.1 Red: a record whose artifact was moved out of band is repaired
       by the bounded walk, matching any hash in its history, keeping its
       artifact identity and its item link.
-- [ ] 6.2 Red: the fast path — an artifact whose recorded size and
+- [x] 6.2 Red: the fast path — an artifact whose recorded size and
       modification time match is not hashed, and a file whose bytes,
       size or modification time changed at its recorded path has its new
       hash appended after the ones already there and is reported as
@@ -166,7 +166,7 @@ is a run contradicting a living requirement.
       reports the change and appends. That is what the fast path
       deliberately misses, so it is what pins the flag's reason for
       existing.
-- [ ] 6.2a Red: **the touch counterexample** — `touch` an artifact so
+- [x] 6.2a Red: **the touch counterexample** — `touch` an artifact so
       that its modification time changes and its bytes do not, then
       reconcile. The fast path misses, the hash confirms the record, and
       the recorded size and modification time are refreshed to the
@@ -177,26 +177,26 @@ is a run contradicting a living requirement.
       corrected, which would leave the artifact permanently unconfirmed
       for anything deriving from `(size, mtime)` — including the
       filesystem view the change above this one builds on the store.
-- [ ] 6.2b Red: a repair writes the file's current size and modification
+- [x] 6.2b Red: a repair writes the file's current size and modification
       time along with its new path, so the reconcile after a repair
       settles that record on the fast path.
-- [ ] 6.3 Red: the precedence of design D6, one test per step and one
+- [x] 6.3 Red: the precedence of design D6, one test per step and one
       per way it can be got wrong — two records whose files swapped
       paths both repair and neither gains a history entry; a settled
       record's file is not a candidate for another record; a current-hash
       match wins over a historical one.
-- [ ] 6.4 Red: ambiguity preserves — a record with two candidates, and
+- [x] 6.4 Red: ambiguity preserves — a record with two candidates, and
       two records contending for one file, each leave path, history and
       item link byte-identical and are reported naming the candidates.
       Assert the item link specifically: the failure this rules out is
       silent reassignment, which nothing downstream can detect.
-- [ ] 6.5 Red: a reconcile over a library nothing has touched writes no
+- [x] 6.5 Red: a reconcile over a library nothing has touched writes no
       library state — every file of the item store and of
       `.borax/artifacts/` byte-identical, mtimes included, with the run
       log the only thing the run leaves — and a
       reconcile creates no record for an orphan and deletes no record
       whose artifact is gone.
-- [ ] 6.6 Green: the `reconcile` subcommand, the fast path, the four
+- [x] 6.6 Green: the `reconcile` subcommand, the fast path, the four
       ordered steps, the ambiguity rule, and field-level editing through
       `toml_edit` rendered into an atomic whole-file replacement so that
       an unchanged document is not rewritten.

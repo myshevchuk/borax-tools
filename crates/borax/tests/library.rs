@@ -3,11 +3,12 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use borax::event::Finding;
+use borax::event::{Event, Finding, Repair};
 use borax::library::{
     ARTIFACT_STORE, ArtifactStore, ITEM_STORE, ItemStore, STATE_DIR, artifacts, contains, missing,
-    orphans, survey, validate,
+    orphans, reconcile, reconciliation_events, relative_to, survey, validate,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -21,6 +22,13 @@ use tempfile::tempdir;
 
 const UUID_A: &str = "018f2b36-7f21-7abc-8def-0123456789ab";
 const UUID_B: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef0";
+const UUID_C: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef1";
+const UUID_D: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef2";
+
+/// The run stamp every reconcile fixture below uses, following
+/// `hash_entry`'s own hard-coded timestamp and tool version.
+const TIMESTAMP: &str = "2026-01-01T00:00:00Z";
+const TOOL_VERSION: &str = "0.6.0-test";
 
 fn item_id(text: &str) -> ItemId {
     ItemId::parse(text).unwrap()
@@ -113,6 +121,70 @@ fn write_artifact_record(root: &Path, record: &ArtifactRecord) {
     let dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(format!("{}.toml", record.id)), record.to_toml()).unwrap();
+}
+
+/// `path`'s size and modification time, in the form an artifact record
+/// stores them.
+fn stat(path: &Path) -> (u64, i64) {
+    let metadata = fs::metadata(path).unwrap();
+    let modified = metadata.modified().unwrap();
+    let modified_millis = match modified.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as i64,
+        Err(err) => -(err.duration().as_millis() as i64),
+    };
+    (metadata.len(), modified_millis)
+}
+
+/// An [`ArtifactRecord`] whose `size` and `modified_millis` are the
+/// real, current stat of the file at `relative` under `root` — unlike
+/// [`artifact_record`]'s hard-coded `size: 100, modified_millis: 0`,
+/// this is what makes the fast path actually match.
+fn fresh_record(
+    root: &Path,
+    id: ArtifactId,
+    item: Option<ItemId>,
+    relative: &str,
+    history: Vec<HashEntry>,
+) -> ArtifactRecord {
+    let (size, modified_millis) = stat(&relative_to(root, relative));
+    ArtifactRecord {
+        id,
+        item,
+        path: relative.to_string(),
+        size,
+        modified_millis,
+        history,
+    }
+}
+
+/// Every file under `root`'s item store and artifact-record store, with
+/// its bytes and its modification time, keyed by path.
+///
+/// [`snapshot`] compares bytes alone; task 6.5 and 6.2a also care about
+/// the modification time reconciliation was run to protect, so this is
+/// a second helper rather than a change to that one. Scoped to
+/// `items/` and `.borax/artifacts/`, which is what those tasks name.
+fn snapshot_with_mtime(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
+    fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, (Vec<u8>, SystemTime)>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.is_file() {
+                let bytes = fs::read(&path).unwrap();
+                let modified = fs::metadata(&path).unwrap().modified().unwrap();
+                out.insert(path.clone(), (bytes, modified));
+            }
+        }
+    }
+
+    let mut found = BTreeMap::new();
+    walk(&root.join(ITEM_STORE), &mut found);
+    walk(&root.join(STATE_DIR).join(ARTIFACT_STORE), &mut found);
+    found
 }
 
 // ---------------------------------------------------------------------
@@ -1216,5 +1288,870 @@ fn validate_leaves_the_store_byte_identical_even_when_it_reports_findings() {
         snapshot(root),
         before,
         "validate must write nothing to the store"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 6.1: reconcile() repairs a moved artifact by matching its history
+// ---------------------------------------------------------------------
+
+/// Scenario "A file manager move is repaired", matched on the record's
+/// current (newest) hash: the artifact's identity and item link survive
+/// the move, and the repair is reported naming where it was.
+#[test]
+fn a_moved_artifact_is_repaired_by_matching_its_current_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"steady content").unwrap();
+    let item = item_id(UUID_C);
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "old/paper.pdf",
+        vec![hash_entry("steady content", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id.clone(),
+            "new/paper.pdf".to_string(),
+            Repair::Repaired {
+                from: "old/paper.pdf".to_string()
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(after.path, "new/paper.pdf");
+    assert_eq!(after.id, id);
+    assert_eq!(after.item, Some(item));
+    assert_eq!(
+        after.history,
+        vec![hash_entry("steady content", "run-0")],
+        "matching the current hash appends nothing"
+    );
+}
+
+/// The same repair, matched on a hash the record only holds as history:
+/// the file's bytes are the *older* version the record once recorded,
+/// not its newest one.
+#[test]
+fn a_moved_artifact_is_repaired_by_matching_a_historical_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"older content").unwrap();
+    let item = item_id(UUID_C);
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "old/paper.pdf",
+        vec![
+            hash_entry("older content", "run-0"),
+            hash_entry("newer content", "run-1"),
+        ],
+    );
+    write_artifact_record(root, &record);
+
+    let result = reconcile(root, false, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id.clone(),
+            "new/paper.pdf".to_string(),
+            Repair::Repaired {
+                from: "old/paper.pdf".to_string()
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(after.path, "new/paper.pdf");
+    assert_eq!(after.item, Some(item));
+    assert_eq!(
+        after.history,
+        vec![
+            hash_entry("older content", "run-0"),
+            hash_entry("newer content", "run-1"),
+        ],
+        "matching a historical hash appends nothing"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 6.2: reconcile() — the fast path
+// ---------------------------------------------------------------------
+
+/// A record whose recorded size and modification time are the file's is
+/// confirmed without being hashed.
+#[test]
+fn fast_path_record_matching_size_and_mtime_is_not_hashed() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"steady content").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = fresh_record(
+        root,
+        id.clone(),
+        None,
+        "paper.pdf",
+        vec![hash_entry("steady content", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let before = snapshot(root);
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(result.hashed, 0, "got {result:?}");
+    assert!(result.repairs.is_empty(), "got {:?}", result.repairs);
+    assert_eq!(result.confirmed, 1, "got {result:?}");
+    assert_eq!(
+        snapshot(root),
+        before,
+        "a record the fast path settles is not written"
+    );
+}
+
+/// A file at its recorded path whose bytes, size and modification time
+/// all changed has its new hash appended after the ones already
+/// recorded, in order, and is reported as changed.
+#[test]
+fn fast_path_miss_appends_the_new_hash_after_the_ones_already_recorded() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"version two content").unwrap();
+    let id = artifact_id(UUID_A);
+    // A record whose size deliberately disagrees with the file, so the
+    // fast path cannot possibly match it, over a history describing an
+    // earlier version of the bytes.
+    let mut record = fresh_record(
+        root,
+        id.clone(),
+        None,
+        "paper.pdf",
+        vec![hash_entry("version one content", "run-0")],
+    );
+    record.size += 1;
+    write_artifact_record(root, &record);
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    let new_hash = hash_bytes(b"version two content");
+    assert_eq!(result.hashed, 1, "got {result:?}");
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id.clone(),
+            "paper.pdf".to_string(),
+            Repair::Changed {
+                hash: new_hash.to_string()
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(
+        after.history,
+        vec![
+            hash_entry("version one content", "run-0"),
+            HashEntry {
+                hash: new_hash,
+                run: RunId::new("run-1"),
+                timestamp: TIMESTAMP.to_string(),
+                tool_version: TOOL_VERSION.to_string(),
+            },
+        ],
+        "the new hash must be appended after the ones already recorded, got {:?}",
+        after.history
+    );
+}
+
+/// The exact counterexample the fast path is deliberately blind to:
+/// bytes changed while size and modification time did not. A plain
+/// reconcile reports nothing and writes no library state; `--rehash`
+/// reports the change and appends.
+#[test]
+fn a_change_the_fast_path_cannot_see_is_missed_without_rehash_and_found_with_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let original: &[u8] = b"original content, unedited";
+    fs::write(&path, original).unwrap();
+    let id = artifact_id(UUID_A);
+    let record = fresh_record(
+        root,
+        id.clone(),
+        None,
+        "paper.pdf",
+        vec![hash_entry("original content, unedited", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+
+    // Edit the bytes to the same length and put the modification time
+    // back exactly as it was, so only the hash comparison can catch it.
+    let mut edited = original.to_vec();
+    edited[0] = b'X';
+    assert_eq!(edited.len(), original.len(), "fixture must keep the length");
+    fs::write(&path, &edited).unwrap();
+    fs::File::open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+
+    let before = snapshot(root);
+    let plain = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        plain.hashed, 0,
+        "the fast path must still match on size and mtime"
+    );
+    assert!(plain.repairs.is_empty(), "got {:?}", plain.repairs);
+    assert_eq!(
+        snapshot(root),
+        before,
+        "a plain reconcile must write no library state here"
+    );
+
+    let rehashed = reconcile(root, true, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+
+    let new_hash = hash_bytes(&edited);
+    assert_eq!(rehashed.hashed, 1, "got {rehashed:?}");
+    assert_eq!(
+        rehashed.repairs,
+        vec![(
+            id.clone(),
+            "paper.pdf".to_string(),
+            Repair::Changed {
+                hash: new_hash.to_string()
+            }
+        )],
+        "got {:?}",
+        rehashed.repairs
+    );
+}
+
+// ---------------------------------------------------------------------
+// 6.2a: the touch counterexample
+// ---------------------------------------------------------------------
+
+/// `touch paper.pdf`: the fast path misses because the modification
+/// time changed, the hash confirms the record, and the recorded size
+/// and modification time are refreshed to the file's current ones — so
+/// a second reconcile settles the record on the fast path.
+#[test]
+fn a_touch_is_confirmed_by_hash_and_refreshes_the_recorded_fields() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    fs::write(&path, b"untouched bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = fresh_record(
+        root,
+        id.clone(),
+        None,
+        "paper.pdf",
+        vec![hash_entry("untouched bytes", "run-0")],
+    );
+    let recorded_millis = record.modified_millis;
+    write_artifact_record(root, &record);
+
+    // Touch: change the modification time, leave the bytes exactly as
+    // they are.
+    let touched = SystemTime::now() + std::time::Duration::from_secs(3600);
+    fs::File::open(&path)
+        .unwrap()
+        .set_modified(touched)
+        .unwrap();
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(result.hashed, 1, "the fast path must miss on the touch");
+    assert_eq!(result.confirmed, 1, "got {result:?}");
+    assert!(
+        result.repairs.is_empty(),
+        "a confirmation is not a repair, got {:?}",
+        result.repairs
+    );
+
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    let (current_size, current_millis) = stat(&path);
+    assert_ne!(
+        current_millis, recorded_millis,
+        "fixture assumption: the touch must actually change the mtime"
+    );
+    assert_eq!(
+        after.size, current_size,
+        "the confirmed record must be refreshed to the file's current size"
+    );
+    assert_eq!(
+        after.modified_millis, current_millis,
+        "the confirmed record must be refreshed to the file's current mtime"
+    );
+    assert_eq!(
+        after.history,
+        vec![hash_entry("untouched bytes", "run-0")],
+        "a confirmation gains no history entry"
+    );
+
+    // A second reconcile now settles the record on the fast path.
+    let before = snapshot_with_mtime(root);
+    let second = reconcile(root, false, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+    assert_eq!(second.hashed, 0, "got {second:?}");
+    assert_eq!(
+        snapshot_with_mtime(root),
+        before,
+        "a reconcile settled on the fast path writes nothing, mtimes included"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 6.2b: a repair settles the record on the fast path afterwards
+// ---------------------------------------------------------------------
+
+/// A repair writes the file's current size and modification time along
+/// with its new path, so the reconcile right after settles that record
+/// on the fast path.
+#[test]
+fn a_repair_settles_the_record_on_the_fast_path_for_the_next_reconcile() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"moved bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        None,
+        "old/paper.pdf",
+        vec![hash_entry("moved bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let first = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    assert_eq!(
+        first.repairs,
+        vec![(
+            id.clone(),
+            "new/paper.pdf".to_string(),
+            Repair::Repaired {
+                from: "old/paper.pdf".to_string()
+            }
+        )],
+        "got {:?}",
+        first.repairs
+    );
+
+    let before = snapshot(root);
+    let second = reconcile(root, false, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+    assert_eq!(
+        second.hashed, 0,
+        "the repair must have written the file's current size and mtime"
+    );
+    assert_eq!(
+        snapshot(root),
+        before,
+        "a reconcile settled on the fast path writes nothing"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 6.3: the precedence of design D6
+// ---------------------------------------------------------------------
+
+/// Two recorded artifacts that swapped paths outside borax: each
+/// record's path is repaired to the file whose hash it records, and
+/// neither hash history gains an entry nor item link changes — the
+/// order that stops step 3 from reading each as the other's artifact
+/// edited in place.
+#[test]
+fn two_records_whose_files_swapped_paths_both_repair_without_gaining_history_or_changing_links() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    // a.pdf now holds what record B used to be at, and vice versa.
+    fs::write(root.join("a.pdf"), b"content-b").unwrap();
+    fs::write(root.join("b.pdf"), b"content-a").unwrap();
+    let id_a = artifact_id(UUID_A);
+    let id_b = artifact_id(UUID_B);
+    let item_a = item_id(UUID_C);
+    let item_b = item_id(UUID_D);
+    let record_a = artifact_record(
+        id_a.clone(),
+        Some(item_a.clone()),
+        "a.pdf",
+        vec![hash_entry("content-a", "run-0")],
+    );
+    let record_b = artifact_record(
+        id_b.clone(),
+        Some(item_b.clone()),
+        "b.pdf",
+        vec![hash_entry("content-b", "run-0")],
+    );
+    write_artifact_record(root, &record_a);
+    write_artifact_record(root, &record_b);
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![
+            (
+                id_a.clone(),
+                "b.pdf".to_string(),
+                Repair::Repaired {
+                    from: "a.pdf".to_string()
+                }
+            ),
+            (
+                id_b.clone(),
+                "a.pdf".to_string(),
+                Repair::Repaired {
+                    from: "b.pdf".to_string()
+                }
+            ),
+        ],
+        "got {:?}",
+        result.repairs
+    );
+    let after = ArtifactStore::read(root);
+    let got_a = after.by_id(&id_a).unwrap();
+    let got_b = after.by_id(&id_b).unwrap();
+    assert_eq!(got_a.path, "b.pdf");
+    assert_eq!(got_a.item, Some(item_a));
+    assert_eq!(
+        got_a.history,
+        vec![hash_entry("content-a", "run-0")],
+        "the swap must gain no history entry"
+    );
+    assert_eq!(got_b.path, "a.pdf");
+    assert_eq!(got_b.item, Some(item_b));
+    assert_eq!(
+        got_b.history,
+        vec![hash_entry("content-b", "run-0")],
+        "the swap must gain no history entry"
+    );
+}
+
+/// A settled record's file is not a candidate for another record: A is
+/// fine at its own path, and B's path holds nothing while B's history
+/// holds the same hash A's file has. B must not be repaired onto A's
+/// already-claimed file.
+#[test]
+fn a_settled_records_file_is_not_a_candidate_for_another_record() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("a.pdf"), b"shared bytes").unwrap();
+    let id_a = artifact_id(UUID_A);
+    let id_b = artifact_id(UUID_B);
+    let record_a = fresh_record(
+        root,
+        id_a.clone(),
+        None,
+        "a.pdf",
+        vec![hash_entry("shared bytes", "run-0")],
+    );
+    let record_b = artifact_record(
+        id_b.clone(),
+        None,
+        "b.pdf",
+        vec![hash_entry("shared bytes", "run-0")],
+    );
+    write_artifact_record(root, &record_a);
+    write_artifact_record(root, &record_b);
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![(id_b.clone(), "b.pdf".to_string(), Repair::Missing)],
+        "A's own file must not be reachable as B's candidate, got {:?}",
+        result.repairs
+    );
+    let after = ArtifactStore::read(root);
+    assert_eq!(after.by_id(&id_a).unwrap().path, "a.pdf");
+    assert_eq!(after.by_id(&id_b).unwrap().path, "b.pdf");
+}
+
+/// A current-hash match wins over a historical one when both are
+/// unclaimed candidates for the same record.
+#[test]
+fn a_current_hash_match_wins_over_a_historical_one() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("old")).unwrap();
+    fs::create_dir_all(root.join("current")).unwrap();
+    fs::write(root.join("old/v1.pdf"), b"version one").unwrap();
+    fs::write(root.join("current/v2.pdf"), b"version two").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        None,
+        "gone.pdf",
+        vec![
+            hash_entry("version one", "run-0"),
+            hash_entry("version two", "run-1"),
+        ],
+    );
+    write_artifact_record(root, &record);
+
+    let result = reconcile(root, false, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id.clone(),
+            "current/v2.pdf".to_string(),
+            Repair::Repaired {
+                from: "gone.pdf".to_string()
+            }
+        )],
+        "the current hash's match must win, got {:?}",
+        result.repairs
+    );
+}
+
+// ---------------------------------------------------------------------
+// 6.4: ambiguity preserves
+// ---------------------------------------------------------------------
+
+/// One record with two candidates: it keeps its path, its history and
+/// its item link, and the run reports it ambiguous naming both
+/// candidates in path order.
+#[test]
+fn one_record_with_two_candidates_is_left_exactly_as_it_was() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("copy1.pdf"), b"duplicated bytes").unwrap();
+    fs::write(root.join("copy2.pdf"), b"duplicated bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_C);
+    let record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "gone.pdf",
+        vec![hash_entry("duplicated bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let before = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id.clone(),
+            "gone.pdf".to_string(),
+            Repair::Ambiguous {
+                candidates: vec!["copy1.pdf".to_string(), "copy2.pdf".to_string()]
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(
+        after, before,
+        "an ambiguous record must be left byte-for-byte as it was"
+    );
+    assert_eq!(
+        after.item,
+        Some(item),
+        "the item link specifically must not be reassigned"
+    );
+}
+
+/// Two records both contending for one unclaimed file: neither is
+/// repaired, neither claims the file, and both are reported ambiguous —
+/// path, history and item link untouched for each.
+#[test]
+fn two_records_contending_for_one_file_are_both_left_exactly_as_they_were() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("shared.pdf"), b"contended bytes").unwrap();
+    let id_a = artifact_id(UUID_A);
+    let id_b = artifact_id(UUID_B);
+    let item_a = item_id(UUID_C);
+    let item_b = item_id(UUID_D);
+    let record_a = artifact_record(
+        id_a.clone(),
+        Some(item_a.clone()),
+        "gone-a.pdf",
+        vec![hash_entry("contended bytes", "run-0")],
+    );
+    let record_b = artifact_record(
+        id_b.clone(),
+        Some(item_b.clone()),
+        "gone-b.pdf",
+        vec![hash_entry("contended bytes", "run-0")],
+    );
+    write_artifact_record(root, &record_a);
+    write_artifact_record(root, &record_b);
+    let before_a = ArtifactStore::read(root).by_id(&id_a).unwrap().clone();
+    let before_b = ArtifactStore::read(root).by_id(&id_b).unwrap().clone();
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![
+            (
+                id_a.clone(),
+                "gone-a.pdf".to_string(),
+                Repair::Ambiguous {
+                    candidates: vec!["shared.pdf".to_string()]
+                }
+            ),
+            (
+                id_b.clone(),
+                "gone-b.pdf".to_string(),
+                Repair::Ambiguous {
+                    candidates: vec!["shared.pdf".to_string()]
+                }
+            ),
+        ],
+        "got {:?}",
+        result.repairs
+    );
+    let after_a = ArtifactStore::read(root).by_id(&id_a).unwrap().clone();
+    let after_b = ArtifactStore::read(root).by_id(&id_b).unwrap().clone();
+    assert_eq!(after_a, before_a);
+    assert_eq!(after_b, before_b);
+    assert_eq!(after_a.item, Some(item_a));
+    assert_eq!(after_b.item, Some(item_b));
+}
+
+// ---------------------------------------------------------------------
+// 6.5: an untouched library, an orphan, and a missing artifact
+// ---------------------------------------------------------------------
+
+/// A reconcile over a library nothing has touched writes no library
+/// state — every file of the item store and of `.borax/artifacts/`
+/// byte-identical, mtimes included.
+#[test]
+fn a_reconcile_over_an_untouched_library_writes_no_library_state() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("a.pdf"), b"content a").unwrap();
+    fs::write(root.join("b.pdf"), b"content b").unwrap();
+    let item = Item {
+        id: item_id(UUID_C),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("item.{UUID_C}.toml"), &item);
+    let record_a = fresh_record(
+        root,
+        artifact_id(UUID_A),
+        Some(item.id.clone()),
+        "a.pdf",
+        vec![hash_entry("content a", "run-0")],
+    );
+    let record_b = fresh_record(
+        root,
+        artifact_id(UUID_B),
+        None,
+        "b.pdf",
+        vec![hash_entry("content b", "run-0")],
+    );
+    write_artifact_record(root, &record_a);
+    write_artifact_record(root, &record_b);
+    let before = snapshot_with_mtime(root);
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(result.hashed, 0, "got {result:?}");
+    assert!(result.repairs.is_empty(), "got {:?}", result.repairs);
+    assert_eq!(result.records, 2, "got {result:?}");
+    assert_eq!(result.confirmed, result.records, "got {result:?}");
+    assert_eq!(
+        snapshot_with_mtime(root),
+        before,
+        "an untouched library must be left byte-identical, mtimes included"
+    );
+}
+
+/// A reconcile creates no record for an orphan.
+#[test]
+fn reconcile_creates_no_record_for_an_orphan() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("orphan.pdf"), b"orphan bytes").unwrap();
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(result.records, 0, "got {result:?}");
+    assert!(
+        !root.join(STATE_DIR).join(ARTIFACT_STORE).exists(),
+        "no record must be created for an orphan"
+    );
+}
+
+/// A reconcile deletes no record whose artifact is gone: it is reported
+/// missing and left byte-identical.
+#[test]
+fn reconcile_deletes_no_record_whose_artifact_is_gone() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        None,
+        "gone.pdf",
+        vec![hash_entry("gone", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let before = snapshot(root);
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![(id, "gone.pdf".to_string(), Repair::Missing)],
+        "got {:?}",
+        result.repairs
+    );
+    assert_eq!(
+        snapshot(root),
+        before,
+        "a record whose artifact is gone must be left byte-identical"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 2.5 (reconcile's half): the bounded walk stops at a nested marker
+// ---------------------------------------------------------------------
+
+/// An artifact moved into a nested library's subtree is not a
+/// candidate: the outer record is reported missing rather than
+/// repaired, and the nested library's files are untouched.
+#[test]
+fn reconcile_does_not_repair_into_a_nested_librarys_subtree() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested/.borax.toml"), b"").unwrap();
+    fs::write(root.join("nested/moved.pdf"), b"escaped bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        None,
+        "gone.pdf",
+        vec![hash_entry("escaped bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let nested_before = snapshot(&root.join("nested"));
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![(id, "gone.pdf".to_string(), Repair::Missing)],
+        "the nested library's file must not be a candidate, got {:?}",
+        result.repairs
+    );
+    assert_eq!(
+        snapshot(&root.join("nested")),
+        nested_before,
+        "a nested library's files must be untouched by an outer reconcile"
+    );
+}
+
+/// A PDF placed under `items/` or under `.borax/` is not a candidate
+/// either, following the same exclusion the walk and the orphan count
+/// already obey.
+#[test]
+fn reconcile_does_not_treat_a_pdf_under_items_or_the_state_dir_as_a_candidate() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(ITEM_STORE)).unwrap();
+    fs::write(
+        root.join(ITEM_STORE).join("smuggled.pdf"),
+        b"smuggled bytes",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(root.join(STATE_DIR).join("smuggled.pdf"), b"smuggled bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        None,
+        "gone.pdf",
+        vec![hash_entry("smuggled bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+    assert_eq!(
+        result.repairs,
+        vec![(id, "gone.pdf".to_string(), Repair::Missing)],
+        "neither items/ nor .borax/ may supply a candidate, got {:?}",
+        result.repairs
+    );
+}
+
+// ---------------------------------------------------------------------
+// reconciliation_events: sanity over the two stores together
+// ---------------------------------------------------------------------
+
+/// `reconciliation_events` emits one `LibraryRepair` per record the run
+/// had something to say about, then one `LibraryReconciled` carrying
+/// the totals — exercised directly over [`reconcile`]'s own output so a
+/// defect in the event mapping is distinguishable from one in
+/// reconciliation itself.
+#[test]
+fn reconciliation_events_emits_one_repair_event_then_the_totals() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"moved bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        None,
+        "old/paper.pdf",
+        vec![hash_entry("moved bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let reconciliation = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let events = reconciliation_events(&reconciliation);
+
+    assert_eq!(events.len(), 2, "got {events:?}");
+    assert_eq!(
+        events[0],
+        Event::LibraryRepair {
+            id: id.to_string(),
+            path: "new/paper.pdf".to_string(),
+            repair: Repair::Repaired {
+                from: "old/paper.pdf".to_string()
+            },
+        },
+        "got {:?}",
+        events[0]
+    );
+    assert_eq!(
+        events[1],
+        Event::LibraryReconciled {
+            root: root.to_path_buf(),
+            records: 1,
+            confirmed: 0,
+            repaired: 1,
+            changed: 0,
+            ambiguous: 0,
+            missing: 0,
+            hashed: 1,
+        },
+        "got {:?}",
+        events[1]
     );
 }

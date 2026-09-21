@@ -16,19 +16,25 @@
 //! it.
 
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, Item, ItemId, is_library_relative, is_well_formed_hash, name_uuid,
+    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, RunId, is_library_relative,
+    is_well_formed_hash, name_uuid,
 };
 use borax_core::record::Record;
+use borax_sources::store::{hash_file, write_atomically};
+use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, value};
 use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
-use crate::event::{Event, Finding};
+use crate::event::{Event, Finding, Repair};
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
 
@@ -831,6 +837,492 @@ pub fn validation_events(validation: &Validation) -> Vec<Event> {
         orphans: validation.orphans,
         missing: validation.missing,
         unlinked: validation.unlinked,
+    });
+    events
+}
+
+/// What the filesystem says about a file, as an artifact record records
+/// it: its size in bytes and its modification time in milliseconds
+/// since the Unix epoch.
+///
+/// `None` when the file cannot be stat'd, or when the platform will not
+/// say when it was modified. A modification time before the epoch is
+/// negative, which is why the field is signed.
+fn seen(path: &Path) -> Option<(u64, i64)> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let millis = match modified.duration_since(UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_millis()).ok()?,
+        Err(before) => -i64::try_from(before.duration().as_millis()).ok()?,
+    };
+    Some((metadata.len(), millis))
+}
+
+/// Whether `record` describes the file at `path` as it stands: the size
+/// and the modification time the record holds are the file's.
+///
+/// This is the fast path, and it is what a reconcile compares before it
+/// hashes anything. It misses a change within the granularity the
+/// recorded modification time keeps, which is what `--rehash` is for.
+/// A file that cannot be stat'd matches nothing.
+fn describes(record: &ArtifactRecord, path: &Path) -> bool {
+    seen(path) == Some((record.size, record.modified_millis))
+}
+
+/// `entry` as the table an artifact record writes a history entry as.
+fn history_table(entry: &HashEntry) -> Table {
+    let mut table = Table::new();
+    table["hash"] = value(entry.hash.as_str());
+    table["run"] = value(entry.run.as_str());
+    table["timestamp"] = value(entry.timestamp.as_str());
+    table["tool_version"] = value(entry.tool_version.as_str());
+    table
+}
+
+/// Add to `document`'s history every entry of `history` beyond the ones
+/// it already holds, in order.
+///
+/// A history only ever grows, so the entries past the length the
+/// document carries are the ones to add, and the entries already
+/// written are left exactly as they are. Both spellings of an array are
+/// appended to in their own spelling, so a record written as tables
+/// stays tables.
+///
+/// Fails when `history` is something other than an array, which is a
+/// record the parser would not have accepted.
+fn append_history(document: &mut DocumentMut, history: &[HashEntry]) -> io::Result<()> {
+    let written = match document.get("history") {
+        Some(TomlItem::ArrayOfTables(tables)) => tables.len(),
+        Some(TomlItem::Value(Value::Array(array))) => array.len(),
+        Some(_) => return Err(io::Error::other("history is not an array")),
+        None => 0,
+    };
+    let Some(added) = history.get(written..) else {
+        return Ok(());
+    };
+    if added.is_empty() {
+        return Ok(());
+    }
+
+    match document
+        .entry("history")
+        .or_insert_with(|| TomlItem::ArrayOfTables(ArrayOfTables::new()))
+    {
+        TomlItem::ArrayOfTables(tables) => {
+            for entry in added {
+                tables.push(history_table(entry));
+            }
+            Ok(())
+        }
+        TomlItem::Value(Value::Array(array)) => {
+            for entry in added {
+                array.push(history_table(entry).into_inline_table());
+            }
+            Ok(())
+        }
+        _ => Err(io::Error::other("history is not an array")),
+    }
+}
+
+/// Write `record` back to `path`, leaving the rest of the document as
+/// it was.
+///
+/// The file's text is parsed as a document, the fields `record` now
+/// carries are set on it, and the result is rendered: an artifact
+/// record's key order, its formatting and any comment a person left in
+/// it survive an edit to one field. A rendering identical to what the
+/// file already holds is not written at all, which is what leaves a
+/// reconcile that decided nothing with no diff and no touched
+/// modification time.
+///
+/// The write is a whole-file atomic replacement
+/// ([`write_atomically`]): a reader either sees the record as it was or
+/// the record as it now is, and an interrupted write leaves the
+/// previous one intact.
+///
+/// Fails with what the filesystem said, which the caller reports as
+/// [`Repair::Unwritten`]. A file that cannot be read or does not parse
+/// is such a failure: this rewrites a record borax read, and nothing
+/// here creates one.
+fn rewrite(path: &Path, record: &ArtifactRecord) -> io::Result<()> {
+    let text = fs::read_to_string(path)?;
+    let mut document: DocumentMut = text.parse().map_err(io::Error::other)?;
+
+    document["path"] = value(record.path.as_str());
+    document["size"] = value(i64::try_from(record.size).map_err(io::Error::other)?);
+    document["modified_millis"] = value(record.modified_millis);
+    append_history(&mut document, &record.history)?;
+
+    let rendered = document.to_string();
+    match rendered == text {
+        true => Ok(()),
+        false => write_atomically(path, rendered.as_bytes()),
+    }
+}
+
+/// Set `record`'s size and modification time to the file it now names.
+///
+/// Leaves both as they are when that file cannot be stat'd: a record
+/// whose fields borax could not read is no worse off than before.
+fn refresh(root: &Path, record: &mut ArtifactRecord) {
+    if let Some((size, modified_millis)) = seen(&relative_to(root, &record.path)) {
+        record.size = size;
+        record.modified_millis = modified_millis;
+    }
+}
+
+/// The hashing one reconcile did, memoised by library-relative path.
+///
+/// A file is read once however many records ask about it, which is what
+/// makes the count of artifacts hashed the count of artifacts rather
+/// than the count of questions.
+#[derive(Debug, Default)]
+struct Hashes {
+    /// Every path asked about, with what it yielded — `None` for a file
+    /// that could not be read, which is asked about no more often than
+    /// one that could.
+    computed: BTreeMap<String, Option<ContentHash>>,
+    /// How many artifacts were hashed. A file that could not be read
+    /// was not one of them.
+    hashed: usize,
+}
+
+impl Hashes {
+    /// The hash of the file at `relative` under `root`, or `None` when
+    /// it cannot be read — which a path holding no file is.
+    fn of(&mut self, root: &Path, relative: &str) -> Option<ContentHash> {
+        if let Some(hash) = self.computed.get(relative) {
+            return hash.clone();
+        }
+
+        let hash = hash_file(&relative_to(root, relative)).ok();
+        if hash.is_some() {
+            self.hashed += 1;
+        }
+        self.computed.insert(relative.to_string(), hash.clone());
+        hash
+    }
+}
+
+/// What a reconcile's four steps decided about one record, before
+/// anything is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Decided {
+    /// The record's own path holds its artifact. `refreshed` is set
+    /// when the fast path missed and a hash in the record's history
+    /// confirmed it: the bytes are right and the recorded size and
+    /// modification time are not.
+    Confirmed { refreshed: bool },
+    /// The artifact was found at this library-relative path.
+    Repaired { to: String },
+    /// The artifact at the record's own path was edited since borax
+    /// last saw it, and now hashes to this.
+    Changed { hash: ContentHash },
+    /// Nothing was decided.
+    Unresolved,
+}
+
+/// What a reconcile made of a library.
+///
+/// The three counts are about the run as a whole; `repairs` is what it
+/// has to say about individual records, and holds nothing about a
+/// record it merely confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reconciliation {
+    /// The library reconciled, as [`Survey::root`].
+    pub root: PathBuf,
+    /// Every record the run had something to say about: its identity,
+    /// where its artifact stands after the run, and what was made of
+    /// it. In the order the store was read, which is path order.
+    pub repairs: Vec<(ArtifactId, String, Repair)>,
+    /// How many records the artifact store holds. A file under
+    /// `.borax/artifacts/` that does not parse is not one of them and
+    /// is not reconciled; `borax validate` is what names it.
+    pub records: usize,
+    /// Records whose artifact was where the record said it would be —
+    /// by the fast path, or by a hash in the record's own history after
+    /// the fast path missed.
+    pub confirmed: usize,
+    /// How many artifacts the run hashed.
+    pub hashed: usize,
+}
+
+/// Reconcile the library rooted at `root`, writing what it repairs.
+///
+/// Brings each artifact record's last-known path back into agreement
+/// with the tree. Every record is compared against the file it names by
+/// size and modification time first, and only what that comparison
+/// leaves unsettled is hashed; `rehash` skips the comparison and hashes
+/// regardless, which is what finds a change made within the granularity
+/// a recorded modification time keeps.
+///
+/// Records are resolved in four steps, each run to completion across
+/// every record before the next begins:
+///
+/// 1. **Settled.** A record whose last-known path holds a file matching
+///    the fast path, or holding any hash in that record's history, is
+///    confirmed, and that artifact is *claimed* by it.
+/// 2. **Repair by content.** Each remaining record is matched against
+///    the artifacts no record claimed, by any hash in its history, a
+///    match on the record's current hash preferred over one on an
+///    earlier hash. A record with exactly one candidate that no other
+///    record also wants has its path repaired and claims that artifact.
+/// 3. **Edited in place.** A record still unresolved whose last-known
+///    path holds an unclaimed artifact matching no record's history is
+///    that artifact edited since borax last saw it: the file's hash is
+///    appended after the hashes already recorded, and it claims that
+///    artifact.
+/// 4. **Unresolved.** Everything still unresolved is left exactly as it
+///    is, and reported: [`Repair::Ambiguous`] naming its candidates
+///    when it matched any, and [`Repair::Missing`] when it matched
+///    none — an artifact the library has a record of and cannot find.
+///
+/// Step 1 before step 2 is what stops a byte-identical copy elsewhere
+/// in the library competing for a record whose own file is fine. Step 2
+/// before step 3 is what makes a swap work: two files that traded paths
+/// each match the *other* record's history, so both repair in step 2
+/// rather than each being read as the other's artifact edited in place.
+///
+/// Steps 2 and 3 reach only the library's own artifacts, the ones
+/// [`artifacts`] walks: neither the item store, nor the state
+/// directory, nor a nested library can supply one. Step 1 asks about
+/// the file the record itself names, whatever that file is, because the
+/// question there is whether the record is right about it.
+///
+/// A record this run confirmed, repaired or appended to is written
+/// with the file's current size and modification time, so those fields
+/// describe the file as borax last saw it and the next pass settles it
+/// on the fast path rather than hashing it again. A record the fast
+/// path settled already agrees with its file and is not written, which
+/// is what keeps a routine pass over an untouched library diff-free.
+///
+/// Nothing is created and nothing is deleted: an orphan stays an orphan
+/// — `borax adopt` is what records what is on disk — and a record whose
+/// artifact is gone keeps its path and says so.
+///
+/// `run`, `timestamp` and `tool_version` stamp a hash appended by step
+/// 3; a run that appends nothing uses none of them. Never fails: a
+/// record whose repair cannot be written is reported as
+/// [`Repair::Unwritten`] and left as it was.
+pub fn reconcile(
+    root: &Path,
+    rehash: bool,
+    run: RunId,
+    timestamp: &str,
+    tool_version: &str,
+) -> Reconciliation {
+    let artifacts: Vec<String> = walk(root)
+        .0
+        .iter()
+        .filter_map(|path| library_relative(root, path))
+        .collect();
+    let store = ArtifactStore::read(root);
+    let records: Vec<(PathBuf, ArtifactRecord)> = store
+        .files()
+        .map(|(file, record)| (file.to_path_buf(), record.clone()))
+        .collect();
+
+    let mut hashes = Hashes::default();
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    let mut outcomes: Vec<Decided> = vec![Decided::Unresolved; records.len()];
+
+    // Step 1. Every record whose own path still holds its artifact,
+    // claiming that file before step 2 looks at anything.
+    for (index, (_, record)) in records.iter().enumerate() {
+        if !rehash && describes(record, &relative_to(root, &record.path)) {
+            outcomes[index] = Decided::Confirmed { refreshed: false };
+            claimed.insert(record.path.clone());
+            continue;
+        }
+        if hashes
+            .of(root, &record.path)
+            .is_some_and(|hash| record.holds(&hash))
+        {
+            outcomes[index] = Decided::Confirmed { refreshed: true };
+            claimed.insert(record.path.clone());
+        }
+    }
+
+    // Step 2, first half: what each remaining record could be, over the
+    // artifacts step 1 left unclaimed. Every record is matched before
+    // any is repaired, so that two files which swapped paths are both
+    // seen as candidates for each other's record.
+    let mut wanted: Vec<Vec<String>> = Vec::with_capacity(records.len());
+    for (index, (_, record)) in records.iter().enumerate() {
+        if outcomes[index] != Decided::Unresolved {
+            wanted.push(Vec::new());
+            continue;
+        }
+
+        let mut current = Vec::new();
+        let mut historical = Vec::new();
+        for artifact in &artifacts {
+            if claimed.contains(artifact) {
+                continue;
+            }
+            let Some(hash) = hashes.of(root, artifact) else {
+                continue;
+            };
+            if record.current_hash() == Some(&hash) {
+                current.push(artifact.clone());
+            } else if record.holds(&hash) {
+                historical.push(artifact.clone());
+            }
+        }
+        wanted.push(match current.is_empty() {
+            true => historical,
+            false => current,
+        });
+    }
+
+    // Step 2, second half: repair a record with exactly one candidate
+    // no other record also wants. Anything else is preserved rather
+    // than guessed at, because a wrong item link is not detectable.
+    for index in 0..records.len() {
+        let [only] = wanted[index].as_slice() else {
+            continue;
+        };
+        if wanted
+            .iter()
+            .enumerate()
+            .any(|(other, candidates)| other != index && candidates.contains(only))
+        {
+            continue;
+        }
+        claimed.insert(only.clone());
+        outcomes[index] = Decided::Repaired { to: only.clone() };
+    }
+
+    // Step 3. A record whose own path holds an unclaimed artifact that
+    // matched nothing is that artifact edited in place.
+    for index in 0..records.len() {
+        if outcomes[index] != Decided::Unresolved {
+            continue;
+        }
+        let relative = records[index].1.path.clone();
+        if claimed.contains(&relative) || !artifacts.contains(&relative) {
+            continue;
+        }
+        let Some(hash) = hashes.of(root, &relative) else {
+            continue;
+        };
+        if records.iter().any(|(_, other)| other.holds(&hash)) {
+            continue;
+        }
+        claimed.insert(relative);
+        outcomes[index] = Decided::Changed { hash };
+    }
+
+    // Step 4, and the writing of everything the three before decided.
+    let mut reconciliation = Reconciliation {
+        root: root.to_path_buf(),
+        repairs: Vec::new(),
+        records: records.len(),
+        confirmed: 0,
+        hashed: 0,
+    };
+    for (index, (file, original)) in records.iter().enumerate() {
+        let mut record = original.clone();
+        let (path, repair) = match &outcomes[index] {
+            Decided::Confirmed { refreshed } => {
+                reconciliation.confirmed += 1;
+                if !refreshed {
+                    continue;
+                }
+                refresh(root, &mut record);
+                (original.path.clone(), None)
+            }
+            Decided::Repaired { to } => {
+                record.path = to.clone();
+                refresh(root, &mut record);
+                let repair = Repair::Repaired {
+                    from: original.path.clone(),
+                };
+                (to.clone(), Some(repair))
+            }
+            Decided::Changed { hash } => {
+                record.history.push(HashEntry {
+                    hash: hash.clone(),
+                    run: run.clone(),
+                    timestamp: timestamp.to_string(),
+                    tool_version: tool_version.to_string(),
+                });
+                refresh(root, &mut record);
+                let repair = Repair::Changed {
+                    hash: hash.to_string(),
+                };
+                (original.path.clone(), Some(repair))
+            }
+            Decided::Unresolved => {
+                let candidates = wanted[index].clone();
+                let repair = match candidates.is_empty() {
+                    true => Repair::Missing,
+                    false => Repair::Ambiguous { candidates },
+                };
+                reconciliation
+                    .repairs
+                    .push((original.id.clone(), original.path.clone(), repair));
+                continue;
+            }
+        };
+
+        match rewrite(file, &record) {
+            Ok(()) => {
+                if let Some(repair) = repair {
+                    reconciliation
+                        .repairs
+                        .push((original.id.clone(), path, repair));
+                }
+            }
+            Err(error) => reconciliation.repairs.push((
+                original.id.clone(),
+                original.path.clone(),
+                Repair::Unwritten {
+                    message: error.to_string(),
+                },
+            )),
+        }
+    }
+
+    reconciliation.hashed = hashes.hashed;
+    reconciliation
+}
+
+/// The events reporting `reconciliation`: one per record it has
+/// something to say about, in the order it read them, then the totals.
+///
+/// A record the run confirmed produces no event of its own — a
+/// reconcile over a library nothing has touched emits its totals and
+/// nothing else — so the count of confirmations is legible only from
+/// the summary, where it belongs.
+pub fn reconciliation_events(reconciliation: &Reconciliation) -> Vec<Event> {
+    let count = |wanted: &dyn Fn(&Repair) -> bool| {
+        reconciliation
+            .repairs
+            .iter()
+            .filter(|(_, _, repair)| wanted(repair))
+            .count()
+    };
+
+    let mut events: Vec<Event> = reconciliation
+        .repairs
+        .iter()
+        .map(|(id, path, repair)| Event::LibraryRepair {
+            id: id.to_string(),
+            path: path.clone(),
+            repair: repair.clone(),
+        })
+        .collect();
+
+    events.push(Event::LibraryReconciled {
+        root: reconciliation.root.clone(),
+        records: reconciliation.records,
+        confirmed: reconciliation.confirmed,
+        repaired: count(&|repair| matches!(repair, Repair::Repaired { .. })),
+        changed: count(&|repair| matches!(repair, Repair::Changed { .. })),
+        ambiguous: count(&|repair| matches!(repair, Repair::Ambiguous { .. })),
+        missing: count(&|repair| matches!(repair, Repair::Missing)),
+        hashed: reconciliation.hashed,
     });
     events
 }

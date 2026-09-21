@@ -738,10 +738,14 @@ pub fn preflight<C: Cache>(
         Command::Config { .. }
         | Command::Resolve { .. }
         // A library command has nothing that could refuse it: an
-        // absent store is an empty one, a file that will not parse is
-        // reported rather than fatal, and neither command writes.
+        // absent store is an empty one, and a file that will not parse
+        // is reported rather than fatal. A reconcile does write, but
+        // what it writes is decided record by record and reported the
+        // same way, so there is nothing here for it to be refused on
+        // either.
         | Command::Status { .. }
-        | Command::Validate { .. } => Ok(Prepared::Unchecked),
+        | Command::Validate { .. }
+        | Command::Reconcile { .. } => Ok(Prepared::Unchecked),
         // The root and the ledger are discovered together, so a run
         // holding one holds the other; either being absent is the one
         // situation of being outside a collection.
@@ -1002,6 +1006,10 @@ pub fn emit_events<C: Cache>(
         }
         (Command::Validate { .. }, _) => {
             validation_events(command, adapters, sink);
+            Aftermath::default()
+        }
+        (Command::Reconcile { rehash, .. }, _) => {
+            reconcile_events(command, *rehash, adapters, sink);
             Aftermath::default()
         }
         (Command::Rename { apply, .. }, Prepared::Grouped { groups, ledger, .. }) => {
@@ -2905,7 +2913,10 @@ fn applying(command: &Command, mode: Mode) -> bool {
     match command {
         Command::Rename { apply, .. } => *apply || mode == Mode::Interactive,
         Command::Cache { clear, .. } => *clear,
-        Command::Bib { .. } | Command::Ledger { .. } => true,
+        // A reconcile writes what it repairs, and a pass that repairs
+        // nothing still reports itself as the kind of run that would
+        // have.
+        Command::Bib { .. } | Command::Ledger { .. } | Command::Reconcile { .. } => true,
         Command::Resolve { .. }
         | Command::Config { .. }
         | Command::Status { .. }
@@ -2965,6 +2976,33 @@ fn status_events<C: Cache>(
 fn validation_events<C: Cache>(command: &Command, adapters: &Adapters<'_, C>, sink: &mut dyn Sink) {
     let validation = crate::library::validate(&reported_root(command, adapters));
     for event in crate::library::validation_events(&validation) {
+        sink.emit(event);
+    }
+}
+
+/// Write `reconcile`'s events into `sink`: one per record the run had
+/// something to say about, then the totals
+/// ([`crate::library::reconciliation_events`]).
+///
+/// The run's timestamp is both the identifier a hash appended by this
+/// run is filed under and the time recorded against it, as a ledger
+/// rebuild's is: one pass over a library is one act of accounting, and
+/// what it recorded has to be identifiable together afterwards.
+fn reconcile_events<C: Cache>(
+    command: &Command,
+    rehash: bool,
+    adapters: &Adapters<'_, C>,
+    sink: &mut dyn Sink,
+) {
+    let at = (adapters.now)();
+    let reconciliation = crate::library::reconcile(
+        &reported_root(command, adapters),
+        rehash,
+        borax_core::library::RunId::new(&at),
+        &at,
+        env!("CARGO_PKG_VERSION"),
+    );
+    for event in crate::library::reconciliation_events(&reconciliation) {
         sink.emit(event);
     }
 }
@@ -3254,6 +3292,15 @@ fn expanded(command: &Command) -> Command {
         },
         Command::Validate { path, run_log } => Command::Validate {
             path: Some(library_directory(path.as_deref())),
+            run_log: run_log.clone(),
+        },
+        Command::Reconcile {
+            path,
+            rehash,
+            run_log,
+        } => Command::Reconcile {
+            path: Some(library_directory(path.as_deref())),
+            rehash: *rehash,
             run_log: run_log.clone(),
         },
     }
