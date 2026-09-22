@@ -844,6 +844,22 @@ somebody to ask
   artifact of that item, skip, or quit — and accepting returns the file
   to planning, where the ordinary move question is put. Only an operator
   can admit a second artifact of a work the library holds.
+- **A record the operator reached:** told, not asked. An identifier
+  they supplied, a lookup they retried and a record they accepted over
+  a conflict are all checked, and a collision is stated once — the same
+  item and path the question would have named — with the move question
+  put again afterwards.
+
+**Why a supplied identifier is told rather than asked.** The question
+exists to obtain one statement from the operator: that this file is
+that work. Supplying the identifier *is* that statement, so asking for
+it again is asking somebody to confirm what they have just said, and
+the second question could only ever be answered the same way. What they
+may genuinely not know is that the library already holds a file of it,
+which is a fact rather than a decision — so the run states it and puts
+the question the operator was already answering. Stating it once is
+what keeps the move reachable: a collision restated on every pass would
+be a file that can never be moved.
 
 **Re-justified on the merits alone.** An earlier draft of this entry
 argued partly from compatibility — that reinstating a behaviour a

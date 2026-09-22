@@ -1687,6 +1687,11 @@ fn asked<C: Cache>(
     // a file they have filed is not a duplicate again for the rest of
     // its loop.
     let mut filing = duplicated;
+    // Whether the operator has been told that a record they reached
+    // names a work the library already holds a file of. Said once: the
+    // answer they give after hearing it is the one that stands, and a
+    // run that said it again would never carry the move out.
+    let mut told = false;
 
     let width = session.width;
     // What became of the last candidate, or the work this file is a
@@ -1811,31 +1816,38 @@ fn asked<C: Cache>(
             // The three answers that act on the record in hand, none
             // of which is offered without a decision to carry out.
             Answer::Rename | Answer::Override | Answer::Keep => {
-                return match (offer, proposal) {
-                    (Some(on), Some(proposed)) => {
-                        // A record the run resolved on its own was
-                        // checked as it resolved. One the operator
-                        // reached — supplied, retried, or accepted over
-                        // a conflict — never was, and admitting a
-                        // second copy of a work the library already
-                        // holds is the one thing the check exists to
-                        // prevent. Its verdict is about the library,
-                        // not about where the identifier came from.
-                        let second_copy = (!on.kept)
-                            .then(|| {
-                                crate::pipeline::second_copy(about.path, &on.file.record, account)
-                            })
-                            .flatten();
-                        match second_copy {
-                            Some(reason) => Settled::Skip { file: None, reason },
-                            None => Settled::CarryOut {
-                                file: accepted(&on),
-                                decision: proposed.decision,
-                                remember: !on.kept,
-                            },
-                        }
-                    }
-                    _ => skipped(own, &held),
+                let (Some(on), Some(proposed)) = (offer.as_ref(), proposal.as_ref()) else {
+                    return skipped(own, &held);
+                };
+                // A record the run resolved on its own was checked as
+                // it resolved. One the operator reached — supplied,
+                // retried, or accepted over a conflict — never was, so
+                // it is checked here, once: what comes back is said
+                // rather than acted on, and the question is put again.
+                //
+                // Reaching an identifier is the operator saying what
+                // the file is, which is the statement the filing
+                // question exists to get. So there is nothing left to
+                // ask, only something they have not been told, and the
+                // answer they give knowing it is the answer that
+                // stands.
+                let held_work = (!on.kept && !told)
+                    .then(|| crate::pipeline::second_copy(about.path, &on.file.record, account))
+                    .flatten();
+                if let (Some(work), Some(library)) = (held_work, account) {
+                    told = true;
+                    report = describe::archived(
+                        library.root,
+                        &work.existing,
+                        work.item_file.as_deref(),
+                        width,
+                    );
+                    continue;
+                }
+                return Settled::CarryOut {
+                    file: accepted(on),
+                    decision: proposed.decision.clone(),
+                    remember: !on.kept,
                 };
             }
             Answer::Supply => {

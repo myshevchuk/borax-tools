@@ -6176,16 +6176,17 @@ fn quitting_a_human_interactive_run_still_prints_the_summary() {
 /// [`standing`](borax::pipeline::standing) runs the work check on a
 /// record it resolved, but a supplied one never went through it, and
 /// neither did a record the conflict check refused and the operator
-/// then accepted. Admitting a second copy of a work the library already
-/// holds is what the check exists to prevent, and its verdict is about
-/// the library rather than about where the identifier came from.
+/// then accepted.
 ///
-/// The check is made silently here rather than put to the operator: a
-/// supplied identifier landing on a work the library holds is left as a
-/// skip, and whether it should be offered the same filing question is
-/// not settled.
+/// What the check produces here is not the filing question but a
+/// statement: supplying the identifier is itself the operator saying
+/// what the file is, so the run says what that identifier collided
+/// with and puts the move question again. The second answer carries
+/// the move out, and the file is admitted as another artifact of the
+/// work it named. Only a file whose own resolution landed on the work
+/// is asked whether to file it.
 #[test]
-fn a_supplied_record_the_library_already_holds_is_reported_a_duplicate() {
+fn a_supplied_record_the_library_already_holds_says_so_and_asks_again() {
     let library = real_library();
     let root = library.path().to_path_buf();
     // The library already holds this work, at a different file.
@@ -6197,6 +6198,17 @@ fn a_supplied_record_the_library_already_holds_is_reported_a_duplicate() {
         "10.1000/already-in-the-library",
         b"the copy already admitted",
     );
+    let items = library::ItemStore::read(&root);
+    let item = items
+        .iter()
+        .next()
+        .expect("setup: the sibling must have minted an item")
+        .id
+        .clone();
+    let item_file = items
+        .file_of(&item)
+        .expect("setup: the item's file must be found")
+        .to_path_buf();
 
     let path = write_real_file(&root, "incoming.pdf", b"supplied work duplicate bytes");
     let documents = FakeDocuments::new().with_file(
@@ -6223,8 +6235,9 @@ fn a_supplied_record_the_library_already_holds_is_reported_a_duplicate() {
         collection_root: Some(root.clone()),
         state_root: None,
     };
-    // Supply the identifier, then accept the move it offers.
-    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+    // Supply the identifier, accept the move it offers, and accept it
+    // again once the run has said what the identifier collided with.
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename, Answer::Rename])
         .with_texts(vec![Some("10.1000/already-in-the-library".to_string())]);
 
     let events = events_for(
@@ -6235,31 +6248,62 @@ fn a_supplied_record_the_library_already_holds_is_reported_a_duplicate() {
     )
     .unwrap();
 
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        3,
+        "the move question must be put again after the collision is reported: got {questions:?}"
+    );
+    assert_eq!(
+        questions[2].choices,
+        vec![Answer::Rename, Answer::Supply, Answer::Skip, Answer::Quit],
+        "the question put again is the ordinary one about the move, not the filing question: \
+         got {:?}",
+        questions[2].choices
+    );
+    let description = questions[2].description.join("\n");
+    for named in [&sibling, &item_file] {
+        let name = named.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            description.contains(&name),
+            "the operator must be told what the identifier collided with ({name}): \
+             got {description:?}"
+        );
+    }
     assert!(
-        events.iter().any(|event| matches!(
+        !events.iter().any(|event| matches!(
             event,
             Event::Skipped {
-                path: p,
-                reason: SkipReason::Duplicate {
-                    reason: DuplicateReason::Work,
-                    existing_path,
-                },
-            } if *p == path && existing_path == &sibling
+                reason: SkipReason::Duplicate { .. },
+                ..
+            }
         )),
-        "the library's own copy must be reported, not a second one \
-         admitted: got {events:?}"
+        "a supplied identifier is the operator saying what the file is, so it is not \
+         reported a duplicate: got {events:?}"
     );
     assert!(
-        !events
+        events
             .iter()
-            .any(|event| matches!(event, Event::Renamed { .. })),
-        "nothing may move: got {events:?}"
+            .any(|event| matches!(event, Event::Renamed { path: p, .. } if p == &path)),
+        "the second answer must carry the move out: got {events:?}"
     );
-    assert!(path.exists(), "the supplied file must stay where it is");
+
+    let records = library::ArtifactStore::read(&root);
     assert_eq!(
-        library::ArtifactStore::read(&root).len(),
+        records.len(),
+        2,
+        "the supplied file must be recorded beside the sibling"
+    );
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
         1,
-        "and nothing may be recorded beyond the sibling's own record"
+        "and against the item it named, with no second item minted"
+    );
+    assert!(
+        records
+            .iter()
+            .all(|record| record.item.as_ref() == Some(&item)),
+        "both records must name the one item: got {records:?}"
     );
 }
 

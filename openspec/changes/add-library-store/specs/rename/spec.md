@@ -59,7 +59,8 @@ to the proposed target despite the conflict, and that choice SHALL name
 the target and SHALL NOT be the default. Every question about a proposed
 move SHALL additionally offer supplying a different identifier.
 
-A file resolving to an identifier an item already carries SHALL be
+A file whose own resolution lands on an identifier an item already
+carries SHALL be
 offered: file it as another artifact of that item, skip, or quit. The
 question SHALL name the item and a path already recorded against it
 that still holds a file, so that the operator is deciding about a work
@@ -73,6 +74,28 @@ work-duplicate reason a batch run would have given. This is the one
 question borax asks about a duplicate, and only an operator can answer
 it: a second artifact of a work and an unwanted second copy of it are
 one thing in the bytes and two in the intention.
+
+A record the operator reached rather than one the run resolved — an
+identifier they supplied, a lookup they retried, a record they accepted
+over a conflict — SHALL be checked against the library the same way and
+SHALL NOT produce that question. Where it lands on a work the library
+already holds a file of, the run SHALL say so, naming the same item and
+recorded path the question would have named, and SHALL put the ordinary
+question about the file's move again; the answer given after it stands,
+and a move carried out then admits the file as another artifact of that
+item. The collision SHALL be stated once, so that a second answer is
+never asked for twice and the move is never unreachable. Supplying an
+identifier is the operator saying what the file is, which is the
+statement the filing question exists to obtain, so what is left is not
+a decision to ask for but a fact they have not been told.
+
+#### Scenario: A supplied identifier lands on a work already held
+- **WHEN** an interactive run's operator supplies the DOI of a work the
+  library already holds a file of, and answers rename
+- **THEN** the run reports the item and the recorded path it collided
+  with, puts the question about the move again, and a second rename
+  answer moves the file and records it as another artifact of that
+  item, with no second item minted
 
 When `rename.skip-named` is off, an already-named file SHALL be put to
 the operator with the choices keep its name, supply a different

@@ -404,20 +404,24 @@ fn content_duplicate(
     ))
 }
 
-/// The skip reporting that another file of the work `record` names is
-/// already held, for a record the operator reached rather than one the
-/// run resolved on its own.
+/// The work the library already holds a file of, for a record the
+/// operator reached rather than one the run resolved on its own.
 ///
 /// The same work check [`standing`] makes, asked where a record arrives
 /// having bypassed it: supplied, retried, or accepted over a conflict.
 /// `None` leaves the record to be acted on.
+///
+/// The caller decides what the answer means. A record the run resolved
+/// on its own makes the file a work duplicate, which a batch run skips
+/// and an interactive one offers to file; a record the operator reached
+/// is the operator saying what the file is, so the collision is
+/// reported to them rather than deciding anything.
 pub fn second_copy(
     path: &Path,
     record: &Record,
     account: Option<&Account<'_>>,
-) -> Option<SkipReason> {
-    let work = account?.work_duplicate(path, &identifiers_of(record))?;
-    Some(duplicate(DuplicateReason::Work, &work.existing))
+) -> Option<WorkDuplicate> {
+    account?.work_duplicate(path, &identifiers_of(record))
 }
 
 /// The skip reporting the file at `existing` as a duplicate of
