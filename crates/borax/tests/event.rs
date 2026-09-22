@@ -127,13 +127,6 @@ fn lookup_missed() -> Event {
     }
 }
 
-fn ledger_rebuilt() -> Event {
-    Event::LedgerRebuilt {
-        root: PathBuf::from("/collection"),
-        entries: 3,
-    }
-}
-
 fn run_finished() -> Event {
     Event::RunFinished {
         counts: Counts {
@@ -189,7 +182,6 @@ fn all_events() -> Vec<Event> {
         cache_status(),
         cache_cleared(),
         lookup_missed(),
-        ledger_rebuilt(),
         run_finished(),
     ]
 }
@@ -272,7 +264,6 @@ fn json_line_event_tag_is_the_variant_name_in_kebab_case() {
         (cache_status(), "cache-status"),
         (cache_cleared(), "cache-cleared"),
         (lookup_missed(), "lookup-missed"),
-        (ledger_rebuilt(), "ledger-rebuilt"),
         (run_finished(), "run-finished"),
     ];
 
@@ -395,19 +386,6 @@ fn json_line_of_cache_cleared_has_exactly_the_documented_field_set() {
     assert_eq!(object["root"], Value::from("/cache"));
     assert_eq!(object["entries"], Value::from(4));
     assert_eq!(object["bytes"], Value::from(1024));
-}
-
-#[test]
-fn json_line_of_ledger_rebuilt_has_exactly_the_documented_field_set() {
-    let value: Value = serde_json::from_str(&json_line(&ledger_rebuilt())).unwrap();
-    let object = value.as_object().unwrap();
-
-    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    assert_eq!(keys, vec!["entries", "event", "root", "schema"]);
-
-    assert_eq!(object["root"], Value::from("/collection"));
-    assert_eq!(object["entries"], Value::from(3));
 }
 
 /// design: `Renamed` carries the hash the file resolved to, required
@@ -681,14 +659,6 @@ fn human_line_of_cache_cleared_mentions_the_root_and_the_counts() {
     assert!(line.contains("/cache"));
     assert!(line.contains('4'));
     assert!(line.contains("1024"));
-}
-
-#[test]
-fn human_line_of_ledger_rebuilt_mentions_the_root_and_the_count() {
-    let line = human_line(&ledger_rebuilt()).unwrap();
-    assert!(!line.contains('\n'));
-    assert!(line.contains("/collection"));
-    assert!(line.contains('3'));
 }
 
 #[test]

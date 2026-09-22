@@ -278,12 +278,12 @@ is a run contradicting a living requirement.
       an item, item first; every store write is `write_atomically` over
       a document edited through `toml_edit`; the outside-the-library
       report.
-- [ ] 7.6 Red: duplicate detection against the artifact store — content
+- [x] 7.6 Red: duplicate detection against the artifact store — content
       by any hash in any history, a file's own record passed over rather
       than ending the search, a stale last-known path reported as
       something to reconcile and never vetoing an admission, and
       `--no-record` turning the checks off silently.
-- [ ] 7.6a Red: the work check, and where the two runs part company. A
+- [x] 7.6a Red: the work check, and where the two runs part company. A
       batch run over a file whose identifier an item already carries
       skips it with the work-duplicate reason naming the recorded path,
       writes no record and moves nothing — including under `--apply`,
@@ -297,12 +297,12 @@ is a run contradicting a living requirement.
       still never asked about; and no question is put when the matching
       item has no artifact whose recorded path still holds a file, since
       the question has no sibling path to name.
-- [ ] 7.6b Red: the case that makes a multi-artifact library usable —
+- [x] 7.6b Red: the case that makes a multi-artifact library usable —
       each of the three recorded artifacts of one item, reached in turn
       by a batch run, is reported neither a duplicate nor skipped,
       because the check passes over the item its own record links to.
       Without this the same run skips all three.
-- [ ] 7.7 Green: the checks over the store; the additional-artifact
+- [x] 7.7 Green: the checks over the store; the additional-artifact
       verdict and what it carries; `crates/borax/src/ledger.rs` and
       `crates/borax-core/src/ledger.rs` are both deleted, nothing having
       a reason to parse a ledger line any more; the `ledger` subcommand
@@ -310,7 +310,7 @@ is a run contradicting a living requirement.
       schema version becomes 3. `Collection`'s path comparison,
       `relative_to` and `collection_relative` move to the library
       module.
-- [ ] 7.8 Red: no command reads, writes or deletes
+- [x] 7.8 Red: no command reads, writes or deletes
       `.borax/ledger.jsonl`. A library holding one is reported,
       validated, reconciled and adopted with the file byte-identical
       afterwards, and an applying run appends nothing to it. The file is

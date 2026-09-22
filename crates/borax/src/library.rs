@@ -35,7 +35,7 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, valu
 use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
-use crate::event::{Admission, Event, Finding, Repair};
+use crate::event::{Admission, Diagnostic, Event, Finding, Level, Repair};
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
 
@@ -367,6 +367,18 @@ impl ItemStore {
         self.iter().find(|item| &item.id == id)
     }
 
+    /// The file the item of identity `id` was read from, or `None`
+    /// when the store holds no such item.
+    ///
+    /// What a question about that item names, so an operator deciding
+    /// about a work the library holds is shown the file that says what
+    /// it is.
+    pub fn file_of(&self, id: &ItemId) -> Option<&Path> {
+        self.files()
+            .find(|(_, item)| &item.id == id)
+            .map(|(path, _)| path)
+    }
+
     /// The first item whose record carries `identifier`, or `None` when
     /// none does.
     ///
@@ -498,6 +510,255 @@ impl ArtifactStore {
         self.entries
             .iter()
             .map(|(path, record)| (path.as_path(), record))
+    }
+}
+
+/// What the library holds for an incoming file, as the two duplicate
+/// checks ask it.
+///
+/// The four travel together because no one of them answers anything
+/// alone: a record names a library-relative path, `root` is what makes
+/// it a path on this machine, `items` is what a work is looked up in,
+/// and `exists` is what says whether a recorded path still holds a
+/// file. The stores are read once for a run and the account borrows
+/// them, so a check costs no filesystem read beyond the one `exists`
+/// makes.
+///
+/// An account is what `--no-record` withholds: a run told to keep no
+/// account is given none, and makes neither check rather than making
+/// both against an empty store.
+pub struct Account<'a> {
+    /// The library root the records' paths are relative to.
+    pub root: &'a Path,
+    /// The items a work is looked up among.
+    pub items: &'a ItemStore,
+    /// The records a hash is looked up among, and the link from an
+    /// item back to the artifacts it has.
+    pub records: &'a ArtifactStore,
+    /// Whether a path still holds a file, answering as
+    /// [`Path::exists`] does.
+    ///
+    /// Asked about a record that matched and about nothing else, so an
+    /// answer of "not there" is exactly a record whose last-known path
+    /// has gone stale — which is what a run reports as a library with
+    /// paths to reconcile.
+    pub exists: &'a dyn Fn(&Path) -> bool,
+}
+
+/// The work an incoming file turned out to be a second file of.
+///
+/// What a batch run reports and what an interactive run's question is
+/// put from: the item is the work the library already holds, and
+/// `existing` is the file the operator is deciding against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkDuplicate {
+    /// The item carrying one of the incoming file's identifiers.
+    pub item: ItemId,
+    /// The file that item was read from, as a path on this machine.
+    /// `None` only for an item the store can no longer name a file
+    /// for.
+    pub item_file: Option<PathBuf>,
+    /// A path recorded against that item which still holds a file: the
+    /// artifact the incoming file would join, and the path the skip
+    /// names. An item with no such path is no work duplicate at all,
+    /// so this is never a path that holds nothing.
+    pub existing: PathBuf,
+}
+
+impl Account<'_> {
+    /// Whether the record recorded at `recorded` — a library-relative
+    /// path, as a record stores it — is the record of the file at
+    /// `incoming` rather than of another copy of it.
+    ///
+    /// The two are compared as paths and not as text: the record's
+    /// path is resolved against the library root, the incoming path is
+    /// made absolute against the working directory, and both are
+    /// normalised lexically — `.` and `..` resolved without asking the
+    /// filesystem — then matched as the platform matches file names,
+    /// case-sensitively on Unix and case-insensitively on Windows.
+    ///
+    /// Symlinks are not resolved. A record names where borax last saw
+    /// a file and the run names the path it was given; a link and its
+    /// target are two names this does not try to unify, and treating
+    /// them as one would mean a link into a library could keep the
+    /// file it points at out of it.
+    pub fn is_incoming(&self, recorded: &str, incoming: &Path) -> bool {
+        match (
+            lexical(&relative_to(self.root, recorded)),
+            lexical(incoming),
+        ) {
+            (Some(recorded), Some(incoming)) => same_name(&recorded, &incoming),
+            // With no working directory there is nothing to resolve a
+            // relative path against, and nothing that can be said to
+            // be the same file as another.
+            _ => false,
+        }
+    }
+
+    /// The record of the file at `incoming` itself, where the library
+    /// has one: the record whose last-known path is that file's own.
+    ///
+    /// The one record neither check may report, since it records the
+    /// file rather than another copy of it — and, through its item
+    /// link, the one item the work check may not report either.
+    pub fn own_record(&self, incoming: &Path) -> Option<&ArtifactRecord> {
+        self.records
+            .iter()
+            .find(|record| self.is_incoming(&record.path, incoming))
+    }
+
+    /// `recorded` as a path on this machine, or `None` when no file
+    /// stands there.
+    ///
+    /// Disk decides: a record whose path has gone stale names no file
+    /// to duplicate, and the account never vetoes an admission on the
+    /// strength of one.
+    fn live_path(&self, recorded: &str) -> Option<PathBuf> {
+        let path = relative_to(self.root, recorded);
+        (self.exists)(&path).then_some(path)
+    }
+
+    /// The file the library already holds with the same bytes as the
+    /// file at `incoming`, whose hash is `hash`.
+    ///
+    /// A match is any record whose history holds `hash` — the whole
+    /// history and not only its newest entry, so a file annotated
+    /// since it was admitted is recognised as the artifact it is, and
+    /// a copy of what an artifact used to be is recognised as a copy
+    /// of it.
+    ///
+    /// The incoming file's own record is passed over and the search
+    /// goes on, rather than the answer being discarded once found: a
+    /// file whose own record answers first would otherwise hide a
+    /// second copy recorded elsewhere in the library. A record whose
+    /// last-known path holds no file is passed over on the same terms,
+    /// and asking `exists` about it is what makes the run report a
+    /// library with paths to reconcile.
+    ///
+    /// Answerable before the file is opened, which is the point: a
+    /// byte-identical re-download is recognised without a single
+    /// source being asked.
+    pub fn content_duplicate(&self, incoming: &Path, hash: &ContentHash) -> Option<PathBuf> {
+        self.records
+            .by_hash(hash)
+            .into_iter()
+            .filter(|record| !self.is_incoming(&record.path, incoming))
+            .find_map(|record| self.live_path(&record.path))
+    }
+
+    /// The work the library already holds a file for, among
+    /// `identifiers`.
+    ///
+    /// The identifiers are tried in the order given, which is the
+    /// order the caller ranks them by, and the first that answers
+    /// decides. An identifier answers when an item carries it *and*
+    /// that item has a record whose path still holds a file: an item
+    /// with no artifact, and one whose every recorded artifact names a
+    /// path holding nothing, is a work there is nothing to duplicate,
+    /// so the incoming file is that item's first artifact rather than
+    /// its second.
+    ///
+    /// The item the incoming file's own record already links to is
+    /// passed over, and so is that record itself. Without the first
+    /// rule every artifact of a multi-artifact item would meet its
+    /// siblings as a duplicate of the item it belongs to, on every
+    /// run, and a batch run would skip each of them.
+    ///
+    /// Answerable only once a record is in hand, which is the earliest
+    /// a second PDF of one paper can be recognised at all.
+    pub fn work_duplicate(
+        &self,
+        incoming: &Path,
+        identifiers: &[Identifier],
+    ) -> Option<WorkDuplicate> {
+        let own = self
+            .own_record(incoming)
+            .and_then(|record| record.item.clone());
+        identifiers.iter().find_map(|identifier| {
+            self.items
+                .iter()
+                .filter(|item| identifier_of(&item.record, identifier).as_ref() == Some(identifier))
+                .filter(|item| own.as_ref() != Some(&item.id))
+                .find_map(|item| self.second_artifact_of(item, incoming))
+        })
+    }
+
+    /// The work `item` is, as the duplicate an incoming file at
+    /// `incoming` would be a second file of, or `None` when the library
+    /// has no file of it to duplicate.
+    ///
+    /// The artifacts recorded against the item are tried in read order
+    /// and the first whose path still holds a file decides. The
+    /// incoming file's own record is passed over: a file is no second
+    /// copy of itself.
+    fn second_artifact_of(&self, item: &Item, incoming: &Path) -> Option<WorkDuplicate> {
+        self.records
+            .by_item(&item.id)
+            .into_iter()
+            .filter(|record| !self.is_incoming(&record.path, incoming))
+            .find_map(|record| self.live_path(&record.path))
+            .map(|existing| WorkDuplicate {
+                item: item.id.clone(),
+                item_file: self.items.file_of(&item.id).map(Path::to_path_buf),
+                existing,
+            })
+    }
+}
+
+/// A library's two stores as one run holds them.
+///
+/// Read once, before the first file: every file of a run is checked
+/// against what the library held when the run started, so a check costs
+/// no directory walk and a run of a hundred files reads the stores once.
+/// [`Account`] is the same two stores with the run's `exists` beside
+/// them, which is what a check is actually made against.
+pub struct Stores {
+    /// The library root the records' paths are relative to.
+    root: PathBuf,
+    items: ItemStore,
+    records: ArtifactStore,
+}
+
+impl Stores {
+    /// Read both stores of the library rooted at `root`.
+    ///
+    /// Never fails, on [`ItemStore::read`]'s terms: a store directory
+    /// that is not there is an empty store, so a directory borax has
+    /// never written to reads as a library holding nothing.
+    pub fn read(root: &Path) -> Stores {
+        Stores {
+            root: root.to_path_buf(),
+            items: ItemStore::read(root),
+            records: ArtifactStore::read(root),
+        }
+    }
+
+    /// These stores as the account a check is made against, answering
+    /// about a recorded path through `exists`.
+    pub fn account<'a>(&'a self, exists: &'a dyn Fn(&Path) -> bool) -> Account<'a> {
+        Account {
+            root: &self.root,
+            items: &self.items,
+            records: &self.records,
+            exists,
+        }
+    }
+}
+
+/// What a run says about having matched a record whose artifact is no
+/// longer where the record says.
+///
+/// One warning however many records turned out to be stale: they are
+/// all the same fact about the library, and the remedy is the same
+/// reconcile whether one path is out of date or a hundred. Nothing was
+/// refused on the strength of one — disk is the source of truth — so
+/// this is what the run has to say and not why it did less.
+pub fn stale_paths_warning() -> Diagnostic {
+    Diagnostic {
+        level: Level::Warning,
+        message: "the library records artifacts that are no longer where it says, so it holds \
+                  paths to reconcile; borax reconcile repairs them"
+            .to_string(),
     }
 }
 

@@ -163,6 +163,24 @@ impl RunId {
     }
 }
 
+/// Why an incoming file is one the library already holds.
+///
+/// The vocabulary a duplicate is reported in, at the two levels it can
+/// be recognised at: the two are kept apart because what an operator
+/// may do about them differs — the same bytes are nothing to file
+/// twice, and a second file of one work is a second artifact of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DuplicateReason {
+    /// The same bytes are archived: the file's hash is in some artifact
+    /// record's history.
+    Content,
+    /// The same work is archived as a different file: no record holds
+    /// the hash, but an item carrying one of the file's identifiers has
+    /// an artifact whose path still holds a file.
+    Work,
+}
+
 /// Why a library's text could not be read as the record it claims to be.
 ///
 /// One variant, because one thing has gone wrong: the file does not say

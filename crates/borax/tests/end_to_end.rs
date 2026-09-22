@@ -22,9 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use borax::bib::{RealBibFiles, sidecar_path};
-use borax::cli::{Cli, Command, LedgerAction};
+use borax::cli::{Cli, Command};
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
-use borax::ledger::{FileLedger, Ledger};
 use borax::pipeline::RealDocuments;
 use borax::renaming::RealFilesystem;
 use borax::run::{Adapters, Configs, Streams, dispatch};
@@ -207,7 +206,8 @@ trait EventStream {
 ///
 /// What [`run_the_batch`] hands back: a run with nothing before it and
 /// nothing after, over its own fresh copies. A test that runs more than
-/// once against the same collection — priming a ledger, rebuilding it —
+/// once against the same library — priming its store, then running
+/// against what that left —
 /// keeps its own directories alive across several calls to
 /// [`invoke`] instead of asking for a second `Ran`, which could not own
 /// them without double-owning what the first already does.
@@ -265,12 +265,12 @@ impl EventStream for Invocation {
 /// going to `master` and a run log to `collection_root`'s `.borax/runs`
 /// or, absent one, to `state`.
 ///
-/// `collection_root` is also what a ledger is read from and appended to:
-/// `Some` gets a real [`FileLedger`] rooted there, `None` is a run
-/// outside any collection. [`run_the_batch`] is this with a fixed
-/// command and no collection; every test that exercises the ledger —
-/// priming it, rebuilding it — calls this directly, more than once,
-/// over directories it keeps alive itself.
+/// `collection_root` is also the library the run records in and checks
+/// its files against, `None` being a run outside any library.
+/// [`run_the_batch`] is this with a fixed command and no library; every
+/// test that exercises the store — priming it, then checking against
+/// what it holds — calls this directly, more than once, over
+/// directories it keeps alive itself.
 fn invoke(
     command: Command,
     master: &Path,
@@ -285,7 +285,6 @@ fn invoke(
 
     let index = ContentIndex::new(MemoryCache::new());
     let effective = effective_with(master);
-    let ledger = collection_root.map(FileLedger::at_collection_root);
     let cli = Cli {
         command,
         json: true,
@@ -304,7 +303,6 @@ fn invoke(
             bib_files: &RealBibFiles,
             cache_root: None,
             now: || "e2e-run".to_string(),
-            ledger: ledger.as_ref().map(|ledger| ledger as &dyn Ledger),
             collection_root: collection_root.map(Path::to_path_buf),
             // An apply run's mandatory run log needs somewhere to land
             // when there is no collection root; `state` is the stand-in
@@ -388,7 +386,7 @@ fn every_line_of_stdout_is_a_json_object_carrying_the_schema() {
     assert!(!ran.events.is_empty());
     for event in &ran.events {
         assert!(event.is_object(), "not an object: {event}");
-        assert_eq!(event["schema"], Value::from(2));
+        assert_eq!(event["schema"], Value::from(3));
         assert!(event["event"].is_string(), "no event tag: {event}");
     }
 }
@@ -740,19 +738,18 @@ fn two_runs_over_the_same_batch_produce_the_same_events() {
 }
 
 // ---------------------------------------------------------------------
-// The ledger — duplicate detection and rebuild over a real collection
+// The library store — duplicate detection over a real library
 //
 // Every test above runs through `run_the_batch`, which is deliberately
-// outside any collection, so nothing above exercises the ledger. These
-// call `invoke` directly against a `collection_root` a real
-// `FileLedger` reads and writes, so the duplicate checks, the
-// stale-entry rule, and `borax ledger rebuild` are all proven over real
-// PDFs and real sidecars rather than a fake standing in for one.
+// outside any library, so nothing above exercises the store. These call
+// `invoke` directly against a `collection_root` the run reads and
+// writes, so the two duplicate checks are proven over real PDFs and
+// real records rather than a fake standing in for either.
 // ---------------------------------------------------------------------
 
 /// A byte-identical copy of `name`'s corpus fixture, saved as `as_name`
 /// under `library` — what a content duplicate is made of: bytes the
-/// ledger already has an entry for, under a different name.
+/// library already has a record for, under a different name.
 fn duplicate_of(library: &Path, name: &str, as_name: &str) -> PathBuf {
     let target = library.join(as_name);
     fs::copy(corpus().join(name), &target)
@@ -778,23 +775,38 @@ fn work_duplicate_of(library: &Path, name: &str, as_name: &str) -> PathBuf {
     target
 }
 
-/// The ledger under `collection`'s accounting directory, as text.
-fn ledger_text(collection: &Path) -> String {
-    fs::read_to_string(collection.join(".borax/ledger.jsonl")).unwrap()
+/// Every artifact record the library at `collection` holds, as the
+/// bytes of the files they were read from, keyed by file name — so what
+/// a run wrote can be compared against what the run before it left,
+/// record for record and byte for byte.
+fn records_of(collection: &Path) -> BTreeMap<String, Vec<u8>> {
+    let dir = collection.join(".borax").join("artifacts");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return BTreeMap::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect()
 }
 
 /// ledger spec scenarios "Re-downloaded identical file" and "Second PDF
 /// of an archived paper": a content duplicate is caught before a
 /// request is made for it, a work duplicate only after resolution
-/// reveals the identifier it shares, and neither disturbs the entry it
-/// duplicates, the file it names, or its own source file.
+/// reveals the identifier it shares, and neither disturbs the record it
+/// duplicates, the file that record names, or its own source file.
 #[test]
-fn a_batch_with_a_content_duplicate_and_a_work_duplicate_skips_both_and_leaves_the_ledger_alone() {
+fn a_batch_with_a_content_duplicate_and_a_work_duplicate_skips_both_and_leaves_the_store_alone() {
     let collection = tempdir().unwrap();
     let state = tempdir().unwrap();
     let master = state.path().join("refs.bib");
 
-    // Prime the ledger with one admission under DOI …001.
+    // Prime the library with one admission under DOI …001.
     let seed = duplicate_of(
         collection.path(),
         "publisher-info-doi.pdf",
@@ -812,12 +824,8 @@ fn a_batch_with_a_content_duplicate_and_a_work_duplicate_skips_both_and_leaves_t
         "priming run: {}",
         priming.stderr
     );
-    let after_priming = ledger_text(collection.path());
-    assert_eq!(
-        after_priming.lines().count(),
-        1,
-        "expected one seeded entry"
-    );
+    let after_priming = records_of(collection.path());
+    assert_eq!(after_priming.len(), 1, "expected one seeded record");
 
     let content_dup = duplicate_of(
         collection.path(),
@@ -868,19 +876,19 @@ fn a_batch_with_a_content_duplicate_and_a_work_duplicate_skips_both_and_leaves_t
     // What makes the two duplicate kinds different rather than merely
     // differently labelled is where each is caught. A content
     // duplicate is recognised from its hash, before anything is asked
-    // of the network; a work duplicate shares no bytes with the entry
+    // of the network; a work duplicate shares no bytes with the record
     // it duplicates, so the run cannot know what it is until
     // resolution has answered, and by then the request is spent.
     //
     // Every request this batch made, in call order — the transport is
-    // fresh per `invoke`, so the seeded entry's own request belongs to
+    // fresh per `invoke`, so the seeded file's own request belongs to
     // the priming run and is not counted here, and the two DOIs differ
     // so nothing is served from the response cache either. Two
     // requests for three files, and neither is for `content-dup.pdf`.
     assert_eq!(
         batch.urls,
         vec![
-            // `work-dup.pdf`, resolving the very identifier the ledger
+            // `work-dup.pdf`, resolving the very identifier the library
             // already holds — the cost of finding that out.
             "https://api.crossref.org/works/10.1234/borax.2024.001".to_string(),
             // `publisher-xmp-doi.pdf`, genuinely new.
@@ -898,17 +906,28 @@ fn a_batch_with_a_content_duplicate_and_a_work_duplicate_skips_both_and_leaves_t
     );
     assert!(work_dup.is_file(), "work duplicate's source was removed");
 
-    // Ledger unchanged by the duplicates: one more entry than priming
-    // left, for the one file that was genuinely new.
-    let after_batch = ledger_text(collection.path());
-    assert!(
-        after_batch.starts_with(&after_priming),
-        "the seeded entry must be untouched"
+    // The store is unchanged by the duplicates: the seeded record is
+    // byte-identical, and there is one more record than priming left,
+    // for the one file that was genuinely new.
+    let after_batch = records_of(collection.path());
+    for (name, bytes) in &after_priming {
+        assert_eq!(
+            after_batch.get(name),
+            Some(bytes),
+            "the seeded record must be untouched: {name}"
+        );
+    }
+    assert_eq!(
+        after_batch.len(),
+        2,
+        "duplicates must write no artifact record"
     );
     assert_eq!(
-        after_batch.lines().count(),
+        fs::read_dir(collection.path().join("items"))
+            .unwrap()
+            .count(),
         2,
-        "duplicates must not add ledger entries"
+        "and must mint no item either"
     );
 }
 
@@ -986,105 +1005,6 @@ fn a_second_run_over_a_renamed_collection_finds_every_file_already_named() {
         second.tagged("renamed").is_empty(),
         "nothing should move on the re-run: {:?}",
         second.events
-    );
-}
-
-// ---------------------------------------------------------------------
-// `borax ledger rebuild` — determinism over a real fixture collection
-// ---------------------------------------------------------------------
-
-/// ledger spec scenarios "Rebuild is idempotent" and "Rebuild after
-/// manual deletions", proven end to end: a real apply run writes real
-/// PDFs and real sidecars, and `borax ledger rebuild` regenerates the
-/// ledger from exactly those files rather than from a fake standing in
-/// for one.
-#[test]
-fn rebuilding_a_real_collection_twice_is_byte_identical_and_compacts_after_deletion() {
-    let collection = tempdir().unwrap();
-    let state = tempdir().unwrap();
-    let master = state.path().join("refs.bib");
-    let names = [
-        "publisher-info-doi.pdf",
-        "publisher-xmp-doi.pdf",
-        "arxiv-new-id.pdf",
-    ];
-    let paths: Vec<PathBuf> = names
-        .iter()
-        .map(|name| duplicate_of(collection.path(), name, name))
-        .collect();
-
-    let applied = invoke(
-        Command::rename(paths, true),
-        &master,
-        state.path(),
-        Some(collection.path()),
-    );
-    assert_eq!(
-        applied.outcome,
-        Outcome::Success,
-        "apply run: {}",
-        applied.stderr
-    );
-
-    let rebuild = || {
-        invoke(
-            Command::Ledger {
-                action: LedgerAction::rebuild(),
-            },
-            &master,
-            state.path(),
-            Some(collection.path()),
-        )
-    };
-
-    let first = rebuild();
-    assert_eq!(
-        first.outcome,
-        Outcome::Success,
-        "first rebuild: {}",
-        first.stderr
-    );
-    assert_eq!(first.tagged("ledger-rebuilt")[0]["entries"], Value::from(3));
-    let first_bytes = fs::read(collection.path().join(".borax/ledger.jsonl")).unwrap();
-
-    let second = rebuild();
-    assert_eq!(
-        second.outcome,
-        Outcome::Success,
-        "second rebuild: {}",
-        second.stderr
-    );
-    let second_bytes = fs::read(collection.path().join(".borax/ledger.jsonl")).unwrap();
-
-    assert_eq!(
-        first_bytes, second_bytes,
-        "two rebuilds of an unchanged collection must be byte identical"
-    );
-    assert_eq!(
-        String::from_utf8(first_bytes).unwrap().lines().count(),
-        3,
-        "one entry per admitted file"
-    );
-
-    // Delete one renamed file and its sidecar; the rebuild must compact
-    // its entry away rather than carry it forward stale.
-    let deleted = collection.path().join("ashby2024.pdf");
-    fs::remove_file(&deleted).unwrap();
-    fs::remove_file(sidecar_path(&deleted)).unwrap();
-
-    let third = rebuild();
-    assert_eq!(
-        third.outcome,
-        Outcome::Success,
-        "compacting rebuild: {}",
-        third.stderr
-    );
-    assert_eq!(third.tagged("ledger-rebuilt")[0]["entries"], Value::from(2));
-    let compacted = ledger_text(collection.path());
-    assert_eq!(compacted.lines().count(), 2);
-    assert!(
-        !compacted.contains("ashby2024.pdf"),
-        "the deleted file's entry survived rebuild:\n{compacted}"
     );
 }
 
@@ -1169,7 +1089,6 @@ fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_ru
             bib_files: &RealBibFiles,
             cache_root: None,
             now: || "e2e-supply-first".to_string(),
-            ledger: None,
             collection_root: None,
             state_root: Some(state.path().to_path_buf()),
         },
@@ -1220,7 +1139,6 @@ fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_ru
             bib_files: &RealBibFiles,
             cache_root: None,
             now: || "e2e-supply-second".to_string(),
-            ledger: None,
             collection_root: None,
             state_root: Some(state.path().to_path_buf()),
         },

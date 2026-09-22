@@ -1,6 +1,6 @@
 //! Turning a moment into the string borax stamps things with.
 //!
-//! One format, used for ledger entry timestamps, run identifiers, and
+//! One format, used for record timestamps, run identifiers, and
 //! run-log filenames: ISO 8601's basic form, which is fixed width and
 //! made only of digits and two letters. That is what lets a directory
 //! listing sort by time, and it is the one spelling of a timestamp that

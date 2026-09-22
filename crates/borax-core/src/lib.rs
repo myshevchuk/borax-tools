@@ -1,13 +1,11 @@
 //! Pure bibliographic logic for borax-tools: the canonical record model,
 //! the filename/key template engine, rename planning, bibliography
-//! serialization, the collection ledger, and the library store. This
-//! crate performs no I/O.
+//! serialization, and the library store. This crate performs no I/O.
 
 pub mod bib_output;
 pub mod bibtex;
 pub mod content;
 pub mod identifier;
-pub mod ledger;
 pub mod library;
 pub mod record;
 pub mod rename;

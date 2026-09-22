@@ -15,7 +15,6 @@ use borax::config::{
     resolve,
 };
 use borax::event::{Admission, Event, Level, Overridden, Repair, SkipReason};
-use borax::ledger::{Ledger, Loaded};
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RealFilesystem, RenameError, counts_for};
@@ -24,9 +23,8 @@ use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
-use borax_core::ledger::{Entry, Index, RunId};
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, RunId as LibraryRunId,
+    ArtifactId, ArtifactRecord, DuplicateReason, HashEntry, Item, ItemId, RunId as LibraryRunId,
 };
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source as FieldSource};
 use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
@@ -838,7 +836,6 @@ fn config_emits_one_config_setting_event_per_setting_matching_effective_events()
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -880,7 +877,6 @@ fn cache_status_without_clear_emits_a_single_cache_status_event() {
         bib_files: &bib_files,
         cache_root: Some(root.clone()),
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -919,7 +915,6 @@ fn cache_clear_emits_a_single_cache_cleared_event_and_empties_the_directory() {
         bib_files: &bib_files,
         cache_root: Some(root.clone()),
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -958,7 +953,6 @@ fn cache_with_no_cache_root_is_a_diagnostic() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1010,7 +1004,6 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1072,7 +1065,6 @@ fn rename_preview_emits_resolved_and_planned_and_moves_nothing() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1138,7 +1130,6 @@ fn rename_preview_with_no_journal_succeeds() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1197,7 +1188,6 @@ fn rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1277,7 +1267,6 @@ fn bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_wr
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1378,7 +1367,6 @@ fn bib_over_a_library_holding_an_artifactless_item_emits_no_entry_for_it() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1447,7 +1435,6 @@ fn rename_with_an_uncompilable_template_propagates_the_diagnostic() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1492,7 +1479,6 @@ fn bib_with_an_uncompilable_filename_template_runs_anyway() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1542,7 +1528,6 @@ fn rename_with_an_uncompilable_citation_key_template_propagates_the_diagnostic()
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1591,7 +1576,6 @@ fn bib_with_an_uncompilable_citation_key_template_propagates_the_diagnostic() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1650,7 +1634,6 @@ fn bib_with_a_citation_key_naming_no_entry_type_propagates_the_diagnostic() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1690,7 +1673,6 @@ fn json_format_opens_with_run_started_and_closes_with_run_finished_and_every_lin
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1769,7 +1751,6 @@ fn json_stdout_is_entirely_well_formed_json_lines_and_nothing_else() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1829,7 +1810,6 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1895,7 +1875,6 @@ fn run_finished_counts_match_counts_for_over_the_body_events() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -1956,7 +1935,6 @@ fn a_clean_run_returns_success() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2010,7 +1988,6 @@ fn a_run_with_a_skip_returns_partial() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2066,7 +2043,6 @@ fn a_refusal_dispatch_alone_makes_is_fatal_and_writes_nothing_to_stdout() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2123,7 +2099,6 @@ fn diagnostics_never_appear_on_stdout_regardless_of_which_check_produced_them() 
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2219,7 +2194,6 @@ fn a_lookup_that_hits_names_the_file_with_the_table_value() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2276,7 +2250,6 @@ fn two_files_in_one_unlisted_journal_produce_one_lookup_missed_event() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2347,7 +2320,6 @@ fn two_unlisted_journals_produce_one_event_each_in_input_order() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2407,7 +2379,6 @@ fn run_started_names_each_table_read_by_path_and_digest() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2457,7 +2428,6 @@ fn a_run_that_reads_no_table_opens_with_an_empty_table_list() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2506,7 +2476,6 @@ fn a_declared_table_that_cannot_be_read_ends_the_run_naming_the_table_and_the_pa
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2551,7 +2520,6 @@ fn a_header_without_the_declared_value_column_ends_the_run_naming_the_table() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2686,7 +2654,6 @@ fn the_target_pattern_names_every_journal_shape_from_one_template() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2813,53 +2780,6 @@ impl Asker for ScriptedAsker {
     }
 }
 
-/// A [`Ledger`] fake recording every `append`, following the shape of
-/// the one in `tests/ledger.rs`, trimmed to what an interactive
-/// admission test needs.
-struct FakeLedger {
-    index: Index,
-    appended: RefCell<Vec<Entry>>,
-}
-
-impl FakeLedger {
-    fn empty() -> FakeLedger {
-        FakeLedger {
-            index: Index::build(&[]),
-            appended: RefCell::new(Vec::new()),
-        }
-    }
-
-    /// A ledger that has already admitted `entry`.
-    fn holding(entry: Entry) -> FakeLedger {
-        FakeLedger {
-            index: Index::build(std::slice::from_ref(&entry)),
-            appended: RefCell::new(Vec::new()),
-        }
-    }
-
-    fn appended(&self) -> Vec<Entry> {
-        self.appended.borrow().clone()
-    }
-}
-
-impl Ledger for FakeLedger {
-    fn load(&self) -> Loaded {
-        Loaded {
-            index: self.index.clone(),
-            warning: None,
-        }
-    }
-
-    fn append(&self, entries: &[Entry]) -> std::io::Result<()> {
-        self.appended.borrow_mut().extend_from_slice(entries);
-        Ok(())
-    }
-
-    fn replace(&self, _entries: &[Entry]) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// design D5/"An interactive run asks before each move": a rename
 /// answer carries out the move exactly as an applying batch run would,
 /// and a skip answer leaves the file untouched and reports it skipped
@@ -2901,7 +2821,6 @@ fn a_rename_answer_moves_the_file_and_a_skip_answer_declines_it() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -2984,7 +2903,6 @@ fn a_file_with_nothing_to_decide_is_never_asked_about() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -3061,7 +2979,6 @@ fn a_declined_proposal_leaves_the_next_files_target_unsuffixed() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -3122,7 +3039,6 @@ fn an_accepted_proposal_suffixes_the_next_files_colliding_target() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -3190,7 +3106,6 @@ fn an_interactive_proposal_into_a_subdirectory_claims_the_right_key_and_suffixes
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -3283,7 +3198,6 @@ fn each_files_events_stay_adjacent_and_in_input_order() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -3314,45 +3228,51 @@ fn each_files_events_stay_adjacent_and_in_input_order() {
     );
 }
 
-/// design D8/"Everything after the decision is the batch path": an
-/// accepted interactive rename is admitted to the collection's ledger
-/// exactly as an applying batch run admits it — same entry, same
-/// fields — because what happens after the decision does not know or
-/// care whether the decision came from `--apply` or from a yes.
-#[test]
-fn an_accepted_interactive_rename_is_admitted_to_the_ledger_exactly_as_an_apply_run_admits_it() {
-    let path = PathBuf::from("/collection/original.pdf");
-    let hash = hash_for("interactive-ledger-admission");
-    let documents = library_with_resolvable(&path, hash.clone(), "10.1000/interactive-admission");
+/// Runs one rename over a fresh real library holding a single file and
+/// hands back what the library recorded: every artifact record it holds
+/// afterwards, and how many items it minted. `answers` empty runs the
+/// batch path under `--apply`; anything else runs the interactive one,
+/// which carries its accepted moves out without `--apply`.
+fn recorded_by_a_rename(answers: Vec<Answer>) -> (Vec<ArtifactRecord>, usize) {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = b"interactive-and-apply bytes";
+    let path = write_real_file(&root, "original.pdf", bytes);
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(bytes),
+        pdf_with_embedded_doi("10.1000/interactive-admission"),
+    );
     let crossref = fake_source(
         SourceName::Crossref,
         Ok(record_by("Smith", 2024, "10.1000/interactive-admission")),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
-    let ledger = FakeLedger::empty();
-    let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
         documents: &documents,
         sources: &sources,
         index: &index,
-        filesystem: &filesystem,
+        filesystem: &RealFilesystem,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: Some(&ledger),
-        collection_root: Some(PathBuf::from("/collection")),
+        collection_root: Some(root.clone()),
         state_root: None,
     };
-    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+    let interactive = !answers.is_empty();
+    let mut asker = ScriptedAsker::new(answers);
+    let mut session = match interactive {
+        true => Session::interactive(&mut asker),
+        false => Session::batch(),
+    };
 
     let events = events_for(
-        &Command::rename(vec![path.clone()], false),
-        &Configs::uniform(effective),
+        &Command::rename(vec![path.clone()], !interactive),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
         &adapters,
-        &mut Session::interactive(&mut asker),
+        &mut session,
     )
     .unwrap();
 
@@ -3361,25 +3281,55 @@ fn an_accepted_interactive_rename_is_admitted_to_the_ledger_exactly_as_an_apply_
             event,
             Event::Renamed { path: renamed, .. } if *renamed == path
         )),
-        "got {events:?}"
+        "setup: the file must move: got {events:?}"
+    );
+    (
+        library::ArtifactStore::read(&root)
+            .iter()
+            .cloned()
+            .collect(),
+        library::ItemStore::read(&root).len(),
+    )
+}
+
+/// design D8/"Everything after the decision is the batch path": an
+/// accepted interactive rename is recorded in the library exactly as an
+/// applying batch run records it — same library-relative path, same
+/// hash history, an item of its own either way — because what happens
+/// after the decision does not know or care whether the decision came
+/// from `--apply` or from a yes.
+///
+/// The identities and the modification times are the two things that
+/// cannot match: a UUID is minted per record and the two runs write
+/// their files at different moments.
+#[test]
+fn an_accepted_interactive_rename_is_recorded_exactly_as_an_apply_run_records_it() {
+    let (accepted, accepted_items) = recorded_by_a_rename(vec![Answer::Rename]);
+    let (applied, applied_items) = recorded_by_a_rename(Vec::new());
+
+    assert_eq!(applied.len(), 1, "setup: got {applied:?}");
+    assert_eq!(accepted.len(), applied.len(), "got {accepted:?}");
+    assert_eq!(accepted_items, 1, "got {accepted_items}");
+    assert_eq!(applied_items, accepted_items);
+
+    let accepted = &accepted[0];
+    let applied = &applied[0];
+    assert_eq!(accepted.path, "Smith2024.pdf", "got {accepted:?}");
+    assert_eq!(accepted.path, applied.path);
+    assert_eq!(accepted.size, applied.size);
+    assert_eq!(
+        accepted.history, applied.history,
+        "an accepted interactive rename must record exactly the history an apply run records"
     );
     assert_eq!(
-        ledger.appended(),
-        vec![Entry {
-            hash,
-            doi: Some(doi("10.1000/interactive-admission")),
-            arxiv: None,
-            pmid: None,
-            isbn: None,
-            path: "Smith2024.pdf".to_string(),
-            entry_type: EntryType::Article,
-            run: RunId::new(fixed_now()),
-            timestamp: fixed_now(),
-            tool_version: env!("CARGO_PKG_VERSION").to_string(),
-        }],
-        "an accepted interactive rename must admit exactly the entry an apply run would: \
-         got {:?}",
-        ledger.appended()
+        accepted.history[0].run,
+        LibraryRunId::new(fixed_now()),
+        "the hash entry is stamped with the run, got {:?}",
+        accepted.history
+    );
+    assert!(
+        accepted.item.is_some() && applied.item.is_some(),
+        "both must link the record to the item minted for the work"
     );
 }
 
@@ -3437,7 +3387,6 @@ fn quitting_counts_unreached_and_still_merges_the_bib_for_the_visited_files() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -3569,7 +3518,6 @@ fn an_interactive_run_with_skip_named_renders_nothing_for_already_named_files() 
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -3673,7 +3621,6 @@ fn an_interactive_run_with_no_skip_named_renders_already_named_files_as_batch_do
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -3763,7 +3710,6 @@ fn the_json_stream_carries_a_passed_over_files_events_in_full() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -3914,7 +3860,6 @@ fn the_hold_ends_before_the_question_and_never_leaks_a_passed_over_files_lines()
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -4010,7 +3955,6 @@ fn a_sidecar_for_a_passed_over_file_is_still_reported() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -4093,7 +4037,6 @@ fn a_sidecar_write_failure_for_a_passed_over_file_is_still_reported() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -4168,7 +4111,6 @@ fn the_description_reaches_the_question_and_stdout_still_carries_resolved() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -4244,7 +4186,6 @@ fn the_description_does_not_reach_the_json_event_stream() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -4330,7 +4271,6 @@ fn two_files_of_one_name_in_two_directories_are_asked_about_distinguishably() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -4420,7 +4360,6 @@ fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -4527,7 +4466,6 @@ impl SupplyFixture {
             bib_files: &self.bib_files,
             cache_root: None,
             now: fixed_now,
-            ledger: None,
             collection_root: None,
             state_root: None,
         }
@@ -4714,7 +4652,6 @@ fn a_conflict_with_a_free_target_offers_overriding_but_never_defaults_to_it() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -4773,7 +4710,6 @@ fn a_conflict_whose_target_is_not_free_offers_no_override() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -4862,7 +4798,6 @@ fn an_already_named_file_under_no_skip_named_offers_to_keep_or_supply() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -5111,7 +5046,6 @@ fn no_skip_named_supplying_and_renaming_re_identifies_a_wrongly_named_file() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -5181,7 +5115,6 @@ fn a_file_settled_by_a_supplied_identifier_is_reported_once() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -5359,7 +5292,6 @@ fn overriding_a_conflict_reports_what_was_overridden_and_renames() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -5442,7 +5374,6 @@ fn skipping_a_conflict_that_could_have_been_overridden_writes_nothing() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -5540,7 +5471,6 @@ fn a_supplied_identifier_resolving_into_a_taken_target_reports_and_reasks() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -5632,7 +5562,6 @@ fn a_supplied_identifier_resolving_into_an_unnameable_record_reports_and_reasks(
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -5712,7 +5641,6 @@ fn a_supplied_identifier_resolving_into_the_files_own_current_name_reports_and_r
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -5853,7 +5781,6 @@ fn an_abandoned_supplied_candidate_is_never_cited() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -5932,7 +5859,6 @@ fn a_files_own_resolution_is_still_cited_after_a_failed_supply() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -6005,7 +5931,6 @@ fn a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_ne
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -6115,7 +6040,6 @@ fn a_resolved_candidate_that_led_nowhere_leaves_the_files_own_record_to_cite() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: None,
     };
@@ -6212,7 +6136,6 @@ fn quitting_a_human_interactive_run_still_prints_the_summary() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: None,
         state_root: Some(state.path().to_path_buf()),
     };
@@ -6247,62 +6170,62 @@ fn quitting_a_human_interactive_run_still_prints_the_summary() {
     );
 }
 
-/// A record the operator reached is put to the ledger before it is
-/// admitted, exactly as one the run resolved on its own is.
+/// A record the operator reached is checked against the library before
+/// it is admitted, exactly as one the run resolved on its own is.
 ///
-/// `resolve_file_checking_ledger` runs the work check on a record it
-/// resolved, but a supplied one never went through it, and neither did
-/// a record the conflict check refused and the operator then accepted.
-/// Admitting a second copy of a work the collection already holds is
-/// the one thing the ledger exists to prevent, and the ledger's verdict
-/// is about the collection rather than about where the identifier came
-/// from.
+/// [`standing`](borax::pipeline::standing) runs the work check on a
+/// record it resolved, but a supplied one never went through it, and
+/// neither did a record the conflict check refused and the operator
+/// then accepted. Admitting a second copy of a work the library already
+/// holds is what the check exists to prevent, and its verdict is about
+/// the library rather than about where the identifier came from.
+///
+/// The check is made silently here rather than put to the operator: a
+/// supplied identifier landing on a work the library holds is left as a
+/// skip, and whether it should be offered the same filing question is
+/// not settled.
 #[test]
-fn a_supplied_record_the_collection_already_holds_is_reported_a_duplicate() {
-    let path = PathBuf::from("/collection/incoming.pdf");
+fn a_supplied_record_the_library_already_holds_is_reported_a_duplicate() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    // The library already holds this work, at a different file.
+    let sibling = seed_sibling_artifact(
+        &root,
+        "sibling-original.pdf",
+        "Smith",
+        2024,
+        "10.1000/already-in-the-library",
+        b"the copy already admitted",
+    );
+
+    let path = write_real_file(&root, "incoming.pdf", b"supplied work duplicate bytes");
     let documents = FakeDocuments::new().with_file(
         &path,
-        hash_for("supplied-work-duplicate"),
+        hash_bytes(b"supplied work duplicate bytes"),
         pdf_with_no_identifier(),
     );
-    let mut held = record_by("Smith", 2024, "10.1000/already-in-the-collection");
-    held.doi = Doi::parse("10.1000/already-in-the-collection").ok();
+    let mut held = record_by("Smith", 2024, "10.1000/already-in-the-library");
+    held.doi = Doi::parse("10.1000/already-in-the-library").ok();
     let crossref = KeyedSource::new(SourceName::Crossref)
-        .answering("doi:10.1000/already-in-the-collection", held);
+        .answering("doi:10.1000/already-in-the-library", held);
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let filesystem =
-        FakeFilesystem::new().with_existing("/collection", [("Smith2024.pdf", Some("other"))]);
     let bib_files = FakeBibFiles::new();
-    // The collection already holds this work, at a different file.
-    let ledger = FakeLedger::holding(Entry {
-        hash: hash_for("the-copy-already-admitted"),
-        doi: Doi::parse("10.1000/already-in-the-collection").ok(),
-        arxiv: None,
-        pmid: None,
-        isbn: None,
-        path: "Smith2024.pdf".to_string(),
-        entry_type: EntryType::Article,
-        run: RunId::new("run-earlier"),
-        timestamp: "2026-08-19T00:00:00Z".to_string(),
-        tool_version: "0.4.0-test".to_string(),
-    });
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
         documents: &documents,
         sources: &sources,
         index: &index,
-        filesystem: &filesystem,
+        filesystem: &RealFilesystem,
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: Some(&ledger),
-        collection_root: Some(PathBuf::from("/collection")),
+        collection_root: Some(root.clone()),
         state_root: None,
     };
     // Supply the identifier, then accept the move it offers.
     let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
-        .with_texts(vec![Some("10.1000/already-in-the-collection".to_string())]);
+        .with_texts(vec![Some("10.1000/already-in-the-library".to_string())]);
 
     let events = events_for(
         &Command::rename(vec![path.clone()], false),
@@ -6317,10 +6240,13 @@ fn a_supplied_record_the_collection_already_holds_is_reported_a_duplicate() {
             event,
             Event::Skipped {
                 path: p,
-                reason: SkipReason::Duplicate { .. },
-            } if *p == path
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Work,
+                    existing_path,
+                },
+            } if *p == path && existing_path == &sibling
         )),
-        "the collection's own copy must be reported, not a second one \
+        "the library's own copy must be reported, not a second one \
          admitted: got {events:?}"
     );
     assert!(
@@ -6329,10 +6255,11 @@ fn a_supplied_record_the_collection_already_holds_is_reported_a_duplicate() {
             .any(|event| matches!(event, Event::Renamed { .. })),
         "nothing may move: got {events:?}"
     );
-    assert!(
-        ledger.appended().is_empty(),
-        "and nothing may be admitted: got {:?}",
-        ledger.appended()
+    assert!(path.exists(), "the supplied file must stay where it is");
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        1,
+        "and nothing may be recorded beyond the sibling's own record"
     );
 }
 
@@ -6525,7 +6452,6 @@ fn status_over_a_marked_directory_of_new_pdfs_reports_every_count_unopened() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -6576,7 +6502,6 @@ fn status_without_identify_never_calls_documents_open() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -6635,7 +6560,6 @@ fn status_identify_counts_artifacts_yielding_an_identifier_and_queries_no_source
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -6698,7 +6622,6 @@ fn status_over_an_unmarked_directory_is_reported_as_given_and_writes_nothing() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         // Nothing above this directory is marked, and nothing configured
         // a `library-root` either.
         collection_root: None,
@@ -6765,7 +6688,6 @@ fn validate_emits_one_finding_event_then_the_totals() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -6823,7 +6745,6 @@ fn validate_with_a_finding_returns_partial_success() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -6873,7 +6794,6 @@ fn validate_with_no_finding_returns_success_whatever_the_orphan_and_unlinked_cou
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -6933,7 +6853,6 @@ fn reconcile_emits_one_repair_event_then_the_totals() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7015,7 +6934,6 @@ fn reconcile_over_a_clean_library_emits_only_the_totals() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7093,7 +7011,6 @@ fn reconcile_rehash_flag_reaches_the_library() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7191,7 +7108,6 @@ fn reconcile_reporting_ambiguity_or_a_missing_artifact_still_succeeds() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7265,7 +7181,6 @@ fn an_applying_rename_over_a_library_with_a_finding_proceeds() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7420,7 +7335,6 @@ fn an_applying_run_writes_an_artifact_record_for_the_file_it_moved() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7499,7 +7413,6 @@ fn a_recorded_files_item_link_survives_three_applying_reruns() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7592,7 +7505,6 @@ fn an_operators_reidentification_relinks_the_artifact_to_the_supplied_records_it
         bib_files: &bib_files_1,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7643,7 +7555,6 @@ fn an_operators_reidentification_relinks_the_artifact_to_the_supplied_records_it
         bib_files: &bib_files_2,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7732,7 +7643,6 @@ fn an_item_with_no_artifact_takes_the_incoming_file_as_its_first_artifact() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7813,7 +7723,6 @@ fn an_item_whose_only_artifact_is_gone_still_takes_a_new_artifact() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7881,7 +7790,6 @@ fn an_already_named_file_inside_the_library_is_recorded_by_an_applying_run() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -7941,7 +7849,6 @@ fn a_preview_writes_nothing_but_an_applying_run_over_the_same_file_does() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -8016,7 +7923,6 @@ fn no_record_moves_the_file_but_writes_nothing_unlike_an_ordinary_run() {
         bib_files: &recording_bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(recording_root.clone()),
         state_root: None,
     };
@@ -8065,7 +7971,6 @@ fn no_record_moves_the_file_but_writes_nothing_unlike_an_ordinary_run() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -8125,7 +8030,6 @@ fn a_file_renamed_outside_the_library_gets_no_record_and_is_reported_outside_it(
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -8194,7 +8098,6 @@ fn an_applying_run_does_not_record_a_file_under_a_nested_library_against_the_enc
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         // The *enclosing* library is what the run is over: the nested
         // directory's own marker does not change what root the run was
         // given.
@@ -8288,7 +8191,6 @@ fn no_record_moves_an_artifact_whose_history_holds_its_hash_leaving_a_stale_path
         bib_files: &recording_bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(recording_root.clone()),
         state_root: None,
     };
@@ -8355,7 +8257,6 @@ fn no_record_moves_an_artifact_whose_history_holds_its_hash_leaving_a_stale_path
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -8471,7 +8372,6 @@ fn no_record_refuses_a_move_when_the_edit_in_place_hash_is_stale() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -8592,7 +8492,6 @@ fn an_applying_run_writes_the_edited_files_current_hash_into_the_update() {
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -8674,7 +8573,6 @@ fn a_failed_store_write_leaves_the_rename_standing_and_the_next_run_records_it()
         bib_files: &bib_files,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -8723,7 +8621,6 @@ fn a_failed_store_write_leaves_the_rename_standing_and_the_next_run_records_it()
         bib_files: &bib_files_2,
         cache_root: None,
         now: fixed_now,
-        ledger: None,
         collection_root: Some(root.clone()),
         state_root: None,
     };
@@ -8747,5 +8644,1140 @@ fn a_failed_store_write_leaves_the_rename_standing_and_the_next_run_records_it()
         library::ItemStore::read(&root).len(),
         1,
         "the item the interrupted admission left behind must be reused, not duplicated"
+    );
+}
+
+// ---------------------------------------------------------------------
+// group 7.6/7.6a/7.6b: duplicate detection against the library store
+//
+// The account this batch checks against is `ledger: None` throughout,
+// exactly as group 7 above: the *old* ledger-based duplicate detection
+// (`crate::pipeline::content_duplicate`/`work_duplicate`, gated on
+// `adapters.ledger`) is still wired into `rename_events` and still
+// runs, but it finds nothing here since it is never given a ledger.
+// `Account::content_duplicate`/`work_duplicate` are `todo!()` in
+// `library.rs` and are not yet reached from `run.rs` at all, so a
+// duplicate the *library* store holds is, today, simply never found:
+// every assertion below that expects one to be caught fails on its own
+// terms rather than panicking.
+// ---------------------------------------------------------------------
+
+/// Runs an ordinary applying rename over a freshly written PDF at
+/// `relative`, resolving to `doi_value`, so the library already holds
+/// an item and a live artifact for that identifier before the test
+/// asks about a second PDF of the same work. Hands back the path the
+/// file moved to.
+fn seed_sibling_artifact(
+    root: &Path,
+    relative: &str,
+    family: &str,
+    year: i32,
+    doi_value: &str,
+    bytes: &[u8],
+) -> PathBuf {
+    let original = write_real_file(root, relative, bytes);
+    let documents = FakeDocuments::new().with_file(
+        &original,
+        hash_bytes(bytes),
+        pdf_with_embedded_doi(doi_value),
+    );
+    let crossref = fake_source(SourceName::Crossref, Ok(record_by(family, year, doi_value)));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.to_path_buf()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![original.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let target = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .expect("setup: the sibling file must have moved");
+    assert!(target.exists(), "setup: the sibling file must be on disk");
+    target
+}
+
+/// task 7.6a: a batch run over a file whose identifier an item already
+/// carries — with a live sibling artifact recorded against it — skips
+/// the file with the work-duplicate reason naming the recorded path,
+/// writes no record and moves nothing, including under `--apply`
+/// (design D16).
+#[test]
+fn a_batch_run_skips_a_file_whose_identifier_an_item_already_carries_as_a_work_duplicate() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let sibling_target = seed_sibling_artifact(
+        &root,
+        "sibling-original.pdf",
+        "Sibling",
+        2020,
+        "10.1000/task-7.6a-batch",
+        b"task-7.6a sibling bytes",
+    );
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        1,
+        "setup: exactly one item must be minted"
+    );
+
+    let incoming = write_real_file(&root, "incoming.pdf", b"task-7.6a incoming bytes");
+    let documents = FakeDocuments::new().with_file(
+        &incoming,
+        hash_bytes(b"task-7.6a incoming bytes"),
+        pdf_with_embedded_doi("10.1000/task-7.6a-batch"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Sibling", 2020, "10.1000/task-7.6a-batch")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![incoming.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Work,
+                    existing_path,
+                },
+            } if path == &incoming && existing_path == &sibling_target
+        )),
+        "a second PDF of an already-archived work must be skipped as a work duplicate \
+         naming the sibling's path: got {events:?}"
+    );
+    assert!(
+        incoming.exists(),
+        "a work duplicate must move nothing, including under --apply"
+    );
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        1,
+        "a work duplicate must write no record"
+    );
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        1,
+        "a work duplicate must mint no second item"
+    );
+}
+
+/// task 7.6a: an interactive run over the same shape of file puts the
+/// question, offering exactly file-as-another-artifact, skip and quit
+/// with skip as the default — filing must never be — and naming both
+/// the item's file and the sibling artifact's path in its description.
+/// Declining reports the work-duplicate reason and not `declined`.
+#[test]
+fn an_interactive_run_offers_filing_a_work_duplicate_as_another_artifact() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let sibling_target = seed_sibling_artifact(
+        &root,
+        "sibling-original.pdf",
+        "Sibling",
+        2021,
+        "10.1000/task-7.6a-interactive",
+        b"task-7.6a-i sibling bytes",
+    );
+    let items = library::ItemStore::read(&root);
+    let item = items.iter().next().expect("setup: an item must be minted");
+    let item_file = items
+        .file_of(&item.id)
+        .expect("setup: the item's file must be found")
+        .to_path_buf();
+
+    let incoming = write_real_file(&root, "incoming.pdf", b"task-7.6a-i incoming bytes");
+    let documents = FakeDocuments::new().with_file(
+        &incoming,
+        hash_bytes(b"task-7.6a-i incoming bytes"),
+        pdf_with_embedded_doi("10.1000/task-7.6a-interactive"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Sibling", 2021, "10.1000/task-7.6a-interactive")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![incoming.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_eq!(
+        questions[0].choices,
+        vec![Answer::Skip, Answer::File, Answer::Quit],
+        "skip must be the default and filing must never be: got {:?}",
+        questions[0].choices
+    );
+    // Named by file name rather than by full path: the requirement is
+    // that the operator is shown which work and which file they are
+    // deciding against, and whether a description renders a path in
+    // full, relative to the library, or relative to the working
+    // directory is a rendering decision this does not pin.
+    let description = questions[0].description.join("\n");
+    let item_named = item_file.file_name().unwrap().to_string_lossy().to_string();
+    let sibling_named = sibling_target
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        description.contains(&item_named),
+        "the description must name the item ({item_named}): got {description:?}"
+    );
+    assert!(
+        description.contains(&sibling_named),
+        "the description must name the recorded artifact ({sibling_named}): got {description:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Work,
+                    existing_path,
+                },
+            } if path == &incoming && existing_path == &sibling_target
+        )),
+        "declining must report the work-duplicate reason and not `declined`: got {events:?}"
+    );
+}
+
+/// task 7.6a: accepting returns the file to planning, where the
+/// ordinary question about its move is put — only then is it moved and
+/// recorded, as a second artifact of the item it matched with no
+/// second item minted.
+///
+/// This one goes red on the `todo!()` in `run.rs`'s `Answer::File`
+/// arm rather than on an assertion, there being no way to reach the
+/// accepting path without answering it. Its assertions are what the
+/// green stage is held to.
+#[test]
+fn filing_a_work_duplicate_moves_it_and_records_it_against_the_same_item() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    seed_sibling_artifact(
+        &root,
+        "sibling-original.pdf",
+        "Filed",
+        2022,
+        "10.1000/task-7.6a-filed",
+        b"task-7.6a-f sibling bytes",
+    );
+    let item = library::ItemStore::read(&root)
+        .iter()
+        .next()
+        .expect("setup: an item must be minted")
+        .id
+        .clone();
+
+    let incoming = write_real_file(&root, "incoming.pdf", b"task-7.6a-f incoming bytes");
+    let documents = FakeDocuments::new().with_file(
+        &incoming,
+        hash_bytes(b"task-7.6a-f incoming bytes"),
+        pdf_with_embedded_doi("10.1000/task-7.6a-filed"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Filed", 2022, "10.1000/task-7.6a-filed")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::File, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![incoming.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        2,
+        "accepting must be followed by the ordinary move question: got {questions:?}"
+    );
+    assert_eq!(
+        questions[1].choices,
+        vec![Answer::Rename, Answer::Supply, Answer::Skip, Answer::Quit],
+        "the second question must be the ordinary one about the move: got {:?}",
+        questions[1].choices
+    );
+    let moved = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { path, target, .. } if path == &incoming => Some(target.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the accepted file must be moved: got {events:?}"));
+
+    let records = library::ArtifactStore::read(&root);
+    assert_eq!(
+        records.len(),
+        2,
+        "filing must write a second artifact record"
+    );
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        1,
+        "filing must mint no second item: it is another artifact of the one it matched"
+    );
+    let filed = records
+        .by_path(&library::library_relative(&root, &moved).unwrap())
+        .unwrap_or_else(|| panic!("the moved file must have a record: got {records:?}"));
+    assert_eq!(
+        filed.item.as_ref(),
+        Some(&item),
+        "the second artifact must be linked to the item it was filed against"
+    );
+}
+
+/// task 7.6a/normative "A file reported as a content duplicate ... SHALL
+/// NOT be asked about": an interactive run over a byte-identical file
+/// puts no question at all and reports it a content duplicate.
+#[test]
+fn a_content_duplicate_is_never_asked_about_interactively() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let shared_hash = hash_bytes(b"task-7.6a-c shared bytes");
+
+    let sibling_original = write_real_file(
+        &root,
+        "sibling-original.pdf",
+        b"task-7.6a-c sibling bytes on disk",
+    );
+    let sibling_documents = FakeDocuments::new().with_file(
+        &sibling_original,
+        shared_hash.clone(),
+        pdf_with_embedded_doi("10.1000/task-7.6a-c-sibling"),
+    );
+    let sibling_crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Sibling", 2019, "10.1000/task-7.6a-c-sibling")),
+    );
+    let sibling_sources: Vec<&dyn Source> = vec![&sibling_crossref];
+    let sibling_index = ContentIndex::new(MemoryCache::new());
+    let sibling_bib_files = FakeBibFiles::new();
+    let sibling_adapters = Adapters {
+        documents: &sibling_documents,
+        sources: &sibling_sources,
+        index: &sibling_index,
+        filesystem: &RealFilesystem,
+        bib_files: &sibling_bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let setup_events = events_for(
+        &Command::rename(vec![sibling_original.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &sibling_adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    let sibling_target = setup_events
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .expect("setup: the sibling file must have moved");
+
+    let incoming = write_real_file(&root, "incoming.pdf", b"task-7.6a-c incoming bytes on disk");
+    let documents = FakeDocuments::new().with_file(
+        &incoming,
+        shared_hash,
+        pdf_with_embedded_doi("10.1000/task-7.6a-c-incoming"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Incoming", 2022, "10.1000/task-7.6a-c-incoming")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    // One spare answer in case the file is still put to a question
+    // today; the assertion below is what must fail, not the asker
+    // running out of scripted answers.
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![incoming.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        asker.questions_asked().is_empty(),
+        "a content duplicate must never be asked about: got {:?}",
+        asker.questions_asked()
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Content,
+                    existing_path,
+                },
+            } if path == &incoming && existing_path == &sibling_target
+        )),
+        "got {events:?}"
+    );
+}
+
+/// task 7.6: with the account on, a byte-identical second file is a
+/// content duplicate and must be skipped rather than admitted; with
+/// `--no-record`, the same shape of duplicate is admitted silently —
+/// the check is off, not merely non-blocking, which is what proves
+/// `--no-record` suppresses the check itself and not only the writes
+/// behind it.
+#[test]
+fn recording_catches_a_content_duplicate_but_no_record_admits_it_silently() {
+    // With the account on, a genuine recorded duplicate is caught.
+    let recording = real_library();
+    let recording_root = recording.path().to_path_buf();
+    let recording_shared_hash = hash_bytes(b"task-7.6-r shared bytes");
+    let recording_sibling = write_real_file(
+        &recording_root,
+        "sibling-original.pdf",
+        b"task-7.6-r sibling bytes on disk",
+    );
+    let recording_sibling_documents = FakeDocuments::new().with_file(
+        &recording_sibling,
+        recording_shared_hash.clone(),
+        pdf_with_embedded_doi("10.1000/task-7.6-r-sibling"),
+    );
+    let recording_sibling_crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Sibling", 2018, "10.1000/task-7.6-r-sibling")),
+    );
+    let recording_sibling_sources: Vec<&dyn Source> = vec![&recording_sibling_crossref];
+    let recording_sibling_index = ContentIndex::new(MemoryCache::new());
+    let recording_sibling_bib_files = FakeBibFiles::new();
+    let recording_sibling_adapters = Adapters {
+        documents: &recording_sibling_documents,
+        sources: &recording_sibling_sources,
+        index: &recording_sibling_index,
+        filesystem: &RealFilesystem,
+        bib_files: &recording_sibling_bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(recording_root.clone()),
+        state_root: None,
+    };
+    let recording_setup_events = events_for(
+        &Command::rename(vec![recording_sibling.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &recording_sibling_adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    let recording_sibling_target = recording_setup_events
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .expect("setup: the sibling file must have moved");
+
+    let recording_incoming = write_real_file(
+        &recording_root,
+        "incoming.pdf",
+        b"task-7.6-r incoming bytes on disk",
+    );
+    let recording_documents = FakeDocuments::new().with_file(
+        &recording_incoming,
+        recording_shared_hash,
+        pdf_with_embedded_doi("10.1000/task-7.6-r-incoming"),
+    );
+    let recording_crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Incoming", 2023, "10.1000/task-7.6-r-incoming")),
+    );
+    let recording_sources: Vec<&dyn Source> = vec![&recording_crossref];
+    let recording_index = ContentIndex::new(MemoryCache::new());
+    let recording_bib_files = FakeBibFiles::new();
+    let recording_adapters = Adapters {
+        documents: &recording_documents,
+        sources: &recording_sources,
+        index: &recording_index,
+        filesystem: &RealFilesystem,
+        bib_files: &recording_bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(recording_root.clone()),
+        state_root: None,
+    };
+
+    let recording_events = events_for(
+        &Command::rename(vec![recording_incoming.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &recording_adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        recording_events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Content,
+                    existing_path,
+                },
+            } if path == &recording_incoming && existing_path == &recording_sibling_target
+        )),
+        "with the account on, a byte-identical file must be skipped as a content \
+         duplicate: got {recording_events:?}"
+    );
+    assert!(
+        recording_incoming.exists(),
+        "a content duplicate must never be moved"
+    );
+    assert_eq!(
+        library::ArtifactStore::read(&recording_root).len(),
+        1,
+        "a content duplicate must write no second record"
+    );
+
+    // With `--no-record`, the same shape of duplicate is admitted
+    // silently.
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let shared_hash = hash_bytes(b"task-7.6-n shared bytes");
+
+    let sibling = write_real_file(
+        &root,
+        "sibling-original.pdf",
+        b"task-7.6-n sibling bytes on disk",
+    );
+    let sibling_documents = FakeDocuments::new().with_file(
+        &sibling,
+        shared_hash.clone(),
+        pdf_with_embedded_doi("10.1000/task-7.6-n-sibling"),
+    );
+    let sibling_crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Sibling", 2018, "10.1000/task-7.6-n-sibling")),
+    );
+    let sibling_sources: Vec<&dyn Source> = vec![&sibling_crossref];
+    let sibling_index = ContentIndex::new(MemoryCache::new());
+    let sibling_bib_files = FakeBibFiles::new();
+    let sibling_adapters = Adapters {
+        documents: &sibling_documents,
+        sources: &sibling_sources,
+        index: &sibling_index,
+        filesystem: &RealFilesystem,
+        bib_files: &sibling_bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    events_for(
+        &Command::rename(vec![sibling.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &sibling_adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        1,
+        "setup: the sibling must be recorded, so a genuine duplicate exists to check against"
+    );
+
+    let incoming = write_real_file(&root, "incoming.pdf", b"task-7.6-n incoming bytes on disk");
+    let documents = FakeDocuments::new().with_file(
+        &incoming,
+        shared_hash,
+        pdf_with_embedded_doi("10.1000/task-7.6-n-incoming"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Incoming", 2024, "10.1000/task-7.6-n-incoming")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.record = Some(false);
+    });
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![incoming.clone()], true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path: from, .. } if from == &incoming
+        )),
+        "--no-record must silently admit a recorded duplicate rather than checking for one: \
+         got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Skipped { .. })),
+        "--no-record must skip nothing: got {events:?}"
+    );
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        1,
+        "--no-record must write no record for the incoming file, leaving only the sibling's"
+    );
+}
+
+// ---------------------------------------------------------------------
+// group 7.6: a stale recorded path never blocks, and is said once
+//
+// "Stale entries never block re-admission": disk is the source of
+// truth, so a record whose last-known path holds no file vetoes
+// nothing — and what the run has to say about it is one fact about the
+// library, said once however many files revealed it.
+// ---------------------------------------------------------------------
+
+const STALE_UUID_A: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdefa";
+const STALE_UUID_B: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdefb";
+
+/// Writes an artifact record for `relative` holding `seed`'s hash,
+/// whatever stands at that path — the shape a stale record has: the
+/// library says a file is there and nothing is.
+fn write_record_for(root: &Path, id: &str, relative: &str, seed: &str) {
+    write_lib_artifact_record(
+        root,
+        &ArtifactRecord {
+            id: lib_artifact_id(id),
+            item: None,
+            path: relative.to_string(),
+            size: 100,
+            modified_millis: 0,
+            history: vec![lib_hash_entry(seed, "run-earlier")],
+        },
+    );
+}
+
+/// Runs an applying rename over `paths` through `dispatch`, so what the
+/// run writes to standard error can be read: `events_for` reports the
+/// events and drops the diagnostics.
+fn stderr_of_rename(
+    root: &Path,
+    paths: Vec<PathBuf>,
+    documents: &FakeDocuments,
+    sources: &[&dyn Source],
+) -> (String, String) {
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents,
+        sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.to_path_buf()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    dispatch(
+        &cli(Command::rename(paths, true), true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+        &mut Streams {
+            out: &mut out,
+            err: &mut err,
+        },
+    );
+
+    (
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+/// A file whose hash a record holds, at a path holding no file, is
+/// admitted normally — and the run says once that the library holds
+/// paths to reconcile, naming the command that repairs them.
+#[test]
+fn a_stale_recorded_path_is_admitted_and_warns_that_the_library_needs_reconciling() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = b"stale-path bytes";
+    let path = write_real_file(&root, "original.pdf", bytes);
+    write_record_for(&root, STALE_UUID_A, "gone.pdf", "stale-path bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(bytes),
+        pdf_with_embedded_doi("10.1000/stale-path"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/stale-path")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let (out, err) = stderr_of_rename(&root, vec![path], &documents, &sources);
+
+    assert!(
+        out.contains("\"event\":\"renamed\""),
+        "a stale recorded path must never block an admission: got {out:?}"
+    );
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 1, "expected exactly one warning, got {err:?}");
+    assert!(lines[0].starts_with("warning:"), "got {err:?}");
+    assert!(
+        lines[0].contains("reconcile"),
+        "the warning must name the command that repairs the paths, got {err:?}"
+    );
+}
+
+/// One fact about the library, said once: two files each matching a
+/// stale record still produce a single warning.
+#[test]
+fn two_files_hitting_stale_recorded_paths_still_warn_once() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let first = write_real_file(&root, "first.pdf", b"stale-first bytes");
+    let second = write_real_file(&root, "second.pdf", b"stale-second bytes");
+    write_record_for(&root, STALE_UUID_A, "gone-one.pdf", "stale-first bytes");
+    write_record_for(&root, STALE_UUID_B, "gone-two.pdf", "stale-second bytes");
+    let documents = FakeDocuments::new()
+        .with_file(
+            &first,
+            hash_bytes(b"stale-first bytes"),
+            pdf_with_embedded_doi("10.1000/stale-first"),
+        )
+        .with_file(
+            &second,
+            hash_bytes(b"stale-second bytes"),
+            pdf_with_embedded_doi("10.1000/stale-second"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/stale-first",
+            record_by("First", 2024, "10.1000/stale-first"),
+        )
+        .answering(
+            "doi:10.1000/stale-second",
+            record_by("Second", 2024, "10.1000/stale-second"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let (_, err) = stderr_of_rename(&root, vec![first, second], &documents, &sources);
+
+    assert_eq!(
+        err.lines().count(),
+        1,
+        "two stale matches must still warn once, got {err:?}"
+    );
+}
+
+/// A run that matches nothing is not a run with stale paths: a miss is
+/// a miss, and nothing is said.
+#[test]
+fn a_run_matching_no_record_says_nothing_about_stale_paths() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"no-match bytes");
+    write_record_for(&root, STALE_UUID_A, "unrelated.pdf", "other bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"no-match bytes"),
+        pdf_with_embedded_doi("10.1000/no-match"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/no-match")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let (_, err) = stderr_of_rename(&root, vec![path], &documents, &sources);
+
+    assert!(err.is_empty(), "a miss is not staleness, got {err:?}");
+}
+
+/// The path an artifact record stores is relative to the library root
+/// and `/`-separated — not relative to the directory the file happened
+/// to be renamed within, which is what would make a record unreadable
+/// from anywhere else in the library.
+#[test]
+fn an_applied_rename_records_the_files_new_path_relative_to_the_library_root() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = b"library-relative bytes";
+    let path = write_real_file(&root, "sub/original.pdf", bytes);
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(bytes),
+        pdf_with_embedded_doi("10.1000/library-relative"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/library-relative")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let (out, _) = stderr_of_rename(&root, vec![path], &documents, &sources);
+
+    assert!(
+        out.contains("\"event\":\"renamed\""),
+        "setup: the file must move: got {out:?}"
+    );
+    let records = library::ArtifactStore::read(&root);
+    let recorded: Vec<&str> = records.iter().map(|record| record.path.as_str()).collect();
+    assert_eq!(recorded, vec!["sub/Smith2024.pdf"], "got {recorded:?}");
+}
+
+// ---------------------------------------------------------------------
+// group 7.8: the retired ledger is left alone
+// ---------------------------------------------------------------------
+
+/// task 7.8: no library command reads, writes or deletes
+/// `.borax/ledger.jsonl`, borax's own retired accounting — a library
+/// holding one is reported, validated and reconciled with the file
+/// left byte-identical, and an applying run appends nothing to it. The
+/// file sits inside the state directory every library command writes
+/// to, so it is left alone deliberately rather than by being out of
+/// reach.
+///
+/// `borax adopt` does not exist yet (it is group 8); adoption joins
+/// this test then.
+#[test]
+fn no_library_command_touches_the_retired_ledger_file() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let ledger_path = root.join(STATE_DIR).join("ledger.jsonl");
+    fs::create_dir_all(ledger_path.parent().unwrap()).unwrap();
+    let original: &[u8] =
+        b"{\"schema\":1,\"path\":\"old.pdf\",\"hash\":\"deadbeef\",\"run\":\"run-0\"}\n";
+    fs::write(&ledger_path, original).unwrap();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(&ledger_path).unwrap(),
+        original,
+        "status must not touch the retired ledger file"
+    );
+
+    events_for(
+        &Command::validate(Some(root.clone())),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(&ledger_path).unwrap(),
+        original,
+        "validate must not touch the retired ledger file"
+    );
+
+    events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(&ledger_path).unwrap(),
+        original,
+        "reconcile must not touch the retired ledger file"
+    );
+
+    // An applying rename over the same library, which writes the state
+    // directory the retired file sits in.
+    let path = write_real_file(&root, "original.pdf", b"task-7.8 bytes");
+    let hash = hash_bytes(b"task-7.8 bytes");
+    let rename_documents =
+        FakeDocuments::new().with_file(&path, hash, pdf_with_embedded_doi("10.1000/task-7.8"));
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Ledgerless", 2022, "10.1000/task-7.8")),
+    );
+    let rename_sources: Vec<&dyn Source> = vec![&crossref];
+    let rename_index = ContentIndex::new(MemoryCache::new());
+    let rename_bib_files = FakeBibFiles::new();
+    let rename_adapters = Adapters {
+        documents: &rename_documents,
+        sources: &rename_sources,
+        index: &rename_index,
+        filesystem: &RealFilesystem,
+        bib_files: &rename_bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &rename_adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Renamed { .. })),
+        "setup: the file must actually move: got {events:?}"
+    );
+
+    assert_eq!(
+        fs::read(&ledger_path).unwrap(),
+        original,
+        "an applying run must write nothing to the retired ledger file: got {:?}",
+        fs::read(&ledger_path).unwrap()
+    );
+}
+
+/// task 7.6b: each of the three recorded artifacts of one item,
+/// reached in turn by a batch run, is reported neither a duplicate nor
+/// skipped — the check passes over the item the incoming file's own
+/// record links to. Without that rule every artifact of a
+/// multi-artifact item meets its siblings as a duplicate of the item
+/// all three belong to, and a batch run skips all three.
+///
+/// The three sit in directories of their own, each already carrying
+/// the name its record renders, so the run reaches each of them with
+/// its own record in hand and nothing about the move confuses what is
+/// being asserted.
+#[test]
+fn a_batch_run_over_three_artifacts_of_one_item_skips_none_of_them() {
+    const G7_UUID_D: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef8";
+
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let item = Item {
+        id: lib_item_id(G7_UUID_A),
+        record: record_by("Sibling", 2020, "10.1000/task-7.6b"),
+    };
+    write_lib_item(&root, "sibling2020", &item);
+
+    let mut documents = FakeDocuments::new();
+    let mut paths = Vec::new();
+    for (uuid, directory, bytes) in [
+        (G7_UUID_B, "one", &b"task-7.6b one"[..]),
+        (G7_UUID_C, "two", &b"task-7.6b two"[..]),
+        (G7_UUID_D, "three", &b"task-7.6b three"[..]),
+    ] {
+        let relative = format!("{directory}/Sibling2020.pdf");
+        let path = write_real_file(&root, &relative, bytes);
+        let (size, modified_millis) = real_stat(&path);
+        write_lib_artifact_record(
+            &root,
+            &ArtifactRecord {
+                id: lib_artifact_id(uuid),
+                item: Some(item.id.clone()),
+                path: relative,
+                size,
+                modified_millis,
+                history: vec![hash_entry_for(hash_bytes(bytes), "run-0")],
+            },
+        );
+        documents = documents.with_file(
+            &path,
+            hash_bytes(bytes),
+            pdf_with_embedded_doi("10.1000/task-7.6b"),
+        );
+        paths.push(path);
+    }
+
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Sibling", 2020, "10.1000/task-7.6b")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(paths.clone(), true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    // Each file was resolved, so each of them reached the work check
+    // rather than being passed over before it: without this the test
+    // could hold with no check having run at all.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Resolved { .. }))
+            .count(),
+        3,
+        "each of the three must be resolved, or nothing was checked: got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Skipped { .. })),
+        "no artifact of an item may be a duplicate of the item it belongs to: got {events:?}"
+    );
+    for path in &paths {
+        assert!(path.exists(), "nothing may move: {}", path.display());
+    }
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        1,
+        "no second item may be minted"
+    );
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        3,
+        "the three records must still be three"
     );
 }

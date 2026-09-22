@@ -9,15 +9,16 @@ use std::thread;
 use std::time::Duration;
 
 use borax::event::{Attempt, Claim, ClaimOrigin, Counts, Event, SkipReason};
-use borax::ledger::Collection;
+use borax::library::Stores;
 use borax::pipeline::{
     Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, claims_of,
-    event_for, remember, resolve_batch, resolve_file, resolve_file_checking_ledger,
-    resolve_supplied,
+    event_for, remember, resolve_batch, resolve_file, resolve_supplied, standing,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
-use borax_core::ledger::{DuplicateReason, Entry, Index, RunId};
+use borax_core::library::{
+    ArtifactId, ArtifactRecord, DuplicateReason, HashEntry, Item, ItemId, RunId as LibraryRunId,
+};
 use borax_core::record::{EntryType, Record};
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_pdf::tiered::{ExtractionConfig, Tier};
@@ -25,6 +26,7 @@ use borax_sources::cache::MemoryCache;
 use borax_sources::source::{Source, SourceError, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 use tempfile::tempdir;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------
 // Fakes
@@ -1620,42 +1622,92 @@ fn a_resolved_event_round_trips_its_record_through_json() {
 }
 
 // ---------------------------------------------------------------------
-// 2.4: resolve_file_checking_ledger — duplicate detection wiring
+// 2.4: standing() — duplicate detection wiring against the library
 //
 // ledger spec: "content check runs after hashing and before any
 // resolution" (Content) / "work duplicate ... after resolution" and
 // "Stale entries never block re-admission" (disk is the source of
-// truth over the ledger).
+// truth over the artifact store).
+//
+// What each check answers is `tests/library.rs`'s subject; what these
+// pin is the wiring — which pass each check runs between, and what the
+// verdict becomes.
 // ---------------------------------------------------------------------
 
-fn ledger_index(entries: &[Entry]) -> Index {
-    Index::build(entries)
+/// A UUIDv7 for a record or an item, distinct per call, following the
+/// shape of the fixed identities in `tests/library.rs`.
+fn fresh_uuid() -> Uuid {
+    Uuid::now_v7()
 }
 
-/// A ledger entry recorded for `path`, hashing `hash`, with an
-/// optional DOI, following the shape of `entry()` in
-/// `borax-core/tests/ledger.rs`.
-fn ledger_entry(path: &str, hash: ContentHash, doi_value: Option<&str>) -> Entry {
-    Entry {
-        hash,
-        doi: doi_value.map(doi),
-        arxiv: None,
-        pmid: None,
-        isbn: None,
-        path: path.to_string(),
-        entry_type: EntryType::Article,
-        run: RunId::new("earlier-run"),
-        timestamp: "2026-08-01T00:00:00Z".to_string(),
-        tool_version: "0.2.0-test".to_string(),
-    }
+/// Writes an artifact record under `root` naming `relative`, holding
+/// `hash`, and linked to `item` where one is given.
+fn record_at(root: &Path, relative: &str, hash: ContentHash, item: Option<ItemId>) {
+    let record = ArtifactRecord {
+        id: ArtifactId::from_uuid(fresh_uuid()),
+        item,
+        path: relative.to_string(),
+        size: 100,
+        modified_millis: 0,
+        history: vec![HashEntry {
+            hash,
+            run: LibraryRunId::new("earlier-run"),
+            timestamp: "2026-08-01T00:00:00Z".to_string(),
+            tool_version: "0.2.0-test".to_string(),
+        }],
+    };
+    let dir = root.join(".borax").join("artifacts");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{}.toml", record.id)), record.to_toml()).unwrap();
+}
+
+/// Writes an item under `root` carrying `doi_value`, and hands back its
+/// identity so a record can be linked to it.
+fn item_with(root: &Path, doi_value: &str) -> ItemId {
+    let item = Item {
+        id: ItemId::from_uuid(fresh_uuid()),
+        record: record_with_doi(doi_value),
+    };
+    let items = root.join("items");
+    fs::create_dir_all(&items).unwrap();
+    fs::write(items.join(format!("{}.toml", item.id)), item.to_toml()).unwrap();
+    item.id.clone()
+}
+
+/// The verdict `standing` reaches for `path` against the library rooted
+/// at `root`, with `live` deciding whether a recorded path still holds
+/// a file — the seam disk occupies in a run, held here so a stale
+/// record is a property of the test rather than of the temporary
+/// directory.
+fn checked<C: borax_sources::cache::Cache>(
+    path: &Path,
+    documents: &dyn Documents,
+    sources: &[&dyn Source],
+    index: &ContentIndex<C>,
+    root: &Path,
+    live: bool,
+) -> FileOutcome {
+    let stores = Stores::read(root);
+    let exists = |_: &Path| live;
+    standing(
+        path,
+        documents,
+        sources,
+        index,
+        &config(true),
+        Some(&stores.account(&exists)),
+    )
+    .verdict
 }
 
 #[test]
 fn a_live_content_duplicate_is_skipped_before_any_network_work() {
-    let path = Path::new("incoming.pdf");
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
     let hash = hash_for("same-bytes");
     let documents = FakeDocuments::new().with_file(
-        path,
+        &path,
         hash.clone(),
         pdf_with_embedded_doi("10.1000/whatever"),
     );
@@ -1664,26 +1716,15 @@ fn a_live_content_duplicate_is_skipped_before_any_network_work() {
     };
     let sources: Vec<&dyn Source> = vec![&panics];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry("archived/Smith2024.pdf", hash, None)]);
+    record_at(root, "archived/Smith2024.pdf", hash, None);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &documents,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     assert_eq!(
         outcome,
         FileOutcome::Skipped(SkipReason::Duplicate {
             reason: DuplicateReason::Content,
-            existing_path: PathBuf::from("/collection/archived/Smith2024.pdf"),
+            existing_path: root.join("archived").join("Smith2024.pdf"),
         })
     );
     assert_eq!(
@@ -1696,28 +1737,19 @@ fn a_live_content_duplicate_is_skipped_before_any_network_work() {
 /// ledger spec scenario "Duplicate of a vanished admission".
 #[test]
 fn a_stale_content_duplicate_does_not_block_re_admission() {
-    let path = Path::new("incoming.pdf");
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
     let hash = hash_for("same-bytes-again");
     let documents =
-        FakeDocuments::new().with_file(path, hash.clone(), pdf_with_embedded_doi("10.1000/again"));
+        FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_embedded_doi("10.1000/again"));
     let (crossref, _) = fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/again")));
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry("gone/Smith2024.pdf", hash, None)]);
+    record_at(root, "gone/Smith2024.pdf", hash, None);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &documents,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            // Nothing on disk any more: the ledger entry is stale.
-            exists: &|_: &Path| false,
-        },
-    );
+    // Nothing on disk any more: the recorded path is stale.
+    let outcome = checked(&path, &documents, &sources, &index, root, false);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, record_with_doi("10.1000/again"));
@@ -1726,38 +1758,33 @@ fn a_stale_content_duplicate_does_not_block_re_admission() {
 /// ledger spec scenario "Second PDF of an archived paper".
 #[test]
 fn a_live_work_duplicate_is_skipped_after_resolution() {
-    let path = Path::new("incoming.pdf");
-    let hash = hash_for("different-bytes");
-    let documents =
-        FakeDocuments::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/reprint"));
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("different-bytes"),
+        pdf_with_embedded_doi("10.1000/reprint"),
+    );
     let (crossref, calls) =
         fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/reprint")));
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry(
+    let item = item_with(root, "10.1000/reprint");
+    record_at(
+        root,
         "archived/Reprint2024.pdf",
         hash_for("original-bytes"),
-        Some("10.1000/reprint"),
-    )]);
-
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &documents,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
+        Some(item),
     );
+
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     assert_eq!(
         outcome,
         FileOutcome::Skipped(SkipReason::Duplicate {
             reason: DuplicateReason::Work,
-            existing_path: PathBuf::from("/collection/archived/Reprint2024.pdf"),
+            existing_path: root.join("archived").join("Reprint2024.pdf"),
         })
     );
     assert_eq!(
@@ -1769,90 +1796,67 @@ fn a_live_work_duplicate_is_skipped_after_resolution() {
 
 #[test]
 fn a_stale_work_duplicate_does_not_block_re_admission() {
-    let path = Path::new("incoming.pdf");
-    let hash = hash_for("different-bytes-again");
-    let documents =
-        FakeDocuments::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/reprint-again"));
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("different-bytes-again"),
+        pdf_with_embedded_doi("10.1000/reprint-again"),
+    );
     let (crossref, _) = fake_source(
         SourceName::Crossref,
         Ok(record_with_doi("10.1000/reprint-again")),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry(
+    let item = item_with(root, "10.1000/reprint-again");
+    record_at(
+        root,
         "gone/Reprint2024.pdf",
         hash_for("original-bytes-again"),
-        Some("10.1000/reprint-again"),
-    )]);
-
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &documents,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| false,
-        },
+        Some(item),
     );
+
+    let outcome = checked(&path, &documents, &sources, &index, root, false);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, record_with_doi("10.1000/reprint-again"));
 }
 
 #[test]
-fn resolve_file_checking_ledger_resolves_normally_when_nothing_matches_an_empty_ledger() {
-    let path = Path::new("incoming.pdf");
-    let hash = hash_for("brand-new");
-    let documents =
-        FakeDocuments::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/new"));
+fn standing_resolves_normally_when_the_library_holds_nothing() {
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("brand-new"),
+        pdf_with_embedded_doi("10.1000/new"),
+    );
     let (crossref, _) = fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/new")));
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[]);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &documents,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, record_with_doi("10.1000/new"));
 }
 
-/// A resolution failure passes through untouched: the ledger has
+/// A resolution failure passes through untouched: the library has
 /// nothing to add to a file that never produced a record.
 #[test]
-fn resolve_file_checking_ledger_passes_through_a_resolution_failure() {
-    let path = Path::new("incoming.pdf");
-    let hash = hash_for("unresolvable");
-    let documents = FakeDocuments::new().with_file(path, hash, pdf_with_no_identifier());
+fn standing_passes_through_a_resolution_failure() {
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_for("unresolvable"), pdf_with_no_identifier());
     let sources: Vec<&dyn Source> = vec![];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[]);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &documents,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     assert_eq!(outcome, FileOutcome::Skipped(SkipReason::NoIdentifier));
 }
@@ -1867,10 +1871,12 @@ fn resolve_file_checking_ledger_passes_through_a_resolution_failure() {
 /// and the file never opened.
 #[test]
 fn a_content_match_at_the_incoming_path_is_not_a_duplicate_and_resolves_from_the_index() {
-    let path = Path::new("/collection/archived/Smith2024.pdf");
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("archived").join("Smith2024.pdf");
     let hash = hash_for("own-bytes");
     let documents = FakeDocuments::new().with_open_error(
-        path,
+        &path,
         hash.clone(),
         ExtractionError::Unreadable {
             message: "must never be opened".to_string(),
@@ -1883,36 +1889,27 @@ fn a_content_match_at_the_incoming_path_is_not_a_duplicate_and_resolves_from_the
     let index = ContentIndex::new(MemoryCache::new());
     let indexed = record_with_doi("10.1000/own");
     index.put(&hash, &indexed);
-    let ledger = ledger_index(&[ledger_entry("archived/Smith2024.pdf", hash, None)]);
+    record_at(root, "archived/Smith2024.pdf", hash, None);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &documents,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, indexed);
-    assert!(file_record.cached, "the file's own entry is not a query");
+    assert!(file_record.cached, "the file's own record is not a query");
     assert_eq!(documents.open_calls(), 0);
 }
 
 /// A content match at a *different* live path is still reported as a
 /// duplicate — the contrast to the case above, so passing over a file's
-/// own entry cannot be mistaken for passing over every entry.
+/// own record cannot be mistaken for passing over every record.
 #[test]
 fn a_content_match_at_another_live_path_is_still_a_duplicate() {
-    let path = Path::new("/collection/incoming/Copy.pdf");
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming").join("Copy.pdf");
     let hash = hash_for("shared-bytes");
     let documents = FakeDocuments::new().with_file(
-        path,
+        &path,
         hash.clone(),
         pdf_with_embedded_doi("10.1000/whatever"),
     );
@@ -1921,63 +1918,47 @@ fn a_content_match_at_another_live_path_is_still_a_duplicate() {
     };
     let sources: Vec<&dyn Source> = vec![&panics];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry("archived/Smith2024.pdf", hash, None)]);
+    record_at(root, "archived/Smith2024.pdf", hash, None);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &documents,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     assert_eq!(
         outcome,
         FileOutcome::Skipped(SkipReason::Duplicate {
             reason: DuplicateReason::Content,
-            existing_path: PathBuf::from("/collection/archived/Smith2024.pdf"),
+            existing_path: root.join("archived").join("Smith2024.pdf"),
         })
     );
 }
 
 /// The work check has the same hole and the same fix: a file at its
 /// admitted path, annotated afterwards so its bytes (and therefore its
-/// hash) changed, still resolves to the identifier its own entry
-/// records and is not reported a work duplicate of itself.
+/// hash) changed, still resolves to the identifier the item its own
+/// record links to carries, and is not reported a work duplicate of
+/// itself.
 #[test]
 fn a_work_match_at_the_incoming_path_is_not_a_duplicate_after_a_changed_hash() {
-    let path = Path::new("/collection/archived/Reprint2024.pdf");
-    let old_hash = hash_for("original-bytes");
-    let new_hash = hash_for("annotated-bytes");
-    let documents =
-        FakeDocuments::new().with_file(path, new_hash, pdf_with_embedded_doi("10.1000/reprint"));
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("archived").join("Reprint2024.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("annotated-bytes"),
+        pdf_with_embedded_doi("10.1000/reprint"),
+    );
     let (crossref, calls) =
         fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/reprint")));
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry(
+    let item = item_with(root, "10.1000/reprint");
+    record_at(
+        root,
         "archived/Reprint2024.pdf",
-        old_hash,
-        Some("10.1000/reprint"),
-    )]);
-
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &documents,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
+        hash_for("original-bytes"),
+        Some(item),
     );
+
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, record_with_doi("10.1000/reprint"));

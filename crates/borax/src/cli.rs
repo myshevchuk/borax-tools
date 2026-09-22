@@ -291,21 +291,6 @@ pub enum Command {
         #[command(flatten)]
         run_log: RunLogOptions,
     },
-    /// Work on the collection's record of what it has admitted.
-    Ledger {
-        #[command(subcommand)]
-        action: LedgerAction,
-    },
-}
-
-/// What `borax ledger` is being asked to do.
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
-pub enum LedgerAction {
-    /// Regenerate the ledger from the collection's files and sidecars.
-    Rebuild {
-        #[command(flatten)]
-        run_log: RunLogOptions,
-    },
 }
 
 /// The settings an invocation overrides, one field per setting.
@@ -521,9 +506,6 @@ impl Cli {
                 run_log.fill(&mut settings)
             }
             Command::Cache { run_log, .. } => run_log.fill(&mut settings),
-            Command::Ledger {
-                action: LedgerAction::Rebuild { run_log },
-            } => run_log.fill(&mut settings),
         }
         settings
     }
@@ -617,8 +599,7 @@ impl Command {
     }
 
     /// The subcommand's name, as [`crate::event::Event::RunStarted`]
-    /// reports it and as the user typed it. A subcommand with an
-    /// action of its own is named by both words, as `ledger rebuild`.
+    /// reports it and as the user typed it.
     pub fn name(&self) -> &'static str {
         match self {
             Command::Resolve { .. } => "resolve",
@@ -629,9 +610,6 @@ impl Command {
             Command::Status { .. } => "status",
             Command::Validate { .. } => "validate",
             Command::Reconcile { .. } => "reconcile",
-            Command::Ledger {
-                action: LedgerAction::Rebuild { .. },
-            } => "ledger rebuild",
         }
     }
 
@@ -646,8 +624,7 @@ impl Command {
             | Command::Cache { .. }
             | Command::Status { .. }
             | Command::Validate { .. }
-            | Command::Reconcile { .. }
-            | Command::Ledger { .. } => &[],
+            | Command::Reconcile { .. } => &[],
         }
     }
 
@@ -665,15 +642,6 @@ impl Command {
             | Command::Validate { path, .. }
             | Command::Reconcile { path, .. } => path.as_deref(),
             _ => None,
-        }
-    }
-}
-
-impl LedgerAction {
-    /// The `ledger rebuild` action, with no setting overridden.
-    pub fn rebuild() -> LedgerAction {
-        LedgerAction::Rebuild {
-            run_log: RunLogOptions::default(),
         }
     }
 }

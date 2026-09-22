@@ -11,6 +11,8 @@
 //! the move being proposed: it invents nothing, and shows nothing about
 //! the resolution that the event stream does not also carry.
 
+use std::path::Path;
+
 use borax_core::record::{DateParts, EntryType, Name, Record};
 
 use crate::event::{Attempt, Claim, ClaimOrigin, Event, SkipReason};
@@ -443,6 +445,41 @@ pub fn reported(
     }
     description.lines.push(String::new());
     description.lines
+}
+
+/// The lines naming the work the library already holds a file for,
+/// shown above the description of the question about filing this file
+/// as another artifact of it.
+///
+/// `existing` is the artifact recorded against that work whose path
+/// still holds a file, and `item` the file the work's own record was
+/// read from, which is `None` only where the store can no longer name
+/// one. Both are named relative to `library` where they lie under it:
+/// the operator is deciding within one library, so the part of a path
+/// every file shares says nothing.
+///
+/// A blank line closes the block, as it does after [`reported`], so the
+/// rule below it reads as the beginning of the file's own account.
+pub fn archived(library: &Path, existing: &Path, item: Option<&Path>, width: usize) -> Vec<String> {
+    let mut description = Description {
+        lines: Vec::new(),
+        width,
+    };
+    description.field("same work", &under(library, existing));
+    if let Some(item) = item {
+        description.field("item", &under(library, item));
+    }
+    description.lines.push(String::new());
+    description.lines
+}
+
+/// `path` as a description names it within `library`: relative to it
+/// where it lies under it, and whole where it does not.
+fn under(library: &Path, path: &Path) -> String {
+    path.strip_prefix(library)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 /// How close two values were, as the `conflict` line puts it.

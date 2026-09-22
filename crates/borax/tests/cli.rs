@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use borax::cli::{Cli, Command, LedgerAction, Settings, flag_layers};
+use borax::cli::{Cli, Command, Settings, flag_layers};
 use borax::config::{
     BibLayer, ExtractionLayer, Layer, NetworkLayer, Origin, RenameLayer, layer_from_toml, resolve,
 };
@@ -117,51 +117,6 @@ fn cache_without_clear_parses_clear_as_false() {
 fn cache_with_clear_parses_clear_as_true() {
     let cli = parse(&["cache", "--clear"]);
     assert_eq!(cli.command, Command::cache(true), "got {:?}", cli.command);
-}
-
-#[test]
-fn ledger_rebuild_parses_with_no_paths() {
-    let cli = parse(&["ledger", "rebuild"]);
-
-    assert_eq!(
-        cli.command,
-        Command::Ledger {
-            action: LedgerAction::rebuild(),
-        },
-        "got {:?}",
-        cli.command
-    );
-}
-
-#[test]
-fn ledger_with_no_action_is_a_parse_error() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "ledger"]);
-    assert!(result.is_err(), "got {result:?}");
-}
-
-#[test]
-fn ledger_rebuild_takes_no_positional_arguments() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "ledger", "rebuild", "extra.pdf"]);
-    assert!(result.is_err(), "got {result:?}");
-}
-
-#[test]
-fn ledger_rebuild_reports_its_own_command_name() {
-    assert_eq!(
-        Command::Ledger {
-            action: LedgerAction::rebuild(),
-        }
-        .name(),
-        "ledger rebuild"
-    );
-}
-
-#[test]
-fn ledger_rebuild_has_no_paths() {
-    let command = Command::Ledger {
-        action: LedgerAction::rebuild(),
-    };
-    assert!(command.paths().is_empty());
 }
 
 #[test]
@@ -361,21 +316,6 @@ fn cache_accepts_the_run_log_pair() {
     );
 }
 
-#[test]
-fn ledger_rebuild_accepts_the_run_log_pair() {
-    let cli = parse(&["ledger", "rebuild", "--no-run-log"]);
-
-    assert_eq!(
-        cli.settings(),
-        Settings {
-            no_run_log: true,
-            ..Settings::default()
-        },
-        "got {:?}",
-        cli.settings()
-    );
-}
-
 // ---------------------------------------------------------------------
 // the refused surface: an inapplicable setting is an unknown argument
 // ---------------------------------------------------------------------
@@ -428,15 +368,6 @@ fn bib_refuses_collision_as_an_unknown_argument() {
 }
 
 #[test]
-fn ledger_rebuild_refuses_no_record_as_an_unknown_argument() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "ledger", "rebuild", "--no-record"]);
-    assert!(result.is_err(), "got {result:?}");
-
-    let message = result.unwrap_err().to_string();
-    assert!(message.contains("--no-record"), "got {message:?}");
-}
-
-#[test]
 fn resolve_refuses_bib_as_an_unknown_argument() {
     let result = <Cli as Parser>::try_parse_from(["borax", "resolve", "--bib", "out.bib", "f.pdf"]);
     assert!(result.is_err(), "got {result:?}");
@@ -467,39 +398,6 @@ fn rename_refuses_template_as_an_unknown_argument() {
 // ---------------------------------------------------------------------
 // a subcommand's help lists that subcommand's settings
 // ---------------------------------------------------------------------
-
-#[test]
-fn ledger_rebuild_help_lists_only_the_run_log_pair_and_json() {
-    let mut command = <Cli as CommandFactory>::command();
-    // Globals reach a subcommand when the tree is built, not when it is
-    // declared, so an unbuilt `rebuild` has never seen `--json`.
-    command.build();
-    let rebuild = command
-        .find_subcommand_mut("ledger")
-        .unwrap()
-        .find_subcommand_mut("rebuild")
-        .unwrap();
-    let help = rebuild.render_help().to_string();
-
-    for offered in ["--run-log", "--no-run-log", "--json"] {
-        assert!(help.contains(offered), "{offered} missing from {help:?}");
-    }
-    for elsewhere in [
-        "--mailto",
-        "--sources",
-        "--page-limit",
-        "--collision",
-        "--bib",
-        "--sidecars",
-        "--record",
-        "--concurrency",
-    ] {
-        assert!(
-            !help.contains(elsewhere),
-            "{elsewhere} listed under ledger rebuild: {help:?}"
-        );
-    }
-}
 
 // ---------------------------------------------------------------------
 // Cli::format
@@ -538,10 +436,9 @@ fn the_command_names_are_pairwise_distinct() {
         Command::bib(vec![]).name(),
         Command::config().name(),
         Command::cache(false).name(),
-        Command::Ledger {
-            action: LedgerAction::rebuild(),
-        }
-        .name(),
+        Command::status(None, false).name(),
+        Command::validate(None).name(),
+        Command::reconcile(None, false).name(),
     ];
 
     let unique: std::collections::BTreeSet<_> = names.iter().collect();

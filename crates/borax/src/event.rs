@@ -15,7 +15,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use borax_core::content::ContentHash;
-use borax_core::ledger::DuplicateReason;
+use borax_core::library::DuplicateReason;
 use borax_core::record::Record;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 /// Consumers pin it: within a major version of borax the shape of an
 /// event with a given `event` tag does not change, and a new schema
 /// version is how a breaking change announces itself.
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 
 /// Something that happened to a file, or to the run as a whole.
 ///
@@ -155,11 +155,6 @@ pub enum Event {
         entries: usize,
         bytes: u64,
     },
-    /// The collection's ledger was regenerated from what is on disk.
-    /// `entries` is how many files the scan found worth recording,
-    /// which is the whole of what the ledger holds afterwards rather
-    /// than an addition to what it held before.
-    LedgerRebuilt { root: PathBuf, entries: usize },
     /// What a library holds, counted from its tree and from its two
     /// stores.
     ///
@@ -324,10 +319,10 @@ pub enum SkipReason {
     /// moved, and a line that could not say which file it was about
     /// would be a move the log cannot account for afterwards.
     Unrecordable { message: String },
-    /// The collection has already admitted this file, by content or by
-    /// work. `existing_path` is where the ledger says the file it
+    /// The library already holds this file, by content or by work.
+    /// `existing_path` is where the artifact record says the file it
     /// duplicates sits, as a full path rather than the
-    /// collection-relative one the ledger stores, so the report names
+    /// library-relative one the record stores, so the report names
     /// somewhere the reader can go and look.
     Duplicate {
         reason: DuplicateReason,
@@ -707,10 +702,6 @@ pub fn human_line(event: &Event) -> Option<String> {
             root.display()
         )),
         Event::LookupMissed { table, input } => Some(format!("{table}: no row for {input:?}")),
-        Event::LedgerRebuilt { root, entries } => Some(format!(
-            "{}: rebuilt with {entries} entries",
-            root.display()
-        )),
         Event::LibraryStatus {
             root,
             artifacts,

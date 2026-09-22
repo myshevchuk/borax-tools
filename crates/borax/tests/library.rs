@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,10 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borax::event::{Admission, Event, Finding, Repair};
 use borax::library::{
-    ARTIFACT_STORE, Admitted, Admitting, ArtifactStore, ITEM_STORE, ItemStore, STATE_DIR,
-    Unrecorded, admission_event, admit, artifacts, contains, item_file_name, missing, orphans,
-    reconcile, reconciliation_events, recorded_at, relative_to, store_write, strands, survey,
-    validate,
+    ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, ITEM_STORE, ItemStore, STATE_DIR,
+    Unrecorded, WorkDuplicate, admission_event, admit, artifacts, contains, item_file_name,
+    missing, orphans, reconcile, reconciliation_events, recorded_at, relative_to, store_write,
+    strands, survey, validate,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -2953,5 +2954,655 @@ fn admission_event_reports_an_unwritten_record() {
             },
         }),
         "got {event:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 7.6/7.6a/7.6b: Account — content and work duplicate detection
+// ---------------------------------------------------------------------
+
+/// An `exists` double for [`Account`]: answers `true` for exactly the
+/// paths it is told are live, and records every path it is asked
+/// about — so a check's staleness rule ("asked about a record that
+/// matched and about nothing else") can be asserted directly.
+struct RecordingExists {
+    live: Vec<PathBuf>,
+    asked: RefCell<Vec<PathBuf>>,
+}
+
+impl RecordingExists {
+    fn new(live: Vec<PathBuf>) -> RecordingExists {
+        RecordingExists {
+            live,
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn check(&self, path: &Path) -> bool {
+        self.asked.borrow_mut().push(path.to_path_buf());
+        self.live.contains(&path.to_path_buf())
+    }
+
+    fn asked(&self) -> Vec<PathBuf> {
+        self.asked.borrow().clone()
+    }
+}
+
+/// An `identifier` built from a DOI, the one kind these fixtures need.
+fn doi_identifier(value: &str) -> Identifier {
+    Identifier::Doi(Doi::parse(value).unwrap())
+}
+
+/// An item carrying `doi_value` as its DOI, at identity `id`.
+fn item_with_doi(id: ItemId, doi_value: &str) -> Item {
+    Item {
+        id,
+        record: record_with_doi(doi_value),
+    }
+}
+
+// ---- design D2: Account::is_incoming ----
+
+/// An [`Account`] rooted at `root` over empty stores. The stores and
+/// `exists` play no part in `is_incoming`, so they are fixtures rather
+/// than anything a test varies.
+fn account_at<'a>(
+    root: &'a Path,
+    items: &'a ItemStore,
+    records: &'a ArtifactStore,
+    exists: &'a dyn Fn(&Path) -> bool,
+) -> Account<'a> {
+    Account {
+        root,
+        items,
+        records,
+        exists,
+    }
+}
+
+/// A relative incoming path is made absolute against the working
+/// directory before it is compared, so it recognises the record that
+/// names the same file relative to the library root.
+#[test]
+fn is_incoming_recognises_a_relative_input_path_as_the_file_itself() {
+    let cwd = std::env::current_dir().unwrap();
+    let root = cwd.join("library");
+    let (items, records) = (ItemStore::default(), ArtifactStore::default());
+    let exists = |_: &Path| true;
+    let account = account_at(&root, &items, &records, &exists);
+
+    assert!(account.is_incoming(
+        "archived/Smith2024.pdf",
+        Path::new("library/archived/Smith2024.pdf"),
+    ));
+}
+
+/// `..` in the incoming path is resolved lexically before comparison,
+/// not left to defeat it.
+#[test]
+fn is_incoming_recognises_an_input_path_containing_dot_dot_as_the_file_itself() {
+    let cwd = std::env::current_dir().unwrap();
+    let root = cwd.join("library");
+    let (items, records) = (ItemStore::default(), ArtifactStore::default());
+    let exists = |_: &Path| true;
+    let account = account_at(&root, &items, &records, &exists);
+
+    assert!(account.is_incoming(
+        "archived/Smith2024.pdf",
+        Path::new("library/other/../archived/Smith2024.pdf"),
+    ));
+}
+
+#[test]
+fn is_incoming_is_false_for_a_different_file() {
+    let root = Path::new("/library");
+    let (items, records) = (ItemStore::default(), ArtifactStore::default());
+    let exists = |_: &Path| true;
+    let account = account_at(root, &items, &records, &exists);
+
+    assert!(!account.is_incoming(
+        "archived/Smith2024.pdf",
+        Path::new("/library/archived/Other2024.pdf"),
+    ));
+}
+
+/// Symlinks are never resolved: a link and the file it points at are
+/// two names, and `is_incoming` compares names, not inodes. Built with
+/// a real symlink on disk so the assertion cannot be satisfied by an
+/// implementation that happens not to touch the filesystem for the
+/// wrong reason.
+#[test]
+#[cfg(unix)]
+fn is_incoming_does_not_resolve_a_symlink_to_the_recorded_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    fs::create_dir_all(root.join("archived")).unwrap();
+    fs::write(root.join("archived/Smith2024.pdf"), b"bytes").unwrap();
+    std::os::unix::fs::symlink(
+        root.join("archived/Smith2024.pdf"),
+        root.join("link-to-smith.pdf"),
+    )
+    .unwrap();
+    let (items, records) = (ItemStore::default(), ArtifactStore::default());
+    let exists = |_: &Path| true;
+    let account = account_at(&root, &items, &records, &exists);
+
+    assert!(!account.is_incoming("archived/Smith2024.pdf", &root.join("link-to-smith.pdf")));
+}
+
+// ---- 7.6: content_duplicate ----
+
+/// task 7.6: a match is any record whose history holds the incoming
+/// hash, and the incoming file is a content duplicate of the file its
+/// recorded path still holds.
+#[test]
+fn content_duplicate_finds_the_record_holding_the_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let existing = relative_to(root, "existing.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "existing.pdf",
+            vec![hash_entry("shared bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![existing.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.content_duplicate(&root.join("incoming.pdf"), &hash("shared bytes"));
+
+    assert_eq!(
+        found,
+        Some(existing),
+        "the file holding the same bytes must be found"
+    );
+}
+
+/// task 7.6: matching a hash anywhere in a record's history, and not
+/// only its current hash, is what the content check means.
+#[test]
+fn content_duplicate_matches_a_historical_hash_not_only_the_current_one() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let existing = relative_to(root, "existing.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "existing.pdf",
+            vec![
+                hash_entry("old bytes", "run-0"),
+                hash_entry("new bytes", "run-1"),
+            ],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![existing.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.content_duplicate(&root.join("incoming.pdf"), &hash("old bytes"));
+
+    assert_eq!(
+        found,
+        Some(existing),
+        "a hash from earlier in the history must still be found"
+    );
+}
+
+/// task 7.6: the incoming file's own record is passed over and the
+/// search goes on, so a second copy recorded elsewhere in the library
+/// is not hidden behind it.
+#[test]
+fn content_duplicate_passes_over_the_incoming_files_own_record_and_finds_a_second_copy() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let incoming = root.join("incoming.pdf");
+    let elsewhere = relative_to(root, "elsewhere.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "incoming.pdf",
+            vec![hash_entry("shared bytes", "run-0")],
+        ),
+    );
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            None,
+            "elsewhere.pdf",
+            vec![hash_entry("shared bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![incoming.clone(), elsewhere.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.content_duplicate(&incoming, &hash("shared bytes"));
+
+    assert_eq!(
+        found,
+        Some(elsewhere),
+        "the search must not stop at the incoming file's own record: got {found:?}"
+    );
+}
+
+/// task 7.6: an artifact record whose recorded path is the incoming
+/// file's own path never makes it a duplicate at either level, and
+/// with no other copy recorded, the incoming file is a content
+/// duplicate of nothing.
+#[test]
+fn content_duplicate_is_none_when_the_only_match_is_the_incoming_files_own_record() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let incoming = root.join("incoming.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "incoming.pdf",
+            vec![hash_entry("shared bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![incoming.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.content_duplicate(&incoming, &hash("shared bytes"));
+
+    assert_eq!(
+        found, None,
+        "a file's own record must never make it a duplicate of itself"
+    );
+}
+
+/// task 7.6: a duplicate report first verifies that the recorded path
+/// still holds a file; a stale one is passed over, never vetoing the
+/// admission, and `exists` is asked about exactly that path.
+#[test]
+fn content_duplicate_is_none_when_the_recorded_path_holds_no_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let stale = relative_to(root, "gone.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "gone.pdf",
+            vec![hash_entry("shared bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(Vec::new());
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.content_duplicate(&root.join("incoming.pdf"), &hash("shared bytes"));
+
+    assert_eq!(
+        found, None,
+        "a stale last-known path must never veto an admission"
+    );
+    assert!(
+        checker.asked().contains(&stale),
+        "the stale path must be asked about, which is what surfaces it to reconcile: got {:?}",
+        checker.asked()
+    );
+}
+
+/// task 7.6: no record holding the incoming hash at all is no content
+/// duplicate.
+#[test]
+fn content_duplicate_is_none_when_no_record_holds_the_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let existing = relative_to(root, "existing.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "existing.pdf",
+            vec![hash_entry("other bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![existing]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.content_duplicate(&root.join("incoming.pdf"), &hash("shared bytes"));
+
+    assert_eq!(found, None, "no matching hash means no content duplicate");
+}
+
+// ---- 7.6a/7.6b: work_duplicate ----
+
+/// task 7.6a: an identifier carried by an item that has an artifact
+/// whose recorded path still holds a file makes the incoming file a
+/// work duplicate, naming that item's file and that artifact's path.
+#[test]
+fn work_duplicate_finds_the_item_holding_the_identifier_with_a_live_artifact() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let existing_item = item_with_doi(item_id(UUID_A), "10.1000/work-dup");
+    write_item(root, &format!("existing.{UUID_A}.toml"), &existing_item);
+    let existing_path = relative_to(root, "existing.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            Some(existing_item.id.clone()),
+            "existing.pdf",
+            vec![hash_entry("existing bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![existing_path.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.work_duplicate(
+        &root.join("incoming.pdf"),
+        &[doi_identifier("10.1000/work-dup")],
+    );
+
+    assert_eq!(
+        found,
+        Some(WorkDuplicate {
+            item: existing_item.id.clone(),
+            item_file: items.file_of(&existing_item.id).map(Path::to_path_buf),
+            existing: existing_path,
+        }),
+        "got {found:?}"
+    );
+}
+
+/// task 7.6a: identifiers are tried in the order given, and the first
+/// that answers decides.
+#[test]
+fn work_duplicate_tries_identifiers_in_order_and_the_first_that_answers_decides() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let existing_item = item_with_doi(item_id(UUID_A), "10.1000/work-dup-second");
+    write_item(root, &format!("existing.{UUID_A}.toml"), &existing_item);
+    let existing_path = relative_to(root, "existing.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            Some(existing_item.id.clone()),
+            "existing.pdf",
+            vec![hash_entry("existing bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![existing_path.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.work_duplicate(
+        &root.join("incoming.pdf"),
+        &[
+            doi_identifier("10.1000/no-item-holds-this"),
+            doi_identifier("10.1000/work-dup-second"),
+        ],
+    );
+
+    assert_eq!(
+        found.map(|duplicate| duplicate.item),
+        Some(existing_item.id),
+        "the second identifier, the one an item actually carries, must decide"
+    );
+}
+
+/// task 7.6a/normative "An item with no artifact recorded against it
+/// ... SHALL NOT make an incoming file a work duplicate": the incoming
+/// file is that item's first artifact.
+#[test]
+fn work_duplicate_is_none_when_the_item_has_no_artifact() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let existing_item = item_with_doi(item_id(UUID_A), "10.1000/no-artifact-yet");
+    write_item(root, &format!("existing.{UUID_A}.toml"), &existing_item);
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(Vec::new());
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.work_duplicate(
+        &root.join("incoming.pdf"),
+        &[doi_identifier("10.1000/no-artifact-yet")],
+    );
+
+    assert_eq!(
+        found, None,
+        "an item with no artifact at all must not make the incoming file a work duplicate"
+    );
+}
+
+/// task 7.6a/normative: an item whose every recorded artifact names a
+/// path holding no file is the same as one with none — the incoming
+/// file is admitted as its first artifact, not refused as a duplicate
+/// of a file that is no longer there.
+#[test]
+fn work_duplicate_is_none_when_every_recorded_artifact_of_the_item_is_stale() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let existing_item = item_with_doi(item_id(UUID_A), "10.1000/all-stale");
+    write_item(root, &format!("existing.{UUID_A}.toml"), &existing_item);
+    let stale_path = relative_to(root, "gone.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            Some(existing_item.id.clone()),
+            "gone.pdf",
+            vec![hash_entry("gone bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(Vec::new());
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.work_duplicate(
+        &root.join("incoming.pdf"),
+        &[doi_identifier("10.1000/all-stale")],
+    );
+
+    assert_eq!(
+        found, None,
+        "an item whose only recorded artifact is gone must not block re-admission"
+    );
+    assert!(
+        checker.asked().contains(&stale_path),
+        "the stale path must still be asked about: got {:?}",
+        checker.asked()
+    );
+}
+
+/// task 7.6b: the item the incoming file's own record already links to
+/// is passed over, and so is that record itself — the rule that makes
+/// a multi-artifact item usable. Without it, every artifact of one
+/// item would meet its siblings as a duplicate of the item it belongs
+/// to.
+#[test]
+fn work_duplicate_passes_over_the_item_the_incoming_files_own_record_already_links_to() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let incoming = root.join("incoming.pdf");
+    let own_item = item_with_doi(item_id(UUID_A), "10.1000/own-work");
+    write_item(root, &format!("own.{UUID_A}.toml"), &own_item);
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            Some(own_item.id.clone()),
+            "incoming.pdf",
+            vec![hash_entry("incoming bytes", "run-0")],
+        ),
+    );
+    let sibling_path = relative_to(root, "sibling.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_C),
+            Some(own_item.id.clone()),
+            "sibling.pdf",
+            vec![hash_entry("sibling bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![incoming.clone(), sibling_path]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.work_duplicate(&incoming, &[doi_identifier("10.1000/own-work")]);
+
+    assert_eq!(
+        found, None,
+        "an item the incoming file's own record already links to must never be reported \
+         as a work duplicate: got {found:?}"
+    );
+}
+
+/// task 7.6b: passing over the incoming file's own item must not hide
+/// a genuine duplicate of a different work among the same identifiers.
+#[test]
+fn work_duplicate_still_finds_a_duplicate_of_a_different_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let incoming = root.join("incoming.pdf");
+    let own_item = item_with_doi(item_id(UUID_A), "10.1000/own-work-2");
+    write_item(root, &format!("own.{UUID_A}.toml"), &own_item);
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            Some(own_item.id.clone()),
+            "incoming.pdf",
+            vec![hash_entry("incoming bytes", "run-0")],
+        ),
+    );
+    let other_item = item_with_doi(item_id(UUID_C), "10.1000/other-work-2");
+    write_item(root, &format!("other.{UUID_C}.toml"), &other_item);
+    let other_path = relative_to(root, "other.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_D),
+            Some(other_item.id.clone()),
+            "other.pdf",
+            vec![hash_entry("other bytes", "run-0")],
+        ),
+    );
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![incoming.clone(), other_path.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.work_duplicate(
+        &incoming,
+        &[
+            doi_identifier("10.1000/own-work-2"),
+            doi_identifier("10.1000/other-work-2"),
+        ],
+    );
+
+    assert_eq!(
+        found,
+        Some(WorkDuplicate {
+            item: other_item.id.clone(),
+            item_file: items.file_of(&other_item.id).map(Path::to_path_buf),
+            existing: other_path,
+        }),
+        "the own item's identifier must be passed over without hiding a real duplicate: \
+         got {found:?}"
     );
 }
