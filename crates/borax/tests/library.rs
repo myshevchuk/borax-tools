@@ -1209,6 +1209,35 @@ fn validate_reports_a_records_missing_artifact_as_a_count_not_a_finding() {
     assert_eq!(result.missing, 1, "got {}", result.missing);
 }
 
+/// A record whose last-known path points into a nested library is an
+/// artifact this library cannot find, and is counted with the rest of
+/// them: the subtree is opaque, so a file standing there is no more
+/// visible to `borax validate` than it is to `borax reconcile`. It is
+/// a count rather than a finding, since a record naming a path the
+/// library cannot see is not malformed.
+#[test]
+fn validate_counts_a_record_inside_a_nested_library_as_missing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested/.borax.toml"), b"").unwrap();
+    fs::write(root.join("nested/kept.pdf"), b"kept bytes").unwrap();
+    let record = fresh_record(
+        root,
+        artifact_id(UUID_A),
+        None,
+        "nested/kept.pdf",
+        vec![hash_entry("kept bytes", "run-1")],
+    );
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+    assert_eq!(result.missing, 1, "got {}", result.missing);
+    assert_eq!(result.orphans, 0, "got {}", result.orphans);
+}
+
 /// An item nothing links to is the `unlinked` count, not a finding.
 #[test]
 fn validate_reports_an_unlinked_item_as_a_count_not_a_finding() {
@@ -2099,6 +2128,90 @@ fn reconcile_does_not_treat_a_pdf_under_items_or_the_state_dir_as_a_candidate() 
         "neither items/ nor .borax/ may supply a candidate, got {:?}",
         result.repairs
     );
+}
+
+/// A record whose last-known path points *into* a nested library is not
+/// confirmed by the file standing there: the subtree is opaque to the
+/// enclosing library, so the record's artifact is one this library
+/// cannot find. Asserted with `--rehash` as well, since the fast path
+/// and the hashing path are two separate ways to confirm a record, and
+/// with `hashed` at zero either way, which is what says the nested
+/// file was never opened.
+#[test]
+fn reconcile_does_not_confirm_a_record_whose_path_is_inside_a_nested_library() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested/.borax.toml"), b"").unwrap();
+    fs::write(root.join("nested/kept.pdf"), b"kept bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = fresh_record(
+        root,
+        id.clone(),
+        None,
+        "nested/kept.pdf",
+        vec![hash_entry("kept bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let before = snapshot(root);
+
+    for rehash in [false, true] {
+        let result = reconcile(root, rehash, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+        assert_eq!(
+            result.repairs,
+            vec![(id.clone(), "nested/kept.pdf".to_string(), Repair::Missing)],
+            "a record inside a nested library must be missing, not confirmed \
+             (rehash: {rehash}), got {:?}",
+            result.repairs
+        );
+        assert_eq!(result.confirmed, 0, "(rehash: {rehash}) got {result:?}");
+        assert_eq!(
+            result.hashed, 0,
+            "a nested library's file must not be opened (rehash: {rehash}), got {result:?}"
+        );
+        assert_eq!(
+            snapshot(root),
+            before,
+            "nothing may be written (rehash: {rehash})"
+        );
+    }
+}
+
+/// The same exclusion, by the same one rule: a record whose path points
+/// under `items/` or under `.borax/` names something that is not this
+/// library's artifact, so no file standing there confirms it.
+#[test]
+fn reconcile_does_not_confirm_a_record_whose_path_is_under_items_or_the_state_dir() {
+    for excluded in [
+        format!("{ITEM_STORE}/smuggled.pdf"),
+        format!("{STATE_DIR}/smuggled.pdf"),
+    ] {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let path = relative_to(root, &excluded);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"smuggled bytes").unwrap();
+        let id = artifact_id(UUID_A);
+        let record = fresh_record(
+            root,
+            id.clone(),
+            None,
+            &excluded,
+            vec![hash_entry("smuggled bytes", "run-0")],
+        );
+        write_artifact_record(root, &record);
+
+        let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+
+        assert_eq!(
+            result.repairs,
+            vec![(id, excluded.clone(), Repair::Missing)],
+            "a record naming {excluded} must be missing, not confirmed, got {:?}",
+            result.repairs
+        );
+        assert_eq!(result.confirmed, 0, "got {result:?}");
+    }
 }
 
 // ---------------------------------------------------------------------

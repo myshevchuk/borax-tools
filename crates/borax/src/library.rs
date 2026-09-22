@@ -520,10 +520,13 @@ pub fn orphans(root: &Path, artifacts: &[PathBuf], records: &ArtifactStore) -> V
         .collect()
 }
 
-/// The records of `records` whose last-known path holds no file, in
+/// The records of `records` whose artifact `exists` does not find, in
 /// read order.
 ///
-/// `exists` answers whether a path is there, and disk is what decides.
+/// `exists` answers whether the library has an artifact at a path, and
+/// the caller decides what that takes: `borax validate` asks for a file
+/// in a subtree the library owns, so a file under a nested library
+/// counts as no artifact of this one.
 /// Each record's path is resolved against `root` the way
 /// [`relative_to`] resolves one. This is the opposite finding to
 /// [`orphans`]: a record with no artifact rather than an artifact with
@@ -783,7 +786,9 @@ pub struct Validation {
     pub findings: Vec<(PathBuf, Finding)>,
     /// Artifacts no record names.
     pub orphans: usize,
-    /// Records whose last-known path holds no file.
+    /// Records whose artifact the library cannot find: their last-known
+    /// path holds no file, or holds one in a subtree the library does
+    /// not own, which it can no more see than an absent file.
     pub missing: usize,
     /// Items no artifact record links to.
     pub unlinked: usize,
@@ -807,7 +812,10 @@ pub fn validate(root: &Path) -> Validation {
         root: survey.root,
         findings,
         orphans: survey.orphans.len(),
-        missing: missing(root, &contents.records, &|path| path.is_file()).len(),
+        missing: missing(root, &contents.records, &|path| {
+            !excludes(root, path) && path.is_file()
+        })
+        .len(),
         unlinked: contents
             .items
             .iter()
@@ -1099,11 +1107,14 @@ pub struct Reconciliation {
 /// each match the *other* record's history, so both repair in step 2
 /// rather than each being read as the other's artifact edited in place.
 ///
-/// Steps 2 and 3 reach only the library's own artifacts, the ones
-/// [`artifacts`] walks: neither the item store, nor the state
-/// directory, nor a nested library can supply one. Step 1 asks about
-/// the file the record itself names, whatever that file is, because the
-/// question there is whether the record is right about it.
+/// Every step reaches the library's own artifacts alone — neither the
+/// item store, nor the state directory, nor a nested library can supply
+/// one, and none of the three can confirm a record either. A record
+/// whose last-known path lies in one of them is therefore a record this
+/// library cannot find, whatever file stands there: the subtree belongs
+/// to another library, or to the library's own accounting, and a
+/// reconcile that confirmed itself from one would be resting on a file
+/// nothing else in the library can see.
 ///
 /// A record this run confirmed, repaired or appended to is written
 /// with the file's current size and modification time, so those fields
@@ -1145,6 +1156,14 @@ pub fn reconcile(
     // Step 1. Every record whose own path still holds its artifact,
     // claiming that file before step 2 looks at anything.
     for (index, (_, record)) in records.iter().enumerate() {
+        // A path the library does not own is one it cannot see, so no
+        // file standing there confirms anything: the record is left to
+        // step 2, which reaches the library's own artifacts alone, and
+        // failing that is reported as an artifact this library cannot
+        // find.
+        if excludes(root, &relative_to(root, &record.path)) {
+            continue;
+        }
         if !rehash && describes(record, &relative_to(root, &record.path)) {
             outcomes[index] = Decided::Confirmed { refreshed: false };
             claimed.insert(record.path.clone());
