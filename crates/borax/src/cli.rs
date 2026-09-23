@@ -147,7 +147,7 @@ pub struct ExtractionOptions {
 /// takes these, since every subcommand is a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
 pub struct RunLogOptions {
-    /// Write the run's event stream to a log in the collection.
+    /// Write the run's event stream to a log in the library.
     #[arg(long)]
     pub run_log: bool,
 
@@ -374,7 +374,7 @@ pub struct Settings {
     /// Neither read nor write the library's records.
     pub no_record: bool,
 
-    /// Write the run's event stream to a log in the collection.
+    /// Write the run's event stream to a log in the library.
     pub run_log: bool,
 
     /// Write no log for this run. An applying rename writes one

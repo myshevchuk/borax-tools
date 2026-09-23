@@ -3035,7 +3035,7 @@ fn open_log<C: Cache>(
                 true,
                 "a run that may move files needs somewhere to record what it moves — --apply \
                  and a run that asks about each file both may — and this is neither in a \
-                 collection nor on a system that names a state directory"
+                 library nor on a system that names a state directory"
                     .to_string(),
             ),
             false => Opened::Log(None),
