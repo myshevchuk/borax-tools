@@ -319,7 +319,7 @@ is a run contradicting a living requirement.
 
 ## 8. `borax adopt`
 
-- [ ] 8.1 Red: adoption from the content index — each orphan whose hash
+- [x] 8.1 Red: adoption from the content index — each orphan whose hash
       the index answers for gains an artifact record carrying that hash,
       its library-relative path and its size and modification time,
       linked to an item holding the cached record; an item the library
@@ -327,12 +327,21 @@ is a run contradicting a living requirement.
       rather than minted again. No service is queried, nothing is
       extracted from the artifact, and no file is renamed, moved or
       deleted.
-- [ ] 8.2 Red: what adoption leaves alone — an artifact the index cannot
+- [x] 8.2 Red: what adoption leaves alone — an artifact the index cannot
       answer for is still an orphan and counted as one; an artifact that
       already has a record is byte-identical afterwards, item link
       included; a second run writes no library state, its run log
       excepted.
-- [ ] 8.3 Red: adoption reads neither a citation sidecar nor
+- [x] 8.2a Red: an orphan whose bytes a record already holds is not
+      adopted. Move a recorded artifact by hand, with the content index
+      answering for its bytes: adopt reports it held by that record,
+      writes no record and no item, and a reconcile afterwards repairs
+      the existing record with identity and item link unchanged. A
+      second orphan with the bytes an earlier orphan of the same run
+      was adopted with is held too. *Arrives green* — the rule was
+      settled while implementing 8.5 and written into the requirement
+      afterwards; its red run was made by disabling the check.
+- [x] 8.3 Red: adoption reads neither a citation sidecar nor
       `.borax/ledger.jsonl`. Over a library whose files have sidecars
       and which holds a ledger from an earlier version, with the content
       index empty, nothing is adopted, every artifact stays an orphan,
@@ -340,10 +349,10 @@ is a run contradicting a living requirement.
       afterwards. This is the test that keeps authoritative state from
       being derived from optional output, and it is also what pins the
       ledger as retired rather than quietly consulted.
-- [ ] 8.4 Red: adoption after `borax cache --clear` adopts nothing and
+- [x] 8.4 Red: adoption after `borax cache --clear` adopts nothing and
       reports every artifact an orphan, rather than reporting a failure.
       The command's source is a cache and the test says so.
-- [ ] 8.5 Green: the `adopt` subcommand, its events and both renderings.
+- [x] 8.5 Green: the `adopt` subcommand, its events and both renderings.
 
 ## 9. The suite and the surface
 

@@ -35,7 +35,7 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, valu
 use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
-use crate::event::{Admission, Diagnostic, Event, Finding, Level, Repair};
+use crate::event::{Admission, Adoption, Diagnostic, Event, Finding, Level, Repair};
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
 
@@ -2016,4 +2016,157 @@ pub fn admission_event(path: &Path, admitted: &Result<Admitted, Unrecorded>) -> 
         path: path.to_path_buf(),
         admission,
     })
+}
+
+/// What an adoption made of a library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adoptions {
+    /// The library adopted into, as [`Survey::root`].
+    pub root: PathBuf,
+    /// Every orphan the run adopted or tried to adopt, library-relative,
+    /// with what became of it, in the order the walk found them. An
+    /// orphan the content index had no record for is not among them.
+    pub adoptions: Vec<(String, Adoption)>,
+    /// How many orphans the library held before the run.
+    pub orphans: usize,
+}
+
+impl Adoptions {
+    /// How many orphans the run gave an artifact record.
+    pub fn adopted(&self) -> usize {
+        self.adoptions
+            .iter()
+            .filter(|(_, adoption)| matches!(adoption, Adoption::Recorded { .. }))
+            .count()
+    }
+}
+
+/// Adopt the orphans of the library rooted at `root`: record each one
+/// whose bytes `lookup` has a record for.
+///
+/// Each orphan ([`orphans`]) is hashed and its hash handed to
+/// `lookup`, which is the content index in a run. Where it answers, the
+/// orphan is admitted exactly as an applying run admits a file it
+/// found already named ([`admit`], with no held record and no
+/// re-identification): the item the library holds for one of the
+/// record's identifiers is linked, or one is minted from the record
+/// and written at the name `key` renders for it. The store is re-read
+/// on every admission, so a second orphan of the work a first one
+/// minted an item for links to that item. Where `lookup` answers
+/// nothing, the orphan is left as it is and produces no adoption.
+///
+/// An orphan whose hash is in the history of a record already in the
+/// store, or of one this run wrote for an earlier orphan, is left an
+/// orphan and reported [`Adoption::Held`], and `lookup` is not asked
+/// about it.
+///
+/// Nothing but the two stores is written: no file is opened beyond
+/// being hashed, and none is moved, renamed or deleted. A record that
+/// already names a path is not an orphan's, so it is left exactly as it
+/// is, and a second run over a library the first left alone finds
+/// nothing to write.
+///
+/// `run`, `timestamp` and `tool_version` stamp the one hash entry each
+/// new record carries. Never fails: an orphan that cannot be read is
+/// reported [`Adoption::Unreadable`], and one whose record cannot be
+/// written [`Adoption::Unwritten`], each still an orphan afterwards.
+pub fn adopt(
+    root: &Path,
+    lookup: &dyn Fn(&ContentHash) -> Option<Record>,
+    key: &mut dyn FnMut(&Record, &ContentHash) -> Option<String>,
+    run: RunId,
+    timestamp: &str,
+    tool_version: &str,
+) -> Adoptions {
+    let store = ArtifactStore::read(root);
+    let orphans = orphans(root, &walk(root).0, &store);
+    let mut written: BTreeMap<ContentHash, ArtifactId> = BTreeMap::new();
+    let mut adoptions = Vec::new();
+
+    for path in &orphans {
+        let Some(relative) = library_relative(root, path) else {
+            continue;
+        };
+        let hash = match hash_file(path) {
+            Ok(hash) => hash,
+            Err(error) => {
+                let message = error.to_string();
+                adoptions.push((relative, Adoption::Unreadable { message }));
+                continue;
+            }
+        };
+        let holder = store
+            .by_hash(&hash)
+            .first()
+            .map(|record| record.id.clone())
+            .or_else(|| written.get(&hash).cloned());
+        if let Some(id) = holder {
+            let id = id.to_string();
+            adoptions.push((relative, Adoption::Held { id }));
+            continue;
+        }
+        let Some(record) = lookup(&hash) else {
+            continue;
+        };
+
+        let key = key(&record, &hash);
+        let admitted = admit(
+            root,
+            &Admitting {
+                path,
+                record: &record,
+                hash: &hash,
+                held: None,
+                reidentified: false,
+                key: key.as_deref(),
+                run: run.clone(),
+                timestamp,
+                tool_version,
+            },
+            &store_write,
+        );
+        let adoption = match admitted {
+            Ok(admitted) => {
+                written.insert(hash, admitted.artifact.clone());
+                Adoption::Recorded {
+                    id: admitted.artifact.to_string(),
+                    item: admitted.item.to_string(),
+                }
+            }
+            Err(unrecorded) => Adoption::Unwritten {
+                message: unrecorded.message,
+            },
+        };
+        adoptions.push((relative, adoption));
+    }
+
+    Adoptions {
+        root: root.to_path_buf(),
+        adoptions,
+        orphans: orphans.len(),
+    }
+}
+
+/// The events reporting `adoptions`, apart: one per orphan it has
+/// something to say about, in the order it reached them, and the
+/// totals.
+///
+/// Apart so that a caller can report what is about the run as a whole
+/// between the two, and still close with the totals.
+pub fn adoption_events(adoptions: &Adoptions) -> (Vec<Event>, Event) {
+    let events = adoptions
+        .adoptions
+        .iter()
+        .map(|(path, adoption)| Event::LibraryAdoption {
+            path: path.clone(),
+            adoption: adoption.clone(),
+        })
+        .collect();
+    let adopted = adoptions.adopted();
+    let totals = Event::LibraryAdopted {
+        root: adoptions.root.clone(),
+        adopted,
+        orphans: adoptions.orphans - adopted,
+    };
+    (events, totals)
 }

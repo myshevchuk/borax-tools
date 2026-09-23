@@ -249,6 +249,28 @@ pub enum Event {
         /// untouched library reports zero.
         hashed: usize,
     },
+    /// What an adoption made of one orphan.
+    ///
+    /// Only an orphan the run adopted or tried to adopt produces one:
+    /// an orphan the content index has no record for is left an orphan
+    /// silently, and the count of orphans in [`Event::LibraryAdopted`]
+    /// is where it shows.
+    LibraryAdoption {
+        /// The orphan, library-relative, as [`Event::LibraryRepair`]
+        /// names an artifact.
+        path: String,
+        adoption: Adoption,
+    },
+    /// What adopting into a library amounted to. Always the last event
+    /// of an adoption before the run's own.
+    LibraryAdopted {
+        root: PathBuf,
+        /// Orphans the run gave an artifact record.
+        adopted: usize,
+        /// Orphans left after the run: those the content index had no
+        /// record for, and those the run could not adopt.
+        orphans: usize,
+    },
     /// The run is over. Always the last event.
     RunFinished { counts: Counts },
 }
@@ -468,6 +490,35 @@ pub enum Admission {
     /// the file its record and never its rename. borax retries
     /// nothing within a run, and the next applying run over the file
     /// records it again.
+    Unwritten { message: String },
+}
+
+/// What an adoption made of one orphan the content index answered
+/// for, or could not be asked about.
+///
+/// Serialized with a `kind` tag, nested under the event's `adoption`
+/// field, as [`Repair`] is under `repair`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Adoption {
+    /// The orphan now has an artifact record, `id`, linked to the item
+    /// `item`: one the library already held for an identifier of the
+    /// cached record, or one minted from that record.
+    Recorded { id: String, item: String },
+    /// The orphan's bytes are already in the history of the artifact
+    /// record `id`, so it was left an orphan.
+    ///
+    /// Such a file is that record's artifact moved, or a copy of it,
+    /// and a second record for the same bytes would leave `borax
+    /// reconcile` unable to tell which is which. Reconciling first is
+    /// what settles the first case; the second stays an orphan.
+    Held { id: String },
+    /// The orphan could not be read, with `message` as the filesystem
+    /// put it, so the content index was never asked about it.
+    Unreadable { message: String },
+    /// The index answered and the record could not be written, with
+    /// `message` as the filesystem put it. The orphan is still one, and
+    /// the next adoption tries it again.
     Unwritten { message: String },
 }
 
@@ -758,6 +809,17 @@ pub fn human_line(event: &Event) -> Option<String> {
              {hashed} hashed",
             root.display()
         )),
+        Event::LibraryAdoption { path, adoption } => {
+            Some(format!("{path}: {}", what_was_adopted(adoption)))
+        }
+        Event::LibraryAdopted {
+            root,
+            adopted,
+            orphans,
+        } => Some(format!(
+            "{}: {adopted} adopted, {orphans} orphans",
+            root.display()
+        )),
         Event::RunFinished { counts } => Some(human_summary(counts, 0)),
     }
 }
@@ -918,6 +980,26 @@ fn what_was_admitted(admission: &Admission) -> String {
         Admission::Outside => "outside the library, so nothing was recorded".to_string(),
         Admission::Unwritten { message } => {
             format!("renamed but not recorded ({message})")
+        }
+    }
+}
+
+/// `adoption` as the end of a sentence whose subject is the orphan,
+/// for the human rendering of [`Event::LibraryAdoption`].
+fn what_was_adopted(adoption: &Adoption) -> String {
+    match adoption {
+        Adoption::Recorded { id, item } => {
+            format!("adopted as artifact {id} of item {item}")
+        }
+        Adoption::Held { id } => format!(
+            "holds bytes artifact {id} already records, so it was left an orphan; \
+             run borax reconcile if the file was moved"
+        ),
+        Adoption::Unreadable { message } => {
+            format!("could not be read ({message}), so it is still an orphan")
+        }
+        Adoption::Unwritten { message } => {
+            format!("could not be recorded ({message}), so it is still an orphan")
         }
     }
 }

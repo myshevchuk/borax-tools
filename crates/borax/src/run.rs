@@ -39,8 +39,8 @@ use borax_sources::transport::UreqTransport;
 use crate::bib::{BibConfig, BibFiles, Keyed, RealBibFiles, merge_master, write_sidecar};
 use crate::cli::{Cli, Command, flag_layers};
 use crate::config::{
-    Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
-    layer_from_toml, nearest_override, resolve, table_path,
+    Config, ConfigError, ENV_PREFIX, Effective, Layer, OVERRIDE_FILE, Origin, global_config_path,
+    layer_from_env, layer_from_toml, nearest_override, resolve, table_path,
 };
 use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
@@ -643,7 +643,8 @@ pub enum Prepared {
     Cache { report: Event },
     /// `rename` or `bib`: the run's paths grouped by the directory
     /// holding them, in the order those directories are first reached,
-    /// each paired with the tables compiled for it.
+    /// each paired with the tables compiled for it. `adopt`: one group,
+    /// for the library root and holding no path.
     ///
     /// Holding the compiled tables is what makes "every template the
     /// command renders from compiles before any file is touched" a
@@ -694,6 +695,10 @@ pub enum Prepared {
 /// - `cache` with no cache directory, or with one that cannot be read,
 ///   because reporting an empty cache would answer a question that was
 ///   never asked;
+/// - `adopt` outside any library, since adopting writes library state
+///   and a directory nobody marked has none to write; the citation-key
+///   table it names minted items by is compiled for the library root,
+///   and refuses the run on the terms above.
 ///
 /// An applying rename with nowhere to record itself is not among them:
 /// what an apply run has to be able to write is its run log, and
@@ -719,8 +724,8 @@ pub fn preflight<C: Cache>(
     match command {
         Command::Config { .. }
         | Command::Resolve { .. }
-        // A library command has nothing that could refuse it: an
-        // absent store is an empty one, and a file that will not parse
+        // These library commands have nothing that could refuse them:
+        // an absent store is an empty one, and a file that will not parse
         // is reported rather than fatal. A reconcile does write, but
         // what it writes is decided record by record and reported the
         // same way, so there is nothing here for it to be refused on
@@ -755,6 +760,31 @@ pub fn preflight<C: Cache>(
                 groups,
                 // A bibliography run admits nothing, so it keeps no
                 // account and checks against none.
+                account: None,
+                warnings,
+            })
+        }
+        Command::Adopt { .. } => {
+            let Some(root) = adapters.collection_root.as_deref() else {
+                return Err(error(format!(
+                    "{} is in no library, and adopting writes library state: mark the \
+                     library's root with {OVERRIDE_FILE} first",
+                    library_directory(command.directory()).display()
+                )));
+            };
+            // One group, for the library root and holding no file: what
+            // it carries is the citation-key table an item minted here
+            // is named by, and the lookup tables that table consults.
+            let (group, warnings) = compiled_group(
+                root.to_path_buf(),
+                Vec::new(),
+                configs,
+                Renders::CitationKeysOnly,
+            )?;
+            Ok(Prepared::Grouped {
+                groups: vec![group],
+                // An adoption checks nothing against the account: it
+                // admits orphans, which no record names by definition.
                 account: None,
                 warnings,
             })
@@ -804,29 +834,47 @@ fn compiled_groups(
     let groups = by_directory(paths)
         .into_iter()
         .map(|(directory, paths)| {
-            let effective = configs.for_directory(&directory);
-            // Before the templates, because compiling one is what
-            // checks its `lookup` tokens against the declared names.
-            let (tables, used, dropped) = loaded_tables(effective)?;
+            let (group, dropped) = compiled_group(directory, paths, configs, renders)?;
             warnings.extend(dropped);
-            let config = effective.config();
-            Ok(Group {
-                filenames: match renders {
-                    Renders::FilenamesAndCitationKeys => {
-                        Some(templates(&config.templates, "templates", &tables)?)
-                    }
-                    Renders::CitationKeysOnly => None,
-                },
-                citation_keys: templates(&config.citation_keys, "citation-keys", &tables)?,
-                tables,
-                used,
-                directory,
-                paths,
-            })
+            Ok(group)
         })
         .collect::<Result<Vec<Group>, Diagnostic>>()?;
 
     Ok((groups, warnings))
+}
+
+/// One [`Group`]: `paths` in `directory`, with the template tables
+/// `renders` calls for compiled from that directory's configuration and
+/// the lookup tables it declares loaded, beside the warnings loading
+/// them produced.
+///
+/// Fails as [`compiled_groups`] does, on a table that will not load or
+/// a template that will not compile.
+fn compiled_group(
+    directory: PathBuf,
+    paths: Vec<PathBuf>,
+    configs: &Configs,
+    renders: Renders,
+) -> Result<(Group, Vec<Diagnostic>), Diagnostic> {
+    let effective = configs.for_directory(&directory);
+    // Before the templates, because compiling one is what checks its
+    // `lookup` tokens against the declared names.
+    let (tables, used, warnings) = loaded_tables(effective)?;
+    let config = effective.config();
+    let group = Group {
+        filenames: match renders {
+            Renders::FilenamesAndCitationKeys => {
+                Some(templates(&config.templates, "templates", &tables)?)
+            }
+            Renders::CitationKeysOnly => None,
+        },
+        citation_keys: templates(&config.citation_keys, "citation-keys", &tables)?,
+        tables,
+        used,
+        directory,
+        paths,
+    };
+    Ok((group, warnings))
 }
 
 /// The tables `effective` declares, read and loaded, with the record of
@@ -999,6 +1047,12 @@ pub fn emit_events<C: Cache>(
         ),
         (Command::Bib { .. }, Prepared::Grouped { groups, .. }) => {
             bib_events(groups, configs, adapters, sink);
+            Aftermath::default()
+        }
+        (Command::Adopt { .. }, Prepared::Grouped { groups, .. }) => {
+            if let [library] = groups.as_slice() {
+                adopt_events(library, adapters, sink);
+            }
             Aftermath::default()
         }
         // A `Prepared` that does not go with the command could only
@@ -3055,7 +3109,7 @@ fn applying(command: &Command, mode: Mode) -> bool {
         // A reconcile writes what it repairs, and a pass that repairs
         // nothing still reports itself as the kind of run that would
         // have.
-        Command::Bib { .. } | Command::Reconcile { .. } => true,
+        Command::Bib { .. } | Command::Reconcile { .. } | Command::Adopt { .. } => true,
         Command::Resolve { .. }
         | Command::Config { .. }
         | Command::Status { .. }
@@ -3144,6 +3198,39 @@ fn reconcile_events<C: Cache>(
     for event in crate::library::reconciliation_events(&reconciliation) {
         sink.emit(event);
     }
+}
+
+/// Write `adopt`'s events into `sink`: one per orphan the run adopted
+/// or tried to adopt, then every lookup the citation keys found no row
+/// for, then the totals ([`crate::library::adoption_events`]).
+///
+/// `library` is the group [`preflight`] prepared: the library root,
+/// with the citation-key table an item minted here is named by. The
+/// content index is the only thing asked about an orphan; no source is
+/// queried and no document opened. The run's timestamp stamps every
+/// hash entry it writes, as [`reconcile_events`]'s does.
+fn adopt_events<C: Cache>(library: &Group, adapters: &Adapters<'_, C>, sink: &mut dyn Sink) {
+    let at = (adapters.now)();
+    let mut lookups = Lookups::new(&library.tables);
+    let adoptions = crate::library::adopt(
+        &library.directory,
+        &|hash| adapters.index.get(hash),
+        &mut |record, hash| {
+            crate::bib::citation_key(record, Some(hash), &library.citation_keys, &mut lookups)
+        },
+        borax_core::library::RunId::new(&at),
+        &at,
+        env!("CARGO_PKG_VERSION"),
+    );
+
+    let (events, totals) = crate::library::adoption_events(&adoptions);
+    for event in events {
+        sink.emit(event);
+    }
+    let mut missed = Missed::default();
+    missed.absorb(lookups.take());
+    missed.report(sink);
+    sink.emit(totals);
 }
 
 /// Carry out `cli` against the real world.
@@ -3435,6 +3522,10 @@ fn expanded(command: &Command) -> Command {
         } => Command::Reconcile {
             path: Some(library_directory(path.as_deref())),
             rehash: *rehash,
+            run_log: run_log.clone(),
+        },
+        Command::Adopt { path, run_log } => Command::Adopt {
+            path: Some(library_directory(path.as_deref())),
             run_log: run_log.clone(),
         },
     }

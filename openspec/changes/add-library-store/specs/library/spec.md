@@ -910,6 +910,17 @@ holds for one of that record's identifiers, or to one it mints from
 that record. Where the index holds nothing, the artifact SHALL remain
 an orphan.
 
+An orphan whose content hash is already held in the history of an
+artifact record SHALL NOT be adopted, whatever the index holds for it,
+and the run SHALL report it naming that record. Such a file is that
+record's artifact moved out of band, or a byte-identical copy of it.
+A second record for the first would give one artifact two identities:
+the next reconcile would settle the new record at the file's path, and
+the old one — with its item link and its history — could never be
+repaired again. `borax reconcile` is what brings a moved artifact's
+record to it, and the report says so. The same holds for an orphan
+whose bytes an earlier orphan of the same run was adopted with.
+
 Nothing SHALL be invented. `borax adopt` mints no title, no author and
 no identifier, and it extracts nothing from the artifact itself: a file
 whose bytes borax has never resolved is a file borax knows nothing
@@ -944,6 +955,15 @@ promise.
 - **THEN** the first is still an orphan and is counted as one, the
   second is byte-identical including its item link, and a second run of
   the command writes no library state
+
+#### Scenario: A recorded artifact moved out of band is not adopted
+- **WHEN** a recorded artifact is moved within the library by a file
+  manager, and `borax adopt` runs with the content index answering for
+  its bytes
+- **THEN** it is reported as held by its existing record and left an
+  orphan, no record and no item is written for it, and a
+  `borax reconcile` afterwards repairs the existing record's path with
+  its identity and item link unchanged
 
 #### Scenario: Adoption reads neither the sidecars nor the old ledger
 - **WHEN** `borax adopt` runs over a library whose files have sidecars

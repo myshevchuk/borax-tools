@@ -291,6 +291,16 @@ pub enum Command {
         #[command(flatten)]
         run_log: RunLogOptions,
     },
+    /// Record the artifacts the content index already knows, querying
+    /// nothing and moving nothing.
+    Adopt {
+        /// The library to adopt into, as `status` takes it.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+
+        #[command(flatten)]
+        run_log: RunLogOptions,
+    },
 }
 
 /// The settings an invocation overrides, one field per setting.
@@ -502,9 +512,9 @@ impl Cli {
                 extraction.fill(&mut settings);
                 run_log.fill(&mut settings);
             }
-            Command::Validate { run_log, .. } | Command::Reconcile { run_log, .. } => {
-                run_log.fill(&mut settings)
-            }
+            Command::Validate { run_log, .. }
+            | Command::Reconcile { run_log, .. }
+            | Command::Adopt { run_log, .. } => run_log.fill(&mut settings),
             Command::Cache { run_log, .. } => run_log.fill(&mut settings),
         }
         settings
@@ -598,6 +608,15 @@ impl Command {
         }
     }
 
+    /// The `adopt` command over the library at `path`, with no setting
+    /// overridden.
+    pub fn adopt(path: Option<PathBuf>) -> Command {
+        Command::Adopt {
+            path,
+            run_log: RunLogOptions::default(),
+        }
+    }
+
     /// The subcommand's name, as [`crate::event::Event::RunStarted`]
     /// reports it and as the user typed it.
     pub fn name(&self) -> &'static str {
@@ -610,6 +629,7 @@ impl Command {
             Command::Status { .. } => "status",
             Command::Validate { .. } => "validate",
             Command::Reconcile { .. } => "reconcile",
+            Command::Adopt { .. } => "adopt",
         }
     }
 
@@ -624,7 +644,8 @@ impl Command {
             | Command::Cache { .. }
             | Command::Status { .. }
             | Command::Validate { .. }
-            | Command::Reconcile { .. } => &[],
+            | Command::Reconcile { .. }
+            | Command::Adopt { .. } => &[],
         }
     }
 
@@ -640,7 +661,8 @@ impl Command {
         match self {
             Command::Status { path, .. }
             | Command::Validate { path, .. }
-            | Command::Reconcile { path, .. } => path.as_deref(),
+            | Command::Reconcile { path, .. }
+            | Command::Adopt { path, .. } => path.as_deref(),
             _ => None,
         }
     }

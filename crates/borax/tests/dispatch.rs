@@ -14,7 +14,7 @@ use borax::config::{
     BibLayer, Effective, KeyColumns, Layer, Origin, RenameLayer, TableDeclaration, ValueKindName,
     resolve,
 };
-use borax::event::{Admission, Event, Level, Overridden, Repair, SkipReason};
+use borax::event::{Admission, Adoption, Event, Level, Overridden, Repair, SkipReason};
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RealFilesystem, RenameError, counts_for};
@@ -9593,14 +9593,11 @@ fn an_applied_rename_records_the_files_new_path_relative_to_the_library_root() {
 
 /// task 7.8: no library command reads, writes or deletes
 /// `.borax/ledger.jsonl`, borax's own retired accounting — a library
-/// holding one is reported, validated and reconciled with the file
-/// left byte-identical, and an applying run appends nothing to it. The
-/// file sits inside the state directory every library command writes
-/// to, so it is left alone deliberately rather than by being out of
-/// reach.
-///
-/// `borax adopt` does not exist yet (it is group 8); adoption joins
-/// this test then.
+/// holding one is reported, validated, reconciled and adopted with the
+/// file left byte-identical, and an applying run appends nothing to it.
+/// The file sits inside the state directory every library command
+/// writes to, so it is left alone deliberately rather than by being out
+/// of reach.
 #[test]
 fn no_library_command_touches_the_retired_ledger_file() {
     let library = real_library();
@@ -9657,7 +9654,7 @@ fn no_library_command_touches_the_retired_ledger_file() {
 
     events_for(
         &Command::reconcile(Some(root.clone()), false),
-        &Configs::uniform(effective),
+        &Configs::uniform(effective.clone()),
         &adapters,
         &mut Session::batch(),
     )
@@ -9666,6 +9663,19 @@ fn no_library_command_touches_the_retired_ledger_file() {
         fs::read(&ledger_path).unwrap(),
         original,
         "reconcile must not touch the retired ledger file"
+    );
+
+    events_for(
+        &Command::adopt(Some(root.clone())),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(&ledger_path).unwrap(),
+        original,
+        "adopt must not touch the retired ledger file"
     );
 
     // An applying rename over the same library, which writes the state
@@ -9824,4 +9834,511 @@ fn a_batch_run_over_three_artifacts_of_one_item_skips_none_of_them() {
         3,
         "the three records must still be three"
     );
+}
+
+// ---------------------------------------------------------------------
+// group 8: borax adopt — recording from the content index, offline
+// ---------------------------------------------------------------------
+
+/// Every file under `root` outside the two stores, with its bytes: the
+/// library's artifacts and everything a person put beside them, which
+/// is exactly what adoption must leave alone.
+fn outside_the_stores(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    snapshot(root)
+        .into_iter()
+        .filter(|(path, _)| {
+            !path.starts_with(root.join(STATE_DIR).join(ARTIFACT_STORE))
+                && !path.starts_with(root.join(ITEM_STORE))
+        })
+        .collect()
+}
+
+/// The adoption events of `events`, as `(path, adoption)` pairs.
+fn adoptions(events: &[Event]) -> Vec<(String, Adoption)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::LibraryAdoption { path, adoption } => Some((path.clone(), adoption.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The closing totals of an adoption run, as `(adopted, orphans)`.
+fn adopted_totals(events: &[Event]) -> (usize, usize) {
+    match events.last() {
+        Some(Event::LibraryAdopted {
+            adopted, orphans, ..
+        }) => (*adopted, *orphans),
+        other => panic!("an adoption run must end with its totals: got {other:?}"),
+    }
+}
+
+/// Run `borax adopt` over the library at `root`, answering from
+/// `index`, with a document reader that counts every open and sources
+/// that panic when asked anything — so a run that succeeds is a run
+/// that neither extracted nor queried.
+fn adopt_over(root: &Path, index: &ContentIndex<MemoryCache>) -> Vec<Event> {
+    let documents = CountingDocuments::new();
+    let crossref = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.to_path_buf()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::adopt(Some(root.to_path_buf())),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert_eq!(documents.open_count(), 0, "adopt must open no document");
+    assert!(
+        filesystem.renames().is_empty(),
+        "adopt must rename nothing: got {:?}",
+        filesystem.renames()
+    );
+    events
+}
+
+/// task 8.1, scenario "A library borax has seen before": each orphan
+/// the content index answers for gains an artifact record carrying its
+/// hash, library-relative path, size and modification time, linked to
+/// an item holding the cached record. An item the library already holds
+/// for one of that record's identifiers is reused — whether it was
+/// there before the run or minted earlier in it — rather than minted
+/// again.
+#[test]
+fn adopt_records_each_orphan_the_content_index_answers_for() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let first = write_real_file(&root, "first.pdf", b"task-8.1 first");
+    let second = write_real_file(&root, "sub/second.pdf", b"task-8.1 second");
+    // Another file of the first one's work: different bytes, same DOI.
+    let copy = write_real_file(&root, "sub/deeper/copy.pdf", b"task-8.1 copy");
+
+    let held = Item {
+        id: lib_item_id(G7_UUID_A),
+        record: record_by("Held", 2019, "10.1000/task-8.1-held"),
+    };
+    write_lib_item(&root, "held2019", &held);
+
+    let index = ContentIndex::new(MemoryCache::new());
+    let cached = record_by("Adopted", 2020, "10.1000/task-8.1");
+    index.put(&hash_bytes(b"task-8.1 first"), &cached);
+    index.put(
+        &hash_bytes(b"task-8.1 second"),
+        &record_by("Held", 2019, "10.1000/task-8.1-held"),
+    );
+    index.put(&hash_bytes(b"task-8.1 copy"), &cached);
+    let untouched = outside_the_stores(&root);
+
+    let events = adopt_over(&root, &index);
+
+    assert_eq!(adopted_totals(&events), (3, 0), "got {events:?}");
+    let reported: Vec<String> = adoptions(&events)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    assert_eq!(
+        reported,
+        vec!["first.pdf", "sub/deeper/copy.pdf", "sub/second.pdf"],
+        "one adoption per orphan, in the walk's order"
+    );
+
+    let records = library::ArtifactStore::read(&root);
+    assert_eq!(records.len(), 3);
+    for (path, bytes) in [
+        (&first, &b"task-8.1 first"[..]),
+        (&second, &b"task-8.1 second"[..]),
+        (&copy, &b"task-8.1 copy"[..]),
+    ] {
+        let relative = library::library_relative(&root, path).unwrap();
+        let record = records.by_path(&relative).unwrap();
+        let (size, modified_millis) = real_stat(path);
+        assert_eq!(
+            (record.size, record.modified_millis),
+            (size, modified_millis)
+        );
+        assert_eq!(record.history.len(), 1, "one hash, the file's own");
+        assert_eq!(record.history[0].hash, hash_bytes(bytes));
+        assert_eq!(record.history[0].run, LibraryRunId::new(fixed_now()));
+        assert_eq!(record.history[0].tool_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    let items = library::ItemStore::read(&root);
+    assert_eq!(
+        items.len(),
+        2,
+        "the held item reused, one minted for the other work and reused for its copy"
+    );
+    let link = |path: &Path| {
+        records
+            .by_path(&library::library_relative(&root, path).unwrap())
+            .unwrap()
+            .item
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(link(&second), held.id, "the item already held is reused");
+    assert_eq!(
+        link(&first),
+        link(&copy),
+        "two artifacts of one work name one item"
+    );
+    let minted = items.by_id(&link(&first)).unwrap();
+    assert_eq!(minted.record, cached, "the item holds the cached record");
+
+    assert_eq!(
+        outside_the_stores(&root),
+        untouched,
+        "nothing outside the two stores may be written, moved or deleted"
+    );
+}
+
+/// task 8.2, scenario "What adoption leaves alone": an artifact the
+/// index cannot answer for is still an orphan and counted as one; an
+/// artifact that already has a record is byte-identical afterwards,
+/// item link included, even though the index answers for it with a
+/// different work; and a second run writes no library state.
+#[test]
+fn adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "known.pdf", b"task-8.2 known");
+    write_real_file(&root, "unknown.pdf", b"task-8.2 unknown");
+    let recorded = write_real_file(&root, "recorded.pdf", b"task-8.2 recorded");
+
+    let item = Item {
+        id: lib_item_id(G7_UUID_A),
+        record: record_by("Recorded", 2018, "10.1000/task-8.2-recorded"),
+    };
+    write_lib_item(&root, "recorded2018", &item);
+    let (size, modified_millis) = real_stat(&recorded);
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(G7_UUID_B),
+            item: Some(item.id.clone()),
+            path: "recorded.pdf".to_string(),
+            size,
+            modified_millis,
+            history: vec![hash_entry_for(hash_bytes(b"task-8.2 recorded"), "run-0")],
+        },
+    );
+    let record_file = root
+        .join(STATE_DIR)
+        .join(ARTIFACT_STORE)
+        .join(format!("{G7_UUID_B}.toml"));
+    let record_bytes = fs::read(&record_file).unwrap();
+
+    let index = ContentIndex::new(MemoryCache::new());
+    index.put(
+        &hash_bytes(b"task-8.2 known"),
+        &record_by("Known", 2021, "10.1000/task-8.2-known"),
+    );
+    // What adopting the recorded artifact would take: a different work.
+    index.put(
+        &hash_bytes(b"task-8.2 recorded"),
+        &record_by("Other", 2022, "10.1000/task-8.2-other"),
+    );
+
+    let events = adopt_over(&root, &index);
+
+    assert_eq!(
+        adopted_totals(&events),
+        (1, 1),
+        "known adopted, unknown still an orphan: got {events:?}"
+    );
+    assert_eq!(
+        fs::read(&record_file).unwrap(),
+        record_bytes,
+        "a recorded artifact's record is left byte-identical"
+    );
+    let survey = library::survey(&root);
+    assert_eq!(
+        survey.orphans,
+        vec![root.join("unknown.pdf")],
+        "the unknown artifact is still an orphan"
+    );
+    assert_eq!(library::ItemStore::read(&root).len(), 2);
+
+    let before = snapshot(&root);
+    let stamps: Vec<(PathBuf, (u64, i64))> = before
+        .keys()
+        .map(|path| (path.clone(), real_stat(path)))
+        .collect();
+
+    let again = adopt_over(&root, &index);
+
+    assert_eq!(adopted_totals(&again), (0, 1), "got {again:?}");
+    assert!(adoptions(&again).is_empty(), "got {again:?}");
+    assert_eq!(snapshot(&root), before, "a second run writes nothing");
+    let restamped: Vec<(PathBuf, (u64, i64))> = before
+        .keys()
+        .map(|path| (path.clone(), real_stat(path)))
+        .collect();
+    assert_eq!(restamped, stamps, "not even rewritten with the same bytes");
+}
+
+/// task 8.2a, scenario "A recorded artifact moved out of band is not
+/// adopted": an orphan whose bytes a record's history already holds is
+/// that record's artifact moved, so adopt reports it held and writes
+/// nothing for it, and the reconcile after repairs the existing record.
+/// A second orphan carrying the bytes an earlier orphan of the same run
+/// was adopted with is held by the record just written.
+#[test]
+fn adopt_holds_an_orphan_whose_bytes_a_record_already_holds() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let item = Item {
+        id: lib_item_id(G7_UUID_A),
+        record: record_by("Moved", 2017, "10.1000/task-8.2a-moved"),
+    };
+    write_lib_item(&root, "moved2017", &item);
+    let recorded = write_real_file(&root, "before/moved.pdf", b"task-8.2a moved");
+    let (size, modified_millis) = real_stat(&recorded);
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(G7_UUID_B),
+            item: Some(item.id.clone()),
+            path: "before/moved.pdf".to_string(),
+            size,
+            modified_millis,
+            history: vec![hash_entry_for(hash_bytes(b"task-8.2a moved"), "run-0")],
+        },
+    );
+    // A file manager's move: the record still names the old path.
+    fs::create_dir_all(root.join("after")).unwrap();
+    fs::rename(&recorded, root.join("after/moved.pdf")).unwrap();
+    write_real_file(&root, "twin-a.pdf", b"task-8.2a twin");
+    write_real_file(&root, "twin-b.pdf", b"task-8.2a twin");
+
+    let index = ContentIndex::new(MemoryCache::new());
+    index.put(
+        &hash_bytes(b"task-8.2a moved"),
+        &record_by("Other", 2022, "10.1000/task-8.2a-other"),
+    );
+    index.put(
+        &hash_bytes(b"task-8.2a twin"),
+        &record_by("Twin", 2023, "10.1000/task-8.2a-twin"),
+    );
+
+    let events = adopt_over(&root, &index);
+
+    assert_eq!(adopted_totals(&events), (1, 2), "got {events:?}");
+    let reported = adoptions(&events);
+    assert_eq!(
+        reported[0],
+        (
+            "after/moved.pdf".to_string(),
+            Adoption::Held {
+                id: G7_UUID_B.to_string()
+            }
+        ),
+        "got {reported:?}"
+    );
+    let Adoption::Recorded { id: twin, .. } = &reported[1].1 else {
+        panic!("the first twin is adopted: got {reported:?}");
+    };
+    assert_eq!(reported[1].0, "twin-a.pdf");
+    assert_eq!(
+        reported[2],
+        (
+            "twin-b.pdf".to_string(),
+            Adoption::Held { id: twin.clone() }
+        ),
+        "the second twin is held by the record the run just wrote"
+    );
+    assert_eq!(library::ArtifactStore::read(&root).len(), 2);
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        2,
+        "no item is minted for the moved artifact's cached record"
+    );
+
+    library::reconcile(
+        &root,
+        false,
+        LibraryRunId::new("run-reconcile"),
+        "2026-01-02T00:00:00Z",
+        "0.6.0-test",
+    );
+    let records = library::ArtifactStore::read(&root);
+    let repaired = records.by_id(&lib_artifact_id(G7_UUID_B)).unwrap();
+    assert_eq!(repaired.path, "after/moved.pdf");
+    assert_eq!(repaired.item, Some(item.id.clone()));
+}
+
+/// task 8.3, scenario "Adoption reads neither the sidecars nor the old
+/// ledger": over a library whose file has a lossless sidecar and which
+/// holds a ledger naming that file's hash, with the content index
+/// empty, nothing is adopted, every artifact stays an orphan, and both
+/// files are byte-identical afterwards.
+#[test]
+fn adopt_reads_neither_a_sidecar_nor_the_retired_ledger() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "Sidecar2020.pdf", b"task-8.3 bytes");
+    let record = record_by("Sidecar", 2020, "10.1000/task-8.3");
+    let sidecar = sidecar_path(&path);
+    fs::write(
+        &sidecar,
+        borax_core::bib_output::sidecar(&record, "Sidecar2020"),
+    )
+    .unwrap();
+    let ledger = root.join(STATE_DIR).join("ledger.jsonl");
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    let ledger_line = format!(
+        "{{\"schema\":1,\"path\":\"Sidecar2020.pdf\",\"hash\":\"{}\",\"run\":\"run-0\"}}\n",
+        hash_bytes(b"task-8.3 bytes")
+    );
+    fs::write(&ledger, &ledger_line).unwrap();
+    let sidecar_bytes = fs::read(&sidecar).unwrap();
+
+    let events = adopt_over(&root, &ContentIndex::new(MemoryCache::new()));
+
+    assert_eq!(adopted_totals(&events), (0, 1), "got {events:?}");
+    assert!(library::ArtifactStore::read(&root).is_empty());
+    assert!(library::ItemStore::read(&root).is_empty());
+    assert_eq!(library::survey(&root).orphans, vec![path]);
+    assert_eq!(fs::read(&sidecar).unwrap(), sidecar_bytes);
+    assert_eq!(fs::read_to_string(&ledger).unwrap(), ledger_line);
+}
+
+/// task 8.4, scenario "Adoption after the cache is cleared": the
+/// content index is a cache, so after `borax cache --clear` adoption
+/// records nothing and reports every artifact an orphan — and the run
+/// succeeds, since an empty cache is not a failure.
+#[test]
+fn adopt_after_the_cache_is_cleared_adopts_nothing_and_succeeds() {
+    use borax_sources::store::FileCache;
+
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "one.pdf", b"task-8.4 one");
+    write_real_file(&root, "two.pdf", b"task-8.4 two");
+    let cache_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(cache_dir.path()));
+    index.put(
+        &hash_bytes(b"task-8.4 one"),
+        &record_by("One", 2020, "10.1000/task-8.4-one"),
+    );
+    index.put(
+        &hash_bytes(b"task-8.4 two"),
+        &record_by("Two", 2020, "10.1000/task-8.4-two"),
+    );
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: Some(cache_dir.path().to_path_buf()),
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let cleared = events_for(
+        &Command::cache(true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert!(
+        matches!(cleared.as_slice(), [Event::CacheCleared { entries: 2, .. }]),
+        "setup: the clear must remove both index entries: got {cleared:?}"
+    );
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+    let outcome = dispatch(
+        &cli(Command::adopt(Some(root.clone())), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "stderr: {err:?}");
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("\"event\":\"library-adopted\"")
+            && out.contains("\"adopted\":0")
+            && out.contains("\"orphans\":2"),
+        "got {out:?}"
+    );
+    assert!(library::ArtifactStore::read(&root).is_empty());
+    assert!(library::ItemStore::read(&root).is_empty());
+}
+
+/// Adoption writes library state, and a directory nobody marked holds
+/// none: `borax adopt` outside any library is refused before it starts,
+/// and leaves the directory exactly as it was.
+#[test]
+fn adopt_outside_any_library_is_refused_and_writes_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    write_real_file(&root, "unmarked.pdf", b"adopt unmarked");
+    let index = ContentIndex::new(MemoryCache::new());
+    index.put(
+        &hash_bytes(b"adopt unmarked"),
+        &record_by("Unmarked", 2020, "10.1000/adopt-unmarked"),
+    );
+    let before = snapshot(&root);
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let refused = events_for(
+        &Command::adopt(Some(root.clone())),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    );
+
+    assert!(
+        matches!(&refused, Err(diagnostic) if diagnostic.level == Level::Error),
+        "got {refused:?}"
+    );
+    assert_eq!(snapshot(&root), before);
 }
