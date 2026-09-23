@@ -356,19 +356,25 @@ is a run contradicting a living requirement.
 
 ## 9. The suite and the surface
 
-- [ ] 9.1 Rewrite `crates/borax/tests/ledger.rs` as `library.rs`: every
+- [x] 9.1 Rewrite `crates/borax/tests/ledger.rs` as `library.rs`: every
       test asserting a ledger append asserts an artifact record. *This
       arrives green* — it is a translation of assertions whose subjects
       group 7 has already changed, and writing it red would mean
       asserting the old store's behaviour in order to watch it fail.
-- [ ] 9.2 Red: the flag surface — `borax status --identify`,
+      *Landed with group 7*: the file was retired there, its behavioural
+      tests translated into `library.rs`, `dispatch.rs` and
+      `end_to_end.rs`, and its tests of the file as a mechanism removed
+      with the mechanism.
+- [x] 9.2 Red: the flag surface — `borax status --identify`,
       `borax reconcile --rehash`, `borax validate` and `borax adopt`
       with no setting of their own, `identify` refused as a
       configuration key, `--record`/`--no-record` accepted as a pair
       wherever the setting is, `--ledger` refused as an unknown
       argument, and `borax ledger` refused as an unknown subcommand.
-- [ ] 9.3 Green: the `cli.rs` declarations.
-- [ ] 9.4 Verify by hand on a copy of the real-PDF corpus: point
+- [x] 9.3 Green: the `cli.rs` declarations. *Nothing left to declare*:
+      each subcommand's surface landed with the group that built it, so
+      9.2's tests arrived green.
+- [x] 9.4 Verify by hand on a copy of the real-PDF corpus: point
       `borax status` at it unmarked and marked, run `--identify`, run
       `borax adopt` with a warm content index and again after
       `borax cache --clear`, record the rest with `rename --apply`,
@@ -378,6 +384,13 @@ is a run contradicting a living requirement.
       performed rather than asserted, and it is the one part of the
       change the suite cannot establish, since what is being checked is
       that a corpus borax has never seen needs no ceremony.
+      *Performed on 149 PDFs.* Every listed step behaved as specified.
+      It also found a defect outside the steps: a run's duplicate check
+      reads the store as it stood at the start of the run, so a
+      byte-identical twin reached after the run moved its recorded
+      sibling saw a stale path, was admitted as a second artifact, and
+      set off a false reconcile warning. It is left open for a
+      decision on the fix.
 
 ## 10. Documents
 

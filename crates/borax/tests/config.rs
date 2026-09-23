@@ -324,6 +324,39 @@ fn layer_from_toml_rejects_an_unknown_key_inside_a_table_naming_it() {
     }
 }
 
+/// cli spec scenario "A selector is not a setting": `identify` is a
+/// per-invocation selector for `status`, not a configurable setting, so
+/// a configuration file naming it is refused at load exactly like any
+/// other unknown key.
+#[test]
+fn layer_from_toml_rejects_identify_as_an_unknown_key() {
+    let err = layer_from_toml("identify = true", Path::new("/identify.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("identify"), "got {message:?}");
+            assert!(message.contains("unknown field"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+/// The same as `layer_from_toml_rejects_identify_as_an_unknown_key`,
+/// for `reconcile`'s selector: `rehash` says what one run is asked to
+/// do, so it is unsettable from configuration too.
+#[test]
+fn layer_from_toml_rejects_rehash_as_an_unknown_key() {
+    let err = layer_from_toml("rehash = true", Path::new("/rehash.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("rehash"), "got {message:?}");
+            assert!(message.contains("unknown field"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
 /// A typo of one of the two keys this change adds is still an unknown
 /// key, the same as any other misspelled setting.
 #[test]
