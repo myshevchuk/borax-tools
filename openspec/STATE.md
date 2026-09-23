@@ -6,8 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-09-17, before 0.5.0, with all four interactive
-changes implemented.
+Last reviewed: 2026-09-23, with `add-library-store` implemented on its
+branch and not yet archived.
 
 ## What is built
 
@@ -216,6 +216,69 @@ group 0, rather than leaving the archive holding both halves of a
 contradiction — the first change in the project to need that, and the
 pattern to copy when a stacked change contradicts one below it.
 
+`add-library-store` is implemented on top of all of these, on the
+branch `change/add-library-store`, and replaces the collection's
+accounting with a library store. A library is the tree under the nearest
+`.borax.toml`, or under the configured `library-root`; its boundary is
+lexical, a symlink is neither an artifact nor an orphan, and a nested
+`.borax.toml` is a library of its own that the outer one's commands do
+not see into. It keeps two stores of plain TOML files read directly,
+with no index: `items/<key>.<uuid>.toml`, one item per work holding its
+record, and `.borax/artifacts/<uuid>.toml`, one artifact record per file
+holding its item link, its library-relative path, its size and
+modification time, and its hash history. An item and an artifact record
+each carry a v7 UUID minted once, and the `id` inside a file is what
+every reference names, never the file name.
+
+Four commands read and keep it. `status` counts what a tree holds and
+opens no document, so a directory borax has never seen is reported on
+with no preceding step; `--identify` adds an extraction pass and still
+queries nothing. `validate` reports what is wrong with the records
+themselves and repairs nothing. `reconcile` brings records back to
+files moved out of band, by size and modification time first and by
+hash after, in four ordered steps that let two swapped files both
+repair; an ambiguous match is left alone and named. `adopt` records,
+offline, each orphan the content index already knows, and holds back
+one whose bytes a record already has, since that is a moved artifact
+for `reconcile` rather than a new one. An applying rename records what
+it moves or finds already named, item first so an interruption leaves
+an unlinked item rather than a dangling link, and every store write is
+an atomic whole-file replacement of a document edited through
+`toml_edit`.
+
+Both duplicate checks now answer from the artifact store, and from the
+library as the run has left it so far rather than as it stood when the
+run began: the first version read a snapshot, and the hand
+verification on the real-PDF corpus caught it admitting a byte-identical
+pair twice and warning falsely about paths to reconcile. A preview
+learns what it would admit on the same terms. `--no-record` turns both
+checks and every write off, and refuses the one move that would strand
+a record naming the file with no hash of its bytes.
+
+The ledger is retired. `.borax/ledger.jsonl` is neither read, written
+nor deleted, `borax ledger` and the `ledger-rebuilt` event are gone,
+`ledger`/`--ledger` became `record`/`--record` and `collection-root`
+became `library-root`, with no aliases. No migration is owed before
+1.0.0: `adopt` or an applying rename populates the store, and the old
+file can be deleted by hand. The `ledger` capability keeps its name in
+`openspec/specs/` although it now specifies the store's duplicate
+checks and record gate, because a capability rename is not something
+archiving expresses; renaming it is a spec-only change of its own. The
+event schema version is 3.
+
+This change also settles what a sidecar is: citation output for other
+tools, which governs no decision borax makes. Nothing reads a sidecar
+to build library state, and `adopt` deliberately does not.
+
+What the next change in the stack adds on top is the organizational
+half the store was built to carry: views, nodes and memberships, with
+the filesystem-backed view among them. That view derives from the
+recorded size and modification time, which is why a reconcile refreshes
+them on every record it confirms, including after a bare `touch`.
+Template filing becomes assignment to that view once views exist, and
+the `rename` filing requirement was left untouched here for that
+reason.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
@@ -263,7 +326,11 @@ pattern to copy when a stacked change contradicts one below it.
   row in the user's table. `add-external-tables` was deliberately built
   so that is the whole of the work, and deferred it because it reaches
   into `record-model` and `resolution` rather than because it is hard.
-- **Everything the design names as a later change**: no library index,
+- **Views, nodes and memberships.** The next change in the library
+  stack; see the `add-library-store` paragraphs above. An item and an
+  artifact record are one edge today and nothing organizes them.
+- **Everything the design names as a later change**: no library index
+  (SQLite and FTS5 wait on a measurement against the direct reads),
   search or watch mode; no OCR or interactive candidate picker; no XMP
   write-back, Zotero interop or Emacs package; no bibliography format
   other than BibTeX. The file's bytes are never modified — borax renames
@@ -297,10 +364,25 @@ pattern to copy when a stacked change contradicts one below it.
   it. `remove-undo` closed the second way in, where a file moved back to
   its original name left its sidecar behind under the vacated one.
 
-  Fixing it properly means deciding what a sidecar's identity is — an
-  output regenerated per run, or a companion that follows its file —
-  and the answer governs re-renames and `ledger rebuild`'s scan alike.
-  That is a change of its own, not a patch.
+  What a sidecar is has been settled by `add-library-store`: derived
+  citation output that governs no decision, and nothing reads one back.
+  So the fix is no longer blocked on a question of identity. What is
+  left is choosing between moving a sidecar with its file on rename and
+  regenerating it and removing the old one, which is a change of its
+  own, not a patch.
+
+- **A PDF parser's panic prints a trace.** `borax-pdf` catches a panic
+  in the parsers and reports the file as unreadable, but Rust's default
+  panic hook has already written the trace to standard error by then.
+  `status --identify` over the real-PDF corpus prints two of them. The
+  run is unaffected and exits 0; the output reads as a crash when it is
+  not one.
+
+- **Names are compared case-sensitively on every Unix target.**
+  `crates/borax/src/paths.rs` answers wrongly on a case-insensitive
+  volume, macOS's default included, and collision detection,
+  already-named reporting and the library boundary all go through it.
+  Deferred by `add-library-store` because fixing it reaches all three.
 
 - **Every capability spec opens with a placeholder Purpose.** All ten
   files in `openspec/specs/` carry the same line the archive tool

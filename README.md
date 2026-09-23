@@ -6,10 +6,12 @@ looks up the identifier with Crossref, OpenAlex, and arXiv, then renames
 the file after the returned record. You choose the new name with a small
 template language.
 
-The pipeline is stateless. By default on a terminal, `rename` asks before
-each move. A batch rename previews unless you pass `--apply`. It never
-overwrites or guesses. It leaves an unidentified file in place and
-prints the reason.
+By default on a terminal, `rename` asks before each move. A batch rename
+previews unless you pass `--apply`. It never overwrites or guesses. It
+leaves an unidentified file in place and prints the reason. Inside a
+library established by `.borax.toml` or the `library-root` setting, an
+applying rename also records the logical works and physical files the
+library holds. Outside a library, it writes no library state.
 
 Status: pre-release. `openspec/` specifies the behaviour, and
 `openspec/STATE.md` tracks how much is built. Versions are `0.y.z` and
@@ -73,6 +75,20 @@ papers/scan003.pdf: skipped, no identifier found
 papers/smith2024_AwesomePaperBorax.pdf: bibliography entry smith2024 added
 1 resolved, 1 renamed, 1 skipped
 ```
+
+Inspect a library, record files borax already knows from its local
+content index, and repair records after moving files in a file manager:
+
+```console
+$ borax status papers/
+$ borax adopt papers/
+$ borax reconcile papers/
+```
+
+`status` only counts the tree and stores unless you add `--identify`.
+`adopt` queries no service and moves nothing. Use `rename --apply` for
+files the content index does not know; it can resolve, rename, and record
+them. `reconcile` updates existing records and never adopts an orphan.
 
 To use another naming scheme, put a template in a `.borax.toml` beside
 the files. This example creates one directory per year:

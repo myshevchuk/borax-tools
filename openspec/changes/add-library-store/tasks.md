@@ -412,7 +412,7 @@ is a run contradicting a living requirement.
 
 ## 10. Documents
 
-- [ ] 10.1 Run `codex-docs` update jobs on `docs/manual.org` (the
+- [x] 10.1 Run `codex-docs` update jobs on `docs/manual.org` (the
       library and its boundary, `borax status`, `borax validate`,
       `borax reconcile`, `borax adopt` and when to run it, the item and
       artifact record formats and how neither is a `.bib` sidecar, what
@@ -420,7 +420,7 @@ is a run contradicting a living requirement.
       renames, and the withdrawal of `borax ledger`),
       `README.md` and `CHANGELOG.md`, with this proposal and its design
       as sources; check the diff against both.
-- [ ] 10.2 Record the built state in `openspec/STATE.md`: the library
+- [x] 10.2 Record the built state in `openspec/STATE.md`: the library
       store as built, the ledger retired with no migration owed, the
       `ledger` capability's name left stale because a rename does not
       archive, and what the next change in the stack adds on top of it.
@@ -428,5 +428,5 @@ is a run contradicting a living requirement.
       what a sidecar is and fixes nothing about the defect — and update
       its closing paragraph, which says the fix is blocked on deciding a
       sidecar's identity and is no longer true.
-- [ ] 10.3 `openspec validate add-library-store --strict` and
+- [x] 10.3 `openspec validate add-library-store --strict` and
       `scripts/check-spec-deltas.py` pass; full suite green.

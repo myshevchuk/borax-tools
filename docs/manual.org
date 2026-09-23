@@ -1,10 +1,12 @@
 #+TITLE: The borax manual
-#+SUBTITLE: Resolving, renaming and citing a collection of papers
+#+SUBTITLE: Resolving, renaming and citing a library of papers
 #+AI_MODEL: claude-opus-5
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 08:32] -- interactive rename
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 17:28]
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-16 Wed 18:33]
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-17 Thu 02:41] -- supplying identifiers
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-09-23 Wed 22:15] -- library store
+#+AI_PASS: claude-opus-5-5 [2026-09-23 Wed] -- fact check of the library-store pass
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -64,7 +66,7 @@ how to install it, and a handful of examples.
 
   A file that already carries the name its record implies is successful,
   not skipped. It does not cause the partial-success exit code, 2. A run
-  over a collection in which every file is already named exits 0.
+  over a library in which every file is already named exits 0.
 
 * Commands
 
@@ -115,10 +117,28 @@ how to install it, and a handful of examples.
    both flags. It reads, resolves, and moves nothing, and exits with the
    fatal code, 1.
 
-   ~rename~ is also where bibliography output and the collection's
-   ledger belong, because it is the command that admits a file into a
-   collection: it accepts ~--bib~, ~--sidecars~, ~--duplicates~,
-   ~--collision~ and ~--ledger~ alongside the resolution settings.
+   ~rename~ is also where bibliography output and admission to a
+   library happen. It accepts ~--bib~, ~--sidecars~, ~--duplicates~,
+   ~--collision~ and ~--record~ alongside the resolution settings.
+   An applying run inside a library writes an artifact record for each
+   file it moves or finds already named, and links that record to an
+   item for the resolved work. A preview writes neither kind of record.
+
+   With recording enabled, duplicate checks use the library as the run
+   has left it so far. Of two byte-identical files in one run, an
+   applying run admits the first and a preview plans it; both report the
+   second as a content duplicate. The same is true of two different
+   files for one work: a batch skips the second, while an interactive
+   run asks whether to file it as another artifact of the existing item.
+   A file's own artifact record never makes it a duplicate of itself:
+   borax passes over that record and keeps looking, so a genuine second
+   copy recorded elsewhere in the library is still reported. Nor is a
+   file a work duplicate of the item its own record already links to,
+   so the several artifacts of one item never skip each other.
+   ~--no-record~ disables both checks and writes no artifact record or
+   item. If moving a changed artifact without updating its record would
+   strand that record, borax refuses the move and tells you to run
+   ~borax reconcile --rehash~ first.
 
    It works one file at a time, so that a file's verdict and its fate
    stay adjacent in the stream. That is why it takes no
@@ -128,10 +148,11 @@ how to install it, and a handful of examples.
 
     borax asks about every file whose outcome you can change: a file it
     can rename, one with no identifier, one whose identifier did not
-    resolve, one with a title conflict, and an unreadable or encrypted
-    file whose content hash is known. It also asks about an already-named
-    file when you use ~--no-skip-named~. Before the question, borax shows
-    the evidence it has on standard error:
+    resolve, one with a title conflict, a second artifact of a work the
+    library already holds, and an unreadable or encrypted file whose
+    content hash is known. It also asks about an already-named file when
+    you use ~--no-skip-named~. Before the question, borax shows the
+    evidence it has on standard error:
 
     #+begin_example
       ── 3 of 17 ──────────────────────────────────────────────────────────
@@ -330,6 +351,9 @@ how to install it, and a handful of examples.
    nothing. It renders citation keys but no file names, so a
    ~templates.default~ that will not compile does not stop it.
 
+   ~bib~ takes files as input. An item with no artifact has no file for
+   this command to resolve, so it produces no bibliography entry.
+
 ** borax config
 
    #+begin_src sh
@@ -361,22 +385,112 @@ how to install it, and a handful of examples.
 
    Reports what the on-disk response cache holds, or empties it.
 
-** borax ledger rebuild
+   The four library commands below each accept
+   ~--run-log~/~--no-run-log~ and ~--json~. ~--identify~ and ~--rehash~
+   select work for one invocation; they are not configuration keys and
+   have no ~--no-~ forms.
+
+** borax status
 
    #+begin_src sh
-     borax ledger rebuild
+     borax status [PATH]
+     borax status --identify [PATH]
    #+end_src
 
-   Regenerates the collection's ledger from the files and sidecars
-   themselves. The ledger is derived state: it is what lets ~rename~
-   notice that a file, or the work it reports, is already in the
-   collection, and it can always be rebuilt from the collection.
+   Reports how many artifacts, items, artifact records, and orphans a
+   library holds. An /artifact/ is a PDF owned by the library tree,
+   outside ~.borax/~, ~items/~, and any nested library. An /orphan/ is
+   an artifact whose path no artifact record names. A record whose path
+   holds no file is missing, not orphaned.
 
-   A ledger entry for the incoming file at its own path does not make
-   that file a duplicate of itself, whether the content or the resolved
-   work matches. borax passes over that entry and keeps looking, so a
-   genuine second copy recorded elsewhere in the collection is still
-   reported as a duplicate.
+   The command opens no document and writes no library state. It also
+   works on an unmarked directory, treating that directory as the root
+   for this report. ~--identify~ additionally opens each artifact and
+   runs the extraction passes to count how many yield an identifier. It
+   queries no service. ~status~ also accepts ~--page-limit~ for that
+   extraction. If you omit ~PATH~, the working directory is used.
+
+   A nested directory with its own ~.borax.toml~ is another library.
+   ~status~ excludes its entire subtree from the parent counts and lists
+   it as a nested library.
+
+** borax validate
+
+   #+begin_src sh
+     borax validate [PATH]
+   #+end_src
+
+   Checks the library's item and artifact records and repairs nothing.
+   It reports a dangling item link, a duplicate identity, a store file
+   whose name disagrees with the identity inside it, a path that is not
+   library-relative, an empty hash history, a malformed hash, a history
+   entry without a run, or a store file that cannot be read.
+
+   Orphans, missing artifacts, and items no artifact record links to are
+   counts rather than findings. They are valid library states. The
+   command exits with the partial-success code, 2, when it reports a
+   finding, and exits 0 when it reports none.
+
+** borax reconcile
+
+   #+begin_src sh
+     borax reconcile [PATH]
+     borax reconcile --rehash [PATH]
+   #+end_src
+
+   Repairs artifact records after files have been moved or edited
+   outside borax. It first trusts a matching recorded size and
+   modification time. ~--rehash~ hashes every artifact instead, which
+   also catches a same-size in-place edit within the filesystem's
+   modification-time granularity.
+
+   Reconciliation completes four steps in order across the library. It
+   first settles records whose own paths still hold their artifacts.
+   It then repairs stale paths by matching any hash in each record's
+   history, preferring the current hash. Next it treats an unmatched
+   file at a record's own path as an in-place edit and appends its new
+   hash. Finally, it leaves unresolved records unchanged.
+
+   A record with more than one candidate is ambiguous, and so is a
+   file two records both match. borax reports every candidate and
+   changes nothing rather than guessing. It creates no record for an
+   orphan and deletes no record. A pass over an untouched library writes
+   no store file.
+
+** borax adopt
+
+   #+begin_src sh
+     borax adopt [PATH]
+   #+end_src
+
+   Records orphans from facts borax already knows locally. For each
+   orphan, it hashes the file and asks the content index, the local cache
+   of records borax resolved before. When the index answers, borax writes
+   an artifact record and links it to an existing item or creates an
+   item. It queries no service, opens no document, and moves, renames,
+   and deletes nothing.
+
+   An unknown orphan stays an orphan. An orphan whose bytes already
+   occur in an artifact record's hash history also stays an orphan and
+   is reported as held by that record. It may be a recorded artifact
+   moved outside borax, in which case run ~reconcile~, or a copy. Running
+   ~adopt~ again does not change records it already wrote. After ~borax
+   cache --clear~, the content index is empty, so adoption records
+   nothing and still succeeds.
+
+   ~adopt~ neither reads citation sidecars nor the retired
+   ~.borax/ledger.jsonl~. It refuses to run outside a library established
+   by ~.borax.toml~ or ~library-root~, because it has nowhere to write
+   library state.
+
+** Choosing how to record existing files
+
+   Use ~adopt~ when borax resolved the same bytes on an earlier run and
+   you want an offline operation that cannot rename anything. Use
+   ~rename --apply~ when an orphan is unknown to the content index: it
+   can extract an identifier, query services, rename the file under the
+   current templates, and record it. Use ~reconcile~ when a record
+   already exists but its artifact was moved or edited outside borax.
 
 * Settings
 
@@ -406,9 +520,28 @@ how to install it, and a handful of examples.
    actually came from, which is how you settle an argument about which
    file is in charge.
 
-   A directory with a ~.borax.toml~ in it, or under one, is a
-   /collection/: the file that configures a tree also says where that
-   tree's ~.borax/~ — its ledger and its run logs — lives.
+   A /library/ root is the configured ~library-root~, or otherwise the
+   nearest ancestor with a ~.borax.toml~. Its ~.borax/~ holds the
+   artifact records and run logs, while ~items/~ under the root holds the
+   item store. A nested marker begins another library, and the outer
+   library stops at that boundary. The boundary is lexical: symlinks are
+   not followed, and a symlink is neither an artifact nor an orphan.
+
+   A library keeps two authoritative text stores. An item is a logical,
+   independently citable work. It lives at
+   ~items/<key>.<uuid>.toml~, where ~<key>~ is the citation key when the
+   item is created and is only a label; borax never renames the file
+   when the key later changes. The ~id~ field inside the file is the
+   item's identity. An item may have no artifact, and several artifacts
+   may link to one item.
+
+   An artifact record describes one physical file. It lives at
+   ~.borax/artifacts/<uuid>.toml~ and records its own identity, its item
+   link, its last-known library-relative path, its size and modification
+   time, and its hash history. Each hash entry names the run, timestamp,
+   and borax version that recorded it. A citation sidecar is optional
+   derived output, not a library record: borax reads neither a sidecar
+   nor a retired ledger file to reconstruct the library.
 
 ** The settings
 
@@ -417,9 +550,9 @@ how to install it, and a handful of examples.
    | ~bib.duplicates~          | ~--duplicates~                   | ~skip~    |
    | ~bib.path~                | ~--bib~                          | unset     |
    | ~bib.sidecars~            | ~--sidecars~/~--no-sidecars~     | ~false~   |
-   | ~collection-root~         | none                             | unset     |
+   | ~library-root~            | none                             | unset     |
    | ~extraction.page-limit~   | ~--page-limit~                   | ~3~       |
-   | ~ledger~                  | ~--ledger~/~--no-ledger~         | ~true~    |
+   | ~record~                  | ~--record~/~--no-record~         | ~true~    |
    | ~mailto~                  | ~--mailto~                       | unset     |
    | ~network.cache~           | ~--cache~/~--no-cache~           | ~true~    |
    | ~network.concurrency~     | ~--concurrency~                  | ~4~       |
@@ -434,16 +567,18 @@ how to install it, and a handful of examples.
      ~.bib~: ~skip~ or ~update~.
    - ~bib.path~ :: The master ~.bib~ file entries are merged into.
    - ~bib.sidecars~ :: Write a sidecar record beside each resolved file.
-   - ~collection-root~ :: The directory anchoring the collection. Set,
-     it replaces the search for a ~.borax.toml~ outright, which is how
-     an unusual layout puts its accounting somewhere no override file
-     sits.
+   - ~library-root~ :: The directory anchoring the library. Set, it
+     replaces the search for a ~.borax.toml~ outright, which is how an
+     unusual layout puts its state somewhere no override file sits.
    - ~extraction.page-limit~ :: How many pages from the front the text
      pass reads. Zero disables the text pass. The default of three
      covers the usual case: publishers put the DOI on the first page,
      and a cover sheet rarely pushes it past the third.
-   - ~ledger~ :: Whether ~rename~ consults and updates the collection's
-     ledger.
+   - ~record~ :: Whether ~rename~ checks the library's artifact records
+     for content and work duplicates, and whether an applying run writes
+     artifact records and items. With it off, no duplicate check or
+     store write is made. The safety check that prevents a move from
+     stranding an existing record still runs.
    - ~mailto~ :: The contact address sent to the polite pools. Setting
      it is how you get the better rate limits, and it is good manners.
    - ~network.cache~ :: Whether resolving reads and writes the on-disk
@@ -514,7 +649,7 @@ how to install it, and a handful of examples.
 
    Every configurable boolean is offered as a pair of flags —
    ~--cache~/~--no-cache~, ~--sidecars~/~--no-sidecars~,
-   ~--ledger~/~--no-ledger~, ~--batch~/~--no-batch~,
+   ~--record~/~--no-record~, ~--batch~/~--no-batch~,
    ~--skip-named~/~--no-skip-named~, and
    ~--run-log~/~--no-run-log~ — which is how a flag that takes no
    value says all three things: on, off, and silent. Naming both halves
@@ -523,7 +658,7 @@ how to install it, and a handful of examples.
 * The template language
 
   Once borax has resolved a file's metadata, it still has to decide
-  what to call the file. You are the one who knows what your collection
+  what to call the file. You are the one who knows what your library
   should look like — one person wants ~smith2024_AwesomePaperBorax.pdf~,
   the next wants everything sorted into a directory per year. A
   /template/ is how you say which. It is a short string that borax
@@ -694,17 +829,17 @@ how to install it, and a handful of examples.
    renders ~2024/smith2024_AwesomePaper~, and borax creates the ~2024~
    directory if it is not already there.
 
-   Inside a collection, the rendered path is relative to the collection
+   Inside a library, the rendered path is relative to the library
    root. This is the directory holding the ~.borax.toml~ that supplied
    the run's configuration, or the directory selected by the
-   ~collection-root~ setting. A template such as
+   ~library-root~ setting. A template such as
    ~[journal]/[auth][year]~ therefore files a paper into ~Nature/~
-   wherever the PDF currently sits in the collection. Re-running over
-   the collection changes nothing. If the journal later renders as
+   wherever the PDF currently sits in the library. Re-running over
+   the library changes nothing. If the journal later renders as
    ~Science~, borax moves the file across into ~Science/~ rather than
    deeper into ~Nature/Science/~.
 
-   When a run has no collection root, a rendered subdirectory is
+   When a run has no library root, a rendered subdirectory is
    relative to the file's current directory, as before. Such a run is
    not idempotent when the template contains a subdirectory. In either
    case, a rendered name containing no ~/~ renames the file where it
@@ -721,7 +856,7 @@ how to install it, and a handful of examples.
    Every rendered name goes through a sanitization pass before it
    reaches the filesystem. You cannot turn it off, and templates cannot
    opt out of it. It applies the strictest rules of any supported
-   platform — Windows's — everywhere, so that a collection stays valid
+   platform — Windows's — everywhere, so that a library stays valid
    when it syncs between machines:
 
    - The characters Windows forbids (~<~ ~>~ ~:~ ~"~ ~\~ ~|~ ~?~ ~*~
@@ -921,7 +1056,7 @@ how to install it, and a handful of examples.
 
    Two rows that fold to the same key but hold different values are an
    error rather than a race, and the run stops before it renames
-   anything. Keeping one of the two silently is how a collection
+   anything. Keeping one of the two silently is how a library
    acquires a systematically wrong abbreviation that nobody can explain
    afterwards.
 
@@ -1089,9 +1224,9 @@ how to install it, and a handful of examples.
   difference is only that the log stays after the process exits.
 
   Where the log goes depends on where you are working. Inside a
-  collection — any directory with a ~.borax.toml~ in it, or under one —
-  logs are kept in ~.borax/runs/~ beside that file, so a collection's
-  records travel with the files they are about. Outside a collection,
+  library — any directory with a ~.borax.toml~ in it, or under one —
+  logs are kept in ~.borax/runs/~ beside that file, so a library's
+  records travel with the files they are about. Outside a library,
   borax falls back to your platform's state directory (on Linux,
   usually =~/.local/state/borax/v1/runs/=).
 
@@ -1113,7 +1248,7 @@ how to install it, and a handful of examples.
   write one, and cannot be talked out of it.* An interactive run is an
   applying run even when you decline every proposal. Its log is created
   and its first event is written before the first question. If borax has
-  nowhere to put that log — you are outside a collection and your system
+  nowhere to put that log — you are outside a library and your system
   names no state directory — it refuses to ask or move anything.
 
   Every applying rename records and flushes a move's ~renamed~ event
@@ -1159,21 +1294,37 @@ how to install it, and a handful of examples.
   and the counts include ~named~. An interactive run waits until you
   settle a file before it emits that file's outcome, so a supplied
   identifier does not produce a second verdict. Questions are not
-  events. The event schema version remains 2.
+  events. The event schema version is 3.
+
+  Schema 3 adds the library events. ~library-status~ carries ~root~,
+  ~artifacts~, ~items~, ~records~, ~orphans~, ~nested~, and
+  ~identifiable~. ~library-finding~ carries ~path~ and ~finding~, and
+  ~library-validated~ carries ~root~, ~findings~, ~orphans~, ~missing~,
+  and ~unlinked~. ~library-repair~ carries ~id~, ~path~, and ~repair~;
+  ~library-reconciled~ carries ~root~, ~records~, ~confirmed~,
+  ~repaired~, ~changed~, ~ambiguous~, ~missing~, and ~hashed~.
+
+  An applying rename may emit ~library-admission~ with ~path~ and an
+  ~admission~ whose ~kind~ is ~relinked~, ~outside~, or ~unwritten~.
+  Adoption emits ~library-adoption~ with ~path~ and an ~adoption~ whose
+  ~kind~ is ~recorded~, ~held~, ~unreadable~, or ~unwritten~, followed
+  by ~library-adopted~ with ~root~, ~adopted~, and ~orphans~. The
+  ~ledger-rebuilt~ event is gone. A ~skipped~ event may now carry the
+  reason kind ~stranding~.
 
 ** Recovering the names a run replaced
 
    Renaming is the one thing borax does that leaves no trace in the
-   files themselves. A bibliography file can be written again, and the
-   ledger can be rebuilt from the collection with ~borax ledger
-   rebuild~, but the name a file used to carry is nowhere except the
-   log of the run that changed it.
+   files themselves. A bibliography file can be written again, and an
+   artifact record keeps the current library-relative path and hash
+   history, but the name a file used to carry is nowhere except the log
+   of the run that changed it.
 
    Each rename appears in the log as one line like this:
 
    #+begin_example
      {
-       "schema": 2,
+       "schema": 3,
        "event": "renamed",
        "path": "/papers/reviewed-final.pdf",
        "target": "/papers/smith2024_AwesomePaperBorax.pdf",
