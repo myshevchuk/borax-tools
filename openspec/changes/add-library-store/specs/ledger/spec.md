@@ -118,6 +118,19 @@ library-relative path under the library root against the incoming path
 made absolute — normalised lexically and matched the way the platform
 matches file names. Symlinks SHALL NOT be resolved.
 
+The library the checks answer from SHALL be the library as the run has
+left it so far, not as it stood when the run began. A file the run
+admits SHALL be, for every later file of the same run, an artifact
+record carrying that file's hash and path and linked to its item; and a
+recorded artifact the run moves SHALL be found at the path it moved to.
+A byte-identical pair reached in one run is therefore one artifact and
+one content duplicate, whether or not either was recorded before, and a
+record whose artifact this run moved is not a stale path for having
+moved. A preview SHALL learn what it would admit in the same way,
+without writing it, so that it reports what the same run with `--apply`
+would do; a run whose checks are off learns nothing, having nothing to
+check against.
+
 #### Scenario: Re-downloaded identical file
 - **WHEN** an incoming file's hash appears in another artifact record's
   hash history
@@ -163,6 +176,26 @@ matches file names. Symlinks SHALL NOT be resolved.
   one item in turn
 - **THEN** none of them is reported a work duplicate, and none is
   skipped for belonging to the item all three already belong to
+
+#### Scenario: A byte-identical pair in one run
+- **WHEN** an applying run reaches two byte-identical files, neither of
+  them recorded before the run
+- **THEN** the first is recorded and the second is reported a content
+  duplicate naming the path the first now has, and a preview of the
+  same run reports the same
+
+#### Scenario: A copy of an artifact the run has just moved
+- **WHEN** an applying run moves a recorded artifact and then reaches a
+  byte-identical copy of it
+- **THEN** the copy is reported a content duplicate naming the moved
+  artifact's new path, and the run does not report that the library has
+  paths to reconcile
+
+#### Scenario: Two files of one work in one batch
+- **WHEN** a batch run reaches two different files resolving to one DOI
+  that no item carried before the run
+- **THEN** the first is recorded against a new item and the second is
+  reported a work duplicate naming the first's path
 
 #### Scenario: A file's own entry does not hide a copy
 - **WHEN** a file at its recorded path is reached again and a

@@ -10342,3 +10342,576 @@ fn adopt_outside_any_library_is_refused_and_writes_nothing() {
     );
     assert_eq!(snapshot(&root), before);
 }
+
+// ---------------------------------------------------------------------
+// group 9.5: the checks answer from the library as the run has left it
+// so far
+//
+// The account `rename_events` builds is checked exactly once, at the
+// start of the run — a snapshot that stays one. The fix task 9.6 owns
+// is making that account learn each admission (and, in a preview, each
+// plan) as the run makes it, so a file reached later in the same run is
+// checked against what the run has already done rather than against
+// what the library held before it started.
+// ---------------------------------------------------------------------
+
+const G95_UUID_A: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdefc";
+
+/// task 9.5, scenario "A byte-identical pair in one run": an applying
+/// batch run over two byte-identical files, neither recorded before the
+/// run, records the first and reports the second a content duplicate
+/// naming the path the first now has. `b.pdf`'s document would fail
+/// loudly if opened, so a wrongly-resolved second file shows up as a
+/// distinct failure rather than a silent admission: the content check
+/// SHALL run before resolution, and a duplicate reached only because the
+/// account learned of the first file's admission must still be found
+/// before any source or extractor is touched for the second.
+#[test]
+fn a_byte_identical_pair_neither_recorded_is_one_admission_and_one_content_duplicate() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = b"task-9.5-pair bytes";
+    let a = write_real_file(&root, "a.pdf", bytes);
+    let b = write_real_file(&root, "b.pdf", bytes);
+    let hash = hash_bytes(bytes);
+    let documents = FakeDocuments::new()
+        .with_file(
+            &a,
+            hash.clone(),
+            pdf_with_embedded_doi("10.1000/task-9.5-pair"),
+        )
+        .with_open_error(
+            &b,
+            hash.clone(),
+            ExtractionError::Unreadable {
+                message: "must never be opened: the content check runs before resolution"
+                    .to_string(),
+            },
+        );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Pair", 2024, "10.1000/task-9.5-pair")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![a.clone(), b.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let a_target = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { path, target, .. } if path == &a => Some(target.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the first of the pair must be renamed: got {events:?}"));
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Content,
+                    existing_path,
+                },
+            } if path == &b && existing_path == &a_target
+        )),
+        "the second of a byte-identical pair reached in one run must be a content \
+         duplicate naming the first's new path: got {events:?}"
+    );
+    assert!(b.exists(), "a content duplicate must never be moved");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Resolved { path, .. } if path == &b)),
+        "a content duplicate is found before resolution, so it is never resolved: \
+         got {events:?}"
+    );
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        1,
+        "the pair must leave one artifact record, not two"
+    );
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        1,
+        "the pair must mint one item, not two"
+    );
+}
+
+/// task 9.5, scenario "A byte-identical pair in one run": a preview of
+/// the same pair reports the same outcome — a plan for the first and a
+/// content duplicate for the second naming the path the first would now
+/// have — and writes nothing to either store.
+#[test]
+fn a_preview_of_a_byte_identical_pair_reports_the_same_duplicate_and_writes_nothing() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = b"task-9.5-pair-preview bytes";
+    let a = write_real_file(&root, "a.pdf", bytes);
+    let b = write_real_file(&root, "b.pdf", bytes);
+    let hash = hash_bytes(bytes);
+    let documents = FakeDocuments::new()
+        .with_file(
+            &a,
+            hash.clone(),
+            pdf_with_embedded_doi("10.1000/task-9.5-pair-preview"),
+        )
+        .with_open_error(
+            &b,
+            hash.clone(),
+            ExtractionError::Unreadable {
+                message: "must never be opened: the content check runs before resolution"
+                    .to_string(),
+            },
+        );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Preview", 2024, "10.1000/task-9.5-pair-preview")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![a.clone(), b.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let a_target = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Planned { path, target } if path == &a => Some(target.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the first of the pair must be planned: got {events:?}"));
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Content,
+                    existing_path,
+                },
+            } if path == &b && existing_path == &a_target
+        )),
+        "a preview must learn what it would admit the same way an applying run does: \
+         got {events:?}"
+    );
+    assert!(a.exists(), "a preview must move nothing");
+    assert!(b.exists(), "a preview must move nothing");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Resolved { path, .. } if path == &b)),
+        "a content duplicate is found before resolution, so it is never resolved: \
+         got {events:?}"
+    );
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        0,
+        "a preview must write nothing to the artifact store"
+    );
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        0,
+        "a preview must write nothing to the item store"
+    );
+}
+
+/// task 9.5, scenario "A copy of an artifact the run has just moved":
+/// an applying run moves a recorded artifact and then reaches a
+/// byte-identical copy of it. The copy is reported a content duplicate
+/// naming the moved artifact's new path, not its stale recorded one —
+/// and the run does not report that the library has paths to reconcile,
+/// since a record whose artifact this run moved is not a stale path for
+/// having moved.
+#[test]
+fn a_copy_of_an_artifact_the_run_has_just_moved_names_its_new_path() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = b"task-9.5-moved-copy bytes";
+    let old = write_real_file(&root, "old.pdf", bytes);
+    let hash = hash_bytes(bytes);
+    let record = record_by("Moved", 2024, "10.1000/task-9.5-moved-copy");
+    let item = Item {
+        id: lib_item_id(G95_UUID_A),
+        record: record.clone(),
+    };
+    write_lib_item(&root, "moved2024", &item);
+    let (size, modified_millis) = real_stat(&old);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G95_UUID_A),
+        item: Some(item.id.clone()),
+        path: "old.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![hash_entry_for(hash.clone(), "run-0")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let copy = write_real_file(&root, "copy.pdf", bytes);
+    let documents = FakeDocuments::new()
+        .with_file(
+            &old,
+            hash.clone(),
+            pdf_with_embedded_doi("10.1000/task-9.5-moved-copy"),
+        )
+        .with_open_error(
+            &copy,
+            hash.clone(),
+            ExtractionError::Unreadable {
+                message: "must never be opened: matched as a content duplicate before \
+                          resolution"
+                    .to_string(),
+            },
+        );
+    let crossref = fake_source(SourceName::Crossref, Ok(record));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![old.clone(), copy.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let old_target = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { path, target, .. } if path == &old => Some(target.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the recorded artifact must be renamed: got {events:?}"));
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Content,
+                    existing_path,
+                },
+            } if path == &copy && existing_path == &old_target
+        )),
+        "the copy must name the artifact's new path, not the stale one its record held \
+         when the run began: got {events:?}"
+    );
+    assert!(copy.exists(), "a content duplicate must never be moved");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Resolved { path, .. } if path == &copy)),
+        "a content duplicate is found before resolution, so it is never resolved: \
+         got {events:?}"
+    );
+    let updated = library::ArtifactStore::read(&root)
+        .by_id(&held.id)
+        .unwrap_or_else(|| panic!("the moved artifact's record must still be there"))
+        .clone();
+    assert_eq!(
+        updated.path,
+        library::library_relative(&root, &old_target).unwrap(),
+        "the record must name where the run put the file, not where it used to be"
+    );
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        1,
+        "the copy must write no second record"
+    );
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        1,
+        "the copy must mint no second item"
+    );
+}
+
+/// task 9.5, scenario "A copy of an artifact the run has just moved":
+/// the run does not report that the library has paths to reconcile. A
+/// record whose artifact this run moved is not a stale path for having
+/// moved — the false "paths to reconcile" warning is exactly the defect
+/// the 149-PDF run turned up.
+#[test]
+fn a_copy_of_an_artifact_the_run_has_just_moved_warns_of_nothing_to_reconcile() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = b"task-9.5-moved-copy-warn bytes";
+    let old = write_real_file(&root, "old.pdf", bytes);
+    let hash = hash_bytes(bytes);
+    let record = record_by("Warn", 2024, "10.1000/task-9.5-moved-copy-warn");
+    let item = Item {
+        id: lib_item_id(G95_UUID_A),
+        record: record.clone(),
+    };
+    write_lib_item(&root, "warn2024", &item);
+    let (size, modified_millis) = real_stat(&old);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G95_UUID_A),
+        item: Some(item.id.clone()),
+        path: "old.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![hash_entry_for(hash.clone(), "run-0")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let copy = write_real_file(&root, "copy.pdf", bytes);
+    let documents = FakeDocuments::new()
+        .with_file(
+            &old,
+            hash.clone(),
+            pdf_with_embedded_doi("10.1000/task-9.5-moved-copy-warn"),
+        )
+        .with_open_error(
+            &copy,
+            hash.clone(),
+            ExtractionError::Unreadable {
+                message: "must never be opened: matched as a content duplicate before \
+                          resolution"
+                    .to_string(),
+            },
+        );
+    let crossref = fake_source(SourceName::Crossref, Ok(record));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let (_, err) = stderr_of_rename(&root, vec![old, copy], &documents, &sources);
+
+    assert!(
+        err.is_empty(),
+        "a record this run moved must never be reported as a path to reconcile: got {err:?}"
+    );
+}
+
+/// task 9.5, scenario "Two files of one work in one batch": a batch
+/// run reaches two different files resolving to one DOI that no item
+/// carried before the run. The first is recorded against a new item and
+/// the second is reported a work duplicate naming the first's new path.
+#[test]
+fn two_files_of_one_work_in_one_batch_are_one_admission_and_one_work_duplicate() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let first = write_real_file(&root, "first.pdf", b"task-9.5-work first bytes");
+    let second = write_real_file(&root, "second.pdf", b"task-9.5-work second bytes");
+    let documents = FakeDocuments::new()
+        .with_file(
+            &first,
+            hash_bytes(b"task-9.5-work first bytes"),
+            pdf_with_embedded_doi("10.1000/task-9.5-work"),
+        )
+        .with_file(
+            &second,
+            hash_bytes(b"task-9.5-work second bytes"),
+            pdf_with_embedded_doi("10.1000/task-9.5-work"),
+        );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Work", 2024, "10.1000/task-9.5-work")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![first.clone(), second.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let first_target = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { path, target, .. } if path == &first => Some(target.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the first file must be renamed: got {events:?}"));
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Work,
+                    existing_path,
+                },
+            } if path == &second && existing_path == &first_target
+        )),
+        "the second file of one work reached in one batch must be a work duplicate \
+         naming the first's new path: got {events:?}"
+    );
+    assert!(second.exists(), "a work duplicate must never be moved");
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        1,
+        "one work in one batch must mint one item, not two"
+    );
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        1,
+        "one work in one batch must leave one artifact record, not two"
+    );
+}
+
+/// task 9.5, "Plus: under `--no-record`...": with the checks off, the
+/// same byte-identical pair from
+/// [`a_byte_identical_pair_neither_recorded_is_one_admission_and_one_content_duplicate`]
+/// is moved in full — one to a collision-suffixed name, since both
+/// resolve to the same template target — neither reported a duplicate,
+/// and nothing is written to either store. This pins that the fix does
+/// not turn the checks on under `--no-record`; it may already pass.
+#[test]
+fn no_record_moves_both_of_a_byte_identical_pair_and_checks_neither() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = b"task-9.5-no-record bytes";
+    let a = write_real_file(&root, "a.pdf", bytes);
+    let b = write_real_file(&root, "b.pdf", bytes);
+    let hash = hash_bytes(bytes);
+    let documents = FakeDocuments::new()
+        .with_file(
+            &a,
+            hash.clone(),
+            pdf_with_embedded_doi("10.1000/task-9.5-no-record"),
+        )
+        .with_file(
+            &b,
+            hash,
+            pdf_with_embedded_doi("10.1000/task-9.5-no-record"),
+        );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("NoRecord", 2024, "10.1000/task-9.5-no-record")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.record = Some(false);
+    });
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![a.clone(), b.clone()], true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let a_target = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { path, target, .. } if path == &a => Some(target.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the first file must be renamed: got {events:?}"));
+    let b_target = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { path, target, .. } if path == &b => Some(target.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!("--no-record must move both files of the pair, checking neither: got {events:?}")
+        });
+
+    assert_ne!(
+        a_target, b_target,
+        "the second must take a collision-suffixed name, distinct from the first's: \
+         got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Skipped { .. })),
+        "--no-record must skip nothing: got {events:?}"
+    );
+    assert!(a_target.exists());
+    assert!(b_target.exists());
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        0,
+        "--no-record must write no records"
+    );
+    assert_eq!(
+        library::ItemStore::read(&root).len(),
+        0,
+        "--no-record must write no items"
+    );
+}

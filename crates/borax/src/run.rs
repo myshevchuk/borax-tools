@@ -9,7 +9,7 @@
 //! filesystem as arguments, and one supplying the real ones. The first
 //! is what tests use; the second is what the binary calls.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -654,9 +654,9 @@ pub enum Prepared {
     Grouped {
         groups: Vec<Group>,
         /// What the library held when the run started: its two stores,
-        /// read once here because every file of the run is checked
-        /// against the same records, and a check that walked the tree
-        /// per file would cost the run its whole saving.
+        /// read once here and then kept current by the run as it admits
+        /// files, because a check that walked the tree per file would
+        /// cost the run its whole saving.
         ///
         /// `None` is a run that keeps no account — the `record` setting
         /// is off, or there is no library to keep one in — which makes
@@ -713,9 +713,9 @@ pub enum Prepared {
 /// way to refuse the run.
 ///
 /// A `rename` also reads the library's stores here — once, before the
-/// first file, since every file in the batch is checked against the
-/// same records. Nothing about that read can refuse a run: a store that
-/// is not there is an empty one.
+/// first file; the run keeps what it read current as it goes rather
+/// than reading again. Nothing about that read can refuse a run: a
+/// store that is not there is an empty one.
 pub fn preflight<C: Cache>(
     command: &Command,
     configs: &Configs,
@@ -1170,15 +1170,20 @@ fn resolving(config: &Config) -> ResolveConfig {
 ///
 /// `groups` is what [`preflight`] made of the run's paths: each
 /// directory the run spans, the files in it, and the template tables its
-/// configuration compiled to. `stores` is what the run checks its files
-/// for duplicates against — the library's two stores, as they stood
-/// before the first file was touched — and `None` is a run that keeps
-/// no account and checks against nothing.
+/// configuration compiled to. `stores` is the library's two stores as
+/// they stood before the first file was touched, and `None` is a run
+/// that keeps no account and checks against nothing.
 ///
-/// The account is a snapshot and stays one. A file this run admits does
-/// not become the account's answer about a later file of the same run:
-/// what each file is checked against is what the library held when the
-/// run started.
+/// Each file is checked for duplicates against the library as the run
+/// has left it so far. A file the run admits is, for every later file,
+/// the artifact record the admission wrote, linked to the item it
+/// selected or minted, and a recorded artifact the run moved is found at
+/// the path it moved to. A preview learns what it would admit on the
+/// same terms without writing it, and counts a path it would have moved
+/// a file to as holding that file, so it reports what the same run with
+/// `--apply` would. A file not admitted — skipped, declined, or refused
+/// — teaches the account nothing. `stores` itself is left as it is: the
+/// run learns into its own copy.
 ///
 /// A group is worked under its own directory's configuration — its
 /// templates, its collision policy, its bibliography destination — since
@@ -1212,7 +1217,9 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// merges what the files it visited produced.
 ///
 /// Returns a warning when any record the run matched turned out to
-/// name a file that is no longer there. It comes back at the end
+/// name a file that is no longer there. A record whose artifact this
+/// run moved names the path it moved to, so the path it moved from is
+/// never among them. It comes back at the end
 /// rather than as an event because it is one fact about the library and
 /// not about the file that happened to reveal it — however many files
 /// find stale paths, the run says so once. A run stopped by a move it
@@ -1241,17 +1248,24 @@ fn rename_events<C: Cache>(
     // outlived its file. A file matching nothing never reaches the
     // question, which is what keeps a plain miss from reading as
     // staleness.
+    //
+    // A preview moves nothing, so the paths it would have moved a file
+    // to hold nothing on disk; they are what `foreseen` adds here, and
+    // count as holding the file the preview learned there.
     let stale = Cell::new(false);
+    let foreseen_at: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
     let exists = |path: &Path| {
-        let present = is_present(adapters.filesystem, path);
+        let present = foreseen_at.borrow().iter().any(|at| at == path)
+            || is_present(adapters.filesystem, path);
         stale.set(stale.get() || !present);
         present
     };
     // A run that keeps no account is resolved with nothing to check
     // against rather than against an empty store, which is what makes
     // `--no-record` suppress the checks themselves and not merely the
-    // writes behind them.
-    let account = stores.map(|stores| stores.account(&exists));
+    // writes behind them. The run's own copy, since what it admits is
+    // learned into it.
+    let mut stores = stores.cloned();
 
     // Across groups, because a table is named once for the run however
     // many directories consult one under that name.
@@ -1322,6 +1336,7 @@ fn rename_events<C: Cache>(
                 if passing_over {
                     sink.hold();
                 }
+                let account = stores.as_ref().map(|stores| stores.account(&exists));
                 // Resolved without reporting. What is reported is what
                 // the file's fate made of the verdict, which for a
                 // batch run is settled the moment the verdict is and
@@ -1356,10 +1371,18 @@ fn rename_events<C: Cache>(
                 // still the path the file holds, and whatever the record
                 // gate says: the gate stops the writing and never this
                 // read.
+                //
+                // A preview asks its account instead, which holds what
+                // the run has learned: it reads nothing from disk that a
+                // file before this one would have changed.
                 let held = match &settled {
                     Settled::CarryOut { .. } if carrying_out => library
                         .filter(|library| !crate::library::excludes(library, path))
                         .and_then(|library| crate::library::recorded_at(library, path)),
+                    Settled::CarryOut { .. } => account
+                        .as_ref()
+                        .and_then(|account| account.own_record(path))
+                        .cloned(),
                     _ => None,
                 };
                 // A move the run would not record, of a file whose record
@@ -1448,8 +1471,17 @@ fn rename_events<C: Cache>(
                                     )
                                 },
                                 &at,
+                                stores.as_mut(),
                             ),
-                            false => None,
+                            false => {
+                                if let Some(stores) = stores.as_mut()
+                                    && let Some(learned) =
+                                        foreseen(library, &event, &file, held.as_ref(), &at, stores)
+                                {
+                                    foreseen_at.borrow_mut().push(learned);
+                                }
+                                None
+                            }
                         };
                         let unwritten = matches!(
                             admission,
@@ -2571,6 +2603,10 @@ fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Set
 /// a conflict has re-identified the file. The hash entry written is
 /// stamped with `at` as both the run and the timestamp.
 ///
+/// An admission that was written is learned into `stores`
+/// ([`crate::library::Stores::learn`]), so the run's later files are
+/// checked against it; one that was not teaches them nothing.
+///
 /// The event is [`crate::library::admission_event`]'s: `None` for an
 /// ordinary admission.
 fn recorded(
@@ -2580,6 +2616,7 @@ fn recorded(
     held: Option<&ArtifactRecord>,
     key: impl FnOnce() -> Option<String>,
     at: &str,
+    stores: Option<&mut crate::library::Stores>,
 ) -> Option<Event> {
     let current = match event {
         Event::Renamed { target, .. } => target,
@@ -2589,9 +2626,7 @@ fn recorded(
     let library = library?;
     let hash = file.hash.as_ref()?;
 
-    if crate::library::excludes(library, current)
-        || crate::library::library_relative(library, current).is_none()
-    {
+    if !admissible(library, current) {
         return Some(Event::LibraryAdmission {
             path: current.clone(),
             admission: Admission::Outside,
@@ -2599,22 +2634,81 @@ fn recorded(
     }
 
     let key = key();
-    let admitted = crate::library::admit(
-        library,
-        &crate::library::Admitting {
-            path: current,
-            record: &file.record,
-            hash,
-            held,
-            reidentified: file.tier == Some(Provenance::Supplied) || file.overrode.is_some(),
-            key: key.as_deref(),
-            run: borax_core::library::RunId::new(at),
-            timestamp: at,
-            tool_version: env!("CARGO_PKG_VERSION"),
-        },
-        &crate::library::store_write,
-    );
+    let admitting = crate::library::Admitting {
+        path: current,
+        record: &file.record,
+        hash,
+        held,
+        reidentified: reidentified(file),
+        key: key.as_deref(),
+        run: borax_core::library::RunId::new(at),
+        timestamp: at,
+        tool_version: env!("CARGO_PKG_VERSION"),
+    };
+    let admitted = crate::library::admit(library, &admitting, &crate::library::store_write);
+    if let (Ok(admitted), Some(stores)) = (&admitted, stores) {
+        stores.learn(&admitting, admitted);
+    }
     crate::library::admission_event(current, &admitted)
+}
+
+/// Learn into `stores` what [`recorded`] would record for `file` after
+/// the preview's `event`, writing nothing, and hand back the path the
+/// learned record names — the target of a `planned` event, or where
+/// the file already is for an `already-named` one.
+///
+/// `held` is the account's record of the file's current path. `None`,
+/// learning nothing, for every other outcome, for a run with no
+/// library, for a file whose content hash is unknown, and for one
+/// [`recorded`] would report outside the library.
+fn foreseen(
+    library: Option<&Path>,
+    event: &Event,
+    file: &FileRecord,
+    held: Option<&ArtifactRecord>,
+    at: &str,
+    stores: &mut crate::library::Stores,
+) -> Option<PathBuf> {
+    let current = match event {
+        Event::Planned { target, .. } => target,
+        Event::AlreadyNamed { path } => path,
+        _ => return None,
+    };
+    let library = library?;
+    let hash = file.hash.as_ref()?;
+    if !admissible(library, current) {
+        return None;
+    }
+
+    stores.foresee(&crate::library::Admitting {
+        path: current,
+        record: &file.record,
+        hash,
+        held,
+        reidentified: reidentified(file),
+        key: None,
+        run: borax_core::library::RunId::new(at),
+        timestamp: at,
+        tool_version: env!("CARGO_PKG_VERSION"),
+    })?;
+    Some(crate::library::relative_to(
+        library,
+        &crate::library::library_relative(library, current)?,
+    ))
+}
+
+/// Whether a file at `path` is one the library rooted at `library`
+/// admits: inside it, and not in a part of it the library excludes.
+fn admissible(library: &Path, path: &Path) -> bool {
+    !crate::library::excludes(library, path)
+        && crate::library::library_relative(library, path).is_some()
+}
+
+/// Whether the operator re-identified `file` in this run: supplied the
+/// identifier it was resolved by, or accepted its record over a
+/// conflict.
+fn reidentified(file: &FileRecord) -> bool {
+    file.tier == Some(Provenance::Supplied) || file.overrode.is_some()
 }
 
 /// Resolve the file at `path` under `effective`, writing its verdict

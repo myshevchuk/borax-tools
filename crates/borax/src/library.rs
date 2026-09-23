@@ -313,7 +313,11 @@ pub struct ItemStore {
     /// record rather than being recoverable from it — an item file
     /// renamed by hand is still the item it was, and saying so is a
     /// finding about that name.
-    entries: Vec<(PathBuf, Item)>,
+    ///
+    /// `None` only for an item a previewing run learned it would mint,
+    /// which no file holds; a store read from disk has a file for every
+    /// item.
+    entries: Vec<(Option<PathBuf>, Item)>,
     /// The files that cost a record, and the source fields that were
     /// dropped from one that survived, in path order.
     pub faults: Vec<StoreFault>,
@@ -347,7 +351,7 @@ impl ItemStore {
                             path: path.clone(),
                             message: format!("dropped unreadable source field {:?}", fault.key),
                         }));
-                    store.entries.push((path, parsed.item));
+                    store.entries.push((Some(path), parsed.item));
                 }
                 Err(error) => store.faults.push(StoreFault {
                     path,
@@ -407,11 +411,11 @@ impl ItemStore {
     }
 
     /// Every item read, each beside the file it came from, in the order
-    /// they were read.
+    /// they were read. An item no file holds is not among them.
     fn files(&self) -> impl Iterator<Item = (&Path, &Item)> {
         self.entries
             .iter()
-            .map(|(path, item)| (path.as_path(), item))
+            .filter_map(|(path, item)| Some((path.as_deref()?, item)))
     }
 }
 
@@ -707,11 +711,15 @@ impl Account<'_> {
 
 /// A library's two stores as one run holds them.
 ///
-/// Read once, before the first file: every file of a run is checked
-/// against what the library held when the run started, so a check costs
-/// no directory walk and a run of a hundred files reads the stores once.
+/// Read once, before the first file, and then kept current by the run
+/// itself: each admission the run makes is learned as it is made
+/// ([`Stores::learn`]), and each one a preview would make is learned
+/// as it is planned ([`Stores::foresee`]). So every file is checked
+/// against the library as the run has left it so far, a check costs no
+/// directory walk, and a run of a hundred files reads the stores once.
 /// [`Account`] is the same two stores with the run's `exists` beside
 /// them, which is what a check is actually made against.
+#[derive(Debug, Clone)]
 pub struct Stores {
     /// The library root the records' paths are relative to.
     root: PathBuf,
@@ -741,6 +749,134 @@ impl Stores {
             items: &self.items,
             records: &self.records,
             exists,
+        }
+    }
+
+    /// Take in what [`admit`] wrote for `admitting`, which it reported
+    /// as `admitted`, so every later check answers as if the stores had
+    /// been read after the write.
+    ///
+    /// The artifact record of identity `admitted.artifact` names
+    /// `admitting.path`, links to `admitted.item`, and holds
+    /// `admitting.hash` as its newest hash, on top of the history
+    /// `admitting.held` had: it replaces the record of that identity
+    /// wherever it stood, which is what finds a moved artifact at its
+    /// new path and no longer at its old one. An item the stores do not
+    /// hold is taken as the one `admit` minted, carrying
+    /// `admitting.record` and held in the file `admit` named for it.
+    ///
+    /// The record's size and modification time are `admitting.held`'s,
+    /// or zero for a record minted here: no check reads them. Nothing
+    /// is learned for a path outside the library, which `admit` records
+    /// nothing for.
+    pub fn learn(&mut self, admitting: &Admitting<'_>, admitted: &Admitted) {
+        let file = self
+            .root
+            .join(ITEM_STORE)
+            .join(item_file_name(admitting.key, &admitted.item));
+        self.take_in(admitting, admitted, Some(file));
+    }
+
+    /// Take in what [`admit`] would write for `admitting`, without
+    /// writing anything, and report it as `admit` would.
+    ///
+    /// The item is selected as [`admit`] selects it — the held
+    /// record's link unless the file was re-identified or the link is
+    /// absent, then the first item carrying one of the record's
+    /// identifiers — but among these stores rather than a fresh read.
+    /// Where none answers, an item is minted from `admitting.record`
+    /// under a fresh identity and learned with no file, since none will
+    /// be written. The artifact record is the held one's identity, or a
+    /// fresh one, and is learned on [`Stores::learn`]'s terms.
+    ///
+    /// `None`, learning nothing, for a path outside the library.
+    pub fn foresee(&mut self, admitting: &Admitting<'_>) -> Option<Admitted> {
+        library_relative(&self.root, admitting.path)?;
+        let kept = admitting
+            .held
+            .and_then(|held| held.item.clone())
+            .filter(|_| !admitting.reidentified);
+        let item = kept
+            .or_else(|| {
+                identifiers(admitting.record)
+                    .iter()
+                    .find_map(|identifier| self.items.by_identifier(identifier))
+                    .map(|item| item.id.clone())
+            })
+            .unwrap_or_else(|| ItemId::from_uuid(Uuid::now_v7()));
+        let admitted = Admitted {
+            artifact: admitting.held.map_or_else(
+                || ArtifactId::from_uuid(Uuid::now_v7()),
+                |held| held.id.clone(),
+            ),
+            relinked_from: admitting
+                .held
+                .and_then(|held| held.item.clone())
+                .filter(|before| before != &item),
+            item,
+        };
+        self.take_in(admitting, &admitted, None);
+        Some(admitted)
+    }
+
+    /// Learn the artifact record `admitted` describes and, when the
+    /// stores do not hold its item yet, that item as held in
+    /// `item_file`.
+    fn take_in(
+        &mut self,
+        admitting: &Admitting<'_>,
+        admitted: &Admitted,
+        item_file: Option<PathBuf>,
+    ) {
+        let Some(relative) = library_relative(&self.root, admitting.path) else {
+            return;
+        };
+
+        if self.items.by_id(&admitted.item).is_none() {
+            self.items.entries.push((
+                item_file,
+                Item {
+                    id: admitted.item.clone(),
+                    record: admitting.record.clone(),
+                },
+            ));
+        }
+
+        let mut record = admitting.held.cloned().unwrap_or_else(|| ArtifactRecord {
+            id: admitted.artifact.clone(),
+            item: None,
+            path: String::new(),
+            size: 0,
+            modified_millis: 0,
+            history: Vec::new(),
+        });
+        record.id = admitted.artifact.clone();
+        record.item = Some(admitted.item.clone());
+        record.path = relative;
+        if record.current_hash() != Some(admitting.hash) {
+            record.history.push(HashEntry {
+                hash: admitting.hash.clone(),
+                run: admitting.run.clone(),
+                timestamp: admitting.timestamp.to_string(),
+                tool_version: admitting.tool_version.to_string(),
+            });
+        }
+
+        match self
+            .records
+            .entries
+            .iter_mut()
+            .find(|(_, held)| held.id == record.id)
+        {
+            Some((_, held)) => *held = record,
+            None => {
+                let file = self
+                    .root
+                    .join(STATE_DIR)
+                    .join(ARTIFACT_STORE)
+                    .join(format!("{}.{RECORD_EXTENSION}", record.id));
+                self.records.entries.push((file, record));
+            }
         }
     }
 }

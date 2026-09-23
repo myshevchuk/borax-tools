@@ -389,8 +389,26 @@ is a run contradicting a living requirement.
       reads the store as it stood at the start of the run, so a
       byte-identical twin reached after the run moved its recorded
       sibling saw a stale path, was admitted as a second artifact, and
-      set off a false reconcile warning. It is left open for a
-      decision on the fix.
+      set off a false reconcile warning. Tasks 9.5 and 9.6 fix it,
+      after the `ledger` delta was amended to say the checks answer from
+      the library as the run has left it so far.
+
+- [x] 9.5 Red: the duplicate checks answer from the library as the run
+      has left it so far — the three scenarios the `ledger` delta adds
+      to its duplicate-detection requirement, each through a batch
+      applying run over real files: a byte-identical pair neither of
+      which was recorded, where the second is a content duplicate naming
+      the first's new path, and a preview of the same pair reports the
+      same; a recorded artifact the run moves followed by its byte-
+      identical copy, where the copy is a content duplicate of the new
+      path and no reconcile warning is given; and two files of one work
+      in one batch, where the second is a work duplicate naming the
+      first's path. Plus: under `--no-record` both files of the same pair
+      are moved and neither is reported a duplicate, the checks being
+      off.
+- [x] 9.6 Green: the account learns each admission the run makes or, in
+      a preview, would make — the record, the item and a moved record's
+      new path — so every later check of the run answers from it.
 
 ## 10. Documents
 
