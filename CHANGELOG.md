@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-24
+
 ### Added
 
 - Libraries now keep logical works as items under
@@ -668,7 +670,8 @@ that development.
   which drops the archive that is part of such an identifier, so every
   pre-2007 preprint failed with a malformed-response error.
 
-[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/myshevchuk/borax-tools/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/myshevchuk/borax-tools/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/myshevchuk/borax-tools/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/myshevchuk/borax-tools/compare/v0.3.0...v0.4.0
