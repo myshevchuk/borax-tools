@@ -6,8 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-09-23, with `add-library-store` implemented on its
-branch and not yet archived.
+Last reviewed: 2026-09-24, before 0.6.0, with `add-library-store`
+implemented and archived.
 
 ## What is built
 
@@ -216,8 +216,8 @@ group 0, rather than leaving the archive holding both halves of a
 contradiction — the first change in the project to need that, and the
 pattern to copy when a stacked change contradicts one below it.
 
-`add-library-store` is implemented on top of all of these, on the
-branch `change/add-library-store`, and replaces the collection's
+`add-library-store` is implemented and archived on top of all of
+these, ships in 0.6.0, and replaces the collection's
 accounting with a library store. A library is the tree under the nearest
 `.borax.toml`, or under the configured `library-root`; its boundary is
 lexical, a symlink is neither an artifact nor an orphan, and a nested

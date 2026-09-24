@@ -8,13 +8,22 @@ The suite SHALL ship as one binary, `borax`, with at minimum the
 subcommands `resolve` (extract + resolve, emit records), `rename` (full
 pipeline: resolve, plan, preview/apply), `bib` (emit/merge bibliography
 output for already-resolved files), `config` (show effective
-configuration), `cache` (inspect and clear the response cache), and
-`ledger` (rebuild the collection's record of what it has admitted).
+configuration), `cache` (inspect and clear the response cache), `status`
+(report what a library holds), `validate` (report a library's findings),
+`reconcile` (bring artifact records back into agreement with the tree),
+and `adopt` (record what the library already holds, from what borax
+already knows locally).
 
 #### Scenario: Pipeline via one command
 - **WHEN** `borax rename --apply <dir>` runs
 - **THEN** extraction, resolution, planning, renaming, and configured
   bibliography output all occur in that single invocation
+
+#### Scenario: A library is reportable with no preceding command
+- **WHEN** `borax status` runs over a directory of PDFs borax has never
+  seen
+- **THEN** it reports what the directory holds, with no initialization,
+  import or ingestion subcommand having been run first
 
 ### Requirement: JSON Lines output is first-class
 Every subcommand SHALL support `--json`, emitting one JSON object per line
@@ -117,10 +126,14 @@ and the `network` table are taken from. A second input tree's
 `.borax.toml` therefore does not change the mode, and neither does the
 working directory when the run was given a path.
 
-The nearest `.borax.toml` additionally defines the collection root: the
-directory containing it anchors the collection's `.borax/` accounting
-directory (ledger and run logs); an explicit `collection-root`
-configuration key overrides this for unusual layouts.
+The nearest `.borax.toml` additionally defines the library root: the
+directory containing it anchors the library's `.borax/` directory — the
+run logs, and the artifact records that are the library's authoritative
+per-file state — and is the directory the item store and every recorded
+path are relative to; an explicit `library-root` configuration key
+overrides this for unusual layouts. One marker and one root: the
+library is the collection under a name that fits what the boundary now
+governs, not a second scope discovered separately.
 
 #### Scenario: Per-directory template override
 - **WHEN** a directory tree contains a `.borax.toml` defining a filename
@@ -129,11 +142,11 @@ configuration key overrides this for unusual layouts.
   template and `borax config` run there reports the override file as the
   value's origin
 
-#### Scenario: Collection root from config discovery
+#### Scenario: Library root from config discovery
 - **WHEN** files are processed under a directory whose ancestor holds
   `.borax.toml`
-- **THEN** that ancestor is the collection root and `.borax/` accounting
-  for the run lives there
+- **THEN** that ancestor is the library root, `.borax/` for the run
+  lives there, and `items/` beneath it is the library's item store
 
 #### Scenario: Two trees, one mode
 - **WHEN** `borax rename tree-a tree-b` runs from a terminal outside
@@ -283,8 +296,8 @@ negation.
   flags, and nothing is read, resolved, or moved
 
 #### Scenario: A pair is offered whole or not at all
-- **WHEN** a subcommand accepts `--ledger`
-- **THEN** it accepts `--no-ledger`, and a subcommand accepting neither
+- **WHEN** a subcommand accepts `--record`
+- **THEN** it accepts `--no-record`, and a subcommand accepting neither
   is not missing a negation
 
 ### Requirement: The apply gate is never configurable
@@ -371,12 +384,20 @@ its stream through it.
 The surface is: `resolve` accepts the resolution, extraction, network
 and response-cache settings, and how many files may be resolved at once;
 `rename` accepts those, minus how many files at once, plus the collision
-policy, the bibliography settings, the ledger gate, the batch pair, the
+policy, the bibliography settings, the record gate, the batch pair, the
 skip-named pair, and `--apply`; `bib`
 accepts the resolution settings and the bibliography settings; `cache`
-accepts `--clear`; `ledger rebuild` accepts no setting of its own. Every
+accepts `--clear`; `status` accepts the extraction settings and
+`--identify`; `validate` accepts no setting of its own; `reconcile`
+accepts `--rehash`; `adopt` accepts no setting of its own, since it
+queries nothing, opens no document and renames nothing. Every
 subcommand additionally accepts the run-log pair, which is decided at
 dispatch and is therefore operative on all of them.
+
+`--identify` and `--rehash` are per-invocation selectors rather than
+settings: each says what this run is being asked to do rather than how
+borax behaves, so neither is settable from configuration and neither
+takes a `--no-` form.
 
 `config` accepts every configurable setting. Passing an override there
 is not a no-op but the question the command answers — what this
@@ -398,9 +419,9 @@ runs, since neither is an argument to an invocation.
   accepted and resolving one file at a time regardless
 
 #### Scenario: Subcommand help lists that subcommand's settings
-- **WHEN** `borax ledger rebuild --help` runs
+- **WHEN** `borax validate --help` runs
 - **THEN** the settings listed are the run-log pair and `--json`, and no
-  extraction, resolution, rename, bibliography or ledger-gate setting
+  extraction, resolution, rename, bibliography or record-gate setting
   appears
 
 #### Scenario: Setting flag follows its subcommand
@@ -425,6 +446,11 @@ runs, since neither is an argument to an invocation.
 - **WHEN** `borax rename --no-skip-named papers/` runs
 - **THEN** it is accepted, and `borax bib --no-skip-named papers/` is
   rejected as an unknown argument
+
+#### Scenario: A selector is not a setting
+- **WHEN** a configuration file sets `identify = true`
+- **THEN** the run aborts at config load naming the unknown key, and
+  `borax status --identify` is the accepted form
 
 ### Requirement: A question describes whichever verdict it is asking about
 A question put about a file SHALL be preceded by a description of the verdict the run is holding for it, whether that verdict is a resolution or a failure, and SHALL show only what that verdict's own event carries.
