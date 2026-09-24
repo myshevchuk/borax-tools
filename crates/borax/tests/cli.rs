@@ -2,12 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use borax::cli::{Cli, Command, LedgerAction, Settings, flag_layers};
+use borax::cli::{Cli, Command, Settings, flag_layers};
 use borax::config::{
     BibLayer, ExtractionLayer, Layer, NetworkLayer, Origin, RenameLayer, layer_from_toml, resolve,
 };
 use borax::event::Format;
 use borax_core::rename::CollisionPolicy;
+use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
 // ---------------------------------------------------------------------
@@ -120,51 +121,6 @@ fn cache_with_clear_parses_clear_as_true() {
 }
 
 #[test]
-fn ledger_rebuild_parses_with_no_paths() {
-    let cli = parse(&["ledger", "rebuild"]);
-
-    assert_eq!(
-        cli.command,
-        Command::Ledger {
-            action: LedgerAction::rebuild(),
-        },
-        "got {:?}",
-        cli.command
-    );
-}
-
-#[test]
-fn ledger_with_no_action_is_a_parse_error() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "ledger"]);
-    assert!(result.is_err(), "got {result:?}");
-}
-
-#[test]
-fn ledger_rebuild_takes_no_positional_arguments() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "ledger", "rebuild", "extra.pdf"]);
-    assert!(result.is_err(), "got {result:?}");
-}
-
-#[test]
-fn ledger_rebuild_reports_its_own_command_name() {
-    assert_eq!(
-        Command::Ledger {
-            action: LedgerAction::rebuild(),
-        }
-        .name(),
-        "ledger rebuild"
-    );
-}
-
-#[test]
-fn ledger_rebuild_has_no_paths() {
-    let command = Command::Ledger {
-        action: LedgerAction::rebuild(),
-    };
-    assert!(command.paths().is_empty());
-}
-
-#[test]
 fn an_unknown_flag_is_a_parse_error() {
     let result = <Cli as Parser>::try_parse_from(["borax", "resolve", "--bogus", "f.pdf"]);
     assert!(result.is_err(), "got {result:?}");
@@ -231,7 +187,7 @@ fn rename_accepts_every_setting_it_consumes() {
         "--duplicates",
         "skip",
         "--sidecars",
-        "--ledger",
+        "--record",
         "--run-log",
         "f.pdf",
     ]);
@@ -248,7 +204,7 @@ fn rename_accepts_every_setting_it_consumes() {
             bib: Some(PathBuf::from("refs.bib")),
             duplicates: Some("skip".to_string()),
             sidecars: true,
-            ledger: true,
+            record: true,
             run_log: true,
             ..Settings::default()
         },
@@ -320,7 +276,7 @@ fn config_accepts_every_setting() {
         "--sidecars",
         "--concurrency",
         "4",
-        "--ledger",
+        "--record",
         "--run-log",
     ]);
 
@@ -337,7 +293,7 @@ fn config_accepts_every_setting() {
             duplicates: Some("skip".to_string()),
             sidecars: true,
             concurrency: Some(4),
-            ledger: true,
+            record: true,
             run_log: true,
             ..Settings::default()
         },
@@ -354,21 +310,6 @@ fn cache_accepts_the_run_log_pair() {
         cli.settings(),
         Settings {
             run_log: true,
-            ..Settings::default()
-        },
-        "got {:?}",
-        cli.settings()
-    );
-}
-
-#[test]
-fn ledger_rebuild_accepts_the_run_log_pair() {
-    let cli = parse(&["ledger", "rebuild", "--no-run-log"]);
-
-    assert_eq!(
-        cli.settings(),
-        Settings {
-            no_run_log: true,
             ..Settings::default()
         },
         "got {:?}",
@@ -409,12 +350,12 @@ fn rename_refuses_concurrency_as_an_unknown_argument() {
 }
 
 #[test]
-fn bib_refuses_no_ledger_as_an_unknown_argument() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "bib", "--no-ledger", "f.pdf"]);
+fn bib_refuses_no_record_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "bib", "--no-record", "f.pdf"]);
     assert!(result.is_err(), "got {result:?}");
 
     let message = result.unwrap_err().to_string();
-    assert!(message.contains("--no-ledger"), "got {message:?}");
+    assert!(message.contains("--no-record"), "got {message:?}");
 }
 
 #[test]
@@ -425,15 +366,6 @@ fn bib_refuses_collision_as_an_unknown_argument() {
 
     let message = result.unwrap_err().to_string();
     assert!(message.contains("--collision"), "got {message:?}");
-}
-
-#[test]
-fn ledger_rebuild_refuses_no_ledger_as_an_unknown_argument() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "ledger", "rebuild", "--no-ledger"]);
-    assert!(result.is_err(), "got {result:?}");
-
-    let message = result.unwrap_err().to_string();
-    assert!(message.contains("--no-ledger"), "got {message:?}");
 }
 
 #[test]
@@ -468,39 +400,6 @@ fn rename_refuses_template_as_an_unknown_argument() {
 // a subcommand's help lists that subcommand's settings
 // ---------------------------------------------------------------------
 
-#[test]
-fn ledger_rebuild_help_lists_only_the_run_log_pair_and_json() {
-    let mut command = <Cli as CommandFactory>::command();
-    // Globals reach a subcommand when the tree is built, not when it is
-    // declared, so an unbuilt `rebuild` has never seen `--json`.
-    command.build();
-    let rebuild = command
-        .find_subcommand_mut("ledger")
-        .unwrap()
-        .find_subcommand_mut("rebuild")
-        .unwrap();
-    let help = rebuild.render_help().to_string();
-
-    for offered in ["--run-log", "--no-run-log", "--json"] {
-        assert!(help.contains(offered), "{offered} missing from {help:?}");
-    }
-    for elsewhere in [
-        "--mailto",
-        "--sources",
-        "--page-limit",
-        "--collision",
-        "--bib",
-        "--sidecars",
-        "--ledger",
-        "--concurrency",
-    ] {
-        assert!(
-            !help.contains(elsewhere),
-            "{elsewhere} listed under ledger rebuild: {help:?}"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------
 // Cli::format
 // ---------------------------------------------------------------------
@@ -528,6 +427,10 @@ fn each_command_variant_reports_its_own_name() {
     assert_eq!(Command::bib(vec![]).name(), "bib");
     assert_eq!(Command::config().name(), "config");
     assert_eq!(Command::cache(false).name(), "cache");
+    assert_eq!(Command::status(None, false).name(), "status");
+    assert_eq!(Command::validate(None).name(), "validate");
+    assert_eq!(Command::reconcile(None, false).name(), "reconcile");
+    assert_eq!(Command::adopt(None).name(), "adopt");
 }
 
 #[test]
@@ -538,10 +441,10 @@ fn the_command_names_are_pairwise_distinct() {
         Command::bib(vec![]).name(),
         Command::config().name(),
         Command::cache(false).name(),
-        Command::Ledger {
-            action: LedgerAction::rebuild(),
-        }
-        .name(),
+        Command::status(None, false).name(),
+        Command::validate(None).name(),
+        Command::reconcile(None, false).name(),
+        Command::adopt(None).name(),
     ];
 
     let unique: std::collections::BTreeSet<_> = names.iter().collect();
@@ -590,6 +493,14 @@ fn paths_returns_the_bib_variants_paths() {
 fn paths_is_empty_for_config_and_cache() {
     assert!(Command::config().paths().is_empty());
     assert!(Command::cache(false).paths().is_empty());
+}
+
+#[test]
+fn paths_is_empty_for_status_validate_reconcile_and_adopt() {
+    assert!(Command::status(None, false).paths().is_empty());
+    assert!(Command::validate(None).paths().is_empty());
+    assert!(Command::reconcile(None, false).paths().is_empty());
+    assert!(Command::adopt(None).paths().is_empty());
 }
 
 // ---------------------------------------------------------------------
@@ -670,14 +581,14 @@ fn rename_refuses_sidecars_and_no_sidecars_together() {
 }
 
 #[test]
-fn rename_refuses_ledger_and_no_ledger_together() {
+fn rename_refuses_record_and_no_record_together() {
     let result =
-        <Cli as Parser>::try_parse_from(["borax", "rename", "--ledger", "--no-ledger", "f.pdf"]);
+        <Cli as Parser>::try_parse_from(["borax", "rename", "--record", "--no-record", "f.pdf"]);
     assert!(result.is_err(), "got {result:?}");
 
     let message = result.unwrap_err().to_string();
     assert!(
-        message.contains("--ledger") && message.contains("--no-ledger"),
+        message.contains("--record") && message.contains("--no-record"),
         "got {message:?}"
     );
 }
@@ -731,7 +642,7 @@ fn no_flag_can_produce_a_templates_layer() {
             "--sidecars",
             "--concurrency",
             "4",
-            "--ledger",
+            "--record",
             "--run-log",
         ])
         .settings(),
@@ -1111,23 +1022,23 @@ fn cache_and_no_cache_together_is_a_parse_error() {
 }
 
 // ---------------------------------------------------------------------
-// flag_layers: --ledger / --no-ledger and --run-log / --no-run-log
+// flag_layers: --record / --no-record and --run-log / --no-run-log
 //
 // design "Config hardening": "Every config-settable boolean flag has an
-// auto-generated --no-* negation" — the ledger and run-log booleans this
+// auto-generated --no-* negation" — the record and run-log booleans this
 // change adds follow the same two-flag shape as sidecars and cache.
 // ---------------------------------------------------------------------
 
 #[test]
-fn ledger_alone_sets_ledger_true() {
-    let layers = flag_layers(&parse(&["config", "--ledger"]).settings());
+fn record_alone_sets_record_true() {
+    let layers = flag_layers(&parse(&["config", "--record"]).settings());
 
     assert_eq!(
         layers,
         vec![(
-            Origin::Flag("ledger".to_string()),
+            Origin::Flag("record".to_string()),
             Layer {
-                ledger: Some(true),
+                record: Some(true),
                 ..Layer::default()
             },
         )],
@@ -1136,15 +1047,15 @@ fn ledger_alone_sets_ledger_true() {
 }
 
 #[test]
-fn no_ledger_alone_sets_ledger_false() {
-    let layers = flag_layers(&parse(&["config", "--no-ledger"]).settings());
+fn no_record_alone_sets_record_false() {
+    let layers = flag_layers(&parse(&["config", "--no-record"]).settings());
 
     assert_eq!(
         layers,
         vec![(
-            Origin::Flag("no-ledger".to_string()),
+            Origin::Flag("no-record".to_string()),
             Layer {
-                ledger: Some(false),
+                record: Some(false),
                 ..Layer::default()
             },
         )],
@@ -1153,8 +1064,8 @@ fn no_ledger_alone_sets_ledger_false() {
 }
 
 #[test]
-fn ledger_and_no_ledger_together_is_a_parse_error() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "config", "--ledger", "--no-ledger"]);
+fn record_and_no_record_together_is_a_parse_error() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "config", "--record", "--no-record"]);
     assert!(result.is_err(), "got {result:?}");
 }
 
@@ -1342,13 +1253,13 @@ fn run_log_and_no_run_log_together_is_a_parse_error() {
 }
 
 // ---------------------------------------------------------------------
-// the CLI overrides a configured ledger/run-log value in both directions
+// the CLI overrides a configured record/run-log value in both directions
 // ---------------------------------------------------------------------
 
 #[test]
-fn no_ledger_flag_overrides_a_configured_ledger_true() {
-    let settings = parse(&["config", "--no-ledger"]).settings();
-    let file_layer = layer_from_toml("ledger = true", Path::new("/config.toml")).unwrap();
+fn no_record_flag_overrides_a_configured_record_true() {
+    let settings = parse(&["config", "--no-record"]).settings();
+    let file_layer = layer_from_toml("record = true", Path::new("/config.toml")).unwrap();
 
     let mut layers = vec![(
         Origin::GlobalFile(PathBuf::from("/config.toml")),
@@ -1358,17 +1269,17 @@ fn no_ledger_flag_overrides_a_configured_ledger_true() {
 
     let effective = resolve(layers).unwrap();
 
-    assert!(!effective.config().ledger);
+    assert!(!effective.config().record);
     assert_eq!(
-        effective.origin("ledger"),
-        Some(&Origin::Flag("no-ledger".to_string()))
+        effective.origin("record"),
+        Some(&Origin::Flag("no-record".to_string()))
     );
 }
 
 #[test]
-fn ledger_flag_overrides_a_configured_ledger_false() {
-    let settings = parse(&["config", "--ledger"]).settings();
-    let file_layer = layer_from_toml("ledger = false", Path::new("/config.toml")).unwrap();
+fn record_flag_overrides_a_configured_record_false() {
+    let settings = parse(&["config", "--record"]).settings();
+    let file_layer = layer_from_toml("record = false", Path::new("/config.toml")).unwrap();
 
     let mut layers = vec![(
         Origin::GlobalFile(PathBuf::from("/config.toml")),
@@ -1378,10 +1289,10 @@ fn ledger_flag_overrides_a_configured_ledger_false() {
 
     let effective = resolve(layers).unwrap();
 
-    assert!(effective.config().ledger);
+    assert!(effective.config().record);
     assert_eq!(
-        effective.origin("ledger"),
-        Some(&Origin::Flag("ledger".to_string()))
+        effective.origin("record"),
+        Some(&Origin::Flag("record".to_string()))
     );
 }
 
@@ -1422,5 +1333,503 @@ fn run_log_flag_overrides_a_configured_run_log_false() {
     assert_eq!(
         effective.origin("run-log"),
         Some(&Origin::Flag("run-log".to_string()))
+    );
+}
+
+// ---------------------------------------------------------------------
+// 9.2: the flag surface for `status`, `validate`, `reconcile` and
+// `adopt` — cli spec "A subcommand accepts only the settings it
+// consumes"
+// ---------------------------------------------------------------------
+
+/// `status` accepts its own selector and the extraction settings, and
+/// nothing else changes what it reports.
+#[test]
+fn status_accepts_identify_and_an_extraction_setting() {
+    let cli = parse(&["status", "--identify", "--page-limit", "3", "papers/"]);
+
+    match &cli.command {
+        Command::Status { path, identify, .. } => {
+            assert_eq!(path.as_deref(), Some(Path::new("papers/")));
+            assert!(*identify);
+        }
+        other => panic!("expected Command::Status, got {other:?}"),
+    }
+    assert_eq!(
+        cli.settings(),
+        Settings {
+            page_limit: Some(3),
+            ..Settings::default()
+        },
+        "got {:?}",
+        cli.settings()
+    );
+}
+
+/// `status` accepts the run-log pair, like every subcommand.
+#[test]
+fn status_accepts_the_run_log_pair() {
+    let cli = parse(&["status", "--run-log"]);
+
+    assert_eq!(
+        cli.settings(),
+        Settings {
+            run_log: true,
+            ..Settings::default()
+        },
+        "got {:?}",
+        cli.settings()
+    );
+}
+
+/// `--rehash` is `reconcile`'s selector, not `status`'s: naming it on
+/// `status` is refused as an unknown argument.
+#[test]
+fn status_refuses_rehash_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "status", "--rehash"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--rehash"), "got {message:?}");
+}
+
+/// `--identify` is a selector rather than a setting, so it has no
+/// `--no-` form — cli spec: "neither is settable from configuration and
+/// neither takes a `--no-` form".
+#[test]
+fn status_refuses_no_identify_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "status", "--no-identify"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--no-identify"), "got {message:?}");
+}
+
+/// `status` opens no document to name what an applying run admits, so
+/// the record gate is not among its settings.
+#[test]
+fn status_refuses_record_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "status", "--record"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--record"), "got {message:?}");
+}
+
+/// `status` accepts the extraction settings, not the resolution
+/// settings that carry `--no-cache` — it queries no service.
+#[test]
+fn status_refuses_no_cache_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "status", "--no-cache"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--no-cache"), "got {message:?}");
+}
+
+/// `reconcile --rehash` parses with `rehash` true.
+#[test]
+fn reconcile_with_rehash_parses_rehash_true() {
+    let cli = parse(&["reconcile", "--rehash", "papers/"]);
+
+    assert_eq!(
+        cli.command,
+        Command::reconcile(Some(PathBuf::from("papers/")), true),
+        "got {:?}",
+        cli.command
+    );
+}
+
+/// `reconcile` without `--rehash` parses with `rehash` false.
+#[test]
+fn reconcile_without_rehash_parses_rehash_false() {
+    let cli = parse(&["reconcile"]);
+
+    assert_eq!(
+        cli.command,
+        Command::reconcile(None, false),
+        "got {:?}",
+        cli.command
+    );
+}
+
+/// `--rehash` is a selector, and takes no `--no-` form.
+#[test]
+fn reconcile_refuses_no_rehash_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "reconcile", "--no-rehash"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--no-rehash"), "got {message:?}");
+}
+
+/// `--identify` is `status`'s selector, not `reconcile`'s.
+#[test]
+fn reconcile_refuses_identify_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "reconcile", "--identify"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--identify"), "got {message:?}");
+}
+
+/// `reconcile` accepts no setting of its own beyond `--rehash`, so an
+/// extraction setting is refused rather than silently inert.
+#[test]
+fn reconcile_refuses_page_limit_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "reconcile", "--page-limit", "3"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--page-limit"), "got {message:?}");
+}
+
+/// `validate` and `adopt` both take an optional library path, parsing
+/// with and without one — cli spec: "The library to validate, as
+/// `status` takes it."
+#[test]
+fn validate_and_adopt_take_an_optional_path() {
+    assert_eq!(
+        parse(&["validate", "papers/"]).command,
+        Command::validate(Some(PathBuf::from("papers/")))
+    );
+    assert_eq!(parse(&["validate"]).command, Command::validate(None));
+    assert_eq!(
+        parse(&["adopt", "papers/"]).command,
+        Command::adopt(Some(PathBuf::from("papers/")))
+    );
+    assert_eq!(parse(&["adopt"]).command, Command::adopt(None));
+}
+
+/// `validate` accepts no setting of its own, only the run-log pair, and
+/// `--json` follows the rule every subcommand follows.
+#[test]
+fn validate_accepts_the_run_log_pair_and_json() {
+    let cli = parse(&["validate", "--run-log", "--json"]);
+
+    assert_eq!(
+        cli.settings(),
+        Settings {
+            run_log: true,
+            ..Settings::default()
+        },
+        "got {:?}",
+        cli.settings()
+    );
+    assert!(cli.json);
+}
+
+/// `adopt` accepts no setting of its own either, since it queries
+/// nothing, opens no document and renames nothing.
+#[test]
+fn adopt_accepts_the_run_log_pair_and_json() {
+    let cli = parse(&["adopt", "--no-run-log", "--json"]);
+
+    assert_eq!(
+        cli.settings(),
+        Settings {
+            no_run_log: true,
+            ..Settings::default()
+        },
+        "got {:?}",
+        cli.settings()
+    );
+    assert!(cli.json);
+}
+
+/// `validate` accepts no setting of its own: an extraction setting, a
+/// resolution setting, a record-gate flag and both selectors are all
+/// refused as unknown arguments.
+#[test]
+fn validate_refuses_every_setting_and_selector() {
+    for flag in [
+        "--page-limit",
+        "--no-cache",
+        "--record",
+        "--no-record",
+        "--identify",
+        "--rehash",
+    ] {
+        let args: Vec<&str> = if flag == "--page-limit" {
+            vec!["borax", "validate", flag, "3"]
+        } else {
+            vec!["borax", "validate", flag]
+        };
+        let result = <Cli as Parser>::try_parse_from(args);
+        assert!(result.is_err(), "{flag} got {result:?}");
+
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains(flag), "{flag} got {message:?}");
+    }
+}
+
+/// `adopt` accepts no setting of its own, same as `validate`.
+#[test]
+fn adopt_refuses_every_setting_and_selector() {
+    for flag in [
+        "--page-limit",
+        "--no-cache",
+        "--record",
+        "--no-record",
+        "--identify",
+        "--rehash",
+    ] {
+        let args: Vec<&str> = if flag == "--page-limit" {
+            vec!["borax", "adopt", flag, "3"]
+        } else {
+            vec!["borax", "adopt", flag]
+        };
+        let result = <Cli as Parser>::try_parse_from(args);
+        assert!(result.is_err(), "{flag} got {result:?}");
+
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains(flag), "{flag} got {message:?}");
+    }
+}
+
+/// cli spec scenario "Subcommand help lists that subcommand's
+/// settings": `borax validate --help` lists only the run-log pair and
+/// `--json`, and no extraction, resolution, rename, bibliography or
+/// record-gate setting appears.
+#[test]
+fn validate_help_lists_only_the_run_log_pair_and_json() {
+    let mut command = <Cli as CommandFactory>::command();
+    command.build();
+    let validate = command.find_subcommand_mut("validate").unwrap();
+    let help = validate.render_long_help().to_string();
+
+    for present in ["--run-log", "--no-run-log", "--json"] {
+        assert!(help.contains(present), "missing {present} in {help}");
+    }
+    for absent in [
+        "--mailto",
+        "--sources",
+        "--page-limit",
+        "--min-interval-ms",
+        "--cache",
+        "--collision",
+        "--bib",
+        "--duplicates",
+        "--sidecars",
+        "--apply",
+        "--batch",
+        "--skip-named",
+        "--record",
+        "--identify",
+        "--rehash",
+        "--clear",
+    ] {
+        assert!(!help.contains(absent), "unexpected {absent} in {help}");
+    }
+}
+
+/// The same as `validate_help_lists_only_the_run_log_pair_and_json`,
+/// for `adopt`.
+#[test]
+fn adopt_help_lists_only_the_run_log_pair_and_json() {
+    let mut command = <Cli as CommandFactory>::command();
+    command.build();
+    let adopt = command.find_subcommand_mut("adopt").unwrap();
+    let help = adopt.render_long_help().to_string();
+
+    for present in ["--run-log", "--no-run-log", "--json"] {
+        assert!(help.contains(present), "missing {present} in {help}");
+    }
+    for absent in [
+        "--mailto",
+        "--sources",
+        "--page-limit",
+        "--min-interval-ms",
+        "--cache",
+        "--collision",
+        "--bib",
+        "--duplicates",
+        "--sidecars",
+        "--apply",
+        "--batch",
+        "--skip-named",
+        "--record",
+        "--identify",
+        "--rehash",
+        "--clear",
+    ] {
+        assert!(!help.contains(absent), "unexpected {absent} in {help}");
+    }
+}
+
+// ---------------------------------------------------------------------
+// 9.2: --record/--no-record parse alone on the subcommands that offer
+// the pair, and are refused on every subcommand that does not
+// ---------------------------------------------------------------------
+
+/// `--record` parses alone on `rename`, one of the two subcommands
+/// offering the record gate.
+#[test]
+fn rename_record_alone_parses() {
+    let cli = parse(&["rename", "--record", "f.pdf"]);
+    assert!(cli.settings().record, "got {:?}", cli.settings());
+}
+
+/// `--no-record` parses alone on `rename`.
+#[test]
+fn rename_no_record_alone_parses() {
+    let cli = parse(&["rename", "--no-record", "f.pdf"]);
+    assert!(cli.settings().no_record, "got {:?}", cli.settings());
+}
+
+/// `--record` parses alone on `config`, the other subcommand offering
+/// the record gate.
+#[test]
+fn config_record_alone_parses() {
+    let cli = parse(&["config", "--record"]);
+    assert!(cli.settings().record, "got {:?}", cli.settings());
+}
+
+/// `--no-record` parses alone on `config`.
+#[test]
+fn config_no_record_alone_parses() {
+    let cli = parse(&["config", "--no-record"]);
+    assert!(cli.settings().no_record, "got {:?}", cli.settings());
+}
+
+/// cli spec scenario "Both forms of a pair": naming `--record` and
+/// `--no-record` together is a usage error on `config`, exactly as it
+/// is on `rename`.
+#[test]
+fn config_refuses_record_and_no_record_together() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "config", "--record", "--no-record"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.contains("--record") && message.contains("--no-record"),
+        "got {message:?}"
+    );
+}
+
+/// `resolve` does not offer the record gate: it neither reads nor
+/// writes the library's records.
+#[test]
+fn resolve_refuses_record_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "resolve", "--record", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--record"), "got {message:?}");
+}
+
+/// `bib` refuses `--record` too — `bib_refuses_no_record_as_an_unknown_argument`
+/// above covers the negated half of the pair.
+#[test]
+fn bib_refuses_record_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "bib", "--record", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("--record"), "got {message:?}");
+}
+
+/// `status`, `validate`, `reconcile` and `adopt` all refuse both halves
+/// of the record-gate pair, none of them consuming it.
+#[test]
+fn status_validate_reconcile_and_adopt_refuse_record_and_no_record() {
+    for subcommand in ["status", "validate", "reconcile", "adopt"] {
+        for flag in ["--record", "--no-record"] {
+            let result = <Cli as Parser>::try_parse_from(["borax", subcommand, flag]);
+            assert!(result.is_err(), "{subcommand} {flag} got {result:?}");
+
+            let message = result.unwrap_err().to_string();
+            assert!(
+                message.contains(flag),
+                "{subcommand} {flag} got {message:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// 9.2: `--ledger` is not part of the accepted surface, and `ledger` is
+// not a recognised subcommand — cli spec's "drops: `ledger rebuild`
+// from the surface list and from the help scenario, with the
+// subcommand."
+// ---------------------------------------------------------------------
+
+/// `--ledger` names nothing this change's CLI surface offers, so it is
+/// refused as an unknown argument on `rename`.
+#[test]
+fn rename_refuses_ledger_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "rename", "--ledger", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        ErrorKind::UnknownArgument,
+        "got a different error kind"
+    );
+}
+
+/// The same as `rename_refuses_ledger_as_an_unknown_argument`, for
+/// `--no-ledger` on `rename`: neither half of a pair that was never
+/// added exists to accept.
+#[test]
+fn rename_refuses_no_ledger_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "rename", "--no-ledger", "f.pdf"]);
+    assert!(result.is_err(), "got {result:?}");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        ErrorKind::UnknownArgument,
+        "got a different error kind"
+    );
+}
+
+/// The same as `rename_refuses_ledger_as_an_unknown_argument`, on
+/// `config`.
+#[test]
+fn config_refuses_ledger_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "config", "--ledger"]);
+    assert!(result.is_err(), "got {result:?}");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        ErrorKind::UnknownArgument,
+        "got a different error kind"
+    );
+}
+
+/// The same as `rename_refuses_no_ledger_as_an_unknown_argument`, on
+/// `config`.
+#[test]
+fn config_refuses_no_ledger_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "config", "--no-ledger"]);
+    assert!(result.is_err(), "got {result:?}");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        ErrorKind::UnknownArgument,
+        "got a different error kind"
+    );
+}
+
+/// `ledger` was never added as a subcommand: the surface this change
+/// adds is `status`, `reconcile`, `validate` and `adopt`, and `ledger`
+/// names none of them.
+#[test]
+fn ledger_is_refused_as_an_unrecognised_subcommand() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "ledger"]);
+    assert!(result.is_err(), "got {result:?}");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        ErrorKind::InvalidSubcommand,
+        "got a different error kind"
+    );
+}
+
+/// `ledger rebuild` is refused the same way: there is no `ledger`
+/// subcommand for `rebuild` to nest under.
+#[test]
+fn ledger_rebuild_is_refused_as_an_unrecognised_subcommand() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "ledger", "rebuild"]);
+    assert!(result.is_err(), "got {result:?}");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        ErrorKind::InvalidSubcommand,
+        "got a different error kind"
     );
 }

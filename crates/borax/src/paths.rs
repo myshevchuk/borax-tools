@@ -3,12 +3,12 @@
 //! Two paths naming one file can be spelled differently — one relative
 //! and one absolute, one carrying `..`, one differing only in case on a
 //! filesystem that does not — and borax has to know when that has
-//! happened: to tell a ledger entry recording a file from one recording
-//! a copy of it, and to tell whether a directory lies under a
-//! collection root.
+//! happened: to tell an artifact record naming a file from one naming
+//! a copy of it, and to tell whether a directory lies under a library
+//! root.
 //!
 //! Nothing here touches the disk beyond reading the working directory.
-//! Symlinks are deliberately not resolved: the ledger records the path
+//! Symlinks are deliberately not resolved: a record names the path
 //! borax moved a file to and a run names the path it was given, so a
 //! link and its target are two names, and treating them as one would
 //! let a link into a collection keep the file it points at out of it.

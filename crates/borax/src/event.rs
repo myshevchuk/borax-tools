@@ -15,7 +15,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use borax_core::content::ContentHash;
-use borax_core::ledger::DuplicateReason;
+use borax_core::library::DuplicateReason;
 use borax_core::record::Record;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 /// Consumers pin it: within a major version of borax the shape of an
 /// event with a given `event` tag does not change, and a new schema
 /// version is how a breaking change announces itself.
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 
 /// Something that happened to a file, or to the run as a whole.
 ///
@@ -155,11 +155,122 @@ pub enum Event {
         entries: usize,
         bytes: u64,
     },
-    /// The collection's ledger was regenerated from what is on disk.
-    /// `entries` is how many files the scan found worth recording,
-    /// which is the whole of what the ledger holds afterwards rather
-    /// than an addition to what it held before.
-    LedgerRebuilt { root: PathBuf, entries: usize },
+    /// What a library holds, counted from its tree and from its two
+    /// stores.
+    ///
+    /// `identifiable` is `None` when the run was not asked for it: a
+    /// count nobody asked for and a count of zero are different
+    /// answers, and only `--identify` opens a document.
+    LibraryStatus {
+        root: PathBuf,
+        artifacts: usize,
+        items: usize,
+        records: usize,
+        orphans: usize,
+        /// The nested libraries the walk stopped at, library-relative
+        /// and in path order. A marker below the root takes its whole
+        /// subtree out of every count above it, so the counts are only
+        /// legible beside the list of what they leave out.
+        nested: Vec<String>,
+        identifiable: Option<usize>,
+    },
+    /// Something wrong with a library's own records, about the file at
+    /// `path` and about no other.
+    LibraryFinding { path: PathBuf, finding: Finding },
+    /// What an applying run's admission of one file came to, beyond
+    /// the record it wrote.
+    ///
+    /// An ordinary admission emits nothing. The file's own outcome —
+    /// `renamed`, or `already-named` — is what says borax settled it,
+    /// and the record written for it is the library's state rather
+    /// than news. What is reported here is what a reader could not
+    /// work out from the rest of the stream: a link the run moved, a
+    /// file it settled outside the library and recorded nothing for,
+    /// and a record it could not write.
+    LibraryAdmission {
+        /// The file the admission was about, at the path it holds
+        /// after the run's work on it.
+        path: PathBuf,
+        admission: Admission,
+    },
+    /// What validating a library amounted to: how many findings were
+    /// reported, and the three counts that are not findings.
+    LibraryValidated {
+        root: PathBuf,
+        findings: usize,
+        orphans: usize,
+        /// Records whose last-known path holds no file. History the
+        /// library deliberately keeps, not a malformed record.
+        missing: usize,
+        /// Items no artifact record links to. An ordinary item for a
+        /// work the library holds no file for.
+        unlinked: usize,
+    },
+    /// What a reconcile made of one artifact record.
+    ///
+    /// Only a record the run had something to do about produces one: a
+    /// record its own path still holds is confirmed silently, so a
+    /// reconcile over a library nothing has touched emits nothing
+    /// between its first event and its last.
+    LibraryRepair {
+        /// The record this is about, by the identity it carries. A
+        /// record outlives every path its artifact has had, so the
+        /// identity is the one handle that follows it across runs.
+        id: String,
+        /// Where the artifact stands after the run, library-relative:
+        /// the path repaired to for a repair, and the record's own
+        /// last-known path for every other outcome.
+        path: String,
+        repair: Repair,
+    },
+    /// What reconciling a library amounted to.
+    LibraryReconciled {
+        root: PathBuf,
+        /// How many records the artifact store holds.
+        records: usize,
+        /// Records whose artifact was where the record said it would
+        /// be, whether the fast path settled it or the hash confirmed
+        /// it after the fast path missed.
+        confirmed: usize,
+        /// Records whose last-known path was brought to an artifact
+        /// found elsewhere in the library.
+        repaired: usize,
+        /// Records whose artifact was edited since borax last saw it,
+        /// and whose new hash was appended.
+        changed: usize,
+        /// Records left exactly as they were because the match was
+        /// ambiguous.
+        ambiguous: usize,
+        /// Records whose artifact is nowhere in the library.
+        missing: usize,
+        /// Artifacts the run hashed. The fast path exists to keep this
+        /// far below the artifact count, so a reader of the stream can
+        /// see whether it did its job — and a second pass over an
+        /// untouched library reports zero.
+        hashed: usize,
+    },
+    /// What an adoption made of one orphan.
+    ///
+    /// Only an orphan the run adopted or tried to adopt produces one:
+    /// an orphan the content index has no record for is left an orphan
+    /// silently, and the count of orphans in [`Event::LibraryAdopted`]
+    /// is where it shows.
+    LibraryAdoption {
+        /// The orphan, library-relative, as [`Event::LibraryRepair`]
+        /// names an artifact.
+        path: String,
+        adoption: Adoption,
+    },
+    /// What adopting into a library amounted to. Always the last event
+    /// of an adoption before the run's own.
+    LibraryAdopted {
+        root: PathBuf,
+        /// Orphans the run gave an artifact record.
+        adopted: usize,
+        /// Orphans left after the run: those the content index had no
+        /// record for, and those the run could not adopt.
+        orphans: usize,
+    },
     /// The run is over. Always the last event.
     RunFinished { counts: Counts },
 }
@@ -230,15 +341,185 @@ pub enum SkipReason {
     /// moved, and a line that could not say which file it was about
     /// would be a move the log cannot account for afterwards.
     Unrecordable { message: String },
-    /// The collection has already admitted this file, by content or by
-    /// work. `existing_path` is where the ledger says the file it
+    /// The library already holds this file, by content or by work.
+    /// `existing_path` is where the artifact record says the file it
     /// duplicates sits, as a full path rather than the
-    /// collection-relative one the ledger stores, so the report names
+    /// library-relative one the record stores, so the report names
     /// somewhere the reader can go and look.
     Duplicate {
         reason: DuplicateReason,
         existing_path: PathBuf,
     },
+    /// The move was not made because the run writes no record and
+    /// making it would leave an artifact record unable to name its
+    /// artifact again.
+    ///
+    /// Only a run with the record gate off reports this. The record
+    /// named here names the file's current path and holds no hash of
+    /// the bytes the file has now, so a move that wrote nothing
+    /// afterwards would take away the one path it can be found by
+    /// while leaving nothing in it that matches the file's content.
+    ///
+    /// `id` is the artifact identity, which is the record's file name
+    /// under `.borax/artifacts/`. The remedy named is
+    /// `borax reconcile --rehash`, which records the file's current
+    /// bytes and lets the move proceed under either setting; re-running
+    /// without the gate is not named, because it does not always work.
+    Stranding { id: String },
+}
+
+/// Something wrong with a library's own records.
+///
+/// A finding is a report about a library and never a rejected write:
+/// `borax validate` repairs nothing and refuses nothing, and every
+/// writer — borax's own CLI, a file manager, a text editor — is judged
+/// by the same list. An orphan, an artifact borax cannot find and an
+/// item nothing links to are counts rather than findings, so none of
+/// them is here.
+///
+/// Serialized with a `kind` tag, nested under the event's `finding`
+/// field, as [`SkipReason`] is under `reason`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Finding {
+    /// An artifact record naming an item the library does not hold.
+    DanglingItem { item: String },
+    /// Two files of one store carrying one identity. `other` is the
+    /// file the identity was first read from, so the pair is legible
+    /// from the finding alone.
+    DuplicateIdentity { id: String, other: PathBuf },
+    /// A file whose record carries an identity its own name does not,
+    /// including a name carrying no identity at all. `id` is what the
+    /// record says, which is the authoritative one.
+    NameDisagrees { id: String },
+    /// An artifact record whose last-known path is not a
+    /// library-relative path under the root.
+    PathNotRelative { path: String },
+    /// An artifact record with no hash history at all, which is a
+    /// record that is evidence about nothing.
+    EmptyHistory,
+    /// An artifact record holding a hash that is not one borax writes.
+    MalformedHash { hash: String },
+    /// A history entry naming no run, so what it records cannot be
+    /// attributed to anything the library did.
+    HistoryEntryWithoutRun { hash: String },
+    /// A file of one of the stores that does not parse as the record
+    /// it claims to be, including an item whose verbatim source fields
+    /// do not parse as JSON. One such file is a finding about itself
+    /// and about no other.
+    Unreadable { message: String },
+}
+
+/// What a reconcile made of one artifact record.
+///
+/// Every variant is about a record the run did not simply confirm:
+/// what it repaired, what it found changed, and what it deliberately
+/// left alone. Serialized with a `kind` tag, nested under the event's
+/// `repair` field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Repair {
+    /// The artifact was found elsewhere in the library and the record's
+    /// last-known path was brought to it. `from` is the path the record
+    /// named, library-relative, so the move is legible from the event
+    /// alone.
+    Repaired { from: String },
+    /// The artifact at the record's own path has bytes no hash in its
+    /// history held: it was edited since borax last saw it, and `hash`
+    /// was appended after the hashes already recorded.
+    Changed { hash: String },
+    /// The record matched more than one unclaimed artifact, or its one
+    /// match is a match for another record too. Nothing was written:
+    /// a stale path is repaired by the next pass, and an item link
+    /// given to the wrong artifact is not detectable at all.
+    /// `candidates` names what it matched, library-relative and in path
+    /// order.
+    Ambiguous { candidates: Vec<String> },
+    /// The record's last-known path holds no file and no artifact in
+    /// the library matches its history. The record is kept as it is,
+    /// path included: a record outliving its artifact is the library
+    /// saying it once held one.
+    Missing,
+    /// The repair was decided and the file could not be written, with
+    /// `message` as the filesystem put it. The record is as it was, and
+    /// the next reconcile decides the same thing again.
+    Unwritten { message: String },
+}
+
+/// What an applying run's admission of one file came to, for the
+/// admissions it has something to say about.
+///
+/// Every variant is about an admission that did not simply happen:
+/// nothing is written for a file outside the library, nothing lands
+/// when the store refuses the write, and a link only moves when the
+/// operator re-identified the file. An admission that minted or
+/// updated a record and left its link where it was produces no event
+/// at all. Serialized with a `kind` tag, nested under the event's
+/// `admission` field, as [`Repair`] is under `repair`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Admission {
+    /// The operator re-identified a file that already had an artifact
+    /// record, so the record was re-linked to the item for the record
+    /// they settled it on.
+    ///
+    /// `id` is the artifact's own identity, which the re-link leaves
+    /// alone; `from` is the item the record named before and `to` the
+    /// item it names now. Both are named because the item left behind
+    /// may now have nothing linking to it, which is an ordinary
+    /// library state `borax validate` counts.
+    Relinked {
+        id: String,
+        from: String,
+        to: String,
+    },
+    /// The file the run settled is not in the library, so nothing was
+    /// recorded for it.
+    ///
+    /// borax brings no file into a library: a file named as input from
+    /// outside the tree is renamed where it sits, and so is one inside
+    /// a subtree this library does not own — its own state directory,
+    /// its item store, or a nested library. The rename stands and is
+    /// reported; what this adds is that no artifact record and no item
+    /// were written for it.
+    Outside,
+    /// The record could not be written, with `message` as the
+    /// filesystem put it.
+    ///
+    /// The rename stands and is reported: a write to the store costs
+    /// the file its record and never its rename. borax retries
+    /// nothing within a run, and the next applying run over the file
+    /// records it again.
+    Unwritten { message: String },
+}
+
+/// What an adoption made of one orphan the content index answered
+/// for, or could not be asked about.
+///
+/// Serialized with a `kind` tag, nested under the event's `adoption`
+/// field, as [`Repair`] is under `repair`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Adoption {
+    /// The orphan now has an artifact record, `id`, linked to the item
+    /// `item`: one the library already held for an identifier of the
+    /// cached record, or one minted from that record.
+    Recorded { id: String, item: String },
+    /// The orphan's bytes are already in the history of the artifact
+    /// record `id`, so it was left an orphan.
+    ///
+    /// Such a file is that record's artifact moved, or a copy of it,
+    /// and a second record for the same bytes would leave `borax
+    /// reconcile` unable to tell which is which. Reconciling first is
+    /// what settles the first case; the second stays an orphan.
+    Held { id: String },
+    /// The orphan could not be read, with `message` as the filesystem
+    /// put it, so the content index was never asked about it.
+    Unreadable { message: String },
+    /// The index answered and the record could not be written, with
+    /// `message` as the filesystem put it. The orphan is still one, and
+    /// the next adoption tries it again.
+    Unwritten { message: String },
 }
 
 /// A title a file claims for itself, and where it was read.
@@ -315,6 +596,12 @@ pub struct Counts {
     /// Not counted from an event, since no event is emitted for a file
     /// nothing happened to; the run sets it when it stops early.
     pub unreached: usize,
+
+    /// Findings reported about the library's own records. A run
+    /// reporting any ends in partial success, on the same terms as one
+    /// that skipped a file: something in what the run was asked about
+    /// needs attention.
+    pub findings: usize,
 }
 
 impl Counts {
@@ -331,6 +618,7 @@ impl Counts {
             Event::Skipped { .. } => self.skipped += 1,
             Event::AlreadyNamed { .. } => self.named += 1,
             Event::LookupMissed { .. } => self.unmatched += 1,
+            Event::LibraryFinding { .. } => self.findings += 1,
             _ => {}
         }
     }
@@ -465,8 +753,71 @@ pub fn human_line(event: &Event) -> Option<String> {
             root.display()
         )),
         Event::LookupMissed { table, input } => Some(format!("{table}: no row for {input:?}")),
-        Event::LedgerRebuilt { root, entries } => Some(format!(
-            "{}: rebuilt with {entries} entries",
+        Event::LibraryStatus {
+            root,
+            artifacts,
+            items,
+            records,
+            orphans,
+            nested,
+            identifiable,
+        } => Some(format!(
+            "{}: {artifacts} artifacts, {items} items, {records} records, {orphans} orphans{}{}",
+            root.display(),
+            match identifiable {
+                None => String::new(),
+                Some(identifiable) => format!(", {identifiable} identifiable"),
+            },
+            match nested.is_empty() {
+                true => String::new(),
+                false => format!(" (excluding nested libraries: {})", nested.join(", ")),
+            }
+        )),
+        Event::LibraryFinding { path, finding } => {
+            Some(format!("{}: {}", path.display(), what_is_wrong(finding)))
+        }
+        Event::LibraryValidated {
+            root,
+            findings,
+            orphans,
+            missing,
+            unlinked,
+        } => Some(format!(
+            "{}: {findings} findings, {orphans} orphans, {missing} missing, {unlinked} unlinked",
+            root.display()
+        )),
+        Event::LibraryRepair { path, repair, .. } => {
+            Some(format!("{path}: {}", what_was_repaired(repair)))
+        }
+        Event::LibraryAdmission { path, admission } => Some(format!(
+            "{}: {}",
+            path.display(),
+            what_was_admitted(admission)
+        )),
+        Event::LibraryReconciled {
+            root,
+            records,
+            confirmed,
+            repaired,
+            changed,
+            ambiguous,
+            missing,
+            hashed,
+        } => Some(format!(
+            "{}: {records} records, {confirmed} confirmed, {repaired} repaired, \
+             {changed} changed, {ambiguous} ambiguous, {missing} missing, \
+             {hashed} hashed",
+            root.display()
+        )),
+        Event::LibraryAdoption { path, adoption } => {
+            Some(format!("{path}: {}", what_was_adopted(adoption)))
+        }
+        Event::LibraryAdopted {
+            root,
+            adopted,
+            orphans,
+        } => Some(format!(
+            "{}: {adopted} adopted, {orphans} orphans",
             root.display()
         )),
         Event::RunFinished { counts } => Some(human_summary(counts, 0)),
@@ -484,10 +835,11 @@ pub fn human_line(event: &Event) -> Option<String> {
 /// a zero: the JSON summary carries it either way, and a run that
 /// looked nothing up has nothing to say about tables it never
 /// consulted. The same goes for files already named, renames not
-/// reached, and files passed over.
+/// reached, files passed over, and findings about a library the run
+/// never validated.
 pub fn human_summary(counts: &Counts, hidden: usize) -> String {
     format!(
-        "{} resolved, {} renamed, {} skipped{}{}{}",
+        "{} resolved, {} renamed, {} skipped{}{}{}{}",
         counts.resolved,
         counts.renamed,
         counts.skipped,
@@ -504,6 +856,10 @@ pub fn human_summary(counts: &Counts, hidden: usize) -> String {
         match counts.unreached {
             0 => String::new(),
             unreached => format!(", {unreached} not reached"),
+        },
+        match counts.findings {
+            0 => String::new(),
+            findings => format!(", {findings} findings"),
         }
     )
 }
@@ -559,6 +915,92 @@ fn skipped_because(reason: &SkipReason) -> String {
             "same work already archived at {} (different file)",
             existing_path.display()
         ),
+        SkipReason::Stranding { id } => format!(
+            "artifact record {id} holds no hash of these bytes, and this run writes none, so \
+             moving it would strand the record; borax reconcile --rehash records them"
+        ),
+    }
+}
+
+/// What `finding` says is wrong with the file, as the clause following
+/// that file's name in a human rendering.
+///
+/// The record's own reading of an identity is given rather than the
+/// name's: a file whose name and contents disagree is named by the
+/// line already, and what the record says is the authoritative half.
+fn what_is_wrong(finding: &Finding) -> String {
+    match finding {
+        Finding::DanglingItem { item } => {
+            format!("names item {item}, which the library has none of")
+        }
+        Finding::DuplicateIdentity { id, other } => format!(
+            "carries identity {id}, which {} carries too",
+            other.display()
+        ),
+        Finding::NameDisagrees { id } => format!("carries identity {id}, which its name does not"),
+        Finding::PathNotRelative { path } => {
+            format!("records {path:?}, which is not a library-relative path")
+        }
+        Finding::EmptyHistory => "has no hash history, so it is evidence about nothing".to_string(),
+        Finding::MalformedHash { hash } => {
+            format!("holds {hash:?}, which is not a hash borax writes")
+        }
+        Finding::HistoryEntryWithoutRun { hash } => {
+            format!("records {hash} against no run")
+        }
+        Finding::Unreadable { message } => format!("unreadable ({message})"),
+    }
+}
+
+/// `repair` as the end of a sentence whose subject is the artifact the
+/// record is about, for the human rendering of
+/// [`Event::LibraryRepair`].
+fn what_was_repaired(repair: &Repair) -> String {
+    match repair {
+        Repair::Repaired { from } => format!("was recorded at {from:?} and is here now"),
+        Repair::Changed { hash } => {
+            format!("has changed since borax last saw it; {hash} recorded")
+        }
+        Repair::Ambiguous { candidates } => format!(
+            "could be any of {}, so nothing was changed",
+            candidates.join(", ")
+        ),
+        Repair::Missing => "is recorded and is nowhere in the library".to_string(),
+        Repair::Unwritten { message } => format!("could not be put right ({message})"),
+    }
+}
+
+/// `admission` as the clause following the file's name in the human
+/// rendering of [`Event::LibraryAdmission`].
+fn what_was_admitted(admission: &Admission) -> String {
+    match admission {
+        Admission::Relinked { id, from, to } => {
+            format!("artifact {id} moved from item {from} to item {to}")
+        }
+        Admission::Outside => "outside the library, so nothing was recorded".to_string(),
+        Admission::Unwritten { message } => {
+            format!("renamed but not recorded ({message})")
+        }
+    }
+}
+
+/// `adoption` as the end of a sentence whose subject is the orphan,
+/// for the human rendering of [`Event::LibraryAdoption`].
+fn what_was_adopted(adoption: &Adoption) -> String {
+    match adoption {
+        Adoption::Recorded { id, item } => {
+            format!("adopted as artifact {id} of item {item}")
+        }
+        Adoption::Held { id } => format!(
+            "holds bytes artifact {id} already records, so it was left an orphan; \
+             run borax reconcile if the file was moved"
+        ),
+        Adoption::Unreadable { message } => {
+            format!("could not be read ({message}), so it is still an orphan")
+        }
+        Adoption::Unwritten { message } => {
+            format!("could not be recorded ({message}), so it is still an orphan")
+        }
     }
 }
 

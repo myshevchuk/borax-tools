@@ -231,8 +231,8 @@ adjacent.
 - **WHEN** the operator answers rename to the question for `a.pdf →
   smith2024.pdf`
 - **THEN** the file is moved, a `renamed` event names both paths and the
-  content hash, and the collection's ledger admits it as an applied
-  rename would
+  content hash, and an artifact record names its new library-relative
+  path and the item it belongs to, as an applied rename would
 
 #### Scenario: Declining a proposal
 - **WHEN** the operator answers skip to the question for `a.pdf`
@@ -280,9 +280,15 @@ Already-named files SHALL NOT make a run exit with the partial-success
 code: a run over files that are all already named exits 0.
 
 Whether a file is already named SHALL be decided by rendering its record
-through the templates in force for its directory, never by whether a
-ledger records it, so a file named under an earlier template is not
-already named under a changed one.
+through the templates in force for its directory, never by whether the
+library holds an artifact record for it, so a file named under an
+earlier template is not already named under a changed one.
+
+An applying run SHALL write an artifact record for an already-named file
+inside the library, as it does for one it moved: the run holds the
+record, agrees with the name, and a library already in good order would
+otherwise never be recorded at all. Nothing is moved, and a preview
+writes no record.
 
 #### Scenario: Re-run over a folder in order
 - **WHEN** `borax rename --batch` runs over a directory in which every
@@ -295,6 +301,14 @@ already named under a changed one.
   configuration now holds a different one
 - **THEN** the file is not already named, and a rename to the new
   template's name is planned for it
+
+#### Scenario: An already-named file is recorded
+- **WHEN** `borax rename --apply` runs over a library whose files all
+  already carry the names their records imply and none of which has an
+  artifact record
+- **THEN** nothing is moved, every file is reported `already-named`, the
+  exit code is 0, and each file now has an artifact record naming an
+  item
 
 ### Requirement: An interactive run passes over already-named files
 An interactive rename run SHALL, when the `rename.skip-named` setting is on, render nothing to the operator for a file that is already named: no resolution line, no outcome line and no question. The setting SHALL default to on, and `--no-skip-named` SHALL turn it off for a run.
@@ -447,7 +461,7 @@ change which questions are put or what their answers do.
   where it was found, and says the record comes from an earlier run
 
 ### Requirement: An interactive run asks about files it could not settle
-An interactive rename run SHALL put a question to the operator, in addition to the questions for proposed moves, for each file whose content hash is known and which: had no identifier found in it; had an identifier no service holds; could not be read as a PDF or is encrypted; or resolved to a record its claimed titles conflict with.
+An interactive rename run SHALL put a question to the operator, in addition to the questions for proposed moves, for each file whose content hash is known and which: had no identifier found in it; had an identifier no service holds; could not be read as a PDF or is encrypted; resolved to a record its claimed titles conflict with; or resolved to an identifier an item already in the library carries.
 
 A file with no identifier, an unreadable body, or an identifier no
 service holds SHALL be offered: supply an identifier, skip, or quit. A
@@ -461,14 +475,54 @@ to the proposed target despite the conflict, and that choice SHALL name
 the target and SHALL NOT be the default. Every question about a proposed
 move SHALL additionally offer supplying a different identifier.
 
+A file whose own resolution lands on an identifier an item already
+carries SHALL be
+offered: file it as another artifact of that item, skip, or quit. The
+question SHALL name the item and a path already recorded against it
+that still holds a file, so that the operator is deciding about a work
+they can see they hold, and filing SHALL NOT be the default. An item
+with no such path is not a work duplicate at all and SHALL NOT produce
+this question: there is no file to compare against, and the incoming
+one is that item's first artifact. Accepting SHALL return the file to
+planning, where the ordinary question about its move is put; only then
+is it moved and recorded. Declining SHALL report it with the
+work-duplicate reason a batch run would have given. This is the one
+question borax asks about a duplicate, and only an operator can answer
+it: a second artifact of a work and an unwanted second copy of it are
+one thing in the bytes and two in the intention.
+
+A record the operator reached rather than one the run resolved — an
+identifier they supplied, a lookup they retried, a record they accepted
+over a conflict — SHALL be checked against the library the same way and
+SHALL NOT produce that question. Where it lands on a work the library
+already holds a file of, the run SHALL say so, naming the same item and
+recorded path the question would have named, and SHALL put the ordinary
+question about the file's move again; the answer given after it stands,
+and a move carried out then admits the file as another artifact of that
+item. The collision SHALL be stated once, so that a second answer is
+never asked for twice and the move is never unreachable. Supplying an
+identifier is the operator saying what the file is, which is the
+statement the filing question exists to obtain, so what is left is not
+a decision to ask for but a fact they have not been told.
+
+#### Scenario: A supplied identifier lands on a work already held
+- **WHEN** an interactive run's operator supplies the DOI of a work the
+  library already holds a file of, and answers rename
+- **THEN** the run reports the item and the recorded path it collided
+  with, puts the question about the move again, and a second rename
+  answer moves the file and records it as another artifact of that
+  item, with no second item minted
+
 When `rename.skip-named` is off, an already-named file SHALL be put to
 the operator with the choices keep its name, supply a different
 identifier, or quit. This is the one question an already-named file is
 asked, and it is asked only when that setting is off; a run passing
 over named files asks nothing about them.
 
-A file reported as a duplicate, or whose content hash is unknown, SHALL
-NOT be asked about.
+A file reported as a content duplicate, or whose content hash is
+unknown, SHALL NOT be asked about. The same bytes are already in the
+library, so there is nothing an operator could add: the question above
+is asked about a work the library holds, never about a file it holds.
 
 Skipping any of these files SHALL leave it untouched and report it with
 the reason a batch run would have given, not as `declined`. A file that
@@ -506,7 +560,28 @@ it already had.
 - **WHEN** an interactive run with `--no-skip-named` reaches a file named
   from the wrong record, and the operator supplies the right identifier
   and answers rename
-- **THEN** the file is renamed from the right record
+- **THEN** the file is renamed from the right record, and if it has an
+  artifact record that record is re-linked to the item for the supplied
+  record, so its name and what the library says it is are corrected
+  together
+
+#### Scenario: Filing a second artifact of a work already held
+- **WHEN** an interactive run reaches a scan of a paper whose published
+  PDF the library already holds under the same DOI, and the operator
+  answers that it is another artifact of that item
+- **THEN** the question names the item and the recorded path of the
+  artifact already linked to it, the ordinary move question follows, and
+  answering rename files the scan and records it against that same item
+
+#### Scenario: Declining a second copy
+- **WHEN** the operator answers skip to that question
+- **THEN** the file keeps its name and is reported with the
+  work-duplicate reason a batch run would have given, not as `declined`
+
+#### Scenario: A content duplicate is still never asked about
+- **WHEN** an interactive run reaches a file whose hash is already in an
+  artifact record's history
+- **THEN** it is reported a content duplicate and no question is put
 
 ### Requirement: A file's verdict follows the operator's decision
 In an interactive run, the events reporting a file's resolution and fate SHALL be emitted once the operator's decisions about that file are made, and SHALL describe the outcome of those decisions: a file SHALL NOT be reported both skipped and renamed, and a record the operator abandoned for another identifier SHALL NOT be reported as the file's resolution.

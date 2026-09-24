@@ -30,7 +30,7 @@ use crate::pipeline::FileRecord;
 /// Moving files, and seeing what is already there.
 ///
 /// The seam renaming needs from the filesystem, kept apart from
-/// [`crate::pipeline::Library`] because reading a file and moving one
+/// [`crate::pipeline::Documents`] because reading a file and moving one
 /// are different privileges: a preview run wires an implementation that
 /// cannot move anything.
 pub trait Filesystem {

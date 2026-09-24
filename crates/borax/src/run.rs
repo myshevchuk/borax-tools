@@ -9,7 +9,7 @@
 //! filesystem as arguments, and one supplying the real ones. The first
 //! is what tests use; the second is what the binary calls.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Identifier, supplied};
-use borax_core::ledger::Index;
+use borax_core::library::ArtifactRecord;
 use borax_core::record::{EntryType, Record};
 use borax_core::tables::{LookupTables, Lookups, Table, TableSpec};
 use borax_core::template::{Miss, Template, TemplateTable};
@@ -39,18 +39,18 @@ use borax_sources::transport::UreqTransport;
 use crate::bib::{BibConfig, BibFiles, Keyed, RealBibFiles, merge_master, write_sidecar};
 use crate::cli::{Cli, Command, flag_layers};
 use crate::config::{
-    Config, ConfigError, ENV_PREFIX, Effective, Layer, Origin, global_config_path, layer_from_env,
-    layer_from_toml, nearest_override, resolve, table_path,
+    Config, ConfigError, ENV_PREFIX, Effective, Layer, OVERRIDE_FILE, Origin, global_config_path,
+    layer_from_env, layer_from_toml, nearest_override, resolve, table_path,
 };
 use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
-    Counts, Diagnostic, Event, Format, Level, Overridden, SkipReason, TableUsed, human_summary,
-    render,
+    Admission, Counts, Diagnostic, Event, Format, Level, Overridden, SkipReason, TableUsed,
+    human_summary, render,
 };
-use crate::ledger::{Collection, FileLedger, Ledger, admission_entry, collection_relative};
+use crate::library::Account;
 use crate::pipeline::{
-    FileOutcome, FileRecord, Library, Provenance, RealLibrary, ResolveConfig, Standing,
-    resolve_batch, resolve_file, resolve_file_checking_ledger, resolved_event,
+    Documents, Duplicated, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig,
+    Standing, resolve_batch, resolve_file, resolved_event,
 };
 use crate::renaming::{
     Applying, Filesystem, Namespace, PlannedRename, Planning, Proposed, RealFilesystem,
@@ -93,7 +93,7 @@ pub fn inputs(paths: &[PathBuf]) -> Vec<PathBuf> {
         let mut reached = Vec::new();
         match fs::metadata(path) {
             Ok(metadata) if metadata.is_dir() => {
-                documents(path, &mut reached);
+                documents(path, &|_| true, &mut reached);
                 reached.sort();
             }
             _ => reached.push(path.clone()),
@@ -112,13 +112,21 @@ pub fn inputs(paths: &[PathBuf]) -> Vec<PathBuf> {
 /// Add every file below `directory` whose extension is
 /// [`PDF_EXTENSION`], ignoring case, to `found`.
 ///
+/// `descend` decides which subdirectories the walk enters; one it
+/// refuses contributes nothing, itself or below it. A walk that enters
+/// everything passes `&|_| true`.
+///
 /// A directory that cannot be read adds nothing, so one unreadable
 /// subtree costs its own files and no others.
 ///
 /// Metadata is read without following symlinks, so a link is neither a
 /// file nor a directory here: it cannot send the walk round a loop, and
 /// naming it directly is still how a user says they meant it.
-fn documents(directory: &Path, found: &mut Vec<PathBuf>) {
+pub(crate) fn documents(
+    directory: &Path,
+    descend: &dyn Fn(&Path) -> bool,
+    found: &mut Vec<PathBuf>,
+) {
     let Ok(listing) = fs::read_dir(directory) else {
         return;
     };
@@ -129,7 +137,9 @@ fn documents(directory: &Path, found: &mut Vec<PathBuf>) {
         };
         let path = entry.path();
         if metadata.is_dir() {
-            documents(&path, found);
+            if descend(&path) {
+                documents(&path, descend, found);
+            }
         } else if metadata.is_file()
             && path
                 .extension()
@@ -390,7 +400,7 @@ pub struct Streams<'a> {
 /// invocation runs in a test with neither a network, a PDF engine, nor
 /// a disk.
 pub struct Adapters<'a, C: Cache> {
-    pub library: &'a dyn Library,
+    pub documents: &'a dyn Documents,
     pub sources: &'a [&'a dyn Source],
     pub index: &'a ContentIndex<C>,
     pub filesystem: &'a dyn Filesystem,
@@ -398,20 +408,12 @@ pub struct Adapters<'a, C: Cache> {
     /// The response cache's directory, or `None` when the system names
     /// no cache directory.
     pub cache_root: Option<PathBuf>,
-    /// The collection's record of what it has admitted — what the
-    /// duplicate checks are asked of, and where an applied admission is
-    /// appended — or `None` when the run is outside any collection and
-    /// there is none to keep.
-    ///
-    /// Whether it is touched at all is still the `ledger` setting's to
-    /// say; this only carries the one the run would touch.
-    pub ledger: Option<&'a dyn Ledger>,
     /// The directory the run's `.borax/` accounting is anchored at, or
     /// `None` when the run is outside any collection.
     ///
-    /// A ledger entry's path is relative to it, so it is what turns an
-    /// entry into a path on this machine and a renamed file into an
-    /// entry.
+    /// An artifact record's path is relative to it, so it is what turns
+    /// a record into a path on this machine and a renamed file into a
+    /// record.
     pub collection_root: Option<PathBuf>,
     /// Where an applying run's log goes when there is no collection
     /// root to keep it in, or `None` when the system names no state
@@ -420,10 +422,10 @@ pub struct Adapters<'a, C: Cache> {
     /// What a run records as the time it happened.
     ///
     /// Asked once for the whole batch, never once per file: its value
-    /// timestamps every entry the run admits to the ledger and, as a
-    /// [`RunId`](borax_core::ledger::RunId), is what makes them one
+    /// timestamps every hash entry the run writes and, as a
+    /// [`RunId`](borax_core::library::RunId), is what makes them one
     /// run. The files a batch admitted are one act of accounting rather
-    /// than a series of them, so entries that entered together have to
+    /// than a series of them, so records that entered together have to
     /// be identifiable together afterwards.
     ///
     /// Naming the run's log is a second reading, taken before the batch
@@ -641,7 +643,8 @@ pub enum Prepared {
     Cache { report: Event },
     /// `rename` or `bib`: the run's paths grouped by the directory
     /// holding them, in the order those directories are first reached,
-    /// each paired with the tables compiled for it.
+    /// each paired with the tables compiled for it. `adopt`: one group,
+    /// for the library root and holding no path.
     ///
     /// Holding the compiled tables is what makes "every template the
     /// command renders from compiles before any file is touched" a
@@ -650,30 +653,25 @@ pub enum Prepared {
     /// for its directory.
     Grouped {
         groups: Vec<Group>,
-        /// What the collection has admitted already, keyed for the
-        /// duplicate checks. Empty whenever detection is off — the
-        /// setting says so, there is no collection, or the ledger could
-        /// not be read — so the checks run against it either way and
-        /// simply miss.
-        ledger: Index,
+        /// What the library held when the run started: its two stores,
+        /// read once here and then kept current by the run as it admits
+        /// files, because a check that walked the tree per file would
+        /// cost the run its whole saving.
+        ///
+        /// `None` is a run that keeps no account — the `record` setting
+        /// is off, or there is no library to keep one in — which makes
+        /// neither duplicate check rather than making both against
+        /// nothing.
+        account: Option<crate::library::Stores>,
         /// What the run has to say, before it starts, about files that
-        /// are not its inputs: that there was no ledger to read or that
-        /// it could not be trusted, and every row a lookup table
-        /// dropped. Empty when there is nothing to report.
+        /// are not its inputs: every row a lookup table dropped. Empty
+        /// when there is nothing to report.
         ///
         /// A list rather than one slot because a table may drop several
         /// rows and a run may read several tables, and a row silently
         /// absent is the mistake external tables exist to prevent.
         warnings: Vec<Diagnostic>,
     },
-    /// `ledger rebuild`, with the report the regenerated ledger
-    /// produced.
-    ///
-    /// The ledger is already written by the time this exists, for
-    /// [`Prepared::Cache`]'s reason: the subcommand's whole work is the
-    /// one event, and that work — scanning the collection and writing
-    /// what it found — is the part that can fail.
-    Rebuilt { report: Event },
 }
 
 /// Settle everything about `command` that could end the run, before any
@@ -697,9 +695,10 @@ pub enum Prepared {
 /// - `cache` with no cache directory, or with one that cannot be read,
 ///   because reporting an empty cache would answer a question that was
 ///   never asked;
-/// - `ledger rebuild` outside any collection, or over a ledger that
-///   cannot be written, since a rebuild reported but not written would
-///   leave the user believing the accounting was put right.
+/// - `adopt` outside any library, since adopting writes library state
+///   and a directory nobody marked has none to write; the citation-key
+///   table it names minted items by is compiled for the library root,
+///   and refuses the run on the terms above.
 ///
 /// An applying rename with nowhere to record itself is not among them:
 /// what an apply run has to be able to write is its run log, and
@@ -708,35 +707,32 @@ pub enum Prepared {
 ///
 /// For a command that works on files, nothing here reads one, queries a
 /// source, or moves anything, so a run refused at this point costs no
-/// network and leaves no trace. `borax cache` and `borax ledger
-/// rebuild` are the exceptions, and the last two failures above are
-/// why: each one's whole work is a single event, and the work is the
-/// part that can fail, so it belongs where there is still a way to
-/// refuse the run.
+/// network and leaves no trace. `borax cache` is the exception, and the
+/// last failure above is why: its whole work is a single event, and the
+/// work is the part that can fail, so it belongs where there is still a
+/// way to refuse the run.
 ///
-/// A `rename` also reads the ledger here — once, before the first file,
-/// since every file in the batch is checked against the same entries.
-/// Nothing about it can refuse a run: whatever reading it had to say
-/// comes back as a [`Diagnostic`] alongside the groups, for the caller
-/// to write out, and the run proceeds with duplicate detection off.
+/// A `rename` also reads the library's stores here — once, before the
+/// first file; the run keeps what it read current as it goes rather
+/// than reading again. Nothing about that read can refuse a run: a
+/// store that is not there is an empty one.
 pub fn preflight<C: Cache>(
     command: &Command,
     configs: &Configs,
     adapters: &Adapters<C>,
 ) -> Result<Prepared, Diagnostic> {
     match command {
-        Command::Config { .. } | Command::Resolve { .. } => Ok(Prepared::Unchecked),
-        // The root and the ledger are discovered together, so a run
-        // holding one holds the other; either being absent is the one
-        // situation of being outside a collection.
-        Command::Ledger { .. } => match (adapters.collection_root.as_deref(), adapters.ledger) {
-            (Some(root), Some(ledger)) => Ok(Prepared::Rebuilt {
-                report: rebuilt_ledger(root, ledger, (adapters.now)())?,
-            }),
-            _ => Err(error(
-                "this directory is in no collection, so there is no ledger to rebuild".to_string(),
-            )),
-        },
+        Command::Config { .. }
+        | Command::Resolve { .. }
+        // These library commands have nothing that could refuse them:
+        // an absent store is an empty one, and a file that will not parse
+        // is reported rather than fatal. A reconcile does write, but
+        // what it writes is decided record by record and reported the
+        // same way, so there is nothing here for it to be refused on
+        // either.
+        | Command::Status { .. }
+        | Command::Validate { .. }
+        | Command::Reconcile { .. } => Ok(Prepared::Unchecked),
         Command::Cache { clear, .. } => match adapters.cache_root.as_deref() {
             Some(root) => Ok(Prepared::Cache {
                 report: cache_report(*clear, root)?,
@@ -744,15 +740,17 @@ pub fn preflight<C: Cache>(
             None => Err(error("this system names no cache directory".to_string())),
         },
         Command::Rename { paths, .. } => {
-            let (groups, mut warnings) =
+            let (groups, warnings) =
                 compiled_groups(paths, configs, Renders::FilenamesAndCitationKeys)?;
-            let prepared = crate::ledger::prepare(configs.run().config().ledger, adapters.ledger);
-            // After the tables', because a run that cannot trust its
-            // ledger should hear that before it hears about a row.
-            warnings.extend(prepared.diagnostic);
             Ok(Prepared::Grouped {
                 groups,
-                ledger: prepared.index,
+                account: configs
+                    .run()
+                    .config()
+                    .record
+                    .then_some(adapters.collection_root.as_deref())
+                    .flatten()
+                    .map(crate::library::Stores::read),
                 warnings,
             })
         }
@@ -760,10 +758,34 @@ pub fn preflight<C: Cache>(
             let (groups, warnings) = compiled_groups(paths, configs, Renders::CitationKeysOnly)?;
             Ok(Prepared::Grouped {
                 groups,
-                // A bibliography run admits nothing, so it neither
-                // consults the ledger nor has cause to complain about
-                // not finding one.
-                ledger: Index::build(&[]),
+                // A bibliography run admits nothing, so it keeps no
+                // account and checks against none.
+                account: None,
+                warnings,
+            })
+        }
+        Command::Adopt { .. } => {
+            let Some(root) = adapters.collection_root.as_deref() else {
+                return Err(error(format!(
+                    "{} is in no library, and adopting writes library state: mark the \
+                     library's root with {OVERRIDE_FILE} first",
+                    library_directory(command.directory()).display()
+                )));
+            };
+            // One group, for the library root and holding no file: what
+            // it carries is the citation-key table an item minted here
+            // is named by, and the lookup tables that table consults.
+            let (group, warnings) = compiled_group(
+                root.to_path_buf(),
+                Vec::new(),
+                configs,
+                Renders::CitationKeysOnly,
+            )?;
+            Ok(Prepared::Grouped {
+                groups: vec![group],
+                // An adoption checks nothing against the account: it
+                // admits orphans, which no record names by definition.
+                account: None,
                 warnings,
             })
         }
@@ -812,29 +834,47 @@ fn compiled_groups(
     let groups = by_directory(paths)
         .into_iter()
         .map(|(directory, paths)| {
-            let effective = configs.for_directory(&directory);
-            // Before the templates, because compiling one is what
-            // checks its `lookup` tokens against the declared names.
-            let (tables, used, dropped) = loaded_tables(effective)?;
+            let (group, dropped) = compiled_group(directory, paths, configs, renders)?;
             warnings.extend(dropped);
-            let config = effective.config();
-            Ok(Group {
-                filenames: match renders {
-                    Renders::FilenamesAndCitationKeys => {
-                        Some(templates(&config.templates, "templates", &tables)?)
-                    }
-                    Renders::CitationKeysOnly => None,
-                },
-                citation_keys: templates(&config.citation_keys, "citation-keys", &tables)?,
-                tables,
-                used,
-                directory,
-                paths,
-            })
+            Ok(group)
         })
         .collect::<Result<Vec<Group>, Diagnostic>>()?;
 
     Ok((groups, warnings))
+}
+
+/// One [`Group`]: `paths` in `directory`, with the template tables
+/// `renders` calls for compiled from that directory's configuration and
+/// the lookup tables it declares loaded, beside the warnings loading
+/// them produced.
+///
+/// Fails as [`compiled_groups`] does, on a table that will not load or
+/// a template that will not compile.
+fn compiled_group(
+    directory: PathBuf,
+    paths: Vec<PathBuf>,
+    configs: &Configs,
+    renders: Renders,
+) -> Result<(Group, Vec<Diagnostic>), Diagnostic> {
+    let effective = configs.for_directory(&directory);
+    // Before the templates, because compiling one is what checks its
+    // `lookup` tokens against the declared names.
+    let (tables, used, warnings) = loaded_tables(effective)?;
+    let config = effective.config();
+    let group = Group {
+        filenames: match renders {
+            Renders::FilenamesAndCitationKeys => {
+                Some(templates(&config.templates, "templates", &tables)?)
+            }
+            Renders::CitationKeysOnly => None,
+        },
+        citation_keys: templates(&config.citation_keys, "citation-keys", &tables)?,
+        tables,
+        used,
+        directory,
+        paths,
+    };
+    Ok((group, warnings))
 }
 
 /// The tables `effective` declares, read and loaded, with the record of
@@ -971,8 +1011,7 @@ pub fn emit_events<C: Cache>(
             }
             Aftermath::default()
         }
-        (Command::Cache { .. }, Prepared::Cache { report })
-        | (Command::Ledger { .. }, Prepared::Rebuilt { report }) => {
+        (Command::Cache { .. }, Prepared::Cache { report }) => {
             sink.emit(report.clone());
             Aftermath::default()
         }
@@ -980,11 +1019,40 @@ pub fn emit_events<C: Cache>(
             resolve_events(paths, configs, adapters, sink);
             Aftermath::default()
         }
-        (Command::Rename { apply, .. }, Prepared::Grouped { groups, ledger, .. }) => {
-            rename_events(groups, *apply, session, ledger, configs, adapters, sink)
+        (Command::Status { identify, .. }, _) => {
+            status_events(command, *identify, configs, adapters, sink);
+            Aftermath::default()
         }
+        (Command::Validate { .. }, _) => {
+            validation_events(command, adapters, sink);
+            Aftermath::default()
+        }
+        (Command::Reconcile { rehash, .. }, _) => {
+            reconcile_events(command, *rehash, adapters, sink);
+            Aftermath::default()
+        }
+        (
+            Command::Rename { apply, .. },
+            Prepared::Grouped {
+                groups, account, ..
+            },
+        ) => rename_events(
+            groups,
+            *apply,
+            session,
+            account.as_ref(),
+            configs,
+            adapters,
+            sink,
+        ),
         (Command::Bib { .. }, Prepared::Grouped { groups, .. }) => {
             bib_events(groups, configs, adapters, sink);
+            Aftermath::default()
+        }
+        (Command::Adopt { .. }, Prepared::Grouped { groups, .. }) => {
+            if let [library] = groups.as_slice() {
+                adopt_events(library, adapters, sink);
+            }
             Aftermath::default()
         }
         // A `Prepared` that does not go with the command could only
@@ -1009,8 +1077,8 @@ pub struct Aftermath {
     /// reached the end of its inputs.
     pub unreached: usize,
     /// What the run discovered that is about the run rather than about
-    /// a file: a ledger holding entries for files that have gone, or the
-    /// record failure that ended the run.
+    /// a file: a library holding paths to reconcile, or the record
+    /// failure that ended the run.
     pub diagnostic: Option<Diagnostic>,
 }
 
@@ -1052,43 +1120,6 @@ fn cache_report(clear: bool, root: &Path) -> Result<Event, Diagnostic> {
     .map_err(|failure| error(format!("\"{}\": {failure}", root.display())))
 }
 
-/// Regenerate the ledger of the collection at `root` and report what it
-/// now holds.
-///
-/// The collection is scanned ([`crate::ledger::scan_collection`]) and
-/// what the scan found becomes the whole ledger: a file the scan does
-/// not count keeps no entry, which is what compacts away the records of
-/// files that have been deleted or moved. Every entry is stamped with
-/// `at`, as both its timestamp and its run identifier, since one
-/// rebuild is one admission of everything it found.
-///
-/// The run's `ledger` setting has no say here. It governs whether the
-/// pipeline consults and adds to the ledger; `ledger rebuild` is an
-/// instruction to do ledger work, and refusing it because the pipeline
-/// was told to leave the ledger alone would refuse the very command
-/// that puts a disabled ledger back in order.
-///
-/// A ledger that will not take the entries is a [`Diagnostic`] rather
-/// than a clean report: a rebuild announced but not written would leave
-/// the user believing the accounting had been put right.
-fn rebuilt_ledger(root: &Path, ledger: &dyn Ledger, at: String) -> Result<Event, Diagnostic> {
-    let entries = crate::ledger::rebuild(
-        &crate::ledger::scan_collection(root),
-        borax_core::ledger::RunId::new(&at),
-        &at,
-        env!("CARGO_PKG_VERSION"),
-    );
-
-    ledger
-        .replace(&entries)
-        .map_err(|failure| error(format!("\"{}\": {failure}", root.display())))?;
-
-    Ok(Event::LedgerRebuilt {
-        root: root.to_path_buf(),
-        entries: entries.len(),
-    })
-}
-
 /// Write the events `borax resolve` produces for `paths` into `sink`.
 ///
 /// One event per file, in the order given, each resolved under the
@@ -1108,7 +1139,7 @@ fn resolve_events<C: Cache>(
 ) {
     let mut run = resolve_batch(
         paths,
-        adapters.library,
+        adapters.documents,
         adapters.sources,
         adapters.index,
         &|path| resolving(configs.for_path(path).config()),
@@ -1139,16 +1170,27 @@ fn resolving(config: &Config) -> ResolveConfig {
 ///
 /// `groups` is what [`preflight`] made of the run's paths: each
 /// directory the run spans, the files in it, and the template tables its
-/// configuration compiled to. `admitted` is what the collection has
-/// admitted already, which every file in the batch is checked against
-/// and which an applied move adds to.
+/// configuration compiled to. `stores` is the library's two stores as
+/// they stood before the first file was touched, and `None` is a run
+/// that keeps no account and checks against nothing.
+///
+/// Each file is checked for duplicates against the library as the run
+/// has left it so far. A file the run admits is, for every later file,
+/// the artifact record the admission wrote, linked to the item it
+/// selected or minted, and a recorded artifact the run moved is found at
+/// the path it moved to. A preview learns what it would admit on the
+/// same terms without writing it, and counts a path it would have moved
+/// a file to as holding that file, so it reports what the same run with
+/// `--apply` would. A file not admitted — skipped, declined, or refused
+/// — teaches the account nothing. `stores` itself is left as it is: the
+/// run learns into its own copy.
 ///
 /// A group is worked under its own directory's configuration — its
 /// templates, its collision policy, its bibliography destination — since
-/// a run spanning two trees is a run under two configurations. The
-/// ledger is the exception: it belongs to the collection the whole run
-/// sits in, so whether it is consulted at all is the run's own setting
-/// and not any one directory's.
+/// a run spanning two trees is a run under two configurations. What the
+/// files are checked against is the exception: it belongs to the library
+/// the whole run sits in, so whether there is an account at all is the
+/// run's own setting and not any one directory's.
 ///
 /// Within a group a file is finished before the next is opened: its
 /// verdict, the move planned or made for it, and any sidecar written
@@ -1174,51 +1216,56 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// and every file after it in [`Aftermath::unreached`], and still
 /// merges what the files it visited produced.
 ///
-/// Returns a warning when any entry the run matched turned out to
-/// name a file that is no longer there. It comes back at the end
-/// rather than as an event because it is one fact about the ledger and
+/// Returns a warning when any record the run matched turned out to
+/// name a file that is no longer there. A record whose artifact this
+/// run moved names the path it moved to, so the path it moved from is
+/// never among them. It comes back at the end
+/// rather than as an event because it is one fact about the library and
 /// not about the file that happened to reveal it — however many files
-/// find stale entries, the run says so once. A run stopped by a move it
+/// find stale paths, the run says so once. A run stopped by a move it
 /// could not record reports that instead, being the more urgent of the
 /// two and the reason the rest of the run did not happen.
 fn rename_events<C: Cache>(
     groups: &[Group],
     apply: bool,
     session: &mut Session<'_>,
-    admitted: &Index,
+    stores: Option<&crate::library::Stores>,
     configs: &Configs,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
 ) -> Aftermath {
     let at = (adapters.now)();
-    // Whether the ledger is in play at all: the setting says so, and
-    // the run is in a collection that has one.
-    let ledger = match configs.run().config().ledger {
-        true => adapters.ledger,
-        false => None,
-    };
-    let root = adapters.collection_root.clone().unwrap_or_default();
-    // `exists` is asked about a ledger entry that matched and about
-    // nothing else, so an answer of "not there" is exactly an entry
-    // that outlived its file. A file matching no entry never reaches
-    // the question, which is what keeps a plain miss from reading as
+    // Whether the moves this run makes are carried out at all, which an
+    // interactive run's are one yes at a time.
+    let carrying_out = apply || session.mode == Mode::Interactive;
+    // Whether the library's record is written to: only by a run that
+    // carries its moves out, and only with the record gate on. A
+    // preview reports the same outcomes and records none of them.
+    let recording = carrying_out && configs.run().config().record;
+    let library = adapters.collection_root.as_deref();
+    // `exists` is asked about a record that matched and about nothing
+    // else, so an answer of "not there" is exactly a record that
+    // outlived its file. A file matching nothing never reaches the
+    // question, which is what keeps a plain miss from reading as
     // staleness.
+    //
+    // A preview moves nothing, so the paths it would have moved a file
+    // to hold nothing on disk; they are what `foreseen` adds here, and
+    // count as holding the file the preview learned there.
     let stale = Cell::new(false);
+    let foreseen_at: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
     let exists = |path: &Path| {
-        let present = is_present(adapters.filesystem, path);
+        let present = foreseen_at.borrow().iter().any(|at| at == path)
+            || is_present(adapters.filesystem, path);
         stale.set(stale.get() || !present);
         present
     };
-    let collection = Collection {
-        ledger: admitted,
-        root: &root,
-        exists: &exists,
-    };
-    // A run with no ledger is resolved with no collection to check
-    // against rather than against an empty one, which is what keeps it
-    // from hashing every file a second time for a check that could only
-    // miss.
-    let checked = ledger.is_some().then_some(&collection);
+    // A run that keeps no account is resolved with nothing to check
+    // against rather than against an empty store, which is what makes
+    // `--no-record` suppress the checks themselves and not merely the
+    // writes behind them. The run's own copy, since what it admits is
+    // learned into it.
+    let mut stores = stores.cloned();
 
     // Across groups, because a table is named once for the run however
     // many directories consult one under that name.
@@ -1267,10 +1314,7 @@ fn rename_events<C: Cache>(
         // A yes is the authorisation for one move, so an interactive
         // run carries its accepted decisions out as an applying run
         // does; `--apply` is what authorises a batch one.
-        let mut applying = Applying::new(
-            adapters.filesystem,
-            apply || session.mode == Mode::Interactive,
-        );
+        let mut applying = Applying::new(adapters.filesystem, carrying_out);
         let mut cited = Citations::default();
         // Whether a file this directory's configuration reports as
         // already named is passed over without a line of its own. Only
@@ -1292,17 +1336,18 @@ fn rename_events<C: Cache>(
                 if passing_over {
                     sink.hold();
                 }
+                let account = stores.as_ref().map(|stores| stores.account(&exists));
                 // Resolved without reporting. What is reported is what
                 // the file's fate made of the verdict, which for a
                 // batch run is settled the moment the verdict is and
                 // for an interactive one is settled by its operator.
                 let standing = crate::pipeline::standing(
                     path,
-                    adapters.library,
+                    adapters.documents,
                     adapters.sources,
                     adapters.index,
                     &resolving(effective.config()),
-                    checked,
+                    account.as_ref(),
                 );
                 let about = About {
                     path,
@@ -1318,9 +1363,34 @@ fn rename_events<C: Cache>(
                         &mut planning,
                         &mut lookups,
                         adapters,
-                        checked,
+                        account.as_ref(),
                     ),
                 };
+
+                // Asked before the move, while the path a record names is
+                // still the path the file holds, and whatever the record
+                // gate says: the gate stops the writing and never this
+                // read.
+                //
+                // A preview asks its account instead, which holds what
+                // the run has learned: it reads nothing from disk that a
+                // file before this one would have changed.
+                let held = match &settled {
+                    Settled::CarryOut { .. } if carrying_out => library
+                        .filter(|library| !crate::library::excludes(library, path))
+                        .and_then(|library| crate::library::recorded_at(library, path)),
+                    Settled::CarryOut { .. } => account
+                        .as_ref()
+                        .and_then(|account| account.own_record(path))
+                        .cloned(),
+                    _ => None,
+                };
+                // A move the run would not record, of a file whose record
+                // holds none of its bytes, is refused and reported as a
+                // skip: it would leave that record naming nothing and
+                // matching nothing. The target is not claimed, so it stays
+                // free for the files after this one.
+                let settled = refused(settled, configs.run().config().record, held.as_ref());
 
                 let (file, event) = match settled {
                     // This file and every file after it are left as they
@@ -1382,8 +1452,52 @@ fn rename_events<C: Cache>(
                                 });
                             }
                         };
+                        // Within the file's own run of events, so a file
+                        // passed over is passed over with its admission —
+                        // unless the admission is a record that could not
+                        // be written, which is shown whatever the hold.
+                        let admission = match recording {
+                            true => recorded(
+                                library,
+                                &event,
+                                &file,
+                                held.as_ref(),
+                                || {
+                                    crate::bib::citation_key(
+                                        &file.record,
+                                        file.hash.as_ref(),
+                                        &group.citation_keys,
+                                        &mut lookups,
+                                    )
+                                },
+                                &at,
+                                stores.as_mut(),
+                            ),
+                            false => {
+                                if let Some(stores) = stores.as_mut()
+                                    && let Some(learned) =
+                                        foreseen(library, &event, &file, held.as_ref(), &at, stores)
+                                {
+                                    foreseen_at.borrow_mut().push(learned);
+                                }
+                                None
+                            }
+                        };
+                        let unwritten = matches!(
+                            admission,
+                            Some(Event::LibraryAdmission {
+                                admission: Admission::Unwritten { .. },
+                                ..
+                            })
+                        );
+                        if let Some(admission) = admission {
+                            sink.emit(admission);
+                        }
                         if named {
-                            sink.withhold();
+                            match unwritten {
+                                true => sink.release(),
+                                false => sink.withhold(),
+                            }
                         }
                         // On the move and never before: an operator who
                         // supplies an identifier and then walks away
@@ -1414,14 +1528,7 @@ fn rename_events<C: Cache>(
                 // rather than beside the one it has just lost, so where
                 // it lands is where the move that just happened put it.
                 let current = match &event {
-                    Event::Renamed { target, .. } => {
-                        // Only a move that happened is an admission: a
-                        // preview reports the same target and admits
-                        // nothing, which is why this reads the event
-                        // rather than `apply`.
-                        admit(ledger, &root, &file, target, &at);
-                        target.clone()
-                    }
+                    Event::Renamed { target, .. } => target.clone(),
                     _ => path.clone(),
                 };
 
@@ -1463,10 +1570,10 @@ fn rename_events<C: Cache>(
             .as_ref()
             .map_or(0, |stopped| unreached(groups, stopped.at)),
         // A run that could not record a move says so; otherwise the only
-        // thing left to report is a ledger naming files that have gone.
+        // thing left to report is a record naming a file that has gone.
         diagnostic: stopped
             .and_then(|stopped| stopped.diagnostic)
-            .or_else(|| stale.get().then(crate::ledger::stale_entries_warning)),
+            .or_else(|| stale.get().then(crate::library::stale_paths_warning)),
     }
 }
 
@@ -1592,11 +1699,20 @@ enum Situation {
 ///
 /// The one place an interactive run differs from a batch one. Every
 /// file whose situation an answer could change is put to the operator
-/// a move to make, a conflict to accept or refuse, a file
-/// nothing identified, one no service holds a record for, one that
-/// could not be read, and — where `rename.skip-named` is off — one
-/// already carrying its record's name. Everything else is settled as
-/// [`alone`] settles it, since no answer would change what happens.
+/// a move to make, a conflict to accept or refuse, a second file of a
+/// work the library already holds, a file nothing identified, one no
+/// service holds a record for, one that could not be read, and — where
+/// `rename.skip-named` is off — one already carrying its record's name.
+/// Everything else is settled as [`alone`] settles it, since no answer
+/// would change what happens.
+///
+/// Filing a work duplicate opens a loop of its own: the file returns to
+/// planning and the ordinary question about its move is put next, so
+/// what is settled here is whether the file is admitted at all and
+/// nothing else about it. It is asked once — a file the operator has
+/// filed is not a duplicate again for the rest of its loop — and
+/// declining reports the duplicate a batch run would have reported
+/// rather than a declined move.
 ///
 /// Answering `supply` opens a loop rather than ending the question:
 /// the identifier is resolved, the record it reaches is described, and
@@ -1616,7 +1732,7 @@ fn asked<C: Cache>(
     planning: &mut Planning<'_>,
     lookups: &mut Lookups<'_>,
     adapters: &Adapters<'_, C>,
-    collection: Option<&Collection<'_>>,
+    account: Option<&Account<'_>>,
 ) -> Settled {
     let Standing {
         verdict,
@@ -1624,6 +1740,7 @@ fn asked<C: Cache>(
         found,
         mut unresolved,
         refused,
+        duplicated,
     } = standing;
     // The verdict the run is holding for the file, which is what its
     // question is described from and what a skip reports.
@@ -1650,11 +1767,31 @@ fn asked<C: Cache>(
     // identifier reached in its place.
     let mut offer = own.clone();
     let mut candidate = false;
-    // What became of the last candidate, prepended to the description
-    // of the question put again and reported nowhere else.
-    let mut report: Vec<String> = Vec::new();
+    // The work the library already holds a file for, while the file is
+    // still to be filed as another artifact of it. Taken when the
+    // operator files, which is what keeps the question to one asking:
+    // a file they have filed is not a duplicate again for the rest of
+    // its loop.
+    let mut filing = duplicated;
+    // Whether the operator has been told that a record they reached
+    // names a work the library already holds a file of. Said once: the
+    // answer they give after hearing it is the one that stands, and a
+    // run that said it again would never carry the move out.
+    let mut told = false;
 
     let width = session.width;
+    // What became of the last candidate, or the work this file is a
+    // second file of, prepended to the description of the question and
+    // reported nowhere else.
+    let mut report: Vec<String> = match (&filing, account) {
+        (Some(duplicated), Some(library)) => describe::archived(
+            library.root,
+            &duplicated.work.existing,
+            duplicated.work.item_file.as_deref(),
+            width,
+        ),
+        _ => Vec::new(),
+    };
     let name = shown(about.path, &session.working);
     let Some(asker) = session.asker.as_deref_mut() else {
         return Settled::Stop;
@@ -1687,6 +1824,7 @@ fn asked<C: Cache>(
             unresolved.as_ref(),
             hash.is_some(),
             about.passing_over,
+            filing.is_some(),
         ) {
             Situation::Ask(choices) => choices,
             Situation::Settle => {
@@ -1722,7 +1860,13 @@ fn asked<C: Cache>(
                 .iter()
                 .cloned()
                 .chain(describe(
-                    &described(about.path, offer.as_ref(), candidate, &held),
+                    &described(
+                        about.path,
+                        offer.as_ref(),
+                        candidate,
+                        &held,
+                        filing.as_ref(),
+                    ),
                     &name,
                     proposed_move(proposal.as_ref()).as_ref(),
                     about.position,
@@ -1734,41 +1878,62 @@ fn asked<C: Cache>(
         match answer {
             Answer::Quit => return Settled::Stop,
             Answer::Skip => return skipped(own, &held),
+            // Accepting a work duplicate returns the file to planning,
+            // where the ordinary question about its move is put: the
+            // answer settles whether this file is admitted at all, and
+            // nothing else about it.
+            Answer::File => {
+                let Some(filed) = filing.take() else {
+                    continue;
+                };
+                // The record is the file's own resolution and was kept
+                // as it resolved; what the library held against it was
+                // never a doubt about the record.
+                held = resolved_event(about.path, &filed.file);
+                own = Some(Offer {
+                    file: filed.file,
+                    conflict: None,
+                    kept: true,
+                });
+                offer = own.clone();
+                candidate = false;
+                report.clear();
+            }
             // The three answers that act on the record in hand, none
             // of which is offered without a decision to carry out.
             Answer::Rename | Answer::Override | Answer::Keep => {
-                return match (offer, proposal) {
-                    (Some(on), Some(proposed)) => {
-                        // A record the run resolved on its own was put
-                        // to the ledger as it resolved. One the
-                        // operator reached — supplied, retried, or
-                        // accepted over a conflict — never was, and
-                        // admitting a second copy of a work the
-                        // collection already holds is the one thing the
-                        // ledger exists to prevent. Its verdict is
-                        // about the collection, not about where the
-                        // identifier came from.
-                        let second_copy = (!on.kept)
-                            .then(|| {
-                                collection.and_then(|collection| {
-                                    crate::pipeline::work_duplicate(
-                                        about.path,
-                                        &on.file.record,
-                                        collection,
-                                    )
-                                })
-                            })
-                            .flatten();
-                        match second_copy {
-                            Some(reason) => Settled::Skip { file: None, reason },
-                            None => Settled::CarryOut {
-                                file: accepted(&on),
-                                decision: proposed.decision,
-                                remember: !on.kept,
-                            },
-                        }
-                    }
-                    _ => skipped(own, &held),
+                let (Some(on), Some(proposed)) = (offer.as_ref(), proposal.as_ref()) else {
+                    return skipped(own, &held);
+                };
+                // A record the run resolved on its own was checked as
+                // it resolved. One the operator reached — supplied,
+                // retried, or accepted over a conflict — never was, so
+                // it is checked here, once: what comes back is said
+                // rather than acted on, and the question is put again.
+                //
+                // Reaching an identifier is the operator saying what
+                // the file is, which is the statement the filing
+                // question exists to get. So there is nothing left to
+                // ask, only something they have not been told, and the
+                // answer they give knowing it is the answer that
+                // stands.
+                let held_work = (!on.kept && !told)
+                    .then(|| crate::pipeline::second_copy(about.path, &on.file.record, account))
+                    .flatten();
+                if let (Some(work), Some(library)) = (held_work, account) {
+                    told = true;
+                    report = describe::archived(
+                        library.root,
+                        &work.existing,
+                        work.item_file.as_deref(),
+                        width,
+                    );
+                    continue;
+                }
+                return Settled::CarryOut {
+                    file: accepted(on),
+                    decision: proposed.decision.clone(),
+                    remember: !on.kept,
                 };
             }
             Answer::Supply => {
@@ -1781,7 +1946,7 @@ fn asked<C: Cache>(
                 match crate::pipeline::resolve_supplied(
                     about.path,
                     &identifier,
-                    adapters.library,
+                    adapters.documents,
                     adapters.sources,
                 ) {
                     Ok(supplied) => {
@@ -1819,7 +1984,7 @@ fn asked<C: Cache>(
                 match crate::pipeline::resolve_supplied(
                     about.path,
                     &identifier,
-                    adapters.library,
+                    adapters.documents,
                     adapters.sources,
                 ) {
                     Ok(supplied) => {
@@ -1888,6 +2053,13 @@ fn asked<C: Cache>(
 /// could only lead to a move that then fails: it is left off the menu,
 /// and a file for which it would have been the only useful answer is
 /// not asked at all.
+///
+/// `filing` is whether the file is a second file of a work the library
+/// already holds and has not yet been filed as another artifact of it.
+/// That is the one question asked before anything about the move, since
+/// it settles whether there is a move to ask about — and it is subject
+/// to `supply` for the same reason every other question is: a file that
+/// cannot be recorded cannot be filed either.
 fn situation(
     offer: Option<&Offer>,
     decision: Option<&PlannedRename>,
@@ -1895,12 +2067,27 @@ fn situation(
     unresolved: Option<&Unresolved>,
     supply: bool,
     passing_over: bool,
+    filing: bool,
 ) -> Situation {
+    // Skip leads, as it does over a conflict: the default an unadorned
+    // Enter takes must never be the answer that files a second copy.
+    // A content duplicate reaches none of this — it is the same bytes
+    // and there is nothing to file — and is reported below as a batch
+    // run reports it.
+    //
+    // A file whose content hash is unknown is not asked either, for the
+    // reason the rule below gives: filing it would end in
+    // `Unrecordable`, so the only answer that could succeed is the one
+    // a batch run gives anyway.
+    if filing && supply {
+        return Situation::Ask(vec![Answer::Skip, Answer::File, Answer::Quit]);
+    }
+
     let Some(offer) = offer else {
         // Nothing was identified. The questions that offer to put that
         // right, and no question for a verdict an identifier would not
-        // change: a duplicate is the ledger's word about the
-        // collection, not about what the file is.
+        // change: a content duplicate is the library's word about the
+        // bytes, not about what the file is.
         if !supply {
             return Situation::Report;
         }
@@ -2021,9 +2208,23 @@ fn accepted(offer: &Offer) -> FileRecord {
 /// conflict and all. A candidate has no verdict of its own, and what
 /// the operator is shown before deciding is what the stream carries
 /// after.
-fn described(path: &Path, offer: Option<&Offer>, candidate: bool, held: &Event) -> Event {
-    match offer {
-        Some(offer) if candidate => resolved_event(path, &accepted(offer)),
+///
+/// A file waiting to be filed as another artifact is shown the record
+/// it resolved to rather than the duplicate its verdict is. The verdict
+/// names the archived file, which the lines above the description
+/// already name; what the question actually asks is whether this file
+/// is another manifestation of that work, and only the record answers
+/// that.
+fn described(
+    path: &Path,
+    offer: Option<&Offer>,
+    candidate: bool,
+    held: &Event,
+    filing: Option<&Duplicated>,
+) -> Event {
+    match (filing, offer) {
+        (Some(filing), _) => resolved_event(path, &filing.file),
+        (None, Some(offer)) if candidate => resolved_event(path, &accepted(offer)),
         _ => held.clone(),
     }
 }
@@ -2342,39 +2543,172 @@ fn is_present(filesystem: &dyn Filesystem, path: &Path) -> bool {
         .contains_key(&*name.to_string_lossy())
 }
 
-/// Record in `ledger` that `file` was admitted to the collection at
-/// `root` and now sits at `path`, as of `at`.
+/// `settled`, or a skip in its place when carrying it out would strand
+/// `held`.
 ///
-/// The entry's path is `path` relative to `root` and `/`-separated, so
-/// the collection can be moved or opened on another machine and still
-/// find what it recorded. `at` is both the entry's timestamp and the
-/// run identifier that ties every entry of one run together.
+/// Only a move is refused, and only in a run that writes no record
+/// (`record` off): a run that records rewrites the record after the
+/// move, so nothing is stranded. `held` is the record naming the file's
+/// current path, and a move strands it when its history does not hold
+/// the file's hash ([`crate::library::strands`]). A file whose hash is
+/// unknown is not refused, there being no bytes to compare.
 ///
-/// Nothing is recorded when the run keeps no ledger, when the file
-/// landed outside the collection its ledger accounts for, or when the
-/// file's content hash is unknown ([`admission_entry`]). An append that
-/// fails costs nothing beyond itself and is not reported: the ledger is
-/// derived accounting, rebuildable from the collection, and a file that
-/// was renamed correctly was renamed correctly whether or not the note
-/// about it landed.
-fn admit(ledger: Option<&dyn Ledger>, root: &Path, file: &FileRecord, path: &Path, at: &str) {
-    let Some(ledger) = ledger else {
-        return;
-    };
-    let Some(relative) = collection_relative(root, path) else {
-        return;
-    };
-    let Some(entry) = admission_entry(
+/// The skip keeps the file's record, so the file is reported resolved
+/// and is cited as any resolved file left where it is.
+fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Settled {
+    let Settled::CarryOut {
         file,
-        &relative,
-        borax_core::ledger::RunId::new(at),
-        at,
-        env!("CARGO_PKG_VERSION"),
-    ) else {
-        return;
+        decision,
+        remember,
+    } = settled
+    else {
+        return settled;
     };
+    let stranding = match (record, &decision, held, &file.hash) {
+        (false, PlannedRename::Rename { .. }, Some(held), Some(hash))
+            if crate::library::strands(Some(held), hash) =>
+        {
+            Some(held.id.to_string())
+        }
+        _ => None,
+    };
+    match stranding {
+        Some(id) => Settled::Skip {
+            file: Some(file),
+            reason: SkipReason::Stranding { id },
+        },
+        None => Settled::CarryOut {
+            file,
+            decision,
+            remember,
+        },
+    }
+}
 
-    let _ = ledger.append(&[entry]);
+/// Record in the library rooted at `library` the file `event` reports
+/// the fate of, and hand back what is worth reporting about it.
+///
+/// Only a file the run renamed or found already named is recorded: it
+/// is at the target of a `renamed` event and where it was for an
+/// `already-named` one. Every other outcome, a run with no library, and
+/// a file whose content hash is unknown record nothing and report
+/// nothing.
+///
+/// A file outside the library, or inside a subtree it does not own, is
+/// reported as [`Admission::Outside`] and recorded nowhere. Otherwise
+/// the file is admitted ([`crate::library::admit`]) under the record
+/// `held` it had before the run moved it, with the item a mint names
+/// keyed by what `key` renders — asked only when the file is admitted.
+/// An operator who supplied the identifier or accepted the record over
+/// a conflict has re-identified the file. The hash entry written is
+/// stamped with `at` as both the run and the timestamp.
+///
+/// An admission that was written is learned into `stores`
+/// ([`crate::library::Stores::learn`]), so the run's later files are
+/// checked against it; one that was not teaches them nothing.
+///
+/// The event is [`crate::library::admission_event`]'s: `None` for an
+/// ordinary admission.
+fn recorded(
+    library: Option<&Path>,
+    event: &Event,
+    file: &FileRecord,
+    held: Option<&ArtifactRecord>,
+    key: impl FnOnce() -> Option<String>,
+    at: &str,
+    stores: Option<&mut crate::library::Stores>,
+) -> Option<Event> {
+    let current = match event {
+        Event::Renamed { target, .. } => target,
+        Event::AlreadyNamed { path } => path,
+        _ => return None,
+    };
+    let library = library?;
+    let hash = file.hash.as_ref()?;
+
+    if !admissible(library, current) {
+        return Some(Event::LibraryAdmission {
+            path: current.clone(),
+            admission: Admission::Outside,
+        });
+    }
+
+    let key = key();
+    let admitting = crate::library::Admitting {
+        path: current,
+        record: &file.record,
+        hash,
+        held,
+        reidentified: reidentified(file),
+        key: key.as_deref(),
+        run: borax_core::library::RunId::new(at),
+        timestamp: at,
+        tool_version: env!("CARGO_PKG_VERSION"),
+    };
+    let admitted = crate::library::admit(library, &admitting, &crate::library::store_write);
+    if let (Ok(admitted), Some(stores)) = (&admitted, stores) {
+        stores.learn(&admitting, admitted);
+    }
+    crate::library::admission_event(current, &admitted)
+}
+
+/// Learn into `stores` what [`recorded`] would record for `file` after
+/// the preview's `event`, writing nothing, and hand back the path the
+/// learned record names — the target of a `planned` event, or where
+/// the file already is for an `already-named` one.
+///
+/// `held` is the account's record of the file's current path. `None`,
+/// learning nothing, for every other outcome, for a run with no
+/// library, for a file whose content hash is unknown, and for one
+/// [`recorded`] would report outside the library.
+fn foreseen(
+    library: Option<&Path>,
+    event: &Event,
+    file: &FileRecord,
+    held: Option<&ArtifactRecord>,
+    at: &str,
+    stores: &mut crate::library::Stores,
+) -> Option<PathBuf> {
+    let current = match event {
+        Event::Planned { target, .. } => target,
+        Event::AlreadyNamed { path } => path,
+        _ => return None,
+    };
+    let library = library?;
+    let hash = file.hash.as_ref()?;
+    if !admissible(library, current) {
+        return None;
+    }
+
+    stores.foresee(&crate::library::Admitting {
+        path: current,
+        record: &file.record,
+        hash,
+        held,
+        reidentified: reidentified(file),
+        key: None,
+        run: borax_core::library::RunId::new(at),
+        timestamp: at,
+        tool_version: env!("CARGO_PKG_VERSION"),
+    })?;
+    Some(crate::library::relative_to(
+        library,
+        &crate::library::library_relative(library, current)?,
+    ))
+}
+
+/// Whether a file at `path` is one the library rooted at `library`
+/// admits: inside it, and not in a part of it the library excludes.
+fn admissible(library: &Path, path: &Path) -> bool {
+    !crate::library::excludes(library, path)
+        && crate::library::library_relative(library, path).is_some()
+}
+
+/// Whether the operator re-identified `file` in this run: supplied the
+/// identifier it was resolved by, or accepted its record over a
+/// conflict.
+fn reidentified(file: &FileRecord) -> bool {
+    file.tier == Some(Provenance::Supplied) || file.overrode.is_some()
 }
 
 /// Resolve the file at `path` under `effective`, writing its verdict
@@ -2384,10 +2718,8 @@ fn admit(ledger: Option<&dyn Ledger>, root: &Path, file: &FileRecord, path: &Pat
 /// than from the event, so the record is what this hands back; the event
 /// is already written by the time it does.
 ///
-/// `collection` is what the file is checked against for duplicates —
-/// once on its hash before it is opened, and again on the identifiers it
-/// resolved to. `None` is a run that admits nothing to any collection,
-/// which is resolved without either check and so hashes the file once.
+/// Nothing here admits a file anywhere, so no duplicate check is made:
+/// the file is resolved as a run that keeps no account resolves it.
 ///
 /// Each file is resolved and reported before the next is opened, so a
 /// reader watching a network-bound run sees it make progress.
@@ -2395,27 +2727,15 @@ fn resolved_record<C: Cache>(
     path: &Path,
     effective: &Effective,
     adapters: &Adapters<C>,
-    collection: Option<&Collection<'_>>,
     sink: &mut dyn Sink,
 ) -> Option<FileRecord> {
-    let config = resolving(effective.config());
-    let outcome = match collection {
-        Some(collection) => resolve_file_checking_ledger(
-            path,
-            adapters.library,
-            adapters.sources,
-            adapters.index,
-            &config,
-            collection,
-        ),
-        None => resolve_file(
-            path,
-            adapters.library,
-            adapters.sources,
-            adapters.index,
-            &config,
-        ),
-    };
+    let outcome = resolve_file(
+        path,
+        adapters.documents,
+        adapters.sources,
+        adapters.index,
+        &resolving(effective.config()),
+    );
     sink.emit(crate::pipeline::event_for(path, &outcome));
     match outcome {
         FileOutcome::Resolved(file) => Some(file),
@@ -2436,9 +2756,9 @@ fn resolved_record<C: Cache>(
 /// destination is configured — a run that writes nowhere still reports
 /// what it resolved.
 ///
-/// Nothing here admits a file to the collection, so the ledger has no
-/// say in it: every file is resolved with no collection to check
-/// against, exactly as a run with no ledger is.
+/// Nothing here admits a file to the library, so no duplicate check has
+/// any say in it: every file is resolved with nothing to check against,
+/// exactly as a run that keeps no account is.
 ///
 /// The lookups that found no row trail the whole run, as they do for
 /// [`rename_events`] and for the same reason.
@@ -2461,7 +2781,7 @@ fn bib_events<C: Cache>(
         let mut lookups = Lookups::new(&group.tables);
 
         for path in &group.paths {
-            if let Some(file) = resolved_record(path, effective, adapters, None, sink) {
+            if let Some(file) = resolved_record(path, effective, adapters, sink) {
                 cited.add(
                     path.clone(),
                     file,
@@ -2715,7 +3035,7 @@ fn open_log<C: Cache>(
                 true,
                 "a run that may move files needs somewhere to record what it moves — --apply \
                  and a run that asks about each file both may — and this is neither in a \
-                 collection nor on a system that names a state directory"
+                 library nor on a system that names a state directory"
                     .to_string(),
             ),
             false => Opened::Log(None),
@@ -2771,12 +3091,11 @@ fn write_event(log: &mut fs::File, event: &Event) -> io::Result<()> {
 /// and nothing moved. A log the run does not depend on failing to open
 /// is a warning on `streams.err`, and the run goes on unrecorded.
 ///
-/// What [`preflight`] has to say about the ledger goes to `streams.err`
-/// too, and the run goes ahead: a ledger that could not be read costs
-/// the run its duplicate detection and nothing else. What the run
-/// itself discovers about the ledger — that it names files which are no
-/// longer there — follows on `streams.err` once the stream has closed,
-/// which is the first moment the whole batch has been checked.
+/// What [`preflight`] has to say about a lookup table goes to
+/// `streams.err` too, and the run goes ahead. What the run itself
+/// discovers about the library — that it records artifacts which are no
+/// longer where it says — follows on `streams.err` once the stream has
+/// closed, which is the first moment the whole batch has been checked.
 pub fn dispatch<C: Cache>(
     cli: &Cli,
     configs: &Configs,
@@ -2881,9 +3200,131 @@ fn applying(command: &Command, mode: Mode) -> bool {
     match command {
         Command::Rename { apply, .. } => *apply || mode == Mode::Interactive,
         Command::Cache { clear, .. } => *clear,
-        Command::Bib { .. } | Command::Ledger { .. } => true,
-        Command::Resolve { .. } | Command::Config { .. } => false,
+        // A reconcile writes what it repairs, and a pass that repairs
+        // nothing still reports itself as the kind of run that would
+        // have.
+        Command::Bib { .. } | Command::Reconcile { .. } | Command::Adopt { .. } => true,
+        Command::Resolve { .. }
+        | Command::Config { .. }
+        | Command::Status { .. }
+        | Command::Validate { .. } => false,
     }
+}
+
+/// The library `command` reports on.
+///
+/// The library root when a marker or a configured `library-root`
+/// established one — which is what `adapters` carries, discovered from
+/// the same directory the run's configuration was — and the directory
+/// the command was given when neither did. A directory nobody marked is
+/// reported on as given: the marker buys writing rather than seeing.
+fn reported_root<C: Cache>(command: &Command, adapters: &Adapters<'_, C>) -> PathBuf {
+    match &adapters.collection_root {
+        Some(root) => root.clone(),
+        None => library_directory(command.directory()),
+    }
+}
+
+/// Write `status`'s events into `sink`.
+///
+/// One event, carrying what [`crate::library::survey`] counted. When
+/// `identify`, each artifact is additionally opened and run through the
+/// extraction passes [`crate::pipeline::from_file`] runs, and how many
+/// yielded an identifier is reported alongside; no service is asked
+/// anything either way, and without the flag no document is opened at
+/// all.
+fn status_events<C: Cache>(
+    command: &Command,
+    identify: bool,
+    configs: &Configs,
+    adapters: &Adapters<'_, C>,
+    sink: &mut dyn Sink,
+) {
+    let surveyed = crate::library::survey(&reported_root(command, adapters));
+    // The extraction settings are the run's own: a library command is
+    // given a library rather than input files, so there is no per-file
+    // directory to resolve them from.
+    let extraction = resolving(configs.run().config()).extraction;
+    let identifiable = identify.then(|| {
+        surveyed
+            .artifacts
+            .iter()
+            .filter(|path| {
+                crate::pipeline::from_file(path, adapters.documents, &extraction).is_ok()
+            })
+            .count()
+    });
+
+    sink.emit(crate::library::status_event(&surveyed, identifiable));
+}
+
+/// Write `validate`'s events into `sink`: one per finding, then the
+/// totals ([`crate::library::validation_events`]).
+fn validation_events<C: Cache>(command: &Command, adapters: &Adapters<'_, C>, sink: &mut dyn Sink) {
+    let validation = crate::library::validate(&reported_root(command, adapters));
+    for event in crate::library::validation_events(&validation) {
+        sink.emit(event);
+    }
+}
+
+/// Write `reconcile`'s events into `sink`: one per record the run had
+/// something to say about, then the totals
+/// ([`crate::library::reconciliation_events`]).
+///
+/// The run's timestamp is both the identifier a hash appended by this
+/// run is filed under and the time recorded against it, as an applying
+/// rename's is: one pass over a library is one act of accounting, and
+/// what it recorded has to be identifiable together afterwards.
+fn reconcile_events<C: Cache>(
+    command: &Command,
+    rehash: bool,
+    adapters: &Adapters<'_, C>,
+    sink: &mut dyn Sink,
+) {
+    let at = (adapters.now)();
+    let reconciliation = crate::library::reconcile(
+        &reported_root(command, adapters),
+        rehash,
+        borax_core::library::RunId::new(&at),
+        &at,
+        env!("CARGO_PKG_VERSION"),
+    );
+    for event in crate::library::reconciliation_events(&reconciliation) {
+        sink.emit(event);
+    }
+}
+
+/// Write `adopt`'s events into `sink`: one per orphan the run adopted
+/// or tried to adopt, then every lookup the citation keys found no row
+/// for, then the totals ([`crate::library::adoption_events`]).
+///
+/// `library` is the group [`preflight`] prepared: the library root,
+/// with the citation-key table an item minted here is named by. The
+/// content index is the only thing asked about an orphan; no source is
+/// queried and no document opened. The run's timestamp stamps every
+/// hash entry it writes, as [`reconcile_events`]'s does.
+fn adopt_events<C: Cache>(library: &Group, adapters: &Adapters<'_, C>, sink: &mut dyn Sink) {
+    let at = (adapters.now)();
+    let mut lookups = Lookups::new(&library.tables);
+    let adoptions = crate::library::adopt(
+        &library.directory,
+        &|hash| adapters.index.get(hash),
+        &mut |record, hash| {
+            crate::bib::citation_key(record, Some(hash), &library.citation_keys, &mut lookups)
+        },
+        borax_core::library::RunId::new(&at),
+        &at,
+        env!("CARGO_PKG_VERSION"),
+    );
+
+    let (events, totals) = crate::library::adoption_events(&adoptions);
+    for event in events {
+        sink.emit(event);
+    }
+    let mut missed = Missed::default();
+    missed.absorb(lookups.take());
+    missed.report(sink);
+    sink.emit(totals);
 }
 
 /// Carry out `cli` against the real world.
@@ -2936,19 +3377,14 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
     let sources: Vec<&dyn Source> = owned.iter().map(Box::as_ref).collect();
 
     let index = ContentIndex::new(response_cache());
-    // The collection the run sits in decides where its accounting
-    // goes, so it is discovered from the same directory the
-    // configuration was, under the `collection-root` that configuration
-    // may have named.
-    let collection_root = crate::config::collection_root(
+    // The library the run sits in decides where its state goes, so it
+    // is discovered from the same directory the configuration was,
+    // under the `library-root` that configuration may have named.
+    let collection_root = crate::config::library_root(
         &working,
-        effective.config().collection_root.as_deref(),
+        effective.config().library_root.as_deref(),
         |candidate| candidate.is_file(),
     );
-    let ledger = collection_root
-        .as_deref()
-        .map(FileLedger::at_collection_root);
-
     let mut asker = TerminalAsker;
     let mut session = session_for(
         &command,
@@ -2970,14 +3406,13 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
         },
         &configs,
         &Adapters {
-            library: &RealLibrary,
+            documents: &RealDocuments,
             sources: &sources,
             index: &index,
             filesystem: &RealFilesystem,
             bib_files: &RealBibFiles,
             cache_root: default_cache_root(),
             now: timestamp,
-            ledger: ledger.as_ref().map(|ledger| ledger as &dyn Ledger),
             collection_root,
             state_root: crate::runlog::default_state_root(),
         },
@@ -3095,7 +3530,15 @@ pub fn start_directory(
 /// [`start_directory`] over the real filesystem and working directory.
 fn start_directory_for(command: &Command) -> PathBuf {
     let working = std::env::current_dir().unwrap_or_default();
-    start_directory(command.paths(), &|path| path.is_dir(), &working)
+    // A library command names its library rather than input files, and
+    // that directory is where its configuration — and so its library
+    // root — is discovered from.
+    match command.directory() {
+        Some(directory) => {
+            start_directory(&[directory.to_path_buf()], &|path| path.is_dir(), &working)
+        }
+        None => start_directory(command.paths(), &|path| path.is_dir(), &working),
+    }
 }
 
 /// `command` with each path it was given replaced by the files that path
@@ -3124,7 +3567,7 @@ fn expanded(command: &Command) -> Command {
             resolution,
             rename,
             bibliography,
-            accounting,
+            record,
             run_log,
         } => Command::Rename {
             paths: inputs(paths),
@@ -3132,7 +3575,7 @@ fn expanded(command: &Command) -> Command {
             resolution: resolution.clone(),
             rename: rename.clone(),
             bibliography: bibliography.clone(),
-            accounting: accounting.clone(),
+            record: record.clone(),
             run_log: run_log.clone(),
         },
         Command::Bib {
@@ -3146,14 +3589,57 @@ fn expanded(command: &Command) -> Command {
             bibliography: bibliography.clone(),
             run_log: run_log.clone(),
         },
-        Command::Config { .. } | Command::Cache { .. } | Command::Ledger { .. } => command.clone(),
+        Command::Config { .. } | Command::Cache { .. } => command.clone(),
+        // A library command's path is a library and not an input file,
+        // so nothing expands it to the documents beneath it; what is
+        // settled here is the default, which is where the run was
+        // started.
+        Command::Status {
+            path,
+            identify,
+            extraction,
+            run_log,
+        } => Command::Status {
+            path: Some(library_directory(path.as_deref())),
+            identify: *identify,
+            extraction: extraction.clone(),
+            run_log: run_log.clone(),
+        },
+        Command::Validate { path, run_log } => Command::Validate {
+            path: Some(library_directory(path.as_deref())),
+            run_log: run_log.clone(),
+        },
+        Command::Reconcile {
+            path,
+            rehash,
+            run_log,
+        } => Command::Reconcile {
+            path: Some(library_directory(path.as_deref())),
+            rehash: *rehash,
+            run_log: run_log.clone(),
+        },
+        Command::Adopt { path, run_log } => Command::Adopt {
+            path: Some(library_directory(path.as_deref())),
+            run_log: run_log.clone(),
+        },
     }
+}
+
+/// The library a command names: `path` when it was given one, and the
+/// working directory when it was not.
+///
+/// A working directory that cannot be read is the empty path, which
+/// holds no artifacts and no stores: a run with nowhere to stand
+/// reports an empty library rather than ending.
+fn library_directory(path: Option<&Path>) -> PathBuf {
+    path.map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
 }
 
 /// The time a real run stamps its records with: the current UTC
 /// instant in ISO 8601 basic form ([`borax_core::time::utc_basic`]).
 ///
-/// Legible in a ledger entry, sortable as a string, and legal as part
+/// Legible in a record, sortable as a string, and legal as part
 /// of a filename on every platform — which it has to be, since a run
 /// log is named after it.
 ///

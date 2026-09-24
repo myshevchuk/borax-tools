@@ -26,7 +26,7 @@ use tempfile::tempdir;
 
 /// A [`Filesystem`] fake backed by a map from directory to the names
 /// present there (with optional content hashes), following the shape of
-/// `FakeLibrary` in `pipeline.rs`.
+/// `FakeDocuments` in `pipeline.rs`.
 ///
 /// Every [`Filesystem::rename`] call is recorded in order, so a test can
 /// assert exactly which moves happened — including that none did. A
@@ -1255,6 +1255,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
             named: 1,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
 }
@@ -1296,6 +1297,7 @@ fn a_preview_runs_counts_report_zero_renamed_however_many_moves_were_planned() {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
 }

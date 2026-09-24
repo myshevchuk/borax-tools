@@ -7,6 +7,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Libraries now keep logical works as items under
+  `items/<key>.<uuid>.toml` and physical files as artifact records under
+  `.borax/artifacts/<uuid>.toml`. The item UUID is authoritative; the
+  citation key in its file name is a creation-time label and is not
+  updated later. Each artifact record has its own stable UUID, links to
+  an item, and stores a library-relative path, size, modification time,
+  and a history of content hashes with the run, timestamp, and borax
+  version that recorded each hash. These text files are authoritative
+  library state. Citation sidecars remain optional derived output and
+  are not read to reconstruct the library.
+
+- `borax status [PATH]` reports artifact, item, artifact-record, and
+  orphan counts and lists nested libraries without opening a document.
+  It can report an unmarked directory without initializing or writing
+  to it.
+  `--identify` additionally opens the artifacts and runs the extraction
+  passes to count those that yield an identifier, but queries no
+  service.
+
+- `borax validate [PATH]` reports malformed library state without
+  repairing it: dangling item links, duplicate identities, file names
+  that disagree with the identities inside them, non-relative artifact
+  paths, empty or malformed hash histories, history entries without a
+  run, and unreadable store files. Orphans, missing artifacts, and items
+  with no linked artifact are counts rather than findings. Findings use
+  the partial-success exit code.
+
+- `borax reconcile [PATH]` repairs artifact-record paths after files
+  have been moved outside borax. It uses matching size and modification
+  time before hashing, then matches any hash in a record's history,
+  appends a hash for an artifact edited in place, and leaves ambiguous
+  matches unchanged while reporting their candidates. `--rehash` hashes
+  every artifact, including same-size files changed in place within the
+  filesystem's modification-time granularity. Reconciliation creates no
+  artifact record for an orphan, deletes no record, and writes no store
+  file in an untouched library.
+
+- `borax adopt [PATH]` records orphans that the local content index
+  already knows. It writes artifact records and links or creates items,
+  but queries no service, opens no document, and moves, renames, or
+  deletes nothing. Unknown orphans remain orphans. An orphan whose bytes
+  already occur in a record's hash history is reported as held by that
+  record and is not adopted; run `reconcile` if it is a recorded
+  artifact moved outside borax. Adoption is idempotent, refuses to write
+  outside a library, and adopts nothing after `borax cache --clear`
+  empties the content index.
+
+### Changed
+
+- A `.borax.toml` now marks a library rather than a collection. The
+  nearest marker still establishes the root, and every recorded path is
+  relative to it. A nested marker begins a separate library: the parent
+  excludes that subtree from status, adoption, reconciliation, and
+  rename admission. Boundaries remain lexical; symlinks are not followed
+  and are neither artifacts nor orphans.
+
+- Applying `borax rename` inside a library now writes an artifact record
+  for every file it moves or finds already named, linking it to an
+  existing item for the work or to a newly created item. Preview runs
+  write no library state. Files outside the library are still renamed in
+  place but are reported as outside it and receive no item or artifact
+  record. An operator-supplied identifier or an accepted title conflict
+  can re-link an existing artifact record to the corrected item.
+
+- Duplicate detection now reads the artifact and item stores. A content
+  duplicate matches any hash in an artifact record's history; a work
+  duplicate matches an identifier on an item that has an artifact still
+  present. Batch runs skip a second artifact of a work. Checks include
+  files accepted or planned earlier in the same run, so an applying run
+  admits the first of a byte-identical pair or two files for one work
+  and reports the second as a duplicate; a preview reports the same
+  decisions without writing.
+
+- **BREAKING:** An interactive rename now asks about a work duplicate
+  instead of skipping it: the file can be filed as another artifact of
+  the existing item, and skipping is the default choice. A batch run
+  still skips it.
+
+- `record = false` or `--no-record` disables both duplicate checks and
+  all item and artifact-record writes. A move is still refused with the
+  new `stranding` skip reason when an existing record names the file's
+  current path but holds no hash of its current bytes. Run
+  `borax reconcile --rehash` before retrying that move.
+
+- **BREAKING:** The `collection-root` setting is now `library-root`, the
+  `ledger` setting is now `record`, and `--ledger` / `--no-ledger` are
+  now `--record` / `--no-record`. The old names have no aliases and are
+  refused.
+
+- **BREAKING:** The JSON Lines event schema is now version 3. It adds
+  `library-status` (`root`, `artifacts`, `items`, `records`, `orphans`,
+  `nested`, `identifiable`), `library-finding` (`path`, `finding`), and
+  `library-validated` (`root`, `findings`, `orphans`, `missing`,
+  `unlinked`). Reconciliation adds `library-repair` (`id`, `path`,
+  `repair`) and `library-reconciled` (`root`, `records`, `confirmed`,
+  `repaired`, `changed`, `ambiguous`, `missing`, `hashed`). Rename adds
+  `library-admission` (`path`, `admission`), whose kinds are `relinked`,
+  `outside`, and `unwritten`. Adoption adds `library-adoption` (`path`,
+  `adoption`), whose kinds are `recorded`, `held`, `unreadable`, and
+  `unwritten`, followed by `library-adopted` (`root`, `adopted`,
+  `orphans`). The schema also adds the `stranding` skip reason and
+  removes `ledger-rebuilt`.
+
+- `borax bib` still takes files rather than items. An item with no
+  artifact therefore produces no bibliography entry.
+
+### Removed
+
+- **BREAKING:** `borax ledger rebuild` and the ledger format are
+  retired. borax no longer reads, writes, rebuilds, or deletes
+  `.borax/ledger.jsonl`; an existing file may be deleted by hand. There
+  is no automatic migration. Run `borax adopt` to record files the
+  content index still knows without querying or moving them, or run
+  `borax rename --apply` to resolve and record files while applying the
+  current naming templates. Run `borax reconcile` afterwards to repair
+  paths changed outside borax.
+
 ## [0.5.1] - 2026-09-17
 
 ### Changed

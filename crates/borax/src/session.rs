@@ -62,15 +62,18 @@ impl Outcome {
 
 /// How a run that completed ended, from its totals.
 ///
-/// [`Counts::skipped`] and [`Counts::unreached`] decide it, and each
-/// means a file the run did not finish with: one it looked at and left,
-/// and one it never reached because the run ended early. A run over an
-/// empty directory resolves nothing, skips nothing, reaches the end of
-/// its inputs, and succeeds, because there was nothing it failed to do.
-/// [`Outcome::Fatal`] is not reachable from totals — a run that
+/// [`Counts::skipped`], [`Counts::unreached`] and [`Counts::findings`]
+/// decide it. The first two mean a file the run did not finish with:
+/// one it looked at and left, and one it never reached because the run
+/// ended early. The third is a library that needs attention rather
+/// than a file, which is the same answer to the shell: something the
+/// run was asked about is not settled. A run over an empty directory
+/// resolves nothing, skips nothing, finds nothing, reaches the end of
+/// its inputs, and succeeds, because there was nothing it failed to
+/// do. [`Outcome::Fatal`] is not reachable from totals — a run that
 /// produced totals is a run that happened.
 pub fn outcome_for(counts: &Counts) -> Outcome {
-    match counts.skipped + counts.unreached {
+    match counts.skipped + counts.unreached + counts.findings {
         0 => Outcome::Success,
         _ => Outcome::Partial,
     }
@@ -142,6 +145,13 @@ pub enum Answer {
     /// Leave the file with the name it has, which is already the name
     /// its record implies. Offered where there was no move to make.
     Keep,
+    /// File it as another artifact of the item the library already
+    /// holds for this work, which returns it to the ordinary question
+    /// about its move. Offered only where a work the library holds has
+    /// a file to compare against, and never the default: borax cannot
+    /// tell a second manifestation of a work from an unwanted second
+    /// copy of it, so only a person answers this.
+    File,
     /// Say what the file is, and decide again from the record that
     /// identifier resolves to.
     Supply,
@@ -302,6 +312,7 @@ impl fmt::Display for Choice {
                 )
             }
             Answer::Keep => formatter.write_str("Keep this name"),
+            Answer::File => formatter.write_str("File as another artifact of this work"),
             Answer::Supply => formatter.write_str("Supply an identifier"),
             Answer::Retry => formatter.write_str("Try the services again"),
             Answer::Skip => formatter.write_str("Skip"),

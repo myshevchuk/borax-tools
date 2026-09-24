@@ -16,7 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::cli::Command;
-use crate::ledger::ACCOUNTING_DIR;
+use crate::library::STATE_DIR as ACCOUNTING_DIR;
 
 /// The directory run logs are kept in: under the collection's
 /// [`ACCOUNTING_DIR`], or directly under the state root for a run that
@@ -129,11 +129,10 @@ pub struct Destination {
 /// True for a rename run that may move files — one given `--apply`, and
 /// an interactive one, whose every yes is the authorisation for a move
 /// — and for nothing else. The reason is not that the run changes
-/// something — `bib` and `ledger rebuild` both do — but that renaming
-/// is the one thing borax does that leaves no account of itself in the
-/// files afterwards: a bibliography file and the ledger can each be
-/// produced again from the collection, while the name a file used to
-/// carry is nowhere but this log. A run whose log is only a record
+/// something — `bib` does — but that renaming is the one thing borax
+/// does that leaves no account of itself in the files afterwards: a
+/// bibliography file can be produced again from the library, while the
+/// name a file used to carry is nowhere but this log. A run whose log is only a record
 /// loses a record when the disk refuses it; a run that moves files with
 /// its log missing has moved files that nothing now describes, which is
 /// why it is the one run that would rather not happen at all.

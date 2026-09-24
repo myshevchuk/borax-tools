@@ -6,7 +6,7 @@
 //! composition: which order the passes run in, what short-circuits
 //! them, and which outcome each failure produces.
 //!
-//! The filesystem enters through [`Library`] alone. Every other input —
+//! The filesystem enters through [`Documents`] alone. Every other input —
 //! the sources, the cache, the extraction limits — is already a trait
 //! or a value, so a whole batch runs in a test with no disk and no
 //! network.
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
-use borax_core::ledger::DuplicateReason;
+use borax_core::library::DuplicateReason;
 use borax_core::record::{Record, Source as FieldSource};
 use borax_pdf::pure::PurePdf;
 use borax_pdf::scan::xmp_title;
@@ -29,17 +29,20 @@ use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 
 use crate::event::{Attempt, Claim, ClaimOrigin, Counts, Event, Overridden, SkipReason};
-use crate::ledger::Collection;
+use crate::library::{Account, WorkDuplicate};
 
-/// The files a run works on, as something that can be read.
+/// The documents a run works on, as something that can be read.
+///
+/// Not the library a run writes to: this is the seam file bytes are
+/// read through, and [`crate::library`] is the tree they sit in.
 ///
 /// The one seam to the filesystem. A run hashes a file before it opens
 /// it, because a hash that matches the content index makes opening it
 /// unnecessary.
 ///
 /// `Sync` because resolution runs files on a bounded pool of threads
-/// ([`borax_sources::pace::map_bounded`]) that share one library.
-pub trait Library: Sync {
+/// ([`borax_sources::pace::map_bounded`]) that share one reader.
+pub trait Documents: Sync {
     /// The content hash of the file at `path`.
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError>;
 
@@ -176,11 +179,11 @@ pub struct Indexed {
 /// and the hash is taken either way.
 pub fn from_index<C: Cache>(
     path: &Path,
-    library: &dyn Library,
+    documents: &dyn Documents,
     index: &ContentIndex<C>,
     config: &ResolveConfig,
 ) -> Indexed {
-    let hash = library.hash(path).ok();
+    let hash = documents.hash(path).ok();
     let record = match config.cache {
         true => hash.as_ref().and_then(|hash| index.get(hash)),
         false => None,
@@ -220,10 +223,10 @@ pub fn indexed_record(record: Record, hash: Option<ContentHash>) -> FileRecord {
 /// has something to compare the record against.
 pub fn from_file(
     path: &Path,
-    library: &dyn Library,
+    documents: &dyn Documents,
     config: &ExtractionConfig,
 ) -> Result<(Extracted, Vec<Claim>), ExtractionError> {
-    let pdf = library.open(path)?;
+    let pdf = documents.open(path)?;
     let claims = claimed_titles(pdf.as_ref());
     Ok((extract(pdf.as_ref(), config)?, claims))
 }
@@ -305,12 +308,12 @@ pub fn disagreement(claims: &[Claim], record: &Record) -> Option<SkipReason> {
 /// alone wants this one.
 pub fn resolve_file<C: Cache>(
     path: &Path,
-    library: &dyn Library,
+    documents: &dyn Documents,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
     config: &ResolveConfig,
 ) -> FileOutcome {
-    standing(path, library, sources, index, config, None).verdict
+    standing(path, documents, sources, index, config, None).verdict
 }
 
 /// Everything the passes produced about one file, for a caller that
@@ -350,6 +353,25 @@ pub struct Standing {
     /// [`SkipReason::Conflict`], since that is the one verdict holding
     /// a record a run declined to use.
     pub refused: Option<FileRecord>,
+    /// The work the library already holds a file for, with the record
+    /// this file resolved to. `Some` exactly when the library's own
+    /// work check made the verdict a duplicate, which is the one
+    /// verdict an operator may answer by filing the file anyway: doing
+    /// so admits it under this record, as another artifact of that
+    /// work.
+    pub duplicated: Option<Duplicated>,
+}
+
+/// A work the library already holds a file for, and the record an
+/// incoming second file of it resolved to.
+///
+/// The two travel together because the question put about one needs
+/// both: the work is what the operator is deciding against, and the
+/// record is what filing the file would admit it under.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Duplicated {
+    pub file: FileRecord,
+    pub work: WorkDuplicate,
 }
 
 impl Standing {
@@ -362,41 +384,90 @@ impl Standing {
             found: None,
             unresolved: None,
             refused: None,
+            duplicated: None,
         }
+    }
+}
+
+/// The skip reporting the same bytes as the file at `path` — whose
+/// hash is `hash` — already held by `account`.
+///
+/// A file with no hash is no duplicate: there is nothing to match on.
+fn content_duplicate(
+    path: &Path,
+    hash: Option<&ContentHash>,
+    account: &Account<'_>,
+) -> Option<SkipReason> {
+    Some(duplicate(
+        DuplicateReason::Content,
+        &account.content_duplicate(path, hash?)?,
+    ))
+}
+
+/// The work the library already holds a file of, for a record the
+/// operator reached rather than one the run resolved on its own.
+///
+/// The same work check [`standing`] makes, asked where a record arrives
+/// having bypassed it: supplied, retried, or accepted over a conflict.
+/// `None` leaves the record to be acted on.
+///
+/// The caller decides what the answer means. A record the run resolved
+/// on its own makes the file a work duplicate, which a batch run skips
+/// and an interactive one offers to file; a record the operator reached
+/// is the operator saying what the file is, so the collision is
+/// reported to them rather than deciding anything.
+pub fn second_copy(
+    path: &Path,
+    record: &Record,
+    account: Option<&Account<'_>>,
+) -> Option<WorkDuplicate> {
+    account?.work_duplicate(path, &identifiers_of(record))
+}
+
+/// The skip reporting the file at `existing` as a duplicate of
+/// `reason`'s kind.
+fn duplicate(reason: DuplicateReason, existing: &Path) -> SkipReason {
+    SkipReason::Duplicate {
+        reason,
+        existing_path: existing.to_path_buf(),
     }
 }
 
 /// Resolve one file, keeping the working [`resolve_file`] discards.
 ///
-/// The four passes in the order [`resolve_file`] documents, with
-/// `collection`'s two duplicate checks around them where there is a
-/// collection to check against — before the file is opened, on its
-/// content, and after resolution, on the record's identifiers. `None`
-/// is a run that admits nothing anywhere, which runs neither check.
+/// The four passes in the order [`resolve_file`] documents, with the
+/// library's two duplicate checks around them where the run keeps an
+/// account — before the file is opened, on its content, and after
+/// resolution, on the record's identifiers. `None` is a run that admits
+/// nothing anywhere, which runs neither check rather than running both
+/// against an empty store.
 ///
 /// The file is hashed once, whether or not the index is consulted and
 /// whether or not a duplicate check wants it: the hash identifies the
 /// file for every later decision about it.
 pub fn standing<C: Cache>(
     path: &Path,
-    library: &dyn Library,
+    documents: &dyn Documents,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
     config: &ResolveConfig,
-    collection: Option<&Collection<'_>>,
+    account: Option<&Account<'_>>,
 ) -> Standing {
-    let Indexed { hash, record } = from_index(path, library, index, config);
+    let Indexed { hash, record } = from_index(path, documents, index, config);
     if let Some(duplicate) =
-        collection.and_then(|collection| content_duplicate(path, hash.as_ref(), collection))
+        account.and_then(|account| content_duplicate(path, hash.as_ref(), account))
     {
         return Standing::of(FileOutcome::Skipped(duplicate), hash);
     }
     if let Some(record) = record {
-        let file = indexed_record(record, hash.clone());
-        return Standing::of(admissible(path, file, collection), hash);
+        let (verdict, duplicated) = admissible(path, indexed_record(record, hash.clone()), account);
+        return Standing {
+            duplicated,
+            ..Standing::of(verdict, hash)
+        };
     }
 
-    let (extracted, claims) = match from_file(path, library, &config.extraction) {
+    let (extracted, claims) = match from_file(path, documents, &config.extraction) {
         Ok(found) => found,
         Err(error) => return Standing::of(FileOutcome::Skipped(skipped_for(&error)), hash),
     };
@@ -413,6 +484,7 @@ pub fn standing<C: Cache>(
                 found,
                 unresolved: Some(unresolved),
                 refused: None,
+                duplicated: None,
             };
         }
     };
@@ -438,6 +510,7 @@ pub fn standing<C: Cache>(
             found,
             unresolved: None,
             refused: Some(file),
+            duplicated: None,
         };
     }
 
@@ -445,25 +518,38 @@ pub fn standing<C: Cache>(
         index.put(hash, &file.record);
     }
 
+    let (verdict, duplicated) = admissible(path, file, account);
     Standing {
-        verdict: admissible(path, file, collection),
+        verdict,
         hash,
         found,
         unresolved: None,
         refused: None,
+        duplicated,
     }
 }
 
-/// `file` as the verdict it is, unless `collection` already holds
+/// `file` as the verdict it is, unless the library already holds
 /// another file for the same work.
 ///
 /// The later of the two duplicate checks: it needs a record, so it is
 /// answerable only once one is in hand, which is the earliest a second
 /// PDF of one paper can be recognised at all.
-fn admissible(path: &Path, file: FileRecord, collection: Option<&Collection<'_>>) -> FileOutcome {
-    match collection.and_then(|collection| work_duplicate(path, &file.record, collection)) {
-        Some(duplicate) => FileOutcome::Skipped(duplicate),
-        None => FileOutcome::Resolved(file),
+///
+/// The work comes back beside the verdict as well as in it, since the
+/// file is one an operator may yet file as another artifact of that
+/// work and the question about it is put from both.
+fn admissible(
+    path: &Path,
+    file: FileRecord,
+    account: Option<&Account<'_>>,
+) -> (FileOutcome, Option<Duplicated>) {
+    match account.and_then(|account| account.work_duplicate(path, &identifiers_of(&file.record))) {
+        Some(work) => (
+            FileOutcome::Skipped(duplicate(DuplicateReason::Work, &work.existing)),
+            Some(Duplicated { file, work }),
+        ),
+        None => (FileOutcome::Resolved(file), None),
     }
 }
 
@@ -478,8 +564,8 @@ fn admissible(path: &Path, file: FileRecord, collection: Option<&Collection<'_>>
 ///
 /// An unreadable file claims nothing, which is the same answer as a
 /// file carrying no titles: neither is evidence against a record.
-pub fn claims_of(path: &Path, library: &dyn Library) -> Vec<Claim> {
-    match library.open(path) {
+pub fn claims_of(path: &Path, documents: &dyn Documents) -> Vec<Claim> {
+    match documents.open(path) {
         Ok(pdf) => claimed_titles(pdf.as_ref()),
         Err(_) => Vec::new(),
     }
@@ -500,7 +586,7 @@ pub fn claims_of(path: &Path, library: &dyn Library) -> Vec<Claim> {
 pub fn resolve_supplied(
     path: &Path,
     identifier: &Identifier,
-    library: &dyn Library,
+    documents: &dyn Documents,
     sources: &[&dyn Source],
 ) -> Result<Supplied, Unresolved> {
     let resolved = from_sources(sources, identifier)?;
@@ -508,7 +594,7 @@ pub fn resolve_supplied(
     // answered for was never opened, and one no identifier was found in
     // was never asked about its titles, so the comparison has nothing
     // to work from until it is wanted (design D2a).
-    let claims = claims_of(path, library);
+    let claims = claims_of(path, documents);
     let conflict = disagreement(&claims, &resolved.record);
 
     Ok(Supplied {
@@ -522,7 +608,7 @@ pub fn resolve_supplied(
             // Taken here because a rename needs it: the planner
             // recognises an already-named file by content, and a record
             // the operator then accepts is remembered under it.
-            hash: library.hash(path).ok(),
+            hash: documents.hash(path).ok(),
             // Nothing has been overridden yet. Accepting this record
             // over `conflict` is the caller's decision, and the caller
             // records it.
@@ -559,85 +645,10 @@ pub fn remember<C: Cache>(index: &ContentIndex<C>, hash: Option<&ContentHash>, r
     }
 }
 
-/// Resolve one file, checking `collection` for it on the way.
-///
-/// [`resolve_file`] with the ledger's two duplicate checks around it,
-/// in the two places the answers become available:
-///
-/// 1. **Content**: the file's hash is looked up before anything else
-///    happens, so a byte-identical re-download is recognised without
-///    the file being opened or a single source asked.
-/// 2. **Work**: the identifiers of the resolved record are looked up
-///    after resolution, which is the earliest a second PDF of an
-///    archived paper can be recognised at all.
-///
-/// A match is [`SkipReason::Duplicate`] carrying the reason and the
-/// existing file's full path; the incoming file is left where it is.
-/// Only a match whose recorded file is still in the collection counts,
-/// so an entry left behind by a deleted or moved file does not keep the
-/// incoming one out. Everything else — a skip, an unhashable file, a
-/// ledger with no entries — is [`resolve_file`]'s outcome unchanged.
-pub fn resolve_file_checking_ledger<C: Cache>(
-    path: &Path,
-    library: &dyn Library,
-    sources: &[&dyn Source],
-    index: &ContentIndex<C>,
-    config: &ResolveConfig,
-    collection: &Collection<'_>,
-) -> FileOutcome {
-    standing(path, library, sources, index, config, Some(collection)).verdict
-}
-
-/// The file `collection` already holds with the same content as the
-/// file at `path`, as the skip that reports it.
-///
-/// Answerable before the file is opened, which is the point: a
-/// byte-identical re-download is recognised without a single source
-/// being asked. A file with no hash is no duplicate — there is nothing
-/// to match on — and neither is one whose recorded twin has since left
-/// the collection.
-pub fn content_duplicate(
-    path: &Path,
-    hash: Option<&ContentHash>,
-    collection: &Collection<'_>,
-) -> Option<SkipReason> {
-    let duplicate = collection
-        .ledger
-        .content_duplicate(hash?, &|recorded| collection.counts_against(recorded, path))?;
-    Some(SkipReason::Duplicate {
-        reason: DuplicateReason::Content,
-        existing_path: collection.live_path(&duplicate)?,
-    })
-}
-
-/// The file `collection` already holds for the same work as `record`,
-/// as the skip that reports it.
-///
-/// Answerable only once a record is in hand, which is the earliest a
-/// second PDF of one paper can be recognised at all. A record the
-/// operator supplied is judged here exactly as an extracted one is: the
-/// ledger's verdict is about the collection, not about where the
-/// identifier came from.
-pub fn work_duplicate(
-    path: &Path,
-    record: &Record,
-    collection: &Collection<'_>,
-) -> Option<SkipReason> {
-    let duplicate = collection
-        .ledger
-        .work_duplicate(&identifiers_of(record), &|recorded| {
-            collection.counts_against(recorded, path)
-        })?;
-    Some(SkipReason::Duplicate {
-        reason: DuplicateReason::Work,
-        existing_path: collection.live_path(&duplicate)?,
-    })
-}
-
 /// Every identifier `record` carries, in the order DOI, arXiv, PMID,
-/// ISBN — the same order [`borax_core::ledger::Entry::identifiers`]
-/// uses, so the ledger is asked about an incoming file's identifiers in
-/// the order it recorded an admitted one's.
+/// ISBN — the order [`crate::library::admit`] searches the item store
+/// in, so an incoming file's identifiers are checked in the order an
+/// admitted one's are looked up.
 fn identifiers_of(record: &Record) -> Vec<Identifier> {
     let mut identifiers = Vec::new();
     if let Some(doi) = &record.doi {
@@ -870,14 +881,14 @@ pub struct Run {
 /// faster than it allows.
 pub fn resolve_batch<C: Cache>(
     paths: &[PathBuf],
-    library: &dyn Library,
+    documents: &dyn Documents,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
     config: &(dyn Fn(&Path) -> ResolveConfig + Sync),
     concurrency: usize,
 ) -> Run {
     let outcomes = map_bounded(paths.to_vec(), concurrency, |path| {
-        let outcome = resolve_file(&path, library, sources, index, &config(&path));
+        let outcome = resolve_file(&path, documents, sources, index, &config(&path));
         (path, outcome)
     });
 
@@ -895,12 +906,12 @@ pub fn resolve_batch<C: Cache>(
     Run { events, counts }
 }
 
-/// A [`Library`] backed by the real filesystem and the pure-Rust PDF
+/// [`Documents`] backed by the real filesystem and the pure-Rust PDF
 /// engine.
 #[derive(Debug, Clone, Copy)]
-pub struct RealLibrary;
+pub struct RealDocuments;
 
-impl Library for RealLibrary {
+impl Documents for RealDocuments {
     /// The file's content hash, read in chunks so a large PDF is never
     /// held in memory whole.
     ///

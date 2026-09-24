@@ -127,13 +127,6 @@ fn lookup_missed() -> Event {
     }
 }
 
-fn ledger_rebuilt() -> Event {
-    Event::LedgerRebuilt {
-        root: PathBuf::from("/collection"),
-        entries: 3,
-    }
-}
-
 fn run_finished() -> Event {
     Event::RunFinished {
         counts: Counts {
@@ -143,6 +136,7 @@ fn run_finished() -> Event {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         },
     }
 }
@@ -188,7 +182,6 @@ fn all_events() -> Vec<Event> {
         cache_status(),
         cache_cleared(),
         lookup_missed(),
-        ledger_rebuilt(),
         run_finished(),
     ]
 }
@@ -271,7 +264,6 @@ fn json_line_event_tag_is_the_variant_name_in_kebab_case() {
         (cache_status(), "cache-status"),
         (cache_cleared(), "cache-cleared"),
         (lookup_missed(), "lookup-missed"),
-        (ledger_rebuilt(), "ledger-rebuilt"),
         (run_finished(), "run-finished"),
     ];
 
@@ -337,7 +329,7 @@ fn json_line_of_run_finished_has_exactly_the_documented_field_set() {
 
     assert_eq!(
         object["counts"],
-        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1, "named": 0, "unmatched": 0, "unreached": 0})
+        serde_json::json!({"resolved": 3, "renamed": 2, "skipped": 1, "named": 0, "unmatched": 0, "unreached": 0, "findings": 0})
     );
 }
 
@@ -394,19 +386,6 @@ fn json_line_of_cache_cleared_has_exactly_the_documented_field_set() {
     assert_eq!(object["root"], Value::from("/cache"));
     assert_eq!(object["entries"], Value::from(4));
     assert_eq!(object["bytes"], Value::from(1024));
-}
-
-#[test]
-fn json_line_of_ledger_rebuilt_has_exactly_the_documented_field_set() {
-    let value: Value = serde_json::from_str(&json_line(&ledger_rebuilt())).unwrap();
-    let object = value.as_object().unwrap();
-
-    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    assert_eq!(keys, vec!["entries", "event", "root", "schema"]);
-
-    assert_eq!(object["root"], Value::from("/collection"));
-    assert_eq!(object["entries"], Value::from(3));
 }
 
 /// design: `Renamed` carries the hash the file resolved to, required
@@ -683,14 +662,6 @@ fn human_line_of_cache_cleared_mentions_the_root_and_the_counts() {
 }
 
 #[test]
-fn human_line_of_ledger_rebuilt_mentions_the_root_and_the_count() {
-    let line = human_line(&ledger_rebuilt()).unwrap();
-    assert!(!line.contains('\n'));
-    assert!(line.contains("/collection"));
-    assert!(line.contains('3'));
-}
-
-#[test]
 fn human_line_of_run_finished_is_not_silent() {
     assert!(human_line(&run_finished()).is_some());
 }
@@ -793,6 +764,7 @@ fn counts_default_is_all_zeroes() {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
 }
@@ -806,11 +778,12 @@ fn counts_serializes_with_all_six_fields() {
         named: 0,
         unmatched: 4,
         unreached: 0,
+        findings: 0,
     };
     let value: Value = serde_json::to_value(counts).unwrap();
     assert_eq!(
         value,
-        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "named": 0, "unmatched": 4, "unreached": 0})
+        serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "named": 0, "unmatched": 4, "unreached": 0, "findings": 0})
     );
 }
 
@@ -856,6 +829,7 @@ fn counts_observe_counts_a_lookup_missed_as_unmatched() {
             named: 0,
             unmatched: 2,
             unreached: 0,
+            findings: 0,
         }
     );
 }
@@ -872,6 +846,7 @@ fn the_summary_line_names_unmatched_lookups_when_there_were_any() {
             named: 0,
             unmatched: 1,
             unreached: 0,
+            findings: 0,
         },
     })
     .unwrap();
@@ -892,6 +867,7 @@ fn the_summary_line_says_nothing_about_unmatched_lookups_when_there_were_none() 
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         },
     })
     .unwrap();
@@ -1009,6 +985,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
                 named: 0,
                 unmatched: 0,
                 unreached: 0,
+                findings: 0,
             },
         },
     ];

@@ -9,14 +9,16 @@ use std::thread;
 use std::time::Duration;
 
 use borax::event::{Attempt, Claim, ClaimOrigin, Counts, Event, SkipReason};
-use borax::ledger::Collection;
+use borax::library::Stores;
 use borax::pipeline::{
-    FileOutcome, FileRecord, Library, Provenance, RealLibrary, ResolveConfig, claims_of, event_for,
-    remember, resolve_batch, resolve_file, resolve_file_checking_ledger, resolve_supplied,
+    Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, claims_of,
+    event_for, remember, resolve_batch, resolve_file, resolve_supplied, standing,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
-use borax_core::ledger::{DuplicateReason, Entry, Index, RunId};
+use borax_core::library::{
+    ArtifactId, ArtifactRecord, DuplicateReason, HashEntry, Item, ItemId, RunId as LibraryRunId,
+};
 use borax_core::record::{EntryType, Record};
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_pdf::tiered::{ExtractionConfig, Tier};
@@ -24,6 +26,7 @@ use borax_sources::cache::MemoryCache;
 use borax_sources::source::{Source, SourceError, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 use tempfile::tempdir;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------
 // Fakes
@@ -105,24 +108,24 @@ fn pdf_with_no_identifier() -> FakePdf {
     FakePdf::new().with_pages(vec![Ok("just some prose, no identifiers here".to_string())])
 }
 
-/// What [`FakeLibrary`] answers for one path.
+/// What [`FakeDocuments`] answers for one path.
 struct LibraryEntry {
     hash: Result<ContentHash, ExtractionError>,
     pdf: Result<FakePdf, ExtractionError>,
 }
 
-/// A [`Library`] fake backed by a map from path to a fixed `(hash, PDF
+/// A [`Documents`] fake backed by a map from path to a fixed `(hash, PDF
 /// content or error)` pair, with call counters so a test can prove a
 /// content-index hit never touched the file.
-struct FakeLibrary {
+struct FakeDocuments {
     entries: BTreeMap<PathBuf, LibraryEntry>,
     hash_calls: AtomicUsize,
     open_calls: AtomicUsize,
 }
 
-impl FakeLibrary {
-    fn new() -> FakeLibrary {
-        FakeLibrary {
+impl FakeDocuments {
+    fn new() -> FakeDocuments {
+        FakeDocuments {
             entries: BTreeMap::new(),
             hash_calls: AtomicUsize::new(0),
             open_calls: AtomicUsize::new(0),
@@ -135,7 +138,7 @@ impl FakeLibrary {
         path: impl Into<PathBuf>,
         hash: ContentHash,
         pdf: FakePdf,
-    ) -> FakeLibrary {
+    ) -> FakeDocuments {
         self.entries.insert(
             path.into(),
             LibraryEntry {
@@ -152,7 +155,7 @@ impl FakeLibrary {
         path: impl Into<PathBuf>,
         hash: ContentHash,
         error: ExtractionError,
-    ) -> FakeLibrary {
+    ) -> FakeDocuments {
         self.entries.insert(
             path.into(),
             LibraryEntry {
@@ -169,7 +172,7 @@ impl FakeLibrary {
         path: impl Into<PathBuf>,
         error: ExtractionError,
         pdf: FakePdf,
-    ) -> FakeLibrary {
+    ) -> FakeDocuments {
         self.entries.insert(
             path.into(),
             LibraryEntry {
@@ -180,19 +183,19 @@ impl FakeLibrary {
         self
     }
 
-    /// Number of times [`Library::hash`] has been called.
+    /// Number of times [`Documents::hash`] has been called.
     fn hash_calls(&self) -> usize {
         self.hash_calls.load(Ordering::Relaxed)
     }
 
-    /// Number of times [`Library::open`] has been called. The assertion
+    /// Number of times [`Documents::open`] has been called. The assertion
     /// that proves a content-index hit never opened the file.
     fn open_calls(&self) -> usize {
         self.open_calls.load(Ordering::Relaxed)
     }
 }
 
-impl Library for FakeLibrary {
+impl Documents for FakeDocuments {
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
         self.hash_calls.fetch_add(1, Ordering::Relaxed);
         self.entries.get(path).map_or_else(
@@ -219,31 +222,31 @@ impl Library for FakeLibrary {
     }
 }
 
-/// A [`Library`] that sleeps before opening a file, keyed by path, so a
+/// A [`Documents`] that sleeps before opening a file, keyed by path, so a
 /// batch resolved concurrently has jobs that finish in a different order
 /// than they were queued — the condition under which `resolve_batch`
 /// restoring input order is actually being exercised, rather than
 /// trivially true because nothing raced.
-struct DelayedLibrary {
-    inner: FakeLibrary,
+struct DelayedDocuments {
+    inner: FakeDocuments,
     delays: BTreeMap<PathBuf, Duration>,
 }
 
-impl DelayedLibrary {
-    fn new(inner: FakeLibrary) -> DelayedLibrary {
-        DelayedLibrary {
+impl DelayedDocuments {
+    fn new(inner: FakeDocuments) -> DelayedDocuments {
+        DelayedDocuments {
             inner,
             delays: BTreeMap::new(),
         }
     }
 
-    fn with_delay(mut self, path: impl Into<PathBuf>, delay: Duration) -> DelayedLibrary {
+    fn with_delay(mut self, path: impl Into<PathBuf>, delay: Duration) -> DelayedDocuments {
         self.delays.insert(path.into(), delay);
         self
     }
 }
 
-impl Library for DelayedLibrary {
+impl Documents for DelayedDocuments {
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
         self.inner.hash(path)
     }
@@ -389,8 +392,8 @@ fn skipped_outcome(outcome: FileOutcome) -> SkipReason {
 fn embedded_metadata_identifier_resolves_via_the_first_source_uncached() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("embedded-happy-path");
-    let library =
-        FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/embedded"));
+    let documents =
+        FakeDocuments::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/embedded"));
     let (crossref, _calls) = fake_source(
         SourceName::Crossref,
         Ok(record_with_doi("10.1000/embedded")),
@@ -398,7 +401,7 @@ fn embedded_metadata_identifier_resolves_via_the_first_source_uncached() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(file_record.record, record_with_doi("10.1000/embedded"));
@@ -414,7 +417,8 @@ fn embedded_metadata_identifier_resolves_via_the_first_source_uncached() {
 fn text_layer_identifier_reports_the_text_layer_tier() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("text-layer-happy-path");
-    let library = FakeLibrary::new().with_file(path, hash, pdf_with_text_doi("10.1000/text-layer"));
+    let documents =
+        FakeDocuments::new().with_file(path, hash, pdf_with_text_doi("10.1000/text-layer"));
     let (crossref, _calls) = fake_source(
         SourceName::Crossref,
         Ok(record_with_doi("10.1000/text-layer")),
@@ -422,7 +426,7 @@ fn text_layer_identifier_reports_the_text_layer_tier() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(
@@ -441,7 +445,7 @@ fn content_index_hit_is_returned_without_opening_the_file() {
     let hash = hash_for("indexed-content");
     // The pdf field would fail loudly if opened, so an accidental open
     // shows up as a skip rather than a silently-correct resolution.
-    let library = FakeLibrary::new().with_open_error(
+    let documents = FakeDocuments::new().with_open_error(
         path,
         hash.clone(),
         ExtractionError::Unreadable {
@@ -453,32 +457,32 @@ fn content_index_hit_is_returned_without_opening_the_file() {
     index.put(&hash, &indexed);
     let sources: Vec<&dyn Source> = Vec::new();
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(file_record.record, indexed);
     assert_eq!(file_record.source, None);
     assert_eq!(file_record.tier, None);
     assert!(file_record.cached);
-    assert_eq!(library.open_calls(), 0);
+    assert_eq!(documents.open_calls(), 0);
 }
 
 #[test]
 fn cache_false_bypasses_the_content_index() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("indexed-but-bypassed");
-    let library =
-        FakeLibrary::new().with_file(path, hash.clone(), pdf_with_embedded_doi("10.1000/live"));
+    let documents =
+        FakeDocuments::new().with_file(path, hash.clone(), pdf_with_embedded_doi("10.1000/live"));
     let indexed = record_with_doi("10.1000/stale-index-entry");
     let index = ContentIndex::new(MemoryCache::new());
     index.put(&hash, &indexed);
     let (crossref, calls) = fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/live")));
     let sources: Vec<&dyn Source> = vec![&crossref];
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(false));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(false));
     let file_record = resolved_outcome(outcome);
 
-    assert_eq!(library.open_calls(), 1);
+    assert_eq!(documents.open_calls(), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(file_record.record, record_with_doi("10.1000/live"));
     assert!(!file_record.cached);
@@ -491,7 +495,7 @@ fn cache_false_bypasses_the_content_index() {
 #[test]
 fn a_hash_failure_proceeds_to_open_and_extract_rather_than_skipping() {
     let path = Path::new("paper.pdf");
-    let library = FakeLibrary::new().with_hash_error(
+    let documents = FakeDocuments::new().with_hash_error(
         path,
         ExtractionError::Unreadable {
             message: "cannot hash".to_string(),
@@ -505,11 +509,11 @@ fn a_hash_failure_proceeds_to_open_and_extract_rather_than_skipping() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
-    assert_eq!(library.hash_calls(), 1);
-    assert_eq!(library.open_calls(), 1);
+    assert_eq!(documents.hash_calls(), 1);
+    assert_eq!(documents.open_calls(), 1);
     assert_eq!(file_record.record, record_with_doi("10.1000/unhashable"));
     assert!(!file_record.cached);
 }
@@ -522,7 +526,7 @@ fn a_hash_failure_proceeds_to_open_and_extract_rather_than_skipping() {
 fn a_successful_resolution_is_written_to_the_content_index() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("to-be-indexed");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash.clone(),
         pdf_with_embedded_doi("10.1000/to-index"),
@@ -534,7 +538,7 @@ fn a_successful_resolution_is_written_to_the_content_index() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(index.get(&hash), Some(file_record.record));
@@ -550,7 +554,7 @@ fn a_successful_resolution_is_written_to_the_content_index() {
 fn a_successful_resolution_is_written_to_the_index_even_with_cache_bypassed() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("indexed-despite-bypass");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash.clone(),
         pdf_with_embedded_doi("10.1000/bypassed"),
@@ -562,7 +566,7 @@ fn a_successful_resolution_is_written_to_the_index_even_with_cache_bypassed() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(false));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(false));
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(index.get(&hash), Some(file_record.record));
@@ -576,7 +580,7 @@ fn a_successful_resolution_is_written_to_the_index_even_with_cache_bypassed() {
 fn unreadable_file_is_skipped_with_the_open_error_message() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("unreadable");
-    let library = FakeLibrary::new().with_open_error(
+    let documents = FakeDocuments::new().with_open_error(
         path,
         hash,
         ExtractionError::Unreadable {
@@ -586,7 +590,7 @@ fn unreadable_file_is_skipped_with_the_open_error_message() {
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let reason = skipped_outcome(outcome);
 
     assert_eq!(
@@ -601,11 +605,11 @@ fn unreadable_file_is_skipped_with_the_open_error_message() {
 fn encrypted_file_is_skipped_as_unreadable() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("encrypted");
-    let library = FakeLibrary::new().with_open_error(path, hash, ExtractionError::Encrypted);
+    let documents = FakeDocuments::new().with_open_error(path, hash, ExtractionError::Encrypted);
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let reason = skipped_outcome(outcome);
 
     assert_eq!(
@@ -620,11 +624,11 @@ fn encrypted_file_is_skipped_as_unreadable() {
 fn a_file_with_no_text_layer_is_skipped_as_having_no_identifier() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("no-text-layer");
-    let library = FakeLibrary::new().with_file(path, hash, pdf_with_no_text_layer());
+    let documents = FakeDocuments::new().with_file(path, hash, pdf_with_no_text_layer());
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let reason = skipped_outcome(outcome);
 
     assert_eq!(reason, SkipReason::NoIdentifier);
@@ -634,11 +638,11 @@ fn a_file_with_no_text_layer_is_skipped_as_having_no_identifier() {
 fn a_file_with_text_but_no_identifier_is_skipped_as_having_no_identifier() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("no-identifier-found");
-    let library = FakeLibrary::new().with_file(path, hash, pdf_with_no_identifier());
+    let documents = FakeDocuments::new().with_file(path, hash, pdf_with_no_identifier());
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let reason = skipped_outcome(outcome);
 
     assert_eq!(reason, SkipReason::NoIdentifier);
@@ -648,15 +652,15 @@ fn a_file_with_text_but_no_identifier_is_skipped_as_having_no_identifier() {
 fn an_identifier_no_source_holds_is_skipped_as_unresolvable_with_attempts_in_priority_order() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("unresolvable");
-    let library =
-        FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/nowhere"));
+    let documents =
+        FakeDocuments::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/nowhere"));
     let (crossref, _) = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
     let (openalex, _) = fake_source(SourceName::OpenAlex, Err(SourceError::NotFound));
     let (datacite, _) = fake_source(SourceName::DataCite, Err(SourceError::NotFound));
     let sources: Vec<&dyn Source> = vec![&crossref, &openalex, &datacite];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let reason = skipped_outcome(outcome);
 
     assert_eq!(
@@ -686,7 +690,7 @@ fn an_identifier_no_source_holds_is_skipped_as_unresolvable_with_attempts_in_pri
 fn a_title_conflict_is_a_skip_and_the_record_is_not_returned() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("conflicting-title");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash,
         pdf_with_embedded_doi("10.1000/conflict").with_title("Old Title Extracted from the PDF"),
@@ -701,7 +705,7 @@ fn a_title_conflict_is_a_skip_and_the_record_is_not_returned() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
 
     assert!(!matches!(outcome, FileOutcome::Resolved(_)));
     let SkipReason::Conflict {
@@ -731,7 +735,7 @@ fn a_title_conflict_is_a_skip_and_the_record_is_not_returned() {
 fn a_title_the_producer_could_not_encode_is_not_a_conflict() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("lossy-title");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash,
         pdf_with_embedded_doi("10.1002/adsc.201000846").with_title(
@@ -750,7 +754,7 @@ fn a_title_the_producer_could_not_encode_is_not_a_conflict() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
 
     assert!(matches!(outcome, FileOutcome::Resolved(_)));
 }
@@ -761,7 +765,7 @@ fn a_title_the_producer_could_not_encode_is_not_a_conflict() {
 fn a_placeholder_xmp_title_does_not_override_an_agreeing_info_title() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("placeholder-xmp");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash,
         pdf_with_text_doi("10.1000/placeholder")
@@ -778,7 +782,7 @@ fn a_placeholder_xmp_title_does_not_override_an_agreeing_info_title() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
 
     assert!(matches!(outcome, FileOutcome::Resolved(_)));
 }
@@ -792,7 +796,8 @@ fn a_placeholder_xmp_title_does_not_override_an_agreeing_info_title() {
 fn crossref_outage_falls_back_to_openalex() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("crossref-outage");
-    let library = FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/outage"));
+    let documents =
+        FakeDocuments::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/outage"));
     let (crossref, _) = fake_source(
         SourceName::Crossref,
         Err(SourceError::Unavailable {
@@ -803,7 +808,7 @@ fn crossref_outage_falls_back_to_openalex() {
     let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(file_record.source, Some(SourceName::OpenAlex));
@@ -815,15 +820,15 @@ fn crossref_outage_falls_back_to_openalex() {
 fn identifier_unknown_everywhere_is_skipped_as_unresolvable() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("unknown-everywhere");
-    let library =
-        FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/unknown"));
+    let documents =
+        FakeDocuments::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/unknown"));
     let (crossref, _) = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
     let (openalex, _) = fake_source(SourceName::OpenAlex, Err(SourceError::NotFound));
     let (datacite, _) = fake_source(SourceName::DataCite, Err(SourceError::NotFound));
     let sources: Vec<&dyn Source> = vec![&crossref, &openalex, &datacite];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &library, &sources, &index, &config(true));
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
 
     assert!(matches!(
         outcome,
@@ -930,7 +935,7 @@ fn events_come_in_input_order_ending_with_run_finished_and_nothing_after() {
     let p1 = PathBuf::from("a.pdf");
     let p2 = PathBuf::from("b.pdf");
     let p3 = PathBuf::from("c.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(&p1, hash_for("order-a"), pdf_with_embedded_doi("10.1000/a"))
         .with_file(&p2, hash_for("order-b"), pdf_with_no_text_layer())
         .with_file(&p3, hash_for("order-c"), pdf_with_embedded_doi("10.1000/c"));
@@ -940,7 +945,7 @@ fn events_come_in_input_order_ending_with_run_finished_and_nothing_after() {
 
     let run = resolve_batch(
         &[p1.clone(), p2.clone(), p3.clone()],
-        &library,
+        &documents,
         &sources,
         &index,
         &|_: &Path| config(true),
@@ -968,7 +973,7 @@ fn counts_reflect_the_outcomes_and_renamed_is_always_zero() {
     let p1 = PathBuf::from("a.pdf");
     let p2 = PathBuf::from("b.pdf");
     let p3 = PathBuf::from("c.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &p1,
             hash_for("counts-a"),
@@ -986,7 +991,7 @@ fn counts_reflect_the_outcomes_and_renamed_is_always_zero() {
 
     let run = resolve_batch(
         &[p1, p2, p3],
-        &library,
+        &documents,
         &sources,
         &index,
         &|_: &Path| config(true),
@@ -1002,6 +1007,7 @@ fn counts_reflect_the_outcomes_and_renamed_is_always_zero() {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
 }
@@ -1009,14 +1015,14 @@ fn counts_reflect_the_outcomes_and_renamed_is_always_zero() {
 #[test]
 fn the_final_event_carries_the_same_counts_as_run_counts() {
     let p1 = PathBuf::from("a.pdf");
-    let library =
-        FakeLibrary::new().with_file(&p1, hash_for("final-event"), pdf_with_no_text_layer());
+    let documents =
+        FakeDocuments::new().with_file(&p1, hash_for("final-event"), pdf_with_no_text_layer());
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
     let run = resolve_batch(
         &[p1],
-        &library,
+        &documents,
         &sources,
         &index,
         &|_: &Path| config(true),
@@ -1035,7 +1041,7 @@ fn a_mixed_batch_completes_and_an_unreadable_file_does_not_curtail_it() {
     let p2 = PathBuf::from("unreadable.pdf");
     let p3 = PathBuf::from("resolved-second.pdf");
     let p4 = PathBuf::from("no-identifier.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &p1,
             hash_for("mixed-1"),
@@ -1060,7 +1066,7 @@ fn a_mixed_batch_completes_and_an_unreadable_file_does_not_curtail_it() {
 
     let run = resolve_batch(
         &[p1.clone(), p2.clone(), p3.clone(), p4.clone()],
-        &library,
+        &documents,
         &sources,
         &index,
         &|_: &Path| config(true),
@@ -1077,6 +1083,7 @@ fn a_mixed_batch_completes_and_an_unreadable_file_does_not_curtail_it() {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
     let paths: Vec<PathBuf> = run.events[..4]
@@ -1091,11 +1098,18 @@ fn a_mixed_batch_completes_and_an_unreadable_file_does_not_curtail_it() {
 
 #[test]
 fn an_empty_batch_produces_just_the_finishing_event_with_zero_counts() {
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let run = resolve_batch(&[], &library, &sources, &index, &|_: &Path| config(true), 1);
+    let run = resolve_batch(
+        &[],
+        &documents,
+        &sources,
+        &index,
+        &|_: &Path| config(true),
+        1,
+    );
 
     assert_eq!(
         run.events,
@@ -1111,7 +1125,7 @@ fn an_empty_batch_produces_just_the_finishing_event_with_zero_counts() {
 fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source() {
     let p1 = PathBuf::from("one.pdf");
     let p2 = PathBuf::from("two.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &p1,
             hash_for("offline-one"),
@@ -1132,7 +1146,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
 
     let first = resolve_batch(
         &[p1.clone(), p2.clone()],
-        &library,
+        &documents,
         &live_sources,
         &index,
         &|_: &Path| conf,
@@ -1147,10 +1161,11 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
     assert_eq!(calls.load(Ordering::Relaxed), 2);
-    let opens_after_first_run = library.open_calls();
+    let opens_after_first_run = documents.open_calls();
 
     let panic_crossref = PanicSource {
         name: SourceName::Crossref,
@@ -1159,7 +1174,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
 
     let second = resolve_batch(
         &[p1, p2],
-        &library,
+        &documents,
         &panic_sources,
         &index,
         &|_: &Path| conf,
@@ -1167,7 +1182,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
     );
 
     assert_eq!(second.counts, first.counts);
-    assert_eq!(library.open_calls(), opens_after_first_run);
+    assert_eq!(documents.open_calls(), opens_after_first_run);
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     // Both runs end with the summary event; the per-file events are
     // everything before it.
@@ -1203,7 +1218,7 @@ fn a_renamed_file_with_identical_content_is_served_from_the_index_without_openin
     let original = PathBuf::from("original.pdf");
     let renamed = PathBuf::from("renamed.pdf");
     let shared_hash = hash_for("same bytes, different name");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &original,
             shared_hash.clone(),
@@ -1225,14 +1240,14 @@ fn a_renamed_file_with_identical_content_is_served_from_the_index_without_openin
 
     let run = resolve_batch(
         &[original, renamed.clone()],
-        &library,
+        &documents,
         &sources,
         &index,
         &|_: &Path| config(true),
         1,
     );
 
-    assert_eq!(library.open_calls(), 1);
+    assert_eq!(documents.open_calls(), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     match &run.events[1] {
         Event::Resolved {
@@ -1258,16 +1273,16 @@ fn a_batch_resolved_on_many_threads_reports_its_files_in_input_order() {
     let paths: Vec<PathBuf> = (0..12)
         .map(|i| PathBuf::from(format!("many-threads-{i:02}.pdf")))
         .collect();
-    let mut library = FakeLibrary::new();
+    let mut documents = FakeDocuments::new();
     for (i, path) in paths.iter().enumerate() {
-        library = if i % 2 == 0 {
-            library.with_file(
+        documents = if i % 2 == 0 {
+            documents.with_file(
                 path,
                 hash_for(&format!("many-threads-{i}")),
                 pdf_with_embedded_doi(&format!("10.1000/many-threads-{i}")),
             )
         } else {
-            library.with_file(
+            documents.with_file(
                 path,
                 hash_for(&format!("many-threads-{i}")),
                 pdf_with_no_identifier(),
@@ -1276,9 +1291,9 @@ fn a_batch_resolved_on_many_threads_reports_its_files_in_input_order() {
     }
     // Earlier files sleep longer, so a job-order-dependent implementation
     // would report them last rather than first.
-    let mut library = DelayedLibrary::new(library);
+    let mut documents = DelayedDocuments::new(documents);
     for (i, path) in paths.iter().enumerate() {
-        library = library.with_delay(path, Duration::from_millis((paths.len() - i) as u64 * 5));
+        documents = documents.with_delay(path, Duration::from_millis((paths.len() - i) as u64 * 5));
     }
     let (crossref, _) = fake_source(
         SourceName::Crossref,
@@ -1289,7 +1304,7 @@ fn a_batch_resolved_on_many_threads_reports_its_files_in_input_order() {
 
     let run = resolve_batch(
         &paths,
-        &library,
+        &documents,
         &sources,
         &index,
         &|_: &Path| config(true),
@@ -1312,16 +1327,16 @@ fn a_batch_resolved_with_one_worker_or_eight_produces_the_same_run() {
     let paths: Vec<PathBuf> = (0..12)
         .map(|i| PathBuf::from(format!("same-run-{i:02}.pdf")))
         .collect();
-    let mut library = FakeLibrary::new();
+    let mut documents = FakeDocuments::new();
     for (i, path) in paths.iter().enumerate() {
-        library = if i % 3 == 0 {
-            library.with_file(
+        documents = if i % 3 == 0 {
+            documents.with_file(
                 path,
                 hash_for(&format!("same-run-{i}")),
                 pdf_with_no_identifier(),
             )
         } else {
-            library.with_file(
+            documents.with_file(
                 path,
                 hash_for(&format!("same-run-{i}")),
                 pdf_with_embedded_doi(&format!("10.1000/same-run-{i}")),
@@ -1340,7 +1355,7 @@ fn a_batch_resolved_with_one_worker_or_eight_produces_the_same_run() {
     let index_one = ContentIndex::new(MemoryCache::new());
     let run_one = resolve_batch(
         &paths,
-        &library,
+        &documents,
         &sources,
         &index_one,
         &|_: &Path| config(true),
@@ -1349,7 +1364,7 @@ fn a_batch_resolved_with_one_worker_or_eight_produces_the_same_run() {
     let index_eight = ContentIndex::new(MemoryCache::new());
     let run_eight = resolve_batch(
         &paths,
-        &library,
+        &documents,
         &sources,
         &index_eight,
         &|_: &Path| config(true),
@@ -1365,9 +1380,9 @@ fn every_file_in_a_concurrent_batch_reaches_the_network_exactly_once() {
     let paths: Vec<PathBuf> = (0..12)
         .map(|i| PathBuf::from(format!("exactly-once-{i:02}.pdf")))
         .collect();
-    let mut library = FakeLibrary::new();
+    let mut documents = FakeDocuments::new();
     for (i, path) in paths.iter().enumerate() {
-        library = library.with_file(
+        documents = documents.with_file(
             path,
             hash_for(&format!("exactly-once-{i}")),
             pdf_with_embedded_doi(&format!("10.1000/exactly-once-{i}")),
@@ -1382,7 +1397,7 @@ fn every_file_in_a_concurrent_batch_reaches_the_network_exactly_once() {
 
     let run = resolve_batch(
         &paths,
-        &library,
+        &documents,
         &sources,
         &index,
         &|_: &Path| config(true),
@@ -1399,7 +1414,7 @@ fn a_concurrency_of_zero_still_resolves_the_whole_batch() {
     let p1 = PathBuf::from("zero-a.pdf");
     let p2 = PathBuf::from("zero-b.pdf");
     let p3 = PathBuf::from("zero-c.pdf");
-    let library = FakeLibrary::new()
+    let documents = FakeDocuments::new()
         .with_file(
             &p1,
             hash_for("zero-a"),
@@ -1417,7 +1432,7 @@ fn a_concurrency_of_zero_still_resolves_the_whole_batch() {
 
     let run = resolve_batch(
         &[p1.clone(), p2.clone(), p3.clone()],
-        &library,
+        &documents,
         &sources,
         &index,
         &|_: &Path| config(true),
@@ -1434,6 +1449,7 @@ fn a_concurrency_of_zero_still_resolves_the_whole_batch() {
             named: 0,
             unmatched: 0,
             unreached: 0,
+            findings: 0,
         }
     );
     assert!(matches!(run.events[3], Event::RunFinished { .. }));
@@ -1441,11 +1457,18 @@ fn a_concurrency_of_zero_still_resolves_the_whole_batch() {
 
 #[test]
 fn an_empty_batch_with_high_concurrency_still_produces_just_the_finishing_event() {
-    let library = FakeLibrary::new();
+    let documents = FakeDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
 
-    let run = resolve_batch(&[], &library, &sources, &index, &|_: &Path| config(true), 8);
+    let run = resolve_batch(
+        &[],
+        &documents,
+        &sources,
+        &index,
+        &|_: &Path| config(true),
+        8,
+    );
 
     assert_eq!(
         run.events,
@@ -1457,7 +1480,7 @@ fn an_empty_batch_with_high_concurrency_still_produces_just_the_finishing_event(
 }
 
 // ---------------------------------------------------------------------
-// RealLibrary
+// RealDocuments
 // ---------------------------------------------------------------------
 
 /// The path to a fixture in `borax-pdf`'s corpus, resolved from this
@@ -1474,9 +1497,9 @@ fn hash_of_a_real_file_matches_hashing_its_bytes_directly() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("document.pdf");
     fs::write(&path, b"some file contents").unwrap();
-    let library = RealLibrary;
+    let documents = RealDocuments;
 
-    let hash = library.hash(&path).unwrap();
+    let hash = documents.hash(&path).unwrap();
 
     assert_eq!(hash, hash_for("some file contents"), "got {hash:?}");
     assert_eq!(hash, hash_file(&path).unwrap());
@@ -1486,9 +1509,9 @@ fn hash_of_a_real_file_matches_hashing_its_bytes_directly() {
 fn hash_of_a_missing_path_is_unreadable() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("does-not-exist.pdf");
-    let library = RealLibrary;
+    let documents = RealDocuments;
 
-    let result = library.hash(&path);
+    let result = documents.hash(&path);
 
     assert!(
         matches!(result, Err(ExtractionError::Unreadable { .. })),
@@ -1501,9 +1524,9 @@ fn open_of_a_file_that_is_not_a_pdf_is_unreadable() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("not-a-pdf.pdf");
     fs::write(&path, b"this is plain text, not a PDF").unwrap();
-    let library = RealLibrary;
+    let documents = RealDocuments;
 
-    match library.open(&path) {
+    match documents.open(&path) {
         Err(ExtractionError::Unreadable { .. }) => {}
         Err(other) => panic!("expected Unreadable, got Err({other:?})"),
         Ok(_) => panic!("expected opening a non-PDF file to fail"),
@@ -1514,9 +1537,9 @@ fn open_of_a_file_that_is_not_a_pdf_is_unreadable() {
 fn open_of_a_missing_path_is_an_error() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("does-not-exist.pdf");
-    let library = RealLibrary;
+    let documents = RealDocuments;
 
-    match library.open(&path) {
+    match documents.open(&path) {
         Err(_) => {}
         Ok(_) => panic!("expected opening a missing path to fail"),
     }
@@ -1524,9 +1547,9 @@ fn open_of_a_missing_path_is_an_error() {
 
 #[test]
 fn open_of_a_real_pdf_fixture_succeeds_with_a_nonzero_page_count() {
-    let library = RealLibrary;
+    let documents = RealDocuments;
 
-    let pdf = library
+    let pdf = documents
         .open(&corpus_fixture("publisher-info-doi.pdf"))
         .unwrap();
 
@@ -1599,42 +1622,92 @@ fn a_resolved_event_round_trips_its_record_through_json() {
 }
 
 // ---------------------------------------------------------------------
-// 2.4: resolve_file_checking_ledger — duplicate detection wiring
+// 2.4: standing() — duplicate detection wiring against the library
 //
 // ledger spec: "content check runs after hashing and before any
 // resolution" (Content) / "work duplicate ... after resolution" and
 // "Stale entries never block re-admission" (disk is the source of
-// truth over the ledger).
+// truth over the artifact store).
+//
+// What each check answers is `tests/library.rs`'s subject; what these
+// pin is the wiring — which pass each check runs between, and what the
+// verdict becomes.
 // ---------------------------------------------------------------------
 
-fn ledger_index(entries: &[Entry]) -> Index {
-    Index::build(entries)
+/// A UUIDv7 for a record or an item, distinct per call, following the
+/// shape of the fixed identities in `tests/library.rs`.
+fn fresh_uuid() -> Uuid {
+    Uuid::now_v7()
 }
 
-/// A ledger entry recorded for `path`, hashing `hash`, with an
-/// optional DOI, following the shape of `entry()` in
-/// `borax-core/tests/ledger.rs`.
-fn ledger_entry(path: &str, hash: ContentHash, doi_value: Option<&str>) -> Entry {
-    Entry {
-        hash,
-        doi: doi_value.map(doi),
-        arxiv: None,
-        pmid: None,
-        isbn: None,
-        path: path.to_string(),
-        entry_type: EntryType::Article,
-        run: RunId::new("earlier-run"),
-        timestamp: "2026-08-01T00:00:00Z".to_string(),
-        tool_version: "0.2.0-test".to_string(),
-    }
+/// Writes an artifact record under `root` naming `relative`, holding
+/// `hash`, and linked to `item` where one is given.
+fn record_at(root: &Path, relative: &str, hash: ContentHash, item: Option<ItemId>) {
+    let record = ArtifactRecord {
+        id: ArtifactId::from_uuid(fresh_uuid()),
+        item,
+        path: relative.to_string(),
+        size: 100,
+        modified_millis: 0,
+        history: vec![HashEntry {
+            hash,
+            run: LibraryRunId::new("earlier-run"),
+            timestamp: "2026-08-01T00:00:00Z".to_string(),
+            tool_version: "0.2.0-test".to_string(),
+        }],
+    };
+    let dir = root.join(".borax").join("artifacts");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{}.toml", record.id)), record.to_toml()).unwrap();
+}
+
+/// Writes an item under `root` carrying `doi_value`, and hands back its
+/// identity so a record can be linked to it.
+fn item_with(root: &Path, doi_value: &str) -> ItemId {
+    let item = Item {
+        id: ItemId::from_uuid(fresh_uuid()),
+        record: record_with_doi(doi_value),
+    };
+    let items = root.join("items");
+    fs::create_dir_all(&items).unwrap();
+    fs::write(items.join(format!("{}.toml", item.id)), item.to_toml()).unwrap();
+    item.id.clone()
+}
+
+/// The verdict `standing` reaches for `path` against the library rooted
+/// at `root`, with `live` deciding whether a recorded path still holds
+/// a file — the seam disk occupies in a run, held here so a stale
+/// record is a property of the test rather than of the temporary
+/// directory.
+fn checked<C: borax_sources::cache::Cache>(
+    path: &Path,
+    documents: &dyn Documents,
+    sources: &[&dyn Source],
+    index: &ContentIndex<C>,
+    root: &Path,
+    live: bool,
+) -> FileOutcome {
+    let stores = Stores::read(root);
+    let exists = |_: &Path| live;
+    standing(
+        path,
+        documents,
+        sources,
+        index,
+        &config(true),
+        Some(&stores.account(&exists)),
+    )
+    .verdict
 }
 
 #[test]
 fn a_live_content_duplicate_is_skipped_before_any_network_work() {
-    let path = Path::new("incoming.pdf");
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
     let hash = hash_for("same-bytes");
-    let library = FakeLibrary::new().with_file(
-        path,
+    let documents = FakeDocuments::new().with_file(
+        &path,
         hash.clone(),
         pdf_with_embedded_doi("10.1000/whatever"),
     );
@@ -1643,30 +1716,19 @@ fn a_live_content_duplicate_is_skipped_before_any_network_work() {
     };
     let sources: Vec<&dyn Source> = vec![&panics];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry("archived/Smith2024.pdf", hash, None)]);
+    record_at(root, "archived/Smith2024.pdf", hash, None);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &library,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     assert_eq!(
         outcome,
         FileOutcome::Skipped(SkipReason::Duplicate {
             reason: DuplicateReason::Content,
-            existing_path: PathBuf::from("/collection/archived/Smith2024.pdf"),
+            existing_path: root.join("archived").join("Smith2024.pdf"),
         })
     );
     assert_eq!(
-        library.open_calls(),
+        documents.open_calls(),
         0,
         "a content duplicate must be caught before the file is even opened"
     );
@@ -1675,28 +1737,19 @@ fn a_live_content_duplicate_is_skipped_before_any_network_work() {
 /// ledger spec scenario "Duplicate of a vanished admission".
 #[test]
 fn a_stale_content_duplicate_does_not_block_re_admission() {
-    let path = Path::new("incoming.pdf");
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
     let hash = hash_for("same-bytes-again");
-    let library =
-        FakeLibrary::new().with_file(path, hash.clone(), pdf_with_embedded_doi("10.1000/again"));
+    let documents =
+        FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_embedded_doi("10.1000/again"));
     let (crossref, _) = fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/again")));
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry("gone/Smith2024.pdf", hash, None)]);
+    record_at(root, "gone/Smith2024.pdf", hash, None);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &library,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            // Nothing on disk any more: the ledger entry is stale.
-            exists: &|_: &Path| false,
-        },
-    );
+    // Nothing on disk any more: the recorded path is stale.
+    let outcome = checked(&path, &documents, &sources, &index, root, false);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, record_with_doi("10.1000/again"));
@@ -1705,38 +1758,33 @@ fn a_stale_content_duplicate_does_not_block_re_admission() {
 /// ledger spec scenario "Second PDF of an archived paper".
 #[test]
 fn a_live_work_duplicate_is_skipped_after_resolution() {
-    let path = Path::new("incoming.pdf");
-    let hash = hash_for("different-bytes");
-    let library =
-        FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/reprint"));
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("different-bytes"),
+        pdf_with_embedded_doi("10.1000/reprint"),
+    );
     let (crossref, calls) =
         fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/reprint")));
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry(
+    let item = item_with(root, "10.1000/reprint");
+    record_at(
+        root,
         "archived/Reprint2024.pdf",
         hash_for("original-bytes"),
-        Some("10.1000/reprint"),
-    )]);
-
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &library,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
+        Some(item),
     );
+
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     assert_eq!(
         outcome,
         FileOutcome::Skipped(SkipReason::Duplicate {
             reason: DuplicateReason::Work,
-            existing_path: PathBuf::from("/collection/archived/Reprint2024.pdf"),
+            existing_path: root.join("archived").join("Reprint2024.pdf"),
         })
     );
     assert_eq!(
@@ -1748,89 +1796,67 @@ fn a_live_work_duplicate_is_skipped_after_resolution() {
 
 #[test]
 fn a_stale_work_duplicate_does_not_block_re_admission() {
-    let path = Path::new("incoming.pdf");
-    let hash = hash_for("different-bytes-again");
-    let library =
-        FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/reprint-again"));
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("different-bytes-again"),
+        pdf_with_embedded_doi("10.1000/reprint-again"),
+    );
     let (crossref, _) = fake_source(
         SourceName::Crossref,
         Ok(record_with_doi("10.1000/reprint-again")),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry(
+    let item = item_with(root, "10.1000/reprint-again");
+    record_at(
+        root,
         "gone/Reprint2024.pdf",
         hash_for("original-bytes-again"),
-        Some("10.1000/reprint-again"),
-    )]);
-
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &library,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| false,
-        },
+        Some(item),
     );
+
+    let outcome = checked(&path, &documents, &sources, &index, root, false);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, record_with_doi("10.1000/reprint-again"));
 }
 
 #[test]
-fn resolve_file_checking_ledger_resolves_normally_when_nothing_matches_an_empty_ledger() {
-    let path = Path::new("incoming.pdf");
-    let hash = hash_for("brand-new");
-    let library = FakeLibrary::new().with_file(path, hash, pdf_with_embedded_doi("10.1000/new"));
+fn standing_resolves_normally_when_the_library_holds_nothing() {
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("brand-new"),
+        pdf_with_embedded_doi("10.1000/new"),
+    );
     let (crossref, _) = fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/new")));
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[]);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &library,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, record_with_doi("10.1000/new"));
 }
 
-/// A resolution failure passes through untouched: the ledger has
+/// A resolution failure passes through untouched: the library has
 /// nothing to add to a file that never produced a record.
 #[test]
-fn resolve_file_checking_ledger_passes_through_a_resolution_failure() {
-    let path = Path::new("incoming.pdf");
-    let hash = hash_for("unresolvable");
-    let library = FakeLibrary::new().with_file(path, hash, pdf_with_no_identifier());
+fn standing_passes_through_a_resolution_failure() {
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_for("unresolvable"), pdf_with_no_identifier());
     let sources: Vec<&dyn Source> = vec![];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[]);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &library,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     assert_eq!(outcome, FileOutcome::Skipped(SkipReason::NoIdentifier));
 }
@@ -1845,10 +1871,12 @@ fn resolve_file_checking_ledger_passes_through_a_resolution_failure() {
 /// and the file never opened.
 #[test]
 fn a_content_match_at_the_incoming_path_is_not_a_duplicate_and_resolves_from_the_index() {
-    let path = Path::new("/collection/archived/Smith2024.pdf");
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("archived").join("Smith2024.pdf");
     let hash = hash_for("own-bytes");
-    let library = FakeLibrary::new().with_open_error(
-        path,
+    let documents = FakeDocuments::new().with_open_error(
+        &path,
         hash.clone(),
         ExtractionError::Unreadable {
             message: "must never be opened".to_string(),
@@ -1861,36 +1889,27 @@ fn a_content_match_at_the_incoming_path_is_not_a_duplicate_and_resolves_from_the
     let index = ContentIndex::new(MemoryCache::new());
     let indexed = record_with_doi("10.1000/own");
     index.put(&hash, &indexed);
-    let ledger = ledger_index(&[ledger_entry("archived/Smith2024.pdf", hash, None)]);
+    record_at(root, "archived/Smith2024.pdf", hash, None);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &library,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, indexed);
-    assert!(file_record.cached, "the file's own entry is not a query");
-    assert_eq!(library.open_calls(), 0);
+    assert!(file_record.cached, "the file's own record is not a query");
+    assert_eq!(documents.open_calls(), 0);
 }
 
 /// A content match at a *different* live path is still reported as a
 /// duplicate — the contrast to the case above, so passing over a file's
-/// own entry cannot be mistaken for passing over every entry.
+/// own record cannot be mistaken for passing over every record.
 #[test]
 fn a_content_match_at_another_live_path_is_still_a_duplicate() {
-    let path = Path::new("/collection/incoming/Copy.pdf");
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming").join("Copy.pdf");
     let hash = hash_for("shared-bytes");
-    let library = FakeLibrary::new().with_file(
-        path,
+    let documents = FakeDocuments::new().with_file(
+        &path,
         hash.clone(),
         pdf_with_embedded_doi("10.1000/whatever"),
     );
@@ -1899,63 +1918,47 @@ fn a_content_match_at_another_live_path_is_still_a_duplicate() {
     };
     let sources: Vec<&dyn Source> = vec![&panics];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry("archived/Smith2024.pdf", hash, None)]);
+    record_at(root, "archived/Smith2024.pdf", hash, None);
 
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &library,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
-    );
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     assert_eq!(
         outcome,
         FileOutcome::Skipped(SkipReason::Duplicate {
             reason: DuplicateReason::Content,
-            existing_path: PathBuf::from("/collection/archived/Smith2024.pdf"),
+            existing_path: root.join("archived").join("Smith2024.pdf"),
         })
     );
 }
 
 /// The work check has the same hole and the same fix: a file at its
 /// admitted path, annotated afterwards so its bytes (and therefore its
-/// hash) changed, still resolves to the identifier its own entry
-/// records and is not reported a work duplicate of itself.
+/// hash) changed, still resolves to the identifier the item its own
+/// record links to carries, and is not reported a work duplicate of
+/// itself.
 #[test]
 fn a_work_match_at_the_incoming_path_is_not_a_duplicate_after_a_changed_hash() {
-    let path = Path::new("/collection/archived/Reprint2024.pdf");
-    let old_hash = hash_for("original-bytes");
-    let new_hash = hash_for("annotated-bytes");
-    let library =
-        FakeLibrary::new().with_file(path, new_hash, pdf_with_embedded_doi("10.1000/reprint"));
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("archived").join("Reprint2024.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("annotated-bytes"),
+        pdf_with_embedded_doi("10.1000/reprint"),
+    );
     let (crossref, calls) =
         fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/reprint")));
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let ledger = ledger_index(&[ledger_entry(
+    let item = item_with(root, "10.1000/reprint");
+    record_at(
+        root,
         "archived/Reprint2024.pdf",
-        old_hash,
-        Some("10.1000/reprint"),
-    )]);
-
-    let outcome = resolve_file_checking_ledger(
-        path,
-        &library,
-        &sources,
-        &index,
-        &config(true),
-        &Collection {
-            ledger: &ledger,
-            root: Path::new("/collection"),
-            exists: &|_: &Path| true,
-        },
+        hash_for("original-bytes"),
+        Some(item),
     );
+
+    let outcome = checked(&path, &documents, &sources, &index, root, true);
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, record_with_doi("10.1000/reprint"));
@@ -1973,7 +1976,7 @@ fn a_work_match_at_the_incoming_path_is_not_a_duplicate_after_a_changed_hash() {
 #[test]
 fn claims_of_reads_the_xmp_and_info_titles_of_a_file_never_resolved() {
     let path = Path::new("paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash_for("claims-of-no-identifier"),
         pdf_with_no_identifier()
@@ -1981,7 +1984,7 @@ fn claims_of_reads_the_xmp_and_info_titles_of_a_file_never_resolved() {
             .with_xmp("<dc:title><rdf:Alt><rdf:li>The Xmp Title</rdf:li></rdf:Alt></dc:title>"),
     );
 
-    let claims = claims_of(path, &library);
+    let claims = claims_of(path, &documents);
 
     assert_eq!(
         claims,
@@ -2004,14 +2007,14 @@ fn claims_of_reads_the_xmp_and_info_titles_of_a_file_never_resolved() {
 #[test]
 fn claims_of_reads_titles_for_a_file_the_content_index_would_have_answered_for() {
     let path = Path::new("paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash_for("claims-of-indexed"),
         pdf_with_embedded_doi("10.1000/indexed-but-still-readable")
             .with_title("A Title The Index Never Saw"),
     );
 
-    let claims = claims_of(path, &library);
+    let claims = claims_of(path, &documents);
 
     assert_eq!(
         claims,
@@ -2025,7 +2028,7 @@ fn claims_of_reads_titles_for_a_file_the_content_index_would_have_answered_for()
 #[test]
 fn claims_of_is_empty_for_a_file_that_cannot_be_opened() {
     let path = Path::new("paper.pdf");
-    let library = FakeLibrary::new().with_open_error(
+    let documents = FakeDocuments::new().with_open_error(
         path,
         hash_for("claims-of-unreadable"),
         ExtractionError::Unreadable {
@@ -2033,7 +2036,7 @@ fn claims_of_is_empty_for_a_file_that_cannot_be_opened() {
         },
     );
 
-    let claims = claims_of(path, &library);
+    let claims = claims_of(path, &documents);
 
     assert_eq!(claims, Vec::new());
 }
@@ -2046,7 +2049,7 @@ fn claims_of_is_empty_for_a_file_that_cannot_be_opened() {
 #[test]
 fn resolve_supplied_reports_a_title_conflict_rather_than_refusing() {
     let path = Path::new("paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash_for("resolve-supplied-conflict"),
         pdf_with_no_identifier().with_title("Old Title Extracted from the PDF"),
@@ -2061,7 +2064,7 @@ fn resolve_supplied_reports_a_title_conflict_rather_than_refusing() {
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
 
-    let supplied = resolve_supplied(path, &identifier, &library, &sources).unwrap();
+    let supplied = resolve_supplied(path, &identifier, &documents, &sources).unwrap();
 
     assert_eq!(
         supplied.file.record,
@@ -2083,7 +2086,7 @@ fn resolve_supplied_reports_a_title_conflict_rather_than_refusing() {
 #[test]
 fn resolve_supplied_reports_no_conflict_when_the_titles_agree() {
     let path = Path::new("paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash_for("resolve-supplied-agrees"),
         pdf_with_no_identifier().with_title("On the Structure of Borax"),
@@ -2095,7 +2098,7 @@ fn resolve_supplied_reports_no_conflict_when_the_titles_agree() {
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
 
-    let supplied = resolve_supplied(path, &identifier, &library, &sources).unwrap();
+    let supplied = resolve_supplied(path, &identifier, &documents, &sources).unwrap();
 
     assert_eq!(supplied.conflict, None);
 }
@@ -2103,7 +2106,7 @@ fn resolve_supplied_reports_no_conflict_when_the_titles_agree() {
 #[test]
 fn resolve_supplied_returns_the_attempts_when_no_service_holds_the_identifier() {
     let path = Path::new("paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash_for("resolve-supplied-unresolvable"),
         pdf_with_no_identifier(),
@@ -2113,7 +2116,7 @@ fn resolve_supplied_returns_the_attempts_when_no_service_holds_the_identifier() 
     let (openalex, _calls) = fake_source(SourceName::OpenAlex, Err(SourceError::NotFound));
     let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
 
-    let unresolved = resolve_supplied(path, &identifier, &library, &sources).unwrap_err();
+    let unresolved = resolve_supplied(path, &identifier, &documents, &sources).unwrap_err();
 
     assert_eq!(
         unresolved.attempts,
@@ -2132,7 +2135,7 @@ fn resolve_supplied_returns_the_attempts_when_no_service_holds_the_identifier() 
 #[test]
 fn resolve_supplied_takes_no_content_index_to_write_to() {
     let path = Path::new("paper.pdf");
-    let library = FakeLibrary::new().with_file(
+    let documents = FakeDocuments::new().with_file(
         path,
         hash_for("resolve-supplied-no-index-seam"),
         pdf_with_no_identifier(),
@@ -2146,7 +2149,7 @@ fn resolve_supplied_takes_no_content_index_to_write_to() {
 
     // If this line compiles at all, it compiles without an index
     // argument — the property under test.
-    let supplied = resolve_supplied(path, &identifier, &library, &sources).unwrap();
+    let supplied = resolve_supplied(path, &identifier, &documents, &sources).unwrap();
 
     assert_eq!(
         supplied.file.record,

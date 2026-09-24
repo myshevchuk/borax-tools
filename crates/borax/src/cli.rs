@@ -15,7 +15,7 @@
 //! anywhere: it chooses the rendering of the event stream, which every
 //! subcommand honours and none of them interprets differently.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -114,25 +114,40 @@ pub struct BibliographyOptions {
     pub no_sidecars: bool,
 }
 
-/// What a subcommand needs to consult and update the collection's
-/// record of what it has admitted.
+/// What a subcommand needs to consult and add to the library's record
+/// of what it holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
-pub struct AccountingOptions {
-    /// Check the collection's ledger for duplicates and record what an
-    /// applied run admits.
+pub struct RecordOptions {
+    /// Check the library's records for duplicates and record what an
+    /// applying run admits.
     #[arg(long)]
-    pub ledger: bool,
+    pub record: bool,
 
-    /// Neither read nor write the collection's ledger.
-    #[arg(long, conflicts_with = "ledger")]
-    pub no_ledger: bool,
+    /// Neither read nor write the library's records.
+    #[arg(long, conflicts_with = "record")]
+    pub no_record: bool,
+}
+
+/// What a subcommand needs to read a document for what it claims about
+/// itself.
+///
+/// The extraction settings alone, for a subcommand that opens files and
+/// asks no service anything. [`ResolutionOptions`] carries the same
+/// settings for the subcommands that go on to resolve what they
+/// extracted, so a command declares one group or the other and never
+/// both.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
+pub struct ExtractionOptions {
+    /// How many pages of a PDF the text pass reads.
+    #[arg(long, value_name = "N")]
+    pub page_limit: Option<usize>,
 }
 
 /// Whether a run keeps a log of its own event stream. Every subcommand
 /// takes these, since every subcommand is a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
 pub struct RunLogOptions {
-    /// Write the run's event stream to a log in the collection.
+    /// Write the run's event stream to a log in the library.
     #[arg(long)]
     pub run_log: bool,
 
@@ -183,7 +198,7 @@ pub enum Command {
         bibliography: BibliographyOptions,
 
         #[command(flatten)]
-        accounting: AccountingOptions,
+        record: RecordOptions,
 
         #[command(flatten)]
         run_log: RunLogOptions,
@@ -218,7 +233,7 @@ pub enum Command {
         bibliography: BibliographyOptions,
 
         #[command(flatten)]
-        accounting: AccountingOptions,
+        record: RecordOptions,
 
         #[command(flatten)]
         run_log: RunLogOptions,
@@ -232,18 +247,57 @@ pub enum Command {
         #[command(flatten)]
         run_log: RunLogOptions,
     },
-    /// Work on the collection's record of what it has admitted.
-    Ledger {
-        #[command(subcommand)]
-        action: LedgerAction,
-    },
-}
+    /// Report what a library holds.
+    Status {
+        /// The library to report on: the directory whose nearest
+        /// `.borax.toml` establishes the root, or the directory itself
+        /// when nothing above it is marked. The working directory by
+        /// default.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
 
-/// What `borax ledger` is being asked to do.
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
-pub enum LedgerAction {
-    /// Regenerate the ledger from the collection's files and sidecars.
-    Rebuild {
+        /// Additionally report how many artifacts an identifier can be
+        /// extracted from, which is a pass over the files.
+        #[arg(long)]
+        identify: bool,
+
+        #[command(flatten)]
+        extraction: ExtractionOptions,
+
+        #[command(flatten)]
+        run_log: RunLogOptions,
+    },
+    /// Report a library's findings, repairing nothing.
+    Validate {
+        /// The library to validate, as `status` takes it.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+
+        #[command(flatten)]
+        run_log: RunLogOptions,
+    },
+    /// Bring artifact records back into agreement with the library's
+    /// tree.
+    Reconcile {
+        /// The library to reconcile, as `status` takes it.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+
+        /// Hash every artifact rather than trusting a recorded size and
+        /// modification time that match the file.
+        #[arg(long)]
+        rehash: bool,
+
+        #[command(flatten)]
+        run_log: RunLogOptions,
+    },
+    /// Record the artifacts the content index already knows, querying
+    /// nothing and moving nothing.
+    Adopt {
+        /// The library to adopt into, as `status` takes it.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+
         #[command(flatten)]
         run_log: RunLogOptions,
     },
@@ -257,7 +311,7 @@ pub enum LedgerAction {
 /// command line was silent about that setting and a lower layer shows
 /// through. Every configurable boolean is offered as a two-flag pair
 /// (`--sidecars` / `--no-sidecars`, `--cache` / `--no-cache`,
-/// `--ledger` / `--no-ledger`, `--run-log` / `--no-run-log`), which is
+/// `--record` / `--no-record`, `--run-log` / `--no-run-log`), which is
 /// how a boolean says all three things — on, off, and silent — with
 /// flags that take no value, and what lets the command line override a
 /// configured value in both directions. Naming both halves of a pair
@@ -313,14 +367,14 @@ pub struct Settings {
     /// Ask every service again and open every file again.
     pub no_cache: bool,
 
-    /// Check the collection's ledger for duplicates and record what an
-    /// applied run admits.
-    pub ledger: bool,
+    /// Check the library's records for duplicates and record what an
+    /// applying run admits.
+    pub record: bool,
 
-    /// Neither read nor write the collection's ledger.
-    pub no_ledger: bool,
+    /// Neither read nor write the library's records.
+    pub no_record: bool,
 
-    /// Write the run's event stream to a log in the collection.
+    /// Write the run's event stream to a log in the library.
     pub run_log: bool,
 
     /// Write no log for this run. An applying rename writes one
@@ -361,11 +415,18 @@ impl BibliographyOptions {
     }
 }
 
-impl AccountingOptions {
+impl RecordOptions {
     /// Copies this group's flags into the matching [`Settings`] fields.
     fn fill(&self, settings: &mut Settings) {
-        settings.ledger = self.ledger;
-        settings.no_ledger = self.no_ledger;
+        settings.record = self.record;
+        settings.no_record = self.no_record;
+    }
+}
+
+impl ExtractionOptions {
+    /// Copies this group's flags into the matching [`Settings`] fields.
+    fn fill(&self, settings: &mut Settings) {
+        settings.page_limit = self.page_limit;
     }
 }
 
@@ -408,14 +469,14 @@ impl Cli {
                 resolution,
                 rename,
                 bibliography,
-                accounting,
+                record,
                 run_log,
                 ..
             } => {
                 resolution.fill(&mut settings);
                 rename.fill(&mut settings);
                 bibliography.fill(&mut settings);
-                accounting.fill(&mut settings);
+                record.fill(&mut settings);
                 run_log.fill(&mut settings);
             }
             Command::Bib {
@@ -433,20 +494,28 @@ impl Cli {
                 resolution,
                 rename,
                 bibliography,
-                accounting,
+                record,
                 run_log,
             } => {
                 settings.concurrency = *concurrency;
                 resolution.fill(&mut settings);
                 rename.fill(&mut settings);
                 bibliography.fill(&mut settings);
-                accounting.fill(&mut settings);
+                record.fill(&mut settings);
                 run_log.fill(&mut settings);
             }
+            Command::Status {
+                extraction,
+                run_log,
+                ..
+            } => {
+                extraction.fill(&mut settings);
+                run_log.fill(&mut settings);
+            }
+            Command::Validate { run_log, .. }
+            | Command::Reconcile { run_log, .. }
+            | Command::Adopt { run_log, .. } => run_log.fill(&mut settings),
             Command::Cache { run_log, .. } => run_log.fill(&mut settings),
-            Command::Ledger {
-                action: LedgerAction::Rebuild { run_log },
-            } => run_log.fill(&mut settings),
         }
         settings
     }
@@ -473,7 +542,7 @@ impl Command {
             resolution: ResolutionOptions::default(),
             rename: RenameOptions::default(),
             bibliography: BibliographyOptions::default(),
-            accounting: AccountingOptions::default(),
+            record: RecordOptions::default(),
             run_log: RunLogOptions::default(),
         }
     }
@@ -495,7 +564,7 @@ impl Command {
             resolution: ResolutionOptions::default(),
             rename: RenameOptions::default(),
             bibliography: BibliographyOptions::default(),
-            accounting: AccountingOptions::default(),
+            record: RecordOptions::default(),
             run_log: RunLogOptions::default(),
         }
     }
@@ -509,9 +578,47 @@ impl Command {
         }
     }
 
+    /// The `status` command over the library at `path`, reporting what
+    /// can be identified when `identify`, with no setting overridden.
+    pub fn status(path: Option<PathBuf>, identify: bool) -> Command {
+        Command::Status {
+            path,
+            identify,
+            extraction: ExtractionOptions::default(),
+            run_log: RunLogOptions::default(),
+        }
+    }
+
+    /// The `validate` command over the library at `path`, with no
+    /// setting overridden.
+    pub fn validate(path: Option<PathBuf>) -> Command {
+        Command::Validate {
+            path,
+            run_log: RunLogOptions::default(),
+        }
+    }
+
+    /// The `reconcile` command over the library at `path`, hashing
+    /// every artifact when `rehash`, with no setting overridden.
+    pub fn reconcile(path: Option<PathBuf>, rehash: bool) -> Command {
+        Command::Reconcile {
+            path,
+            rehash,
+            run_log: RunLogOptions::default(),
+        }
+    }
+
+    /// The `adopt` command over the library at `path`, with no setting
+    /// overridden.
+    pub fn adopt(path: Option<PathBuf>) -> Command {
+        Command::Adopt {
+            path,
+            run_log: RunLogOptions::default(),
+        }
+    }
+
     /// The subcommand's name, as [`crate::event::Event::RunStarted`]
-    /// reports it and as the user typed it. A subcommand with an
-    /// action of its own is named by both words, as `ledger rebuild`.
+    /// reports it and as the user typed it.
     pub fn name(&self) -> &'static str {
         match self {
             Command::Resolve { .. } => "resolve",
@@ -519,9 +626,10 @@ impl Command {
             Command::Bib { .. } => "bib",
             Command::Config { .. } => "config",
             Command::Cache { .. } => "cache",
-            Command::Ledger {
-                action: LedgerAction::Rebuild { .. },
-            } => "ledger rebuild",
+            Command::Status { .. } => "status",
+            Command::Validate { .. } => "validate",
+            Command::Reconcile { .. } => "reconcile",
+            Command::Adopt { .. } => "adopt",
         }
     }
 
@@ -532,16 +640,30 @@ impl Command {
             Command::Resolve { paths, .. }
             | Command::Rename { paths, .. }
             | Command::Bib { paths, .. } => paths,
-            Command::Config { .. } | Command::Cache { .. } | Command::Ledger { .. } => &[],
+            Command::Config { .. }
+            | Command::Cache { .. }
+            | Command::Status { .. }
+            | Command::Validate { .. }
+            | Command::Reconcile { .. }
+            | Command::Adopt { .. } => &[],
         }
     }
-}
 
-impl LedgerAction {
-    /// The `ledger rebuild` action, with no setting overridden.
-    pub fn rebuild() -> LedgerAction {
-        LedgerAction::Rebuild {
-            run_log: RunLogOptions::default(),
+    /// The directory the subcommand works on as a library, or `None`
+    /// for a subcommand that works on files or on nothing.
+    ///
+    /// Not a path in [`Command::paths`]'s sense: these subcommands take
+    /// a library rather than input files, so nothing expands it to the
+    /// documents beneath it and no configuration is resolved per file
+    /// under it. What it decides is where the run's own configuration
+    /// is discovered from, and so which library the run is in.
+    pub fn directory(&self) -> Option<&Path> {
+        match self {
+            Command::Status { path, .. }
+            | Command::Validate { path, .. }
+            | Command::Reconcile { path, .. }
+            | Command::Adopt { path, .. } => path.as_deref(),
+            _ => None,
         }
     }
 }
@@ -723,20 +845,20 @@ pub fn flag_layers(settings: &Settings) -> Vec<(Origin, Layer)> {
             },
         );
     }
-    if settings.ledger {
+    if settings.record {
         push(
-            "ledger",
+            "record",
             Layer {
-                ledger: Some(true),
+                record: Some(true),
                 ..Layer::default()
             },
         );
     }
-    if settings.no_ledger {
+    if settings.no_record {
         push(
-            "no-ledger",
+            "no-record",
             Layer {
-                ledger: Some(false),
+                record: Some(false),
                 ..Layer::default()
             },
         );

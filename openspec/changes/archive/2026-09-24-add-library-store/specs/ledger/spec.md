@@ -1,8 +1,64 @@
-# ledger Specification
+## ADDED Requirements
 
-## Purpose
-TBD - created by archiving change add-ledger-and-run-logs. Update Purpose after archive.
-## Requirements
+### Requirement: The record of admissions is optional and degrades loudly, never blocking
+The pipeline SHALL treat the library's record of what it has admitted as
+optional: when it is disabled (`--no-record` or config) or there is no
+library root, the run proceeds with duplicate detection off and says
+nothing about it, having been told not to check or having nowhere to
+check against. An empty artifact store is not a degradation — it is a
+library that has admitted nothing borax has recorded — and SHALL produce
+no warning.
+
+`--no-record` SHALL suppress every write to the store and both
+duplicate checks: the run writes no artifact record and no item, makes
+no content check and no work check, and nothing persistent survives it
+but the moves it made and its run log. One setting governs both,
+because a run that keeps no account of what it admitted has nothing to
+check a later file against either.
+
+What `--no-record` SHALL NOT suppress is the check an applying run makes
+against the record of the very file it is about to move. That check is
+not part of the account and not a policy about admissions: it is what
+keeps a move from stranding a record beyond repair, and the `library`
+capability states it and the one refusal it produces. The gate governs
+bookkeeping, not safety — an operator turning off the account is asking
+borax to keep no record of this run, not asking it to damage the records
+it already has.
+
+An artifact record that cannot be read or does not parse SHALL cost its
+own artifact and nothing else: it contributes to neither check, the run
+warns once naming the number of unreadable records, and the rest of the
+store answers normally. One unreadable file SHALL NOT turn duplicate
+detection off across the library, which is what a single-file account
+had to do.
+
+#### Scenario: An unreadable artifact record
+- **WHEN** one file under `.borax/artifacts/` does not parse
+- **THEN** the run warns naming it, duplicate detection still runs
+  against every other record, and `borax validate` reports it as a
+  finding
+
+#### Scenario: No library root
+- **WHEN** files are processed in a directory tree with no
+  `.borax.toml` above it
+- **THEN** no artifact record is read or written and no duplicate
+  warning is possible for that run
+
+#### Scenario: The account is turned off for a run
+- **WHEN** `borax rename --apply --no-record` runs over a library
+- **THEN** no duplicate check is made and no artifact record and no item
+  is written, and the files are renamed and reported as they otherwise
+  would be
+
+## MODIFIED Requirements
+
+<!-- drops: the ledger entry as the unit a lookup answers with. Both
+     checks, both reasons and the divert survive; what answers them is
+     the artifact store, where a hash history rather than one hash per
+     entry is what a content check matches against, and an item rather
+     than an entry's restated identifiers is what a work check matches
+     against. -->
+
 ### Requirement: Duplicate detection operates at two levels with distinct reasons
 The pipeline SHALL check each incoming file against the library's
 artifact store twice and report the two outcomes distinctly: a content
@@ -171,6 +227,12 @@ becomes of the file it matched.
 - **THEN** that file is moved and recorded, and the artifact it matched
   keeps its path, its record and its item link
 
+<!-- drops: `borax ledger rebuild` as the remedy, which this change
+     withdraws, and the framing of a stale record as an entry to
+     distrust. A stale last-known path is now the ordinary state of a
+     library between a move and the next reconcile, so the remedy is a
+     reconcile and the report is not a warning about damage. -->
+
 ### Requirement: Stale entries never block re-admission
 A duplicate report SHALL first verify that the recorded path still holds
 a file in the library; if it does not, the record's last-known path is
@@ -189,53 +251,71 @@ reconciliation rather than correct by construction.
 - **THEN** the file is processed normally and the run reports that the
   library has paths to reconcile
 
-### Requirement: The record of admissions is optional and degrades loudly, never blocking
-The pipeline SHALL treat the library's record of what it has admitted as
-optional: when it is disabled (`--no-record` or config) or there is no
-library root, the run proceeds with duplicate detection off and says
-nothing about it, having been told not to check or having nowhere to
-check against. An empty artifact store is not a degradation — it is a
-library that has admitted nothing borax has recorded — and SHALL produce
-no warning.
+## REMOVED Requirements
 
-`--no-record` SHALL suppress every write to the store and both
-duplicate checks: the run writes no artifact record and no item, makes
-no content check and no work check, and nothing persistent survives it
-but the moves it made and its run log. One setting governs both,
-because a run that keeps no account of what it admitted has nothing to
-check a later file against either.
+### Requirement: The ledger is an append-only JSONL file at the collection root
+**Reason**: The artifact record replaces it. `.borax/ledger.jsonl` was a
+per-file account keyed on a content hash, holding one path, one hash and
+the identifiers of the record that admitted it; the artifact record is
+the same account grown up — keyed on an identity that survives both a
+move and a byte edit, holding a hash history whose entries carry the
+run, the timestamp and the version that recorded each of them, and
+naming an item rather than restating identifiers. Keeping both would
+give a library two per-file stores that disagree the first time
+something moves a file out of band, since only one of them has a
+reconcile. An append-only log was also the wrong shape for state that is
+repaired: a record whose path is corrected is one file rewritten, not a
+line appended to a log that still holds the wrong answer above it.
 
-What `--no-record` SHALL NOT suppress is the check an applying run makes
-against the record of the very file it is about to move. That check is
-not part of the account and not a policy about admissions: it is what
-keeps a move from stranding a record beyond repair, and the `library`
-capability states it and the one refusal it produces. The gate governs
-bookkeeping, not safety — an operator turning off the account is asking
-borax to keep no record of this run, not asking it to damage the records
-it already has.
+**Migration**: None is owed. borax is before `1.0.0` and promises no
+compatibility, so a library that predates the artifact store simply
+starts with an empty one: `.borax/ledger.jsonl` is neither read nor
+written nor deleted, and duplicate detection has nothing to answer from
+until the store is populated. `borax rename --apply` over the library
+records every file it settles, moved or already named, and `borax adopt`
+records offline whatever the content index can still answer for. The
+old file is left where it is and may be deleted by hand; it is borax's
+own accounting rather than a user's document, and nothing in it is
+information a user would lose.
 
-An artifact record that cannot be read or does not parse SHALL cost its
-own artifact and nothing else: it contributes to neither check, the run
-warns once naming the number of unreadable records, and the rest of the
-store answers normally. One unreadable file SHALL NOT turn duplicate
-detection off across the library, which is what a single-file account
-had to do.
+### Requirement: The ledger is rebuildable and rebuilds deterministically
+**Reason**: `borax ledger rebuild` derived the account back from the
+collection's files and their citation sidecars, which is a dependence
+on derived output that the authoritative artifact record exists to end.
+With authoritative per-artifact state there is nothing to derive from
+output: the records are the account. What a library still needs is the
+two halves this requirement ran together — a local way to record what is
+on disk, and a pass that brings each record back into agreement with the
+tree — and both are specified in the `library` capability rather than
+withdrawn. `borax adopt` is the first, offline and moving nothing;
+`borax reconcile` is the second, with its bounded walk, its
+`(size, mtime)` fast path, its precedence and ambiguity rules, and no
+library state written when nothing has changed — its run log is written
+as any run's is — which is the determinism this requirement was asking
+for in the form that still means something.
 
-#### Scenario: An unreadable artifact record
-- **WHEN** one file under `.borax/artifacts/` does not parse
-- **THEN** the run warns naming it, duplicate detection still runs
-  against every other record, and `borax validate` reports it as a
-  finding
+**Migration**: Run `borax adopt` where `borax ledger rebuild` was run,
+and `borax reconcile` to repair paths afterwards. Neither queries a
+service, renames a file or moves one. An artifact the content index
+cannot answer for stays an orphan, which is a worklist entry rather
+than a silent omission; `borax rename --apply` over the library is what
+resolves and records such a file, and it is a different operation
+because it may query services and may rename under the templates in
+force.
 
-#### Scenario: No library root
-- **WHEN** files are processed in a directory tree with no
-  `.borax.toml` above it
-- **THEN** no artifact record is read or written and no duplicate
-  warning is possible for that run
+### Requirement: The ledger is optional and degrades loudly, never blocking
+**Reason**: Renamed and rewritten as "The record of admissions is
+optional and degrades loudly, never blocking", added by this change in
+this capability. The rule survives — the account is optional, its
+absence never blocks a run, and a run told not to keep one keeps none —
+but every noun in it changed: there is no ledger file to be absent or
+unparsable, no torn trailing line to ignore, and the setting is now
+`--no-record`. It is expressed as a removal and an addition rather than
+as a rename because `openspec archive` matches a MODIFIED requirement to
+a living one by title, and a renamed title matches nothing.
 
-#### Scenario: The account is turned off for a run
-- **WHEN** `borax rename --apply --no-record` runs over a library
-- **THEN** no duplicate check is made and no artifact record and no item
-  is written, and the files are renamed and reported as they otherwise
-  would be
-
+**Migration**: None. Read the added requirement of the same shape:
+`--no-ledger` is spelled `--no-record`, and what was said about an
+absent or unparsable ledger file is now said about an unreadable
+artifact record, which costs its own artifact alone rather than the
+whole library's duplicate detection.
