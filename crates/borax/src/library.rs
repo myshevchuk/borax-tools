@@ -95,17 +95,28 @@ pub fn contains(root: &Path, path: &Path) -> bool {
 /// `/`-separated whatever the platform writes, which is the form an
 /// artifact record stores.
 ///
-/// `None` when `path` is not spelled as a descendant of `root`. The
-/// comparison is on the paths as given, so both sides have to be
-/// spelled the same way — which they are when `path` came from
-/// [`artifacts`].
+/// `None` when `path` does not lie under `root`. Both sides are
+/// normalised as [`contains`] normalises them before they are compared,
+/// so a relative input and an absolute root name one tree however each
+/// is spelled.
 pub fn library_relative(root: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(root).ok()?;
+    let (root, path) = normalised(root, path);
+    let relative = path.strip_prefix(&root).ok()?;
     let segments: Vec<String> = relative
         .components()
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect();
     Some(segments.join("/"))
+}
+
+/// `root` and `path` normalised lexically, each left as spelled where
+/// it cannot be: a relative path with no working directory to resolve
+/// it against.
+fn normalised(root: &Path, path: &Path) -> (PathBuf, PathBuf) {
+    (
+        lexical(root).unwrap_or_else(|| root.to_path_buf()),
+        lexical(path).unwrap_or_else(|| path.to_path_buf()),
+    )
 }
 
 /// The full path of `relative`, which is `/`-separated and relative to
@@ -173,17 +184,18 @@ fn owns(root: &Path, directory: &Path) -> bool {
 /// the orphan count, an applying run's admissions and reconciliation
 /// all ask, so that the four agree about where the library stops.
 ///
-/// `path` is compared against `root` as spelled, in the form
-/// [`artifacts`] produces.
+/// Both sides are normalised as [`library_relative`] normalises them,
+/// so the answer does not depend on how either is spelled.
 pub fn excludes(root: &Path, path: &Path) -> bool {
-    let Ok(relative) = path.strip_prefix(root) else {
+    let (root, path) = normalised(root, path);
+    let Ok(relative) = path.strip_prefix(&root) else {
         return true;
     };
 
-    let mut walked = root.to_path_buf();
+    let mut walked = root.clone();
     for component in relative.components() {
         walked.push(component);
-        if !owns(root, &walked) {
+        if !owns(&root, &walked) {
             return true;
         }
     }

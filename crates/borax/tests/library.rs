@@ -9,9 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use borax::event::{Admission, Event, Finding, Repair};
 use borax::library::{
     ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, ITEM_STORE, ItemStore, STATE_DIR,
-    Unrecorded, WorkDuplicate, admission_event, admit, artifacts, contains, item_file_name,
-    missing, orphans, reconcile, reconciliation_events, recorded_at, relative_to, store_write,
-    strands, survey, validate,
+    Unrecorded, WorkDuplicate, admission_event, admit, artifacts, contains, excludes,
+    item_file_name, library_relative, missing, orphans, reconcile, reconciliation_events,
+    recorded_at, relative_to, store_write, strands, survey, validate,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -359,6 +359,53 @@ fn artifacts_excludes_everything_beneath_a_nested_marker() {
     fs::write(root.join("outer.pdf"), b"").unwrap();
 
     assert_eq!(artifacts(root), vec![root.join("outer.pdf")]);
+}
+
+// ---------------------------------------------------------------------
+// library_relative() and excludes() under any spelling
+// ---------------------------------------------------------------------
+
+// A run given `paper.pdf` discovers its library root as an absolute
+// directory. The file is inside that library by lexical containment,
+// however it was spelled, so an applying run records it there.
+#[test]
+fn a_relative_path_is_library_relative_to_an_absolute_root() {
+    let working = std::env::current_dir().unwrap();
+
+    assert_eq!(
+        library_relative(&working, Path::new("paper.pdf")).as_deref(),
+        Some("paper.pdf")
+    );
+    assert_eq!(
+        library_relative(&working, Path::new("./sub/x/../paper.pdf")).as_deref(),
+        Some("sub/paper.pdf")
+    );
+}
+
+#[test]
+fn an_absolute_path_is_library_relative_to_a_relative_root() {
+    let working = std::env::current_dir().unwrap();
+
+    assert_eq!(
+        library_relative(Path::new("."), &working.join("sub/paper.pdf")).as_deref(),
+        Some("sub/paper.pdf")
+    );
+}
+
+#[test]
+fn a_relative_path_climbing_out_of_the_root_is_not_library_relative() {
+    let working = std::env::current_dir().unwrap();
+
+    assert_eq!(library_relative(&working, Path::new("../paper.pdf")), None);
+}
+
+#[test]
+fn a_relative_path_inside_the_root_is_not_excluded() {
+    let working = std::env::current_dir().unwrap();
+
+    assert!(!excludes(&working, Path::new("paper.pdf")));
+    assert!(!excludes(Path::new("."), &working.join("paper.pdf")));
+    assert!(excludes(&working, Path::new("../paper.pdf")));
 }
 
 // ---------------------------------------------------------------------
