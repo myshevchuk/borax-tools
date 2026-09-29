@@ -1977,6 +1977,34 @@ fn nearest_override_prefers_the_closest_file() {
     assert_eq!(found, Some(PathBuf::from("/proj/sub/.borax.toml")));
 }
 
+// `./paper.pdf` starts the search at `.`, whose own ancestors stop at
+// the working directory. The override file above it is the one the
+// same file named as `paper.pdf` finds, so the search climbs from where
+// `.` is rather than from how it is spelled.
+#[test]
+fn nearest_override_climbs_above_a_relative_start() {
+    let working = std::env::current_dir().unwrap();
+    let parent = working.parent().expect("tests do not run at the root");
+    let expected = parent.join(OVERRIDE_FILE);
+
+    let found = nearest_override(Path::new("."), |candidate| candidate == expected);
+
+    assert_eq!(found, Some(expected));
+}
+
+#[test]
+fn nearest_override_resolves_parent_components_before_climbing() {
+    let working = std::env::current_dir().unwrap();
+    let expected = working.join(OVERRIDE_FILE);
+    let sub = working.join("sub");
+
+    let found = nearest_override(Path::new("sub/.."), |candidate| {
+        candidate == expected || candidate == sub.join(OVERRIDE_FILE)
+    });
+
+    assert_eq!(found, Some(expected));
+}
+
 #[test]
 fn nearest_override_is_none_when_nothing_matches_up_to_the_root() {
     let found = nearest_override(Path::new("/proj/sub/deeper"), exists_at(&[]));
