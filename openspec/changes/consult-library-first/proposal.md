@@ -47,8 +47,10 @@ restoration: no living requirement governs what resolution reads first.
   and resolved lexically before containment, exclusion and record
   matching, as the duplicate checks already do. `borax resolve
   paper.pdf` and `./sub/../paper.pdf` are consulted like the absolute
-  spelling. `library_relative` and `excludes` are unchanged for their
-  other callers (design D1a).
+  spelling. The two helpers it rests on, `library_relative` and
+  `excludes`, and discovery from a relative start directory were
+  restored to the library's containment rule by separate fixes on this
+  branch (design D1a).
 - **Counting every history entry is an interim policy.** A rollback
   resolves from the item. A hash entry records no item, though, so bytes
   restored after a re-link answer with the *new* item. The proposal pins
@@ -239,10 +241,6 @@ not design any of it.
 - **History entries bound to items** (change 15, Phase 4). Until
   then, a rollback after a re-link answers with the new item (design
   D1, Risks).
-- **Relative inputs in admission, and discovery from a relative start
-  directory.** Both were observed from source and predate this change.
-  Consultation normalises its own comparisons; the rest is left alone
-  (design D1a, Risks).
 - **Acceptance of changed bytes** (change 15). Reconciliation's
   "Edited in place" step and an applying run's record update both write
   unrelated bytes into an artifact's history today. After this change,

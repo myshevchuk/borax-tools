@@ -45,8 +45,8 @@ and return early when a probe shows the directory is still listable
         `<root>/sub/./paper.pdf`, as `<root>/x/../sub/paper.pdf`, and as
         a relative spelling from the test's working directory
         (`paths::route`). The same holds for a relative spelling of the
-        root. `library_relative` and `excludes` keep their as-spelled
-        behaviour: an existing test of either is not changed.
+        root. `library_relative` and `excludes` already normalise
+        (restoration `1d2954a`); rely on them.
       - `UnrecognisedContent` lists every record naming the path when
         none holds the hash. `Ambiguous` lists every record at the path
         that holds it, in read order. When two records name the path
@@ -84,11 +84,9 @@ and return early when a probe shows the directory is still listable
         rendering yet.
       - In `crates/borax/src/library.rs`: `Consulted`, `RecordFaults`,
         `Stores::consult` and `Stores::record_faults`.
-        - `consult` normalises the root and the path with
-          `paths::lexical` before calling `library_relative`, `excludes`
-          and `Account::is_incoming`'s comparison, and uses
+        - `consult` uses `library_relative` and `excludes`, which
+          normalise both sides, `Account::is_incoming`'s comparison,
           `ArtifactRecord::holds` and `name_uuid`.
-        - `library_relative` and `excludes` are not changed.
       - `store_files`: only `NotFound` is an empty store, and every
         other listing, iteration or metadata failure is a `StoreFault`
         (design D2a). Widen `Finding::Unreadable`'s docstring to a store

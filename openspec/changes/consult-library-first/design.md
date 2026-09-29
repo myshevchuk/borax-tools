@@ -42,12 +42,14 @@ source at `1c23be9`.
   line is `<path>: resolved <identifier> via <source>[ (cached)]`.
 - `describe::whence` maps every `tier` it does not know to `from the
   file`. `record_from` appends `from an earlier run` when `cached`.
-- `library::library_relative` and `library::excludes` compare paths as
-  spelled (`strip_prefix`), and their docstrings say so: both sides must
-  be spelled alike. `run::inputs` does not make input paths absolute. A
-  bare `borax resolve paper.pdf` starts in the absolute working
-  directory (`start_directory`), so `collection_root` is absolute while
-  the input is `paper.pdf`.
+- `run::inputs` does not make input paths absolute, so an input may be
+  `paper.pdf` while `collection_root` is absolute. Two restorations
+  committed on this branch before the tests (`6bd1ea4`, `1d2954a`) make
+  that harmless: `config::nearest_override` climbs from the lexically
+  normalised start, so `./paper.pdf` finds a marker above the working
+  directory, and `library::library_relative` and `library::excludes`
+  normalise both sides as `library::contains` does, so admission places
+  a relative input in the tree.
 - `library::store_files` returns an empty list for *every* `read_dir`
   error, and `listing.flatten()` plus the `metadata().is_ok_and(..)`
   filter silently drop entries that fail. An unreadable
@@ -173,31 +175,12 @@ the same file to the consultation. A path that cannot be normalised (a
 relative path with no working directory) is not consulted, `library:
 null`.
 
-`library_relative` and `excludes` are **not changed**. Consultation
-normalises before calling them. Their other callers were checked:
-
-- `walk`, `orphans`, `reconcile` and `adopt` pass paths produced by
-  walking from the root, so both sides are already spelled alike.
-- `Stores::foresee`/`take_in`, `admit`, `recorded_at`, and the rename
-  helpers in `run.rs` (the `held` lookup, `admissible`, the path
-  comparison at the moved-record check) receive the run's input paths
-  as typed. For a relative input, these give "outside" today. That is a
-  separate defect in admission, not in consultation. Changing the two
-  functions would alter admission behaviour, which this change does not
-  propose, so it is left to the orchestrator as an observation (Risks).
-
-**Not changed: library discovery.** `config::library_root` searches
-`start.ancestors()`. For a relative start directory, such as the `.`
-that `./paper.pdf` gives, the search stops at the working directory, so
-a marker above it is not found. Discovery is out of this change's scope
-("the current library found by its marker", as today). Consultation
-works on whatever root discovery returns, relative roots included,
-because it normalises the root too.
-
-**Rejected: change `library_relative` and `excludes` to normalise.** It
-would silently change what admission, `foresee` and the moved-record
-check decide for relative inputs, which are paths this proposal does
-not specify or test.
+`library_relative` and `excludes` already normalise both sides (the
+restoration `1d2954a`, which brought admission back in line with the
+library's lexical-containment rule), so consultation relies on them
+rather than normalising separately. Discovery climbs from the
+normalised start (the restoration `6bd1ea4`), so the root is absolute
+for every spelling of the input.
 
 ## D2. What the library cannot answer, and what happens then
 
@@ -823,17 +806,6 @@ verdict paths.
   discussion own the fix: bind entries to items, or discount entries
   older than a re-link. Tasks 1.1 pins today's answer so the fix
   changes a test deliberately.
-- **Relative input paths in admission (observed, not changed).**
-  Consultation normalises paths (D1a). Admission's `library_relative`
-  and `excludes` calls still compare as spelled, so an applying
-  `rename paper.pdf` may resolve from the library yet be admitted as
-  `outside`. This was read from source, not run. It predates this
-  change and is out of its scope.
-- **Discovery from a relative start directory (observed, not
-  changed).** `borax resolve ./paper.pdf` from below a library's root
-  does not find the marker above the working directory (D1a). That is
-  unchanged discovery, and affects run logs and admissions as much as
-  consultation.
 - **A moved artifact falls back until reconciled.** Between an
   out-of-band move and `borax reconcile`, a tracked file is untracked
   and can get the stale content-index record. The library capability
