@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use borax::event::{
     Attempt, Claim, ClaimOrigin, Counts, Diagnostic, Event, Format, Level, SCHEMA, SkipReason,
-    TableUsed, human_line, json_line, render,
+    Summary, TableUsed, human_line, human_summary, json_line, render,
 };
 use borax::pipeline::{FileOutcome, FileRecord, event_for};
 use borax_core::content::{ContentHash, hash_bytes};
@@ -661,9 +661,13 @@ fn human_line_of_cache_cleared_mentions_the_root_and_the_counts() {
     assert!(line.contains("1024"));
 }
 
+/// design D2: a context-free rendering of `run-finished` has nothing
+/// correct to say, because it cannot know which command's shape fits.
+/// `run-finished` joins `run-started` as a silent event; the summary
+/// comes from `human_summary`, given the command's `Summary`.
 #[test]
-fn human_line_of_run_finished_is_not_silent() {
-    assert!(human_line(&run_finished()).is_some());
+fn human_line_of_run_finished_is_silent() {
+    assert_eq!(human_line(&run_finished()), None);
 }
 
 #[test]
@@ -838,8 +842,9 @@ fn counts_observe_counts_a_lookup_missed_as_unmatched() {
 /// half of it.
 #[test]
 fn the_summary_line_names_unmatched_lookups_when_there_were_any() {
-    let line = human_line(&Event::RunFinished {
-        counts: Counts {
+    let line = human_summary(
+        Summary::Renaming,
+        &Counts {
             resolved: 12,
             renamed: 12,
             skipped: 0,
@@ -848,7 +853,8 @@ fn the_summary_line_names_unmatched_lookups_when_there_were_any() {
             unreached: 0,
             findings: 0,
         },
-    })
+        0,
+    )
     .unwrap();
 
     assert!(line.contains("1 unmatched"), "got {line:?}");
@@ -859,8 +865,9 @@ fn the_summary_line_names_unmatched_lookups_when_there_were_any() {
 /// being nothing for a person to do about it.
 #[test]
 fn the_summary_line_says_nothing_about_unmatched_lookups_when_there_were_none() {
-    let line = human_line(&Event::RunFinished {
-        counts: Counts {
+    let line = human_summary(
+        Summary::Renaming,
+        &Counts {
             resolved: 3,
             renamed: 2,
             skipped: 1,
@@ -869,10 +876,233 @@ fn the_summary_line_says_nothing_about_unmatched_lookups_when_there_were_none() 
             unreached: 0,
             findings: 0,
         },
-    })
+        0,
+    )
     .unwrap();
 
     assert_eq!(line, "3 resolved, 2 renamed, 1 skipped");
+}
+
+// ---------------------------------------------------------------------
+// human_summary: the shapes fixed by design D3 — task 1.1
+// ---------------------------------------------------------------------
+
+/// A `Counts` with every field nonzero, so the optional-clause tests
+/// below can pin the order and presence of each one at once.
+fn full_counts() -> Counts {
+    Counts {
+        resolved: 5,
+        renamed: 4,
+        skipped: 2,
+        named: 3,
+        unmatched: 1,
+        unreached: 1,
+        findings: 1,
+    }
+}
+
+/// design D3: `Renaming` reproduces today's `human_summary` output,
+/// byte for byte, with every optional clause present when its count is
+/// nonzero: `already named`, `unmatched`, `not reached` and `findings`.
+#[test]
+fn human_summary_renaming_includes_every_optional_clause_when_all_are_nonzero() {
+    let line = human_summary(Summary::Renaming, &full_counts(), 0).unwrap();
+
+    assert_eq!(
+        line,
+        "5 resolved, 4 renamed, 2 skipped, 3 already named, \
+         1 unmatched, 1 not reached, 1 findings",
+        "got {line:?}"
+    );
+}
+
+/// design D3: an interactive run that hid every already-named file it
+/// passed over says so instead of naming them, `(not shown)`.
+#[test]
+fn human_summary_renaming_marks_already_named_not_shown_when_all_are_hidden() {
+    let line = human_summary(Summary::Renaming, &full_counts(), 3).unwrap();
+
+    assert!(line.contains("3 already named (not shown)"), "got {line:?}");
+}
+
+/// design D3: an interactive run that hid only some of the already-named
+/// files it passed over names how many, `(N not shown)`.
+#[test]
+fn human_summary_renaming_marks_already_named_partly_shown_when_some_are_hidden() {
+    let line = human_summary(Summary::Renaming, &full_counts(), 1).unwrap();
+
+    assert!(
+        line.contains("3 already named (1 not shown)"),
+        "got {line:?}"
+    );
+}
+
+/// design D3: `Renaming` is always `Some`, even for a run with no
+/// activity at all.
+#[test]
+fn human_summary_renaming_is_always_some() {
+    assert!(human_summary(Summary::Renaming, &Counts::default(), 0).is_some());
+}
+
+/// design D3: `Resolution` gives `1 resolved, 0 skipped` for one
+/// resolution.
+#[test]
+fn human_summary_resolution_reports_one_resolution() {
+    let counts = Counts {
+        resolved: 1,
+        ..Counts::default()
+    };
+
+    assert_eq!(
+        human_summary(Summary::Resolution, &counts, 0),
+        Some("1 resolved, 0 skipped".to_string())
+    );
+}
+
+/// design D3: `Resolution` gives `0 resolved, 0 skipped` for an empty
+/// run. Resolved and skipped are always written, even at zero, because
+/// they answer the question the command was run to ask.
+#[test]
+fn human_summary_resolution_reports_zero_and_zero_for_an_empty_run() {
+    assert_eq!(
+        human_summary(Summary::Resolution, &Counts::default(), 0),
+        Some("0 resolved, 0 skipped".to_string())
+    );
+}
+
+/// design D3: `Resolution` adds the `unmatched`, `not reached` and
+/// `findings` clauses only when nonzero, and its line never contains
+/// `renamed` or `already named`, even with those counts set.
+#[test]
+fn human_summary_resolution_adds_optional_clauses_and_drops_renaming_fields() {
+    let line = human_summary(Summary::Resolution, &full_counts(), 0).unwrap();
+
+    assert_eq!(
+        line, "5 resolved, 2 skipped, 1 unmatched, 1 not reached, 1 findings",
+        "got {line:?}"
+    );
+    assert!(!line.contains("renamed"), "got {line:?}");
+    assert!(!line.contains("already named"), "got {line:?}");
+}
+
+/// design D3: `Silent` is `None` for all-zero counts.
+#[test]
+fn human_summary_silent_is_none_for_all_zero_counts() {
+    assert_eq!(human_summary(Summary::Silent, &Counts::default(), 0), None);
+}
+
+/// design D3: `Silent` is `None` for counts whose only nonzero totals
+/// are resolved, renamed, named or unmatched — none of which decides a
+/// partial-success exit.
+#[test]
+fn human_summary_silent_is_none_when_only_non_partial_success_totals_are_nonzero() {
+    let counts = Counts {
+        resolved: 4,
+        renamed: 3,
+        named: 2,
+        unmatched: 1,
+        skipped: 0,
+        unreached: 0,
+        findings: 0,
+    };
+
+    assert_eq!(human_summary(Summary::Silent, &counts, 0), None);
+}
+
+/// design D3: `Validation` is `None` when findings alone is nonzero —
+/// `validate` already states the count on the `library-validated` line,
+/// and repeating it there is the redundancy this change removes.
+#[test]
+fn human_summary_validation_is_none_when_findings_alone_is_nonzero() {
+    let counts = Counts {
+        findings: 2,
+        ..Counts::default()
+    };
+
+    assert_eq!(human_summary(Summary::Validation, &counts, 0), None);
+}
+
+// ---------------------------------------------------------------------
+// human_summary: a partial-success total is never hidden — design D3a,
+// task 1.2
+// ---------------------------------------------------------------------
+
+/// design D3a: for every `Summary` variant, a nonzero `skipped`,
+/// `unreached` or `findings` total, taken alone, always produces a line
+/// naming it in its clause wording — except `Validation` with
+/// `findings`, which is `None` because `validate` already states that
+/// count on the line above it.
+#[test]
+fn a_partial_success_total_is_never_hidden_for_any_summary_shape() {
+    let variants = [
+        Summary::Renaming,
+        Summary::Resolution,
+        Summary::Validation,
+        Summary::Silent,
+    ];
+    let cases: [(fn(usize) -> Counts, &str); 3] = [
+        (
+            |n| Counts {
+                skipped: n,
+                ..Counts::default()
+            },
+            "skipped",
+        ),
+        (
+            |n| Counts {
+                unreached: n,
+                ..Counts::default()
+            },
+            "not reached",
+        ),
+        (
+            |n| Counts {
+                findings: n,
+                ..Counts::default()
+            },
+            "findings",
+        ),
+    ];
+
+    for summary in variants {
+        for (make_counts, clause) in cases {
+            let counts = make_counts(7);
+            let line = human_summary(summary, &counts, 0);
+
+            if summary == Summary::Validation && clause == "findings" {
+                assert_eq!(
+                    line, None,
+                    "Validation must not repeat findings: got {line:?}"
+                );
+                continue;
+            }
+
+            let line = line.unwrap_or_else(|| {
+                panic!("{summary:?} hid a nonzero {clause} total: counts {counts:?}")
+            });
+            assert!(
+                line.contains(&format!("7 {clause}")),
+                "{summary:?} did not name its {clause} total: got {line:?}"
+            );
+        }
+    }
+}
+
+/// design D3a, the exact wording: `Silent` with a nonzero `skipped` and
+/// `unreached`, and nothing else, is exactly the two clauses joined by
+/// `, `, in that order.
+#[test]
+fn human_summary_silent_with_skipped_and_unreached_is_exactly_the_two_clauses() {
+    let counts = Counts {
+        skipped: 2,
+        unreached: 1,
+        ..Counts::default()
+    };
+
+    assert_eq!(
+        human_summary(Summary::Silent, &counts, 0),
+        Some("2 skipped, 1 not reached".to_string())
+    );
 }
 
 // --- the tables a run read, on Event::RunStarted ---
