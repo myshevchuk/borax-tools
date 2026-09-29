@@ -44,8 +44,8 @@ use crate::config::{
 };
 use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
-    Admission, Counts, Diagnostic, Event, Format, Level, Overridden, SkipReason, TableUsed,
-    human_summary, render,
+    Admission, Counts, Diagnostic, Event, Format, Level, Overridden, SkipReason, Summary,
+    TableUsed, human_summary, render,
 };
 use crate::library::Account;
 use crate::pipeline::{
@@ -2820,6 +2820,11 @@ fn bib_config(config: &Config) -> BibConfig {
 /// so what the two formats report at the end agrees however much they
 /// differ in between.
 ///
+/// In [`Format::Human`], [`Event::RunFinished`] is written as the line
+/// [`human_summary`] gives for `summary`, the shape the run's command
+/// asks for, and as no line when that shape has nothing to say. In
+/// [`Format::Json`] it is written like every other event.
+///
 /// A write that fails is dropped rather than reported: the stream is
 /// where a run says things, and a run whose stream has gone has nowhere
 /// left to say that it went.
@@ -2842,6 +2847,8 @@ struct Rendering<'a> {
     held: Option<Vec<String>>,
     /// How many files' lines were dropped rather than written.
     hidden: usize,
+    /// The shape of the closing line in [`Format::Human`].
+    summary: Summary,
 }
 
 impl Rendering<'_> {
@@ -2859,10 +2866,11 @@ impl Rendering<'_> {
 impl Sink for Rendering<'_> {
     fn emit(&mut self, event: Event) {
         // The summary is the one line the hold changes rather than
-        // delays: a run that passed files over says so there.
+        // delays: a run that passed files over says so there. Its shape
+        // is the command's, which the event does not carry.
         let line = match (&event, self.format) {
             (Event::RunFinished { counts }, Format::Human) => {
-                Some(human_summary(counts, self.hidden))
+                human_summary(self.summary, counts, self.hidden)
             }
             _ => render(self.format, &event),
         };
@@ -3076,6 +3084,10 @@ fn write_event(log: &mut fs::File, event: &Event) -> io::Result<()> {
 /// [`Event::RunFinished`], whatever happened in between, so a consumer
 /// can tell a run that produced nothing from a run that was cut off.
 /// Events a format has nothing to say about are simply not written.
+/// The human rendering closes on the summary line
+/// [`Command::summary`] names for `cli.command`, or on the command's
+/// own last report line when that summary has nothing to say; the JSON
+/// stream and the run log close on [`Event::RunFinished`] either way.
 ///
 /// Each event is written when it happens rather than when the run ends,
 /// so a network-bound run is watchable while it is bound.
@@ -3155,6 +3167,7 @@ pub fn dispatch<C: Cache>(
             counts: Counts::default(),
             held: None,
             hidden: 0,
+            summary: cli.command.summary(),
         },
         log,
         recorded: None,

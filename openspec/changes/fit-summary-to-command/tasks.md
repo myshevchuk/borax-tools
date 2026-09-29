@@ -58,7 +58,7 @@ a sign the task has been misread.
       `--identify`), `reconcile`, `adopt`, `config` and `cache` to
       `Silent`. Build each command through the same parse path the
       existing `cli.rs` tests use.
-- [ ] 1.5 Green: add `Summary` and change `human_summary` in
+- [x] 1.5 Green: add `Summary` and change `human_summary` in
       `crates/borax/src/event.rs`. `human_line` renders `RunFinished`
       as `None`, and its docstring stops claiming `RunStarted` is the
       only silent event. Add `Command::summary` in
@@ -99,7 +99,7 @@ a sign the task has been misread.
       - A human-mode `status` inside a library with the run log on
         writes a log whose last line is the same `run-finished` event,
         though stdout showed no summary.
-- [ ] 2.6 Green: in `crates/borax/src/run.rs`, give `Rendering` a
+- [x] 2.6 Green: in `crates/borax/src/run.rs`, give `Rendering` a
       `summary: Summary` field set from `cli.command.summary()` in
       `dispatch`. `Rendering::emit` renders `(RunFinished, Human)`
       through `human_summary(self.summary, counts, self.hidden)` and

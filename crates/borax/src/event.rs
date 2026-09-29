@@ -693,9 +693,12 @@ fn unrenderable(message: &str) -> String {
 /// `event` as a line of prose, or `None` when the event is not worth
 /// saying aloud.
 ///
-/// [`Event::RunStarted`] is the only silent one: a person watching a
-/// rename wants the renames, not a restatement of the command they
-/// just typed. The JSON stream keeps it regardless.
+/// The two framing events are silent. [`Event::RunStarted`] would
+/// restate the command a person just typed. [`Event::RunFinished`]
+/// closes the run with a line whose shape depends on the command, which
+/// the event alone does not name, so a rendering that knows the command
+/// writes it through [`human_summary`] instead. The JSON stream keeps
+/// both regardless.
 pub fn human_line(event: &Event) -> Option<String> {
     match event {
         Event::RunStarted { .. } => None,
@@ -820,48 +823,89 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: {adopted} adopted, {orphans} orphans",
             root.display()
         )),
-        Event::RunFinished { counts } => Some(human_summary(counts, 0)),
+        Event::RunFinished { .. } => None,
     }
 }
 
-/// What a run amounts to, as the closing line of a human rendering.
+/// Which closing line a command's human rendering ends with.
+///
+/// Chosen per command by [`crate::cli::Command::summary`] and rendered
+/// by [`human_summary`]. The JSON stream does not depend on it: every
+/// command closes that stream with the same [`Event::RunFinished`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Summary {
+    /// `rename`: resolved, renamed and skipped, then files already
+    /// named, unmatched lookups, files not reached and findings, each
+    /// when nonzero.
+    Renaming,
+    /// `resolve` and `bib`: resolved and skipped, then unmatched
+    /// lookups, files not reached and findings, each when nonzero.
+    Resolution,
+    /// `validate`: no line of its own, since its findings are on the
+    /// [`Event::LibraryValidated`] line, unless files were skipped or
+    /// not reached.
+    Validation,
+    /// `status`, `reconcile`, `adopt`, `config` and `cache`: no line of
+    /// their own, unless files were skipped or not reached or findings
+    /// were reported.
+    Silent,
+}
+
+/// What a run amounts to, as the closing line of a human rendering in
+/// the shape `summary` asks for, or `None` when that shape has nothing
+/// to say about `counts`.
+///
+/// [`Summary::Renaming`] and [`Summary::Resolution`] always give a
+/// line, and always state resolved and skipped, zero included.
+/// Unmatched lookups, files not reached and findings are written only
+/// when nonzero, and in that order.
+///
+/// [`Summary::Silent`] and [`Summary::Validation`] give `None` unless a
+/// total that makes the run a partial success is nonzero — skipped, not
+/// reached, or findings — and then give just those totals, so the
+/// terminal never ends a partial run without saying why.
+/// [`Summary::Validation`] leaves findings out, because the
+/// [`Event::LibraryValidated`] line already states them.
 ///
 /// `hidden` is how many already-named files the run passed over without
-/// a line of their own, which only an interactive run does. Saying so
-/// here is what keeps a terminal that showed less than the stream held
-/// honest about it.
-///
-/// A zero count of unmatched lookups is left out rather than written as
-/// a zero: the JSON summary carries it either way, and a run that
-/// looked nothing up has nothing to say about tables it never
-/// consulted. The same goes for files already named, renames not
-/// reached, files passed over, and findings about a library the run
-/// never validated.
-pub fn human_summary(counts: &Counts, hidden: usize) -> String {
-    format!(
-        "{} resolved, {} renamed, {} skipped{}{}{}{}",
-        counts.resolved,
-        counts.renamed,
-        counts.skipped,
-        match (counts.named, hidden) {
-            (0, _) => String::new(),
-            (named, 0) => format!(", {named} already named"),
-            (named, hidden) if hidden >= named => format!(", {named} already named (not shown)"),
-            (named, hidden) => format!(", {named} already named ({hidden} not shown)"),
-        },
-        match counts.unmatched {
-            0 => String::new(),
-            unmatched => format!(", {unmatched} unmatched"),
-        },
-        match counts.unreached {
-            0 => String::new(),
-            unreached => format!(", {unreached} not reached"),
-        },
-        match counts.findings {
-            0 => String::new(),
-            findings => format!(", {findings} findings"),
-        }
-    )
+/// a line of their own, which only an interactive run does, and is read
+/// only by [`Summary::Renaming`]: its `already named` clause says how
+/// many of them the terminal did not show.
+pub fn human_summary(summary: Summary, counts: &Counts, hidden: usize) -> Option<String> {
+    let clause = |count: usize, what: &str| (count != 0).then(|| format!("{count} {what}"));
+    let skipped = format!("{} skipped", counts.skipped);
+    let unmatched = clause(counts.unmatched, "unmatched");
+    let unreached = clause(counts.unreached, "not reached");
+    let findings = clause(counts.findings, "findings");
+    let clauses: Vec<Option<String>> = match summary {
+        Summary::Renaming => vec![
+            Some(format!("{} resolved", counts.resolved)),
+            Some(format!("{} renamed", counts.renamed)),
+            Some(skipped),
+            match (counts.named, hidden) {
+                (0, _) => None,
+                (named, 0) => Some(format!("{named} already named")),
+                (named, hidden) if hidden >= named => {
+                    Some(format!("{named} already named (not shown)"))
+                }
+                (named, hidden) => Some(format!("{named} already named ({hidden} not shown)")),
+            },
+            unmatched,
+            unreached,
+            findings,
+        ],
+        Summary::Resolution => vec![
+            Some(format!("{} resolved", counts.resolved)),
+            Some(skipped),
+            unmatched,
+            unreached,
+            findings,
+        ],
+        Summary::Validation => vec![clause(counts.skipped, "skipped"), unreached],
+        Summary::Silent => vec![clause(counts.skipped, "skipped"), unreached, findings],
+    };
+    let said: Vec<String> = clauses.into_iter().flatten().collect();
+    (!said.is_empty()).then(|| said.join(", "))
 }
 
 /// The clause following `skipped,` in a human line.

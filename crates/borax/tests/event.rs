@@ -1034,13 +1034,17 @@ fn human_summary_validation_is_none_when_findings_alone_is_nonzero() {
 /// count on the line above it.
 #[test]
 fn a_partial_success_total_is_never_hidden_for_any_summary_shape() {
+    /// Counts with one total set to the given value, and the clause
+    /// wording that names that total.
+    type Case = (fn(usize) -> Counts, &'static str);
+
     let variants = [
         Summary::Renaming,
         Summary::Resolution,
         Summary::Validation,
         Summary::Silent,
     ];
-    let cases: [(fn(usize) -> Counts, &str); 3] = [
+    let cases: [Case; 3] = [
         (
             |n| Counts {
                 skipped: n,
