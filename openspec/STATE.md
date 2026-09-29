@@ -279,6 +279,19 @@ Template filing becomes assignment to that view once views exist, and
 the `rename` filing requirement was left untouched here for that
 reason.
 
+`fit-summary-to-command` is implemented on top, after 0.6.0. The human
+rendering of `run-finished` is chosen per command through
+`Command::summary`: `rename` keeps its line byte for byte, `resolve`
+and `bib` close on `N resolved, N skipped`, and the library commands,
+`config` and `cache` close on their own report line. A skipped,
+unreached or findings total is still named where a shape would say
+nothing, so a partial-success exit never ends on a clean-looking
+terminal. `human_line` renders `run-finished` as nothing, because the
+event does not name the command. JSON and run logs are unchanged and
+the event schema version is still 3. It is the first change of the
+roadmap drawn from the interactive reviews of 0.6.0, which lives
+outside the repository.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the

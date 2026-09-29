@@ -14,11 +14,14 @@ use borax::config::{
     BibLayer, Effective, KeyColumns, Layer, Origin, RenameLayer, TableDeclaration, ValueKindName,
     resolve,
 };
-use borax::event::{Admission, Adoption, Event, Level, Overridden, Repair, SkipReason};
+use borax::event::{
+    Admission, Adoption, Event, Level, Overridden, Repair, SCHEMA, SkipReason, human_line,
+};
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RealFilesystem, RenameError, counts_for};
 use borax::run::{Adapters, Configs, Streams, dispatch, entry_type, events_for, templates};
+use borax::runlog::RUNS_DIR;
 use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
@@ -1838,9 +1841,72 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
     );
     assert_eq!(
         lines.last(),
-        Some(&"1 resolved, 0 renamed, 0 skipped"),
+        Some(&"1 resolved, 0 skipped"),
+        "design D4: resolve is Summary::Resolution and drops renamed, got {lines:?}"
+    );
+}
+
+/// design D4: `resolve` names its skip in the summary — the total that
+/// decides its exit is never hidden.
+#[test]
+fn human_format_of_resolve_with_a_skip_names_it_and_the_outcome_is_partial() {
+    let good = PathBuf::from("/lib/good.pdf");
+    let bad = PathBuf::from("/lib/bad.pdf");
+    let documents = FakeDocuments::new()
+        .with_file(
+            &good,
+            hash_for("dispatch-human-skip-good"),
+            pdf_with_embedded_doi("10.1000/dispatch-human-skip"),
+        )
+        .with_file(
+            &bad,
+            hash_for("dispatch-human-skip-bad"),
+            pdf_with_no_identifier(),
+        );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/dispatch-human-skip")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::resolve(vec![good.clone(), bad.clone()]), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert_eq!(
+        lines.last(),
+        Some(&"1 resolved, 1 skipped"),
         "got {lines:?}"
     );
+    assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
 }
 
 #[test]
@@ -10914,4 +10980,704 @@ fn no_record_moves_both_of_a_byte_identical_pair_and_checks_neither() {
         0,
         "--no-record must write no items"
     );
+}
+
+// ---------------------------------------------------------------------
+// dispatch, human mode: each command's summary shape — design D4,
+// tasks 2.1, 2.3, 2.4, 2.5
+// ---------------------------------------------------------------------
+
+/// design D4: `status` is `Silent`. It ends on the `library-status`
+/// report and never on a `resolved,` line.
+#[test]
+fn status_human_mode_ends_on_the_library_status_line_with_no_summary() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::status(Some(root.clone()), false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let expected_last = format!(
+        "{}: 0 artifacts, 0 items, 0 records, 0 orphans",
+        root.display()
+    );
+
+    assert_eq!(lines.last(), Some(&expected_last.as_str()), "got {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("resolved,")),
+        "got {lines:?}"
+    );
+}
+
+/// design D4: `status --identify` is `Silent` too, the same as plain
+/// `status`.
+#[test]
+fn status_identify_human_mode_ends_on_the_library_status_line_with_no_summary() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::status(Some(root.clone()), true), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let expected_last = format!(
+        "{}: 0 artifacts, 0 items, 0 records, 0 orphans, 0 identifiable",
+        root.display()
+    );
+
+    assert_eq!(lines.last(), Some(&expected_last.as_str()), "got {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("resolved,")),
+        "got {lines:?}"
+    );
+}
+
+/// design D4: `validate` is `Validation`. It ends on the
+/// `library-validated` line, which already carries the findings count,
+/// and a finding still decides `Outcome::Partial`.
+#[test]
+fn validate_human_mode_ends_on_the_library_validated_line_and_is_partial() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    write_dangling_artifact_record(&root);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::validate(Some(root.clone())), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let expected_last = format!(
+        "{}: 1 findings, 0 orphans, 1 missing, 0 unlinked",
+        root.display()
+    );
+
+    assert_eq!(lines.last(), Some(&expected_last.as_str()), "got {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("resolved,")),
+        "got {lines:?}"
+    );
+    assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
+}
+
+/// design D4: `reconcile` is `Silent`. It ends on the
+/// `library-reconciled` totals and never on a `resolved,` line.
+#[test]
+fn reconcile_human_mode_ends_on_its_own_totals_line_with_no_summary() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::reconcile(Some(root.clone()), false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let expected_last = format!(
+        "{}: 0 records, 0 confirmed, 0 repaired, 0 changed, 0 ambiguous, 0 missing, 0 hashed",
+        root.display()
+    );
+
+    assert_eq!(lines.last(), Some(&expected_last.as_str()), "got {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("resolved,")),
+        "got {lines:?}"
+    );
+}
+
+/// design D4: `adopt` is `Silent`, so it ends on its own totals line.
+/// That it stays silent when a lookup misses follows from `adopt`
+/// mapping to `Silent` and `Silent` ignoring `unmatched`, both pinned
+/// by unit tests.
+#[test]
+fn adopt_human_mode_ends_on_its_own_totals_line_with_no_summary() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::adopt(Some(root.clone())), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let expected_last = format!("{}: 0 adopted, 0 orphans", root.display());
+
+    assert_eq!(lines.last(), Some(&expected_last.as_str()), "got {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("resolved,")),
+        "got {lines:?}"
+    );
+}
+
+/// design D4: `config` is `Silent`. It ends on its own last
+/// `config-setting` line, matching what `human_line` renders for it,
+/// and never on a `resolved,` line.
+#[test]
+fn config_human_mode_ends_on_its_own_setting_line_with_no_summary() {
+    let effective = resolve(Vec::new()).unwrap();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::config(), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let expected_events = effective.events();
+    let expected_last =
+        human_line(expected_events.last().unwrap()).expect("a config setting always renders");
+
+    assert_eq!(lines.last(), Some(&expected_last.as_str()), "got {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("resolved,")),
+        "got {lines:?}"
+    );
+}
+
+/// design D4: `cache` is `Silent`. It ends on its own `cache-status`
+/// line and never on a `resolved,` line.
+#[test]
+fn cache_human_mode_ends_on_its_own_status_line_with_no_summary() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("cache");
+    fs::create_dir_all(&root).unwrap();
+
+    let effective = resolve(Vec::new()).unwrap();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: Some(root.clone()),
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::cache(false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let expected_last = format!("{}: 0 entries, 0 bytes", root.display());
+
+    assert_eq!(lines.last(), Some(&expected_last.as_str()), "got {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("resolved,")),
+        "got {lines:?}"
+    );
+}
+
+/// design D4: `bib` shares `Resolution` with `resolve`. Its summary has
+/// no `renamed` clause, whatever the counts.
+#[test]
+fn bib_human_mode_summary_has_no_renamed_clause() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let record = record_by("Smith", 2024, "10.1000/bib-human-summary");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("bib-human-summary"),
+        pdf_with_embedded_doi("10.1000/bib-human-summary"),
+    );
+    let crossref = fake_source(SourceName::Crossref, Ok(record));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.citation_keys = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.bib = Some(BibLayer {
+            path: Some(PathBuf::from("refs.bib")),
+            duplicates: None,
+            sidecars: Some(false),
+        });
+    });
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::bib(vec![path]), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert_eq!(
+        lines.last(),
+        Some(&"1 resolved, 0 skipped"),
+        "got {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("renamed")),
+        "got {lines:?}"
+    );
+}
+
+/// An [`Effective`] declaring a `jcode` table over `path`, consulted by
+/// the citation-key template rather than the filename one — the table
+/// `bib` reads.
+fn effective_looking_up_for_bib(path: &Path) -> Effective {
+    effective_with(|layer| {
+        layer.citation_keys = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]-[journal:lookup(\"jcode\")]".to_string(),
+        )]));
+        layer.tables = Some(BTreeMap::from([(
+            "jcode".to_string(),
+            TableDeclaration {
+                path: path.to_path_buf(),
+                key: KeyColumns::One("title".to_string()),
+                value: "abbreviation".to_string(),
+                values: ValueKindName::Text,
+            },
+        )]));
+        layer.bib = Some(BibLayer {
+            path: Some(PathBuf::from("refs.bib")),
+            duplicates: None,
+            sidecars: Some(false),
+        });
+    })
+}
+
+/// design D4: `bib`'s `Resolution` summary names an unmatched lookup the
+/// same way `resolve`'s does — `bib` is the only other command
+/// `external-tables`'s restated requirement names as counting misses in
+/// its summary.
+#[test]
+fn bib_human_mode_summary_names_an_unmatched_lookup() {
+    let directory = tempdir().unwrap();
+    let table = directory.path().join("journals.tsv");
+    fs::write(&table, JOURNALS).unwrap();
+
+    let path = PathBuf::from("/lib/paper.pdf");
+    let record = article_in("Journal of Unlisted Results", "10.1000/bib-unmatched");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("bib-unmatched"),
+        pdf_with_embedded_doi("10.1000/bib-unmatched"),
+    );
+    let crossref = fake_source(SourceName::Crossref, Ok(record));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_looking_up_for_bib(&table);
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::bib(vec![path]), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert_eq!(
+        lines.last(),
+        Some(&"1 resolved, 0 skipped, 1 unmatched"),
+        "got {lines:?}"
+    );
+}
+
+/// design D4/D3a, the regression guard: a batch `rename` over one
+/// already-named file still ends `1 resolved, 0 renamed, 0 skipped, 1
+/// already named` — `Renaming`'s wording is unchanged by this change.
+/// The existing interactive tests asserting `2 already named (not
+/// shown)` and `2 not reached` are untouched and must stay green.
+#[test]
+fn batch_rename_over_one_already_named_file_keeps_the_renaming_summary_line() {
+    let already_named = PathBuf::from("/lib/Smith2024.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &already_named,
+        hash_for("regression-already-named"),
+        pdf_with_embedded_doi("10.1000/regression-already-named"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/regression-already-named")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![already_named], false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert_eq!(
+        lines.last(),
+        Some(&"1 resolved, 0 renamed, 0 skipped, 1 already named"),
+        "got {lines:?}"
+    );
+}
+
+/// design D5: `status --json` is unaffected by the summary shape —
+/// JSON always closes with `run-finished` carrying all seven counters
+/// and schema 3, whatever the human rendering does.
+#[test]
+fn status_json_still_ends_with_run_finished_and_all_seven_counters() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::status(Some(root), false), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+
+    assert_eq!(last["event"], serde_json::Value::from("run-finished"));
+    assert_eq!(last["schema"], serde_json::Value::from(SCHEMA));
+    let counts = last["counts"].as_object().unwrap();
+    let mut keys: Vec<&str> = counts.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "findings",
+            "named",
+            "renamed",
+            "resolved",
+            "skipped",
+            "unmatched",
+            "unreached",
+        ],
+        "got {last:?}"
+    );
+}
+
+/// design D5: a human-mode `status` inside a library with the run log on
+/// (the default) writes a log whose last line is the same
+/// `run-finished` event, though stdout showed no summary.
+#[test]
+fn status_human_mode_run_log_still_ends_with_run_finished_though_stdout_showed_no_summary() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::status(Some(root.clone()), false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let stdout = String::from_utf8(out).unwrap();
+    assert!(
+        !stdout.lines().any(|line| line.contains("resolved,")),
+        "stdout must show no summary: got {stdout:?}"
+    );
+
+    let runs_dir = root.join(STATE_DIR).join(RUNS_DIR);
+    let mut logs: Vec<PathBuf> = fs::read_dir(&runs_dir)
+        .unwrap_or_else(|error| panic!("expected a run log under {runs_dir:?}: {error}"))
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    logs.sort();
+    assert_eq!(logs.len(), 1, "expected exactly one run log: got {logs:?}");
+
+    let contents = fs::read_to_string(&logs[0]).unwrap();
+    let last: serde_json::Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
+
+    assert_eq!(last["event"], serde_json::Value::from("run-finished"));
 }

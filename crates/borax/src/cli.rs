@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::{BibLayer, ExtractionLayer, Layer, NetworkLayer, Origin, RenameLayer};
-use crate::event::Format;
+use crate::event::{Format, Summary};
 
 /// The `borax` command line.
 #[derive(Debug, Clone, Parser)]
@@ -630,6 +630,24 @@ impl Command {
             Command::Validate { .. } => "validate",
             Command::Reconcile { .. } => "reconcile",
             Command::Adopt { .. } => "adopt",
+        }
+    }
+
+    /// The closing line the subcommand's human output ends with.
+    ///
+    /// Every subcommand names one: `rename` closes on the rename
+    /// totals, `resolve` and `bib` on the resolution totals, `validate`
+    /// and the rest on their own report lines.
+    pub fn summary(&self) -> Summary {
+        match self {
+            Command::Rename { .. } => Summary::Renaming,
+            Command::Resolve { .. } | Command::Bib { .. } => Summary::Resolution,
+            Command::Validate { .. } => Summary::Validation,
+            Command::Status { .. }
+            | Command::Reconcile { .. }
+            | Command::Adopt { .. }
+            | Command::Config { .. }
+            | Command::Cache { .. } => Summary::Silent,
         }
     }
 

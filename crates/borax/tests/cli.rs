@@ -6,7 +6,7 @@ use borax::cli::{Cli, Command, Settings, flag_layers};
 use borax::config::{
     BibLayer, ExtractionLayer, Layer, NetworkLayer, Origin, RenameLayer, layer_from_toml, resolve,
 };
-use borax::event::Format;
+use borax::event::{Format, Summary};
 use borax_core::rename::CollisionPolicy;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -1832,4 +1832,60 @@ fn ledger_rebuild_is_refused_as_an_unrecognised_subcommand() {
         ErrorKind::InvalidSubcommand,
         "got a different error kind"
     );
+}
+
+// ---------------------------------------------------------------------
+// Command::summary — design D1, D4; task 1.4
+// ---------------------------------------------------------------------
+
+/// design D4: `rename` closes on the `Renaming` shape, whether or not
+/// `--apply` was given.
+#[test]
+fn rename_summary_is_renaming() {
+    assert_eq!(
+        parse(&["rename", "f.pdf"]).command.summary(),
+        Summary::Renaming
+    );
+    assert_eq!(
+        parse(&["rename", "--apply", "f.pdf"]).command.summary(),
+        Summary::Renaming
+    );
+}
+
+/// design D4: `resolve` and `bib` share the `Resolution` shape, dropping
+/// the counters neither command can produce.
+#[test]
+fn resolve_and_bib_summary_is_resolution() {
+    assert_eq!(
+        parse(&["resolve", "f.pdf"]).command.summary(),
+        Summary::Resolution
+    );
+    assert_eq!(
+        parse(&["bib", "f.pdf"]).command.summary(),
+        Summary::Resolution
+    );
+}
+
+/// design D4: `validate` closes on the `Validation` shape, whose
+/// findings are stated on the `library-validated` line rather than
+/// repeated in a summary.
+#[test]
+fn validate_summary_is_validation() {
+    assert_eq!(parse(&["validate"]).command.summary(), Summary::Validation);
+}
+
+/// design D4: `status`, with or without `--identify`, `reconcile`,
+/// `adopt`, `config` and `cache` each close on the `Silent` shape —
+/// they already end on their own report or totals line.
+#[test]
+fn status_reconcile_adopt_config_and_cache_summary_is_silent() {
+    assert_eq!(parse(&["status"]).command.summary(), Summary::Silent);
+    assert_eq!(
+        parse(&["status", "--identify"]).command.summary(),
+        Summary::Silent
+    );
+    assert_eq!(parse(&["reconcile"]).command.summary(), Summary::Silent);
+    assert_eq!(parse(&["adopt"]).command.summary(), Summary::Silent);
+    assert_eq!(parse(&["config"]).command.summary(), Summary::Silent);
+    assert_eq!(parse(&["cache"]).command.summary(), Summary::Silent);
 }
