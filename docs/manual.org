@@ -7,6 +7,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-17 Thu 02:41] -- supplying identifiers
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-23 Wed 22:15] -- library store
 #+AI_PASS: claude-opus-5-5 [2026-09-23 Wed] -- fact check of the library-store pass
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-09-29 Tue 21:51] -- command summaries
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -58,11 +59,17 @@ how to install it, and a handful of examples.
   as prose or, with ~--json~, as one JSON object per line. That stream
   is the integration contract, and it is what a run log holds.
 
-  The closing summary counts each outcome separately:
+  Human output closes with a line fitted to the command. A ~rename~ run
+  uses a summary that counts each rename outcome separately:
 
   #+begin_example
     3 resolved, 1 renamed, 0 skipped, 12 already named
   #+end_example
+
+  ~resolve~ and ~bib~ instead report resolution totals. Commands that
+  produce their own report or totals line normally end there. JSON
+  output and run logs still close with all seven ~run-finished~
+  counters.
 
   A file that already carries the name its record implies is successful,
   not skipped. It does not cause the partial-success exit code, 2. A run
@@ -90,6 +97,13 @@ how to install it, and a handful of examples.
 
    It is the one command that resolves files concurrently, so it takes
    ~--concurrency~.
+
+   Its human output ends with the resolved and skipped totals, including
+   zeros:
+
+   #+begin_example
+     1 resolved, 0 skipped
+   #+end_example
 
 ** borax rename
 
@@ -354,6 +368,10 @@ how to install it, and a handful of examples.
    ~bib~ takes files as input. An item with no artifact has no file for
    this command to resolve, so it produces no bibliography entry.
 
+   Its closing line reports the resolved and skipped totals, including
+   zeros, and adds the unmatched lookup count when it is nonzero. It
+   does not report a renamed or already-named count.
+
 ** borax config
 
    #+begin_src sh
@@ -414,6 +432,10 @@ how to install it, and a handful of examples.
    ~status~ excludes its entire subtree from the parent counts and lists
    it as a nested library.
 
+   Human output ends with that library report, with or without
+   ~--identify~. It does not add a resolved, renamed, and skipped
+   summary.
+
 ** borax validate
 
    #+begin_src sh
@@ -430,6 +452,10 @@ how to install it, and a handful of examples.
    counts rather than findings. They are valid library states. The
    command exits with the partial-success code, 2, when it reports a
    finding, and exits 0 when it reports none.
+
+   Each finding has its own line. Human output ends with the validation
+   totals, including the findings count, and does not repeat that count
+   in another summary line.
 
 ** borax reconcile
 
@@ -1125,15 +1151,17 @@ how to install it, and a handful of examples.
      jcode: no row for "Journal of Unlisted Results"
    #+end_example
 
-   and the run summary counts them:
+   In human output, ~rename~ and ~bib~ count misses in their closing
+   summaries. This ~rename~ summary is unchanged:
 
    #+begin_example
      12 resolved, 12 renamed, 0 skipped, 1 unmatched
    #+end_example
 
-   That report is the point of the whole arrangement. It is what tells
-   you which line to add to your file, and it tells you once rather
-   than twelve times.
+   ~adopt~ has no closing summary count. It prints each miss directly
+   above its closing adoption totals. The per-miss report is the point
+   of the whole arrangement. It tells you which line to add to your
+   file, and it tells you once rather than twelve times.
 
 ** Where the file is, and when it is read
 

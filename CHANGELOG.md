@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Human output now closes with a summary fitted to each command.
+  `status`, with or without `--identify`, `validate`, `reconcile`,
+  `adopt`, `config`, and `cache` no longer append resolved, renamed, and
+  skipped totals to their own output. `resolve` and `bib` omit the
+  renamed count, while `rename` output is unchanged. JSON output and run
+  logs are unchanged, and the event schema remains at version 3.
+
 ## [0.6.0] - 2026-09-24
 
 ### Added
