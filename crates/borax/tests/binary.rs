@@ -367,3 +367,114 @@ fn config_reports_an_uncompilable_template_as_its_source_text() {
     );
     assert!(stdout.contains(".borax.toml"), "got {stdout:?}");
 }
+
+// ---------------------------------------------------------------------
+// consult-library-first, task 4.1: relative spellings of a tracked file
+// (design D1a, D8)
+// ---------------------------------------------------------------------
+
+/// Writes an item under `<root>/items/` carrying `title`, and an
+/// artifact record under `<root>/.borax/artifacts/` linking to it,
+/// naming `relative` and holding the hash of `bytes`.
+fn seed_tracked_binary_fixture(root: &Path, relative: &str, bytes: &[u8], title: &str) {
+    use borax_core::content::hash_bytes;
+    use borax_core::library::{ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, RunId};
+    use borax_core::record::{EntryType, Record};
+    use uuid::Uuid;
+
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some(title.to_string());
+    let item = Item {
+        id: ItemId::from_uuid(Uuid::now_v7()),
+        record,
+    };
+    let items = root.join("items");
+    fs::create_dir_all(&items).expect("items dir");
+    fs::write(items.join(format!("{}.toml", item.id)), item.to_toml()).expect("item file");
+
+    let artifact = ArtifactRecord {
+        id: ArtifactId::from_uuid(Uuid::now_v7()),
+        item: Some(item.id.clone()),
+        path: relative.to_string(),
+        size: bytes.len() as u64,
+        modified_millis: 0,
+        history: vec![HashEntry {
+            hash: hash_bytes(bytes),
+            run: RunId::new("fixture-run"),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            tool_version: "0.6.0-test".to_string(),
+        }],
+    };
+    let records = root.join(".borax").join("artifacts");
+    fs::create_dir_all(&records).expect("artifacts dir");
+    fs::write(
+        records.join(format!("{}.toml", artifact.id)),
+        artifact.to_toml(),
+    )
+    .expect("artifact record file");
+}
+
+/// A stale entry in the content index cache under `cache_home`, sharing
+/// `bytes`' hash but carrying a different title — the fixture the
+/// review scenario needs: an index entry the library answer must leave
+/// untouched and must not be served instead of.
+fn seed_stale_content_index(cache_home: &Path, bytes: &[u8], stale_title: &str) {
+    use borax_core::content::hash_bytes;
+    use borax_core::record::{EntryType, Record};
+    use borax_sources::store::{content_key, entry_path};
+
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some(stale_title.to_string());
+    let root = cache_home.join("borax").join("v1");
+    let key = content_key(&hash_bytes(bytes));
+    let path = entry_path(&root, &key).expect("a well-formed cache key");
+    fs::create_dir_all(path.parent().unwrap()).expect("cache dir");
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).expect("stale cache entry");
+}
+
+/// `borax resolve --json paper.pdf` and
+/// `borax resolve --json ./sub/../paper.pdf`, run from the library
+/// root, both report the tracked file from its library item — over a
+/// stale content-index entry — with `tier: "library"` (design D1a).
+#[test]
+fn resolve_reports_a_tracked_file_the_same_way_for_every_relative_spelling() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let root = library.path();
+    fs::write(root.join(".borax.toml"), b"").expect("marker");
+    let bytes = b"tracked binary fixture bytes";
+    fs::write(root.join("paper.pdf"), bytes).expect("paper.pdf");
+    fs::create_dir_all(root.join("sub")).expect("sub dir");
+    seed_tracked_binary_fixture(root, "paper.pdf", bytes, "The Corrected Title");
+    seed_stale_content_index(cache_home.path(), bytes, "The Stale Title");
+
+    for spelling in ["paper.pdf", "./sub/../paper.pdf"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_borax"))
+            .args(["resolve", "--json", spelling])
+            .current_dir(root)
+            .env_clear()
+            .env("XDG_CONFIG_HOME", config_home.path())
+            .env("APPDATA", config_home.path())
+            .env("XDG_CACHE_HOME", cache_home.path())
+            .output()
+            .expect("the binary should run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        let resolved: serde_json::Value = stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .find(|line: &serde_json::Value| line["event"] == "resolved")
+            .unwrap_or_else(|| panic!("no resolved event for {spelling:?}: {stdout}"));
+
+        assert_eq!(
+            resolved["tier"], "library",
+            "spelling {spelling:?} must be consulted the same way: {stdout}"
+        );
+        assert_eq!(
+            resolved["record"]["title"], "The Corrected Title",
+            "spelling {spelling:?}: {stdout}"
+        );
+        assert_eq!(resolved["library"]["kind"], "tracked");
+    }
+}

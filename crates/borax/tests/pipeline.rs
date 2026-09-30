@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use borax::event::{Attempt, Claim, ClaimOrigin, Counts, Event, SkipReason};
+use borax::event::{Attempt, Claim, ClaimOrigin, Counts, Event, LibraryAnswer, SkipReason};
 use borax::library::Stores;
 use borax::pipeline::{
     Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, claims_of,
-    event_for, remember, resolve_batch, resolve_file, resolve_supplied, standing,
+    event_for, remember, resolve_batch, resolve_file, resolve_supplied, standing, verdict_event,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -22,7 +22,7 @@ use borax_core::library::{
 use borax_core::record::{EntryType, Record};
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_pdf::tiered::{ExtractionConfig, Tier};
-use borax_sources::cache::MemoryCache;
+use borax_sources::cache::{Cache, MemoryCache};
 use borax_sources::source::{Source, SourceError, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 use tempfile::tempdir;
@@ -855,6 +855,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
         cached: false,
         hash: Some(hash_for("paper")),
         overrode: None,
+        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -873,6 +874,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
             tier: Some(tier_str(Tier::EmbeddedMetadata).to_string()),
             cached: false,
             overrode: None,
+            library: None,
         }
     );
 }
@@ -891,6 +893,7 @@ fn a_content_index_hit_reports_its_source_as_cache() {
         cached: true,
         hash: Some(hash_for("paper")),
         overrode: None,
+        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -922,6 +925,7 @@ fn a_skipped_file_produces_a_skipped_event_carrying_the_same_reason() {
         Event::Skipped {
             path,
             reason: SkipReason::NoIdentifier,
+            library: None,
         }
     );
 }
@@ -948,6 +952,7 @@ fn events_come_in_input_order_ending_with_run_finished_and_nothing_after() {
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         1,
     );
@@ -994,6 +999,7 @@ fn counts_reflect_the_outcomes_and_renamed_is_always_zero() {
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         1,
     );
@@ -1025,6 +1031,7 @@ fn the_final_event_carries_the_same_counts_as_run_counts() {
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         1,
     );
@@ -1069,6 +1076,7 @@ fn a_mixed_batch_completes_and_an_unreadable_file_does_not_curtail_it() {
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         1,
     );
@@ -1107,6 +1115,7 @@ fn an_empty_batch_produces_just_the_finishing_event_with_zero_counts() {
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         1,
     );
@@ -1149,6 +1158,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
         &documents,
         &live_sources,
         &index,
+        None,
         &|_: &Path| conf,
         1,
     );
@@ -1177,6 +1187,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
         &documents,
         &panic_sources,
         &index,
+        None,
         &|_: &Path| conf,
         1,
     );
@@ -1243,6 +1254,7 @@ fn a_renamed_file_with_identical_content_is_served_from_the_index_without_openin
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         1,
     );
@@ -1307,6 +1319,7 @@ fn a_batch_resolved_on_many_threads_reports_its_files_in_input_order() {
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         8,
     );
@@ -1358,6 +1371,7 @@ fn a_batch_resolved_with_one_worker_or_eight_produces_the_same_run() {
         &documents,
         &sources,
         &index_one,
+        None,
         &|_: &Path| config(true),
         1,
     );
@@ -1367,6 +1381,7 @@ fn a_batch_resolved_with_one_worker_or_eight_produces_the_same_run() {
         &documents,
         &sources,
         &index_eight,
+        None,
         &|_: &Path| config(true),
         8,
     );
@@ -1400,6 +1415,7 @@ fn every_file_in_a_concurrent_batch_reaches_the_network_exactly_once() {
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         8,
     );
@@ -1435,6 +1451,7 @@ fn a_concurrency_of_zero_still_resolves_the_whole_batch() {
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         0,
     );
@@ -1466,6 +1483,7 @@ fn an_empty_batch_with_high_concurrency_still_produces_just_the_finishing_event(
         &documents,
         &sources,
         &index,
+        None,
         &|_: &Path| config(true),
         8,
     );
@@ -1578,6 +1596,7 @@ fn a_resolved_event_carries_the_whole_record() {
         cached: false,
         hash: None,
         overrode: None,
+        library: None,
     });
 
     let Event::Resolved {
@@ -1609,6 +1628,7 @@ fn a_resolved_event_round_trips_its_record_through_json() {
             cached: false,
             hash: None,
             overrode: None,
+            library: None,
         }),
     );
 
@@ -1696,6 +1716,7 @@ fn checked<C: borax_sources::cache::Cache>(
         index,
         &config(true),
         Some(&stores.account(&exists)),
+        None,
     )
     .verdict
 }
@@ -2182,4 +2203,629 @@ fn remember_with_no_hash_does_not_panic() {
     let record = record_with_doi("10.1000/no-hash-to-remember-under");
 
     remember(&index, None, &record);
+}
+
+// ---------------------------------------------------------------------
+// consult-library-first, task 3.1: standing() consults the library
+// first (design D1, D3, D6, D8, D9, D10, D11)
+// ---------------------------------------------------------------------
+
+/// A [`Cache`] wrapping a [`MemoryCache`], counting every `get` and
+/// `put` — what proves a library answer neither reads nor writes the
+/// content index (design D6).
+#[derive(Clone, Default)]
+struct CountingCache {
+    inner: Arc<MemoryCache>,
+    gets: Arc<AtomicUsize>,
+    puts: Arc<AtomicUsize>,
+}
+
+impl CountingCache {
+    fn new() -> CountingCache {
+        CountingCache::default()
+    }
+
+    fn gets(&self) -> usize {
+        self.gets.load(Ordering::Relaxed)
+    }
+
+    fn puts(&self) -> usize {
+        self.puts.load(Ordering::Relaxed)
+    }
+}
+
+impl Cache for CountingCache {
+    fn get(&self, key: &str) -> Option<Record> {
+        self.gets.fetch_add(1, Ordering::Relaxed);
+        self.inner.get(key)
+    }
+
+    fn put(&self, key: &str, record: &Record) {
+        self.puts.fetch_add(1, Ordering::Relaxed);
+        self.inner.put(key, record);
+    }
+}
+
+/// Writes an item under `root` carrying `record`, and hands back the
+/// whole item — [`item_with`] hands back only the identity, but a
+/// library-answer test needs the record and provenance too, to check
+/// that they travel unchanged into the verdict.
+fn library_item(root: &Path, record: Record) -> Item {
+    let item = Item {
+        id: ItemId::from_uuid(fresh_uuid()),
+        record,
+    };
+    let items = root.join("items");
+    fs::create_dir_all(&items).unwrap();
+    fs::write(items.join(format!("{}.toml", item.id)), item.to_toml()).unwrap();
+    item
+}
+
+/// A library whose one artifact record names `relative`, holds `hash`,
+/// and links `item`.
+fn tracked_library(root: &Path, relative: &str, hash: ContentHash, item: &Item) -> Stores {
+    record_at(root, relative, hash, Some(item.id.clone()));
+    Stores::read(root)
+}
+
+/// design D1, D3, D6, D9: a tracked file's verdict is the item's own
+/// record, reached with no extraction, no source and no content-index
+/// traffic — under `cache` both true and false, since the library is
+/// not the cache (design D7).
+#[test]
+fn a_tracked_file_resolves_from_its_item_with_no_extraction_no_source_and_no_index_traffic() {
+    for cache in [true, false] {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("paper.pdf");
+        let hash = hash_for("tracked bytes");
+        let item = library_item(root, record_with_doi("10.1000/tracked"));
+        let stores = tracked_library(root, "paper.pdf", hash.clone(), &item);
+        let documents = FakeDocuments::new().with_file(&path, hash, pdf_with_no_text_layer());
+        let (crossref, calls) = fake_source(SourceName::Crossref, Ok(record_with_doi("wrong")));
+        let sources: Vec<&dyn Source> = vec![&crossref];
+        let index = CountingCache::new();
+        let content_index = ContentIndex::new(index.clone());
+
+        let result = standing(
+            &path,
+            &documents,
+            &sources,
+            &content_index,
+            &config(cache),
+            None,
+            Some(&stores),
+        );
+
+        match &result.verdict {
+            FileOutcome::Resolved(file) => {
+                assert_eq!(file.record, item.record, "cache={cache}");
+                assert_eq!(file.tier, Some(Provenance::Library), "cache={cache}");
+                assert!(!file.cached, "cache={cache}");
+                assert_eq!(file.claims, Vec::new(), "cache={cache}");
+                assert_eq!(file.found, None, "cache={cache}");
+                assert_eq!(
+                    result.library,
+                    Some(LibraryAnswer::Tracked {
+                        artifact: file_artifact_id(&stores, &path, &hash),
+                        item: item.id.to_string(),
+                    }),
+                    "cache={cache}"
+                );
+            }
+            other => panic!("expected Resolved for a tracked file, got {other:?} (cache={cache})"),
+        }
+
+        assert_eq!(
+            documents.open_calls(),
+            0,
+            "cache={cache}: the file must not be opened"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "cache={cache}: no source may be asked"
+        );
+        assert_eq!(
+            index.gets(),
+            0,
+            "cache={cache}: the content index must not be read"
+        );
+        assert_eq!(
+            index.puts(),
+            0,
+            "cache={cache}: the content index must not be written"
+        );
+    }
+}
+
+/// The artifact identity a fixture's own [`tracked_library`] wrote,
+/// read back from the store so the expected [`LibraryAnswer`] does not
+/// have to hard-code a UUID the fixture generates fresh.
+fn file_artifact_id(stores: &Stores, path: &Path, hash: &ContentHash) -> String {
+    stores
+        .consult(path, Some(hash))
+        .and_then(|consulted| match consulted.answer {
+            LibraryAnswer::Tracked { artifact, .. } => Some(artifact),
+            _ => None,
+        })
+        .expect("the fixture must build a tracked file")
+}
+
+/// design D3: `verdict_event` of a tracked standing is a `resolved`
+/// event whose `found` is the record's own identifier, whose `source`
+/// is read from the item's provenance, and whose `library` is
+/// `Tracked`.
+#[test]
+fn verdict_event_of_a_tracked_standing_reports_found_and_source_from_the_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let hash = hash_for("tracked bytes 2");
+    let mut record = record_with_doi("10.1000/tracked-verdict");
+    record.borax.provenance = [("title".to_string(), borax_core::record::Source::Crossref)]
+        .into_iter()
+        .collect();
+    let item = library_item(root, record);
+    let stores = tracked_library(root, "paper.pdf", hash.clone(), &item);
+    let documents = FakeDocuments::new().with_file(&path, hash, pdf_with_no_text_layer());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+    let event = verdict_event(&path, &result);
+
+    match event {
+        Event::Resolved {
+            found,
+            source,
+            identifier,
+            library,
+            ..
+        } => {
+            assert_eq!(
+                found, identifier,
+                "found must be the record's own identifier"
+            );
+            assert_eq!(source, "crossref");
+            assert!(matches!(library, Some(LibraryAnswer::Tracked { .. })));
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D3: an item whose provenance names no service reports
+/// `source: "library"`, not `"cache"` — `library` appears in `source`
+/// only where `cache` would otherwise appear (design D3, "Rejected:
+/// `source: \"library\"` on every library answer").
+#[test]
+fn verdict_event_of_a_provenance_less_item_names_library_as_the_source() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let hash = hash_for("provenance-less bytes");
+    let item = library_item(root, record_with_doi("10.1000/provenance-less"));
+    let stores = tracked_library(root, "paper.pdf", hash.clone(), &item);
+    let documents = FakeDocuments::new().with_file(&path, hash, pdf_with_no_text_layer());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+    let event = verdict_event(&path, &result);
+
+    match event {
+        Event::Resolved { source, .. } => assert_eq!(source, "library"),
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D2: a `dangling-item` problem — the linked item is not in the
+/// store — falls back through the content index, extraction and the
+/// services exactly as an untracked file would, and the fresh success
+/// is written to the content index. The problem travels onto the
+/// verdict and onto `verdict_event`'s `resolved` event.
+#[test]
+fn a_dangling_item_problem_falls_back_and_writes_the_content_index() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let hash = hash_for("dangling bytes");
+    let dangling_item = ItemId::from_uuid(fresh_uuid());
+    record_at(root, "paper.pdf", hash.clone(), Some(dangling_item.clone()));
+    let stores = Stores::read(root);
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/fallback"),
+    );
+    let (crossref, calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/fallback")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "the fallback must ask a source"
+    );
+    assert_eq!(
+        index.get(&hash),
+        Some(record_with_doi("10.1000/fallback")),
+        "a fresh success must still be written to the content index"
+    );
+    let expected_problem = LibraryAnswer::DanglingItem {
+        artifact: record_id_at(root, "paper.pdf"),
+        item: dangling_item.to_string(),
+    };
+    match &result.verdict {
+        FileOutcome::Resolved(file) => {
+            assert_eq!(result.library, Some(expected_problem.clone()));
+            let _ = file;
+        }
+        other => panic!("expected Resolved for the fallback, got {other:?}"),
+    }
+    match verdict_event(&path, &result) {
+        Event::Resolved { library, .. } => assert_eq!(library, Some(expected_problem)),
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// The artifact identity of the one record `record_at` wrote at
+/// `relative` under `root`, read back from disk.
+fn record_id_at(root: &Path, relative: &str) -> String {
+    let stores = Stores::read(root);
+    stores
+        .consult(&root.join(relative), None)
+        .and_then(|consulted| match consulted.answer {
+            LibraryAnswer::DanglingItem { artifact, .. } => Some(artifact),
+            LibraryAnswer::NoItem { artifact } => Some(artifact),
+            _ => None,
+        })
+        .expect("record_at must have written exactly one record at this path")
+}
+
+/// A dangling-linked record whose file carries no identifier at all:
+/// the verdict is `NoIdentifier`, and its `verdict_event` still carries
+/// the `DanglingItem` problem on the `skipped` event.
+#[test]
+fn a_dangling_item_problem_on_a_file_with_no_identifier_carries_through_to_the_skip() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("mystery.pdf");
+    let hash = hash_for("dangling, no identifier");
+    let dangling_item = ItemId::from_uuid(fresh_uuid());
+    record_at(
+        root,
+        "mystery.pdf",
+        hash.clone(),
+        Some(dangling_item.clone()),
+    );
+    let stores = Stores::read(root);
+    let documents = FakeDocuments::new().with_file(&path, hash, pdf_with_no_identifier());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+
+    assert!(matches!(
+        result.verdict,
+        FileOutcome::Skipped(SkipReason::NoIdentifier)
+    ));
+    let expected_problem = LibraryAnswer::DanglingItem {
+        artifact: record_id_at(root, "mystery.pdf"),
+        item: dangling_item.to_string(),
+    };
+    assert_eq!(result.library, Some(expected_problem.clone()));
+    match verdict_event(&path, &result) {
+        Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
+        other => panic!("expected Event::Skipped, got {other:?}"),
+    }
+}
+
+/// design D1: the content-duplicate check runs before the library is
+/// consulted at all, so a file whose bytes another live record already
+/// holds is a duplicate with `library: None` — the library is never
+/// asked about it.
+#[test]
+fn a_content_duplicate_is_skipped_before_the_library_is_asked() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let existing = write_file_for_test(root, "existing.pdf", b"shared bytes");
+    let incoming = root.join("incoming.pdf");
+    let hash = hash_bytes(b"shared bytes");
+    record_at(root, "existing.pdf", hash.clone(), None);
+    let stores = Stores::read(root);
+    let exists = |_: &Path| true;
+    let account = stores.account(&exists);
+    let documents = FakeDocuments::new().with_file(&incoming, hash, pdf_with_no_text_layer());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &incoming,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        Some(&account),
+        Some(&stores),
+    );
+
+    assert!(
+        matches!(
+            result.verdict,
+            FileOutcome::Skipped(SkipReason::Duplicate {
+                reason: DuplicateReason::Content,
+                ..
+            })
+        ),
+        "got {:?}",
+        result.verdict
+    );
+    assert_eq!(
+        result.library, None,
+        "a content duplicate is decided before the library is ever asked"
+    );
+    assert_eq!(documents.open_calls(), 0);
+}
+
+/// Writes `bytes` at `relative` under `root`, for a fixture that needs
+/// a real file on disk (the incoming file's own hash is computed by
+/// the fake `Documents`, but the *existing* file the duplicate check
+/// asks `exists` about need not be real here since `exists` is stubbed
+/// `true` unconditionally).
+fn write_file_for_test(root: &Path, relative: &str, bytes: &[u8]) -> PathBuf {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// `library: None` as the argument: behaviour and events are exactly
+/// today's, `library: None` on every event — the run outside any
+/// library.
+#[test]
+fn passing_no_library_leaves_behaviour_and_events_unchanged() {
+    let path = PathBuf::from("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("no-library"),
+        pdf_with_embedded_doi("10.1000/no-library"),
+    );
+    let (crossref, _) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/no-library")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+
+    assert_eq!(result.library, None);
+    match verdict_event(&path, &result) {
+        Event::Resolved { library, .. } => assert_eq!(library, None),
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// `resolve_batch` with a fixture library gives the same events at
+/// concurrency 1 and at concurrency 8 — the library answer travels
+/// through `map_bounded` like any other part of the verdict (design
+/// D8: shared by reference, nothing learned).
+#[test]
+fn resolve_batch_with_a_library_gives_the_same_events_at_concurrency_one_and_eight() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let paths: Vec<PathBuf> = (0..6).map(|i| root.join(format!("paper{i}.pdf"))).collect();
+    let mut documents = FakeDocuments::new();
+    for (i, path) in paths.iter().enumerate() {
+        let hash = hash_for(&format!("batch-{i}"));
+        let item = library_item(root, record_with_doi(&format!("10.1000/batch-{i}")));
+        record_at(root, &format!("paper{i}.pdf"), hash.clone(), Some(item.id));
+        documents = documents.with_file(path, hash, pdf_with_no_text_layer());
+    }
+    let stores = Stores::read(root);
+    let sources: Vec<&dyn Source> = Vec::new();
+
+    let index_one = ContentIndex::new(MemoryCache::new());
+    let run_one = resolve_batch(
+        &paths,
+        &documents,
+        &sources,
+        &index_one,
+        Some(&stores),
+        &|_: &Path| config(true),
+        1,
+    );
+
+    let index_eight = ContentIndex::new(MemoryCache::new());
+    let run_eight = resolve_batch(
+        &paths,
+        &documents,
+        &sources,
+        &index_eight,
+        Some(&stores),
+        &|_: &Path| config(true),
+        8,
+    );
+
+    assert_eq!(run_one.events, run_eight.events);
+    assert_eq!(run_one.counts, run_eight.counts);
+    for event in &run_one.events {
+        if let Event::Resolved { library, .. } = event {
+            assert!(
+                matches!(library, Some(LibraryAnswer::Tracked { .. })),
+                "got {event:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// consult-library-first, second pass on task 3.1/5.3: the dangling-item
+// problem survives every fallback outcome, not only a fresh success
+// (design D2, D11) — a blocking critic finding: the verdict/retry paths
+// must not silently drop the library's answer.
+// ---------------------------------------------------------------------
+
+/// A dangling-item problem whose fallback ends in
+/// [`SkipReason::Unresolvable`] (no source holds the identifier): the
+/// standing and its `verdict_event` still carry `DanglingItem`.
+#[test]
+fn a_dangling_item_problem_on_an_unresolvable_skip_carries_through() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("unresolvable.pdf");
+    let hash = hash_for("dangling unresolvable");
+    let dangling_item = ItemId::from_uuid(fresh_uuid());
+    record_at(
+        root,
+        "unresolvable.pdf",
+        hash.clone(),
+        Some(dangling_item.clone()),
+    );
+    let stores = Stores::read(root);
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash,
+        pdf_with_embedded_doi("10.1000/nobody-holds-this"),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+
+    assert!(
+        matches!(
+            result.verdict,
+            FileOutcome::Skipped(SkipReason::Unresolvable { .. })
+        ),
+        "got {:?}",
+        result.verdict
+    );
+    let expected_problem = LibraryAnswer::DanglingItem {
+        artifact: record_id_at(root, "unresolvable.pdf"),
+        item: dangling_item.to_string(),
+    };
+    assert_eq!(result.library, Some(expected_problem.clone()));
+    match verdict_event(&path, &result) {
+        Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
+        other => panic!("expected Event::Skipped, got {other:?}"),
+    }
+}
+
+/// A dangling-item problem whose fallback resolves to a record the
+/// file's own title disagrees with (`SkipReason::Conflict`): the
+/// standing and its `verdict_event` still carry `DanglingItem`.
+#[test]
+fn a_dangling_item_problem_on_a_conflict_skip_carries_through() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("conflict.pdf");
+    let hash = hash_for("dangling conflict");
+    let dangling_item = ItemId::from_uuid(fresh_uuid());
+    record_at(
+        root,
+        "conflict.pdf",
+        hash.clone(),
+        Some(dangling_item.clone()),
+    );
+    let stores = Stores::read(root);
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash,
+        pdf_with_embedded_doi("10.1000/dangling-conflict")
+            .with_title("Old Title Extracted from the PDF"),
+    );
+    let (crossref, _) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1000/dangling-conflict",
+            "A Completely Different Title About Something Else",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+
+    assert!(
+        matches!(
+            result.verdict,
+            FileOutcome::Skipped(SkipReason::Conflict { .. })
+        ),
+        "got {:?}",
+        result.verdict
+    );
+    let expected_problem = LibraryAnswer::DanglingItem {
+        artifact: record_id_at(root, "conflict.pdf"),
+        item: dangling_item.to_string(),
+    };
+    assert_eq!(result.library, Some(expected_problem.clone()));
+    match verdict_event(&path, &result) {
+        Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
+        other => panic!("expected Event::Skipped, got {other:?}"),
+    }
 }

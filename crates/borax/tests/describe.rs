@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use borax::describe::{DEFAULT_WIDTH, Position, Proposal, describe};
-use borax::event::{Attempt, Claim, ClaimOrigin, Event, Overridden, SkipReason};
+use borax::event::{Attempt, Claim, ClaimOrigin, Event, LibraryAnswer, Overridden, SkipReason};
 use borax_core::identifier::{ArxivId, Doi};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
 
@@ -65,6 +65,7 @@ impl Fixture {
             tier: self.tier.clone(),
             overrode: None,
             cached: self.cached,
+            library: None,
         }
     }
 }
@@ -874,6 +875,7 @@ fn a_file_no_service_holds_a_record_for_names_what_each_one_said() {
                 },
             ],
         },
+        library: None,
     };
 
     let lines = describe(
@@ -916,6 +918,7 @@ fn an_unreachable_service_is_shown_saying_what_it_said() {
                 error: "timed out".to_string(),
             }],
         },
+        library: None,
     };
 
     let lines = describe(
@@ -947,6 +950,7 @@ fn a_file_with_no_identifier_describes_only_itself() {
     let skipped = Event::Skipped {
         path: PathBuf::from("scanned.pdf"),
         reason: SkipReason::NoIdentifier,
+        library: None,
     };
 
     let lines = describe(
@@ -983,6 +987,7 @@ fn a_conflict_asked_about_shows_how_close_the_two_titles_were() {
             resolved: "Asymmetric Synthesis of Fluorinated Amines".to_string(),
             similarity: 0.08,
         },
+        library: None,
     };
 
     let lines = describe(
@@ -1054,6 +1059,7 @@ fn an_overridden_conflict_shows_the_same_line_on_the_record_it_accepted() {
             resolved: "Asymmetric Synthesis of Fluorinated Amines".to_string(),
             similarity: 0.08,
         }),
+        library: None,
     };
 
     let lines = describe(
@@ -1109,6 +1115,254 @@ fn a_supplied_identifier_says_supplied_where_a_pass_would_be_named() {
             "identifier",
             "doi:10.1021/jacs.4c01234, supplied"
         )),
+        "got {lines:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// consult-library-first, task 5.2: the description names a library
+// answer, and states a library problem (design D5)
+// ---------------------------------------------------------------------
+
+fn tracked_answer() -> LibraryAnswer {
+    LibraryAnswer::Tracked {
+        artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
+        item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
+    }
+}
+
+/// `fixture.event()` with `tier` and `library` overridden, following
+/// the shape of the resolved event a library answer actually produces:
+/// `tier: "library"`, `cached: false`, `claims: []`.
+fn library_resolved_event(fixture: &Fixture, answer: LibraryAnswer) -> Event {
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        source,
+        found,
+        overrode,
+        ..
+    } = fixture.event()
+    else {
+        unreachable!()
+    };
+    Event::Resolved {
+        path,
+        identifier,
+        record,
+        source,
+        found,
+        claims: Vec::new(),
+        tier: Some("library".to_string()),
+        overrode,
+        cached: false,
+        library: Some(answer),
+    }
+}
+
+/// design D5: `identifier` for a library answer names `found` with no
+/// origin clause — `whence("library")` is `None`, since nothing was
+/// looked up.
+#[test]
+fn identifier_line_for_a_library_answer_has_no_origin_clause() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Corrected Title".to_string());
+    record.doi = Some(Doi::parse("10.1000/library-answer").unwrap());
+    let fixture = Fixture::new(record, "doi:10.1000/library-answer");
+    let event = library_resolved_event(&fixture, tracked_answer());
+
+    let lines = describe(
+        &event,
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line("identifier", "doi:10.1000/library-answer")),
+        "got {lines:#?}"
+    );
+}
+
+/// design D5: `record` reads `<services>, from the library`.
+#[test]
+fn record_line_for_a_library_answer_names_the_service_and_the_library() {
+    let record = Record::new(EntryType::Article);
+    let mut fixture = Fixture::new(record, "doi:10.1000/library-answer-2");
+    fixture.source = "crossref".to_string();
+    let event = library_resolved_event(&fixture, tracked_answer());
+
+    let lines = describe(
+        &event,
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line("record", "Crossref, from the library")),
+        "got {lines:#?}"
+    );
+}
+
+/// design D5: when `source` is `library` alone (a provenance-less
+/// item), `record` reads just `the library`.
+#[test]
+fn record_line_for_a_provenance_less_library_answer_names_only_the_library() {
+    let record = Record::new(EntryType::Article);
+    let mut fixture = Fixture::new(record, "doi:10.1000/library-answer-3");
+    fixture.source = "library".to_string();
+    let event = library_resolved_event(&fixture, tracked_answer());
+
+    let lines = describe(
+        &event,
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line("record", "the library")),
+        "got {lines:#?}"
+    );
+}
+
+/// design D5: `file says` reads `nothing read`, as for a content-index
+/// answer — the file was not opened.
+#[test]
+fn file_says_line_for_a_library_answer_reads_nothing_read() {
+    let record = Record::new(EntryType::Article);
+    let fixture = Fixture::new(record, "doi:10.1000/library-answer-4");
+    let event = library_resolved_event(&fixture, tracked_answer());
+
+    let lines = describe(
+        &event,
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line("file says", "nothing read")),
+        "got {lines:#?}"
+    );
+}
+
+/// design D5: a problem kind adds a `library` line, following `record`,
+/// carrying D5's `<what>` wording.
+#[test]
+fn a_library_problem_on_a_resolved_event_adds_a_library_line_after_record() {
+    let record = Record::new(EntryType::Article);
+    let mut fixture = Fixture::new(record, "doi:10.1000/library-problem");
+    fixture.tier = Some("text-layer".to_string());
+    fixture.cached = false;
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        source,
+        found,
+        claims,
+        tier,
+        overrode,
+        cached,
+        ..
+    } = fixture.event()
+    else {
+        unreachable!()
+    };
+    let event = Event::Resolved {
+        path,
+        identifier,
+        record,
+        source,
+        found,
+        claims,
+        tier,
+        overrode,
+        cached,
+        library: Some(LibraryAnswer::DanglingItem {
+            artifact: "a".to_string(),
+            item: "b".to_string(),
+        }),
+    };
+
+    let lines = describe(
+        &event,
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    let record_index = lines
+        .iter()
+        .position(|line| line.starts_with("record"))
+        .unwrap_or_else(|| panic!("no record line: {lines:#?}"));
+    assert_eq!(
+        lines.get(record_index + 1),
+        Some(&label_line(
+            "library",
+            "artifact a links to item b, which the library does not hold"
+        )),
+        "got {lines:#?}"
+    );
+}
+
+/// design D5: on a failed file, the `library` line follows the
+/// reason's own lines.
+#[test]
+fn a_library_problem_on_a_skipped_event_follows_the_reasons_lines() {
+    let event = Event::Skipped {
+        path: PathBuf::from("scanned.pdf"),
+        reason: SkipReason::NoIdentifier,
+        library: Some(LibraryAnswer::UnrecognisedContent {
+            artifacts: vec!["a".to_string()],
+        }),
+    };
+
+    let lines = describe(
+        &event,
+        "scanned.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert_eq!(
+        lines,
+        vec![
+            rule(1, 1, DEFAULT_WIDTH),
+            label_line("file", "scanned.pdf"),
+            label_line("identifier", "none found in the file"),
+            label_line(
+                "library",
+                "the library records artifact a at this path, but not these bytes"
+            ),
+        ],
         "got {lines:#?}"
     );
 }

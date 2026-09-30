@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use borax::event::{
-    Attempt, Claim, ClaimOrigin, Counts, Diagnostic, Event, Format, Level, SCHEMA, SkipReason,
-    Summary, TableUsed, human_line, human_summary, json_line, render,
+    Attempt, Claim, ClaimOrigin, Counts, Diagnostic, Event, Format, Level, LibraryAnswer, SCHEMA,
+    SkipReason, Summary, TableUsed, human_line, human_summary, json_line, render,
 };
 use borax::pipeline::{FileOutcome, FileRecord, event_for};
 use borax_core::content::{ContentHash, hash_bytes};
@@ -51,6 +51,7 @@ fn resolved() -> Event {
         tier: Some("first-page".to_string()),
         cached: false,
         overrode: None,
+        library: None,
     }
 }
 
@@ -78,6 +79,7 @@ fn skipped(reason: SkipReason) -> Event {
     Event::Skipped {
         path: PathBuf::from("mystery.pdf"),
         reason,
+        library: None,
     }
 }
 
@@ -288,6 +290,7 @@ fn json_line_of_resolved_has_exactly_the_documented_field_set() {
             "event",
             "found",
             "identifier",
+            "library",
             "overrode",
             "path",
             "record",
@@ -312,10 +315,11 @@ fn json_line_of_skipped_has_exactly_the_documented_field_set() {
 
     let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, vec!["event", "path", "reason", "schema"]);
+    assert_eq!(keys, vec!["event", "library", "path", "reason", "schema"]);
 
     assert_eq!(object["path"], Value::from("mystery.pdf"));
     assert!(object["reason"].is_object());
+    assert_eq!(object["library"], Value::Null);
 }
 
 #[test]
@@ -1188,6 +1192,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
             tier: Some("first-page".to_string()),
             cached: false,
             overrode: None,
+            library: None,
         },
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
@@ -1201,6 +1206,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
             tier: None,
             cached: true,
             overrode: None,
+            library: None,
         },
         Event::Renamed {
             path: PathBuf::from("a.pdf"),
@@ -1210,6 +1216,7 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
         Event::Skipped {
             path: PathBuf::from("c.pdf"),
             reason: SkipReason::NoIdentifier,
+            library: None,
         },
         Event::RunFinished {
             counts: Counts {
@@ -1255,6 +1262,7 @@ fn a_rename_the_filesystem_refused_counts_as_a_skip_and_not_as_a_rename() {
         reason: SkipReason::RenameFailed {
             message: "permission denied".to_string(),
         },
+        library: None,
     });
 
     assert_eq!(
@@ -1285,6 +1293,7 @@ fn a_refused_move_leaves_an_earlier_successful_one_counted() {
         reason: SkipReason::RenameFailed {
             message: "permission denied".to_string(),
         },
+        library: None,
     });
 
     assert_eq!(
@@ -1327,6 +1336,7 @@ fn resolved_serializes_claims_as_design_d3_shows() {
         tier: Some("text-layer".to_string()),
         cached: false,
         overrode: None,
+        library: None,
     };
 
     let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
@@ -1361,6 +1371,7 @@ fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
         cached: false,
         hash: Some(hash_bytes(b"paper")),
         overrode: None,
+        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1403,6 +1414,7 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
         cached: true,
         hash: Some(hash_bytes(b"paper")),
         overrode: None,
+        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1442,6 +1454,7 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
         cached: true,
         hash: Some(hash_bytes(b"paper")),
         overrode: None,
+        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1476,6 +1489,7 @@ fn a_record_whose_provenance_names_no_service_keeps_cache() {
         cached: true,
         hash: Some(hash_bytes(b"paper")),
         overrode: None,
+        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1486,4 +1500,415 @@ fn a_record_whose_provenance_names_no_service_keeps_cache() {
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// consult-library-first, task 2.1: the `library` field (design D3, D5)
+// ---------------------------------------------------------------------
+
+/// `resolved()` with `library` set to `answer` and `tier`/`cached` as
+/// given, following the JSON shape a library answer or a library
+/// problem actually carries (design D3's table).
+fn resolved_with_library(tier: Option<&str>, cached: bool, answer: LibraryAnswer) -> Event {
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        source,
+        found,
+        claims,
+        overrode,
+        ..
+    } = resolved()
+    else {
+        unreachable!("resolved() builds a resolved event")
+    };
+    Event::Resolved {
+        path,
+        identifier,
+        record,
+        source,
+        found,
+        claims,
+        tier: tier.map(str::to_string),
+        overrode,
+        cached,
+        library: Some(answer),
+    }
+}
+
+/// `skipped(reason)` with `library` set to `answer`.
+fn skipped_with_library(reason: SkipReason, answer: LibraryAnswer) -> Event {
+    let Event::Skipped { path, reason, .. } = skipped(reason) else {
+        unreachable!("skipped() builds a skipped event")
+    };
+    Event::Skipped {
+        path,
+        reason,
+        library: Some(answer),
+    }
+}
+
+fn tracked_answer() -> LibraryAnswer {
+    LibraryAnswer::Tracked {
+        artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
+        item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
+    }
+}
+
+/// design D3: every `LibraryAnswer` variant round-trips through the
+/// JSON line, tagged by `kind` in kebab-case, on a `resolved` event.
+#[test]
+fn json_line_of_resolved_carries_every_library_answer_variant_tagged_by_kind() {
+    let cases: Vec<(LibraryAnswer, serde_json::Value)> = vec![
+        (
+            tracked_answer(),
+            serde_json::json!({
+                "kind": "tracked",
+                "artifact": "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f",
+                "item": "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70"
+            }),
+        ),
+        (
+            LibraryAnswer::Untracked,
+            serde_json::json!({"kind": "untracked"}),
+        ),
+        (
+            LibraryAnswer::UnrecognisedContent {
+                artifacts: vec!["a".to_string()],
+            },
+            serde_json::json!({"kind": "unrecognised-content", "artifacts": ["a"]}),
+        ),
+        (
+            LibraryAnswer::Ambiguous {
+                artifacts: vec!["a".to_string(), "b".to_string()],
+            },
+            serde_json::json!({"kind": "ambiguous", "artifacts": ["a", "b"]}),
+        ),
+        (
+            LibraryAnswer::NoItem {
+                artifact: "a".to_string(),
+            },
+            serde_json::json!({"kind": "no-item", "artifact": "a"}),
+        ),
+        (
+            LibraryAnswer::DanglingItem {
+                artifact: "a".to_string(),
+                item: "b".to_string(),
+            },
+            serde_json::json!({"kind": "dangling-item", "artifact": "a", "item": "b"}),
+        ),
+        (
+            LibraryAnswer::UnreadableItem {
+                artifact: "a".to_string(),
+                item: "b".to_string(),
+                path: PathBuf::from("/lib/items/key.b.toml"),
+                message: "bad toml".to_string(),
+            },
+            serde_json::json!({
+                "kind": "unreadable-item",
+                "artifact": "a",
+                "item": "b",
+                "path": "/lib/items/key.b.toml",
+                "message": "bad toml"
+            }),
+        ),
+        (
+            LibraryAnswer::AmbiguousItem {
+                artifact: "a".to_string(),
+                item: "b".to_string(),
+                files: vec![
+                    PathBuf::from("/lib/items/x.b.toml"),
+                    PathBuf::from("/lib/items/y.b.toml"),
+                ],
+            },
+            serde_json::json!({
+                "kind": "ambiguous-item",
+                "artifact": "a",
+                "item": "b",
+                "files": ["/lib/items/x.b.toml", "/lib/items/y.b.toml"]
+            }),
+        ),
+        (
+            LibraryAnswer::Unhashable {
+                artifacts: vec!["a".to_string()],
+            },
+            serde_json::json!({"kind": "unhashable", "artifacts": ["a"]}),
+        ),
+        (
+            LibraryAnswer::UnreadableRecords {
+                listed: true,
+                unreadable: 2,
+            },
+            serde_json::json!({"kind": "unreadable-records", "listed": true, "unreadable": 2}),
+        ),
+        (
+            LibraryAnswer::UnreadableRecords {
+                listed: false,
+                unreadable: 0,
+            },
+            serde_json::json!({"kind": "unreadable-records", "listed": false, "unreadable": 0}),
+        ),
+    ];
+
+    for (answer, expected) in cases {
+        let event = resolved_with_library(Some("library"), false, answer.clone());
+        let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+        assert_eq!(value["schema"], Value::from(3));
+        assert_eq!(value["library"], expected, "for {answer:?}");
+    }
+}
+
+/// The same shapes on a `skipped` event.
+#[test]
+fn json_line_of_skipped_carries_every_library_answer_variant_tagged_by_kind() {
+    let event = skipped_with_library(SkipReason::NoIdentifier, LibraryAnswer::Untracked);
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(value["schema"], Value::from(3));
+    assert_eq!(value["library"], serde_json::json!({"kind": "untracked"}));
+
+    let event = skipped_with_library(SkipReason::NoIdentifier, tracked_answer());
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(
+        value["library"],
+        serde_json::json!({
+            "kind": "tracked",
+            "artifact": "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f",
+            "item": "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70"
+        })
+    );
+}
+
+/// `library` is `"library":null` for `None`, on both event kinds, and
+/// carries the schema unchanged at 3 (design D3, D4).
+#[test]
+fn json_line_writes_library_null_when_the_library_was_not_consulted() {
+    let value: Value = serde_json::from_str(&json_line(&resolved())).unwrap();
+    assert_eq!(value["library"], Value::Null);
+    assert_eq!(value["schema"], Value::from(3));
+
+    let value: Value =
+        serde_json::from_str(&json_line(&skipped(SkipReason::NoIdentifier))).unwrap();
+    assert_eq!(value["library"], Value::Null);
+    assert_eq!(value["schema"], Value::from(3));
+}
+
+/// A `resolved` JSON line written before this change — no `library` key
+/// at all — still deserializes, with `library: None` (design D10:
+/// `#[serde(default)]`).
+#[test]
+fn a_resolved_line_with_no_library_key_deserializes_with_library_none() {
+    let without_library = r#"{"schema":3,"event":"resolved","path":"paper.pdf",
+        "identifier":"doi:10.1000/xyz","record":{},"source":"crossref",
+        "found":"doi:10.1000/xyz","claims":[],"tier":null,"overrode":null,"cached":false}"#;
+
+    let value: serde_json::Value = serde_json::from_str(without_library).unwrap();
+    let event: Event = serde_json::from_value(value).unwrap();
+
+    match event {
+        Event::Resolved { library, .. } => assert_eq!(library, None),
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// The same for a `skipped` line with no `library` key.
+#[test]
+fn a_skipped_line_with_no_library_key_deserializes_with_library_none() {
+    let without_library = r#"{"schema":3,"event":"skipped","path":"mystery.pdf",
+        "reason":{"kind":"no-identifier"}}"#;
+
+    let value: serde_json::Value = serde_json::from_str(without_library).unwrap();
+    let event: Event = serde_json::from_value(value).unwrap();
+
+    match event {
+        Event::Skipped { library, .. } => assert_eq!(library, None),
+        other => panic!("expected Event::Skipped, got {other:?}"),
+    }
+}
+
+// --- human_line: design D5's exact strings ---
+
+/// design D5: `tier: Some("library")` gains ` (from the library)`.
+#[test]
+fn human_line_of_a_library_answer_gains_the_from_the_library_suffix() {
+    let event = resolved_with_library(Some("library"), false, tracked_answer());
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: resolved 10.1000/xyz123 via crossref (from the library)"
+    );
+}
+
+/// A provenance-less item reports `source: "library"`, giving
+/// `… via library (from the library)` (design D5).
+#[test]
+fn human_line_of_a_provenance_less_library_answer_names_library_as_the_source() {
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        found,
+        claims,
+        overrode,
+        ..
+    } = resolved_with_library(Some("library"), false, tracked_answer())
+    else {
+        unreachable!()
+    };
+    let event = Event::Resolved {
+        path,
+        identifier,
+        record,
+        source: "library".to_string(),
+        found,
+        claims,
+        tier: Some("library".to_string()),
+        overrode,
+        cached: false,
+        library: Some(tracked_answer()),
+    };
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: resolved 10.1000/xyz123 via library (from the library)"
+    );
+}
+
+/// design D5: a resolution whose `library.kind` is a problem appends
+/// `; the library could not answer: <what>` after the line it would
+/// otherwise have had — including ` (cached)`.
+#[test]
+fn human_line_appends_the_library_problem_clause_to_a_cached_resolved_line() {
+    let event = resolved_with_library(
+        None,
+        true,
+        LibraryAnswer::DanglingItem {
+            artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
+            item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: resolved 10.1000/xyz123 via crossref (cached); the library could not \
+         answer: artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links to item \
+         0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70, which the library does not hold"
+    );
+}
+
+/// The same clause on a `skipped` line.
+#[test]
+fn human_line_appends_the_library_problem_clause_to_a_skipped_line() {
+    let event = skipped_with_library(
+        SkipReason::NoIdentifier,
+        LibraryAnswer::UnrecognisedContent {
+            artifacts: vec!["0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string()],
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the library could not answer: the \
+         library records artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f at this path, but \
+         not these bytes"
+    );
+}
+
+/// design D5's `<what>` with several artifacts, on `Ambiguous`.
+#[test]
+fn human_line_names_every_artifact_of_an_ambiguous_library_problem() {
+    let event = skipped_with_library(
+        SkipReason::NoIdentifier,
+        LibraryAnswer::Ambiguous {
+            artifacts: vec!["a-id".to_string(), "b-id".to_string()],
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the library could not answer: 2 \
+         artifact records claim this file: a-id, b-id"
+    );
+}
+
+/// design D5's `<what>` for `unreadable-records`, singular and plural,
+/// and the `listed: false` wording.
+#[test]
+fn human_line_names_the_unreadable_records_wording_for_each_shape() {
+    let one = skipped_with_library(
+        SkipReason::NoIdentifier,
+        LibraryAnswer::UnreadableRecords {
+            listed: true,
+            unreadable: 1,
+        },
+    );
+    assert_eq!(
+        human_line(&one).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the library could not answer: 1 \
+         artifact record file could not be read, so the library cannot say whether it \
+         tracks this file"
+    );
+
+    let several = skipped_with_library(
+        SkipReason::NoIdentifier,
+        LibraryAnswer::UnreadableRecords {
+            listed: true,
+            unreadable: 3,
+        },
+    );
+    assert_eq!(
+        human_line(&several).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the library could not answer: 3 \
+         artifact record files could not be read, so the library cannot say whether it \
+         tracks this file"
+    );
+
+    let unlistable = skipped_with_library(
+        SkipReason::NoIdentifier,
+        LibraryAnswer::UnreadableRecords {
+            listed: false,
+            unreadable: 0,
+        },
+    );
+    assert_eq!(
+        human_line(&unlistable).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the library could not answer: the \
+         library's artifact records could not be listed, so it cannot say whether it \
+         tracks this file"
+    );
+}
+
+/// `Tracked` with `tier: Some("supplied")` (an operator's
+/// re-identification of a tracked file) leaves the line byte-identical
+/// to today's: a library answer with no problem adds nothing when
+/// `tier` is not `"library"` (design D3, D5).
+#[test]
+fn human_line_of_a_supplied_tracked_file_is_unchanged() {
+    let event = resolved_with_library(Some("supplied"), false, tracked_answer());
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: resolved 10.1000/xyz123 via crossref"
+    );
+}
+
+/// `Untracked` leaves the line unchanged too.
+#[test]
+fn human_line_of_an_untracked_file_is_unchanged() {
+    let event = resolved_with_library(Some("first-page"), false, LibraryAnswer::Untracked);
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: resolved 10.1000/xyz123 via crossref"
+    );
+}
+
+/// `library: None` — the library was not consulted at all — leaves the
+/// line unchanged, exactly as before this change.
+#[test]
+fn human_line_with_no_library_consultation_is_unchanged() {
+    assert_eq!(
+        human_line(&resolved()).unwrap(),
+        "paper.pdf: resolved 10.1000/xyz123 via crossref"
+    );
 }
