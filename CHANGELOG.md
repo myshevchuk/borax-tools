@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or reading or writing either cache. The stores are read once at the
   start of the run, so later files do not see admissions made earlier in
   that run. `--no-cache` and `--no-record` do not bypass library
-  resolution; `--no-record` still disables duplicate checks and all
-  library writes.
+  resolution; `--no-record` still disables duplicate checks and every
+  artifact-record and item write. The run log is still written.
 
 - A recorded path whose library cannot supply one unambiguous item now
   falls back to ordinary resolution and reports why. This does not by
