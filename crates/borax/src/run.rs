@@ -794,18 +794,25 @@ fn run_library<C: Cache>(adapters: &Adapters<C>) -> Option<crate::library::Store
         .map(crate::library::Stores::read)
 }
 
-/// What the run has to say about having consulted `library` for any of
-/// `paths` while its artifact store could not be read whole, or `None`
-/// when it could, or when no file was one the library answers about.
-fn consultation_warning<'a>(
+/// What the run has to say about having consulted `library` while its
+/// artifact store could not be read whole, or `None` when it could,
+/// when there is no library, or when `consulted` says no file was asked
+/// about.
+fn consultation_warning(
+    library: Option<&crate::library::Stores>,
+    consulted: bool,
+) -> Option<Diagnostic> {
+    let faults = library?.record_faults()?;
+    consulted.then(|| crate::library::record_faults_warning(faults))
+}
+
+/// Whether `library` answers about any of `paths`: what a run that asks
+/// it about every one of them consults it for.
+fn covers_any<'a>(
     library: Option<&crate::library::Stores>,
     mut paths: impl Iterator<Item = &'a PathBuf>,
-) -> Option<Diagnostic> {
-    let library = library?;
-    let faults = library.record_faults()?;
-    paths
-        .any(|path| library.covers(path))
-        .then(|| crate::library::record_faults_warning(faults))
+) -> bool {
+    library.is_some_and(|library| paths.any(|path| library.covers(path)))
 }
 
 /// Which template tables a command renders from, and so which ones
@@ -1071,7 +1078,10 @@ pub fn emit_events<C: Cache>(
             Aftermath {
                 library: consultation_warning(
                     library.as_ref(),
-                    groups.iter().flat_map(|group| &group.paths),
+                    covers_any(
+                        library.as_ref(),
+                        groups.iter().flat_map(|group| &group.paths),
+                    ),
                 ),
                 ..Aftermath::default()
             }
@@ -1192,7 +1202,7 @@ fn resolve_events<C: Cache>(
     for event in run.events {
         sink.emit(event);
     }
-    consultation_warning(library.as_ref(), paths.iter())
+    consultation_warning(library.as_ref(), covers_any(library.as_ref(), paths.iter()))
 }
 
 /// What a run may do while resolving, from `config`.
@@ -1263,7 +1273,8 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// merges what the files it visited produced.
 ///
 /// Returns the warning a library whose artifact store could not be read
-/// whole calls for ([`consultation_warning`]), and a warning when any
+/// whole calls for ([`consultation_warning`]), where the library was
+/// asked about a file the run reached, and a warning when any
 /// record the run matched turned out to name a file that is no longer
 /// there. A record whose artifact this
 /// run moved names the path it moved to, so the path it moved from is
@@ -1301,9 +1312,17 @@ fn rename_events<C: Cache>(
     // to hold nothing on disk; they are what `foreseen` adds here, and
     // count as holding the file the preview learned there.
     let stale = Cell::new(false);
+    //
+    // Both are compared normalised: a path the account asks about is
+    // resolved against the stores' root, which is normalised, and one
+    // `foreseen` names is resolved against the run's, which may not be.
     let foreseen_at: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
     let exists = |path: &Path| {
-        let present = foreseen_at.borrow().iter().any(|at| at == path)
+        let asked = crate::paths::lexical(path);
+        let present = foreseen_at
+            .borrow()
+            .iter()
+            .any(|at| Some(at) == asked.as_ref())
             || is_present(adapters.filesystem, path);
         stale.set(stale.get() || !present);
         present
@@ -1314,6 +1333,10 @@ fn rename_events<C: Cache>(
     // writes behind them. The run's own copy, since what it admits is
     // learned into it.
     let mut stores = snapshot.filter(|_| configs.run().config().record).cloned();
+    // Whether any file the run reached was one the library was asked
+    // about, which is what a warning about the library's artifact store
+    // is owed to.
+    let mut consulted = false;
 
     // Across groups, because a table is named once for the run however
     // many directories consult one under that name.
@@ -1398,6 +1421,7 @@ fn rename_events<C: Cache>(
                     account.as_ref(),
                     snapshot,
                 );
+                consulted |= standing.library.is_some();
                 let about = About {
                     path,
                     position: among(groups, (index, position)),
@@ -1532,7 +1556,9 @@ fn rename_events<C: Cache>(
                                     && let Some(learned) =
                                         foreseen(library, &event, &file, held.as_ref(), &at, stores)
                                 {
-                                    foreseen_at.borrow_mut().push(learned);
+                                    foreseen_at
+                                        .borrow_mut()
+                                        .push(crate::paths::lexical(&learned).unwrap_or(learned));
                                 }
                                 None
                             }
@@ -1623,7 +1649,7 @@ fn rename_events<C: Cache>(
         unreached: stopped
             .as_ref()
             .map_or(0, |stopped| unreached(groups, stopped.at)),
-        library: consultation_warning(snapshot, groups.iter().flat_map(|group| &group.paths)),
+        library: consultation_warning(snapshot, consulted),
         // A run that could not record a move says so; otherwise the only
         // thing left to report is a record naming a file that has gone.
         diagnostic: stopped

@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Components, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use borax_core::content::ContentHash;
@@ -72,23 +72,28 @@ pub fn contains(root: &Path, path: &Path) -> bool {
     let (Some(root), Some(path)) = (lexical(root), lexical(path)) else {
         return false;
     };
+    below(&root, &path).is_some()
+}
 
-    let mut root = root.components();
+/// What remains of `path` after `root`, when `root` is a leading run of
+/// its components, or `None` when it is not.
+///
+/// Components are matched the way the platform matches file names
+/// ([`same_name`]), and what remains is `path`'s own components, as
+/// `path` spells them. Both sides are taken as given: a caller wanting
+/// `.` and `..` resolved normalises them first.
+fn below<'a>(root: &Path, path: &'a Path) -> Option<Components<'a>> {
     let mut path = path.components();
-    loop {
-        match (root.next(), path.next()) {
-            (None, _) => return true,
-            (Some(_), None) => return false,
-            (Some(expected), Some(found)) => {
-                if !same_name(
-                    Path::new(expected.as_os_str()),
-                    Path::new(found.as_os_str()),
-                ) {
-                    return false;
-                }
-            }
+    for expected in root.components() {
+        let found = path.next()?;
+        if !same_name(
+            Path::new(expected.as_os_str()),
+            Path::new(found.as_os_str()),
+        ) {
+            return None;
         }
     }
+    Some(path)
 }
 
 /// `path` as a library-relative path: relative to `root` and
@@ -96,14 +101,13 @@ pub fn contains(root: &Path, path: &Path) -> bool {
 /// artifact record stores.
 ///
 /// `None` when `path` does not lie under `root`. Both sides are
-/// normalised as [`contains`] normalises them before they are compared,
-/// so a relative input and an absolute root name one tree however each
-/// is spelled.
+/// normalised as [`contains`] normalises them, and their components
+/// matched as it matches them, so a relative input and an absolute root
+/// name one tree however each is spelled. The segments are `path`'s
+/// own, spelled as `path` spells them.
 pub fn library_relative(root: &Path, path: &Path) -> Option<String> {
     let (root, path) = normalised(root, path);
-    let relative = path.strip_prefix(&root).ok()?;
-    let segments: Vec<String> = relative
-        .components()
+    let segments: Vec<String> = below(&root, &path)?
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect();
     Some(segments.join("/"))
@@ -184,16 +188,17 @@ fn owns(root: &Path, directory: &Path) -> bool {
 /// the orphan count, an applying run's admissions and reconciliation
 /// all ask, so that the four agree about where the library stops.
 ///
-/// Both sides are normalised as [`library_relative`] normalises them,
-/// so the answer does not depend on how either is spelled.
+/// Both sides are normalised and compared as [`library_relative`]
+/// normalises and compares them, so the answer does not depend on how
+/// either is spelled.
 pub fn excludes(root: &Path, path: &Path) -> bool {
     let (root, path) = normalised(root, path);
-    let Ok(relative) = path.strip_prefix(&root) else {
+    let Some(relative) = below(&root, &path) else {
         return true;
     };
 
     let mut walked = root.clone();
-    for component in relative.components() {
+    for component in relative {
         walked.push(component);
         if !owns(&root, &walked) {
             return true;
@@ -770,15 +775,21 @@ pub struct Stores {
 impl Stores {
     /// Read both stores of the library rooted at `root`.
     ///
+    /// `root` is normalised lexically first, and kept as spelled only
+    /// where it cannot be — a relative root with no working directory —
+    /// so every path the stores report is a full path however the root
+    /// was spelled.
+    ///
     /// Never fails, on [`ItemStore::read`]'s terms: a store directory
     /// that is not there is an empty store, so a directory borax has
     /// never written to reads as a library holding nothing, and one
     /// that cannot be listed is a [`StoreFault`] at that directory.
     pub fn read(root: &Path) -> Stores {
+        let root = lexical(root).unwrap_or_else(|| root.to_path_buf());
         Stores {
-            root: root.to_path_buf(),
-            items: ItemStore::read(root),
-            records: ArtifactStore::read(root),
+            items: ItemStore::read(&root),
+            records: ArtifactStore::read(&root),
+            root,
         }
     }
 
