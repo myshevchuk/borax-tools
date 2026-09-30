@@ -35,7 +35,7 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, valu
 use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
-use crate::event::{Admission, Adoption, Diagnostic, Event, Finding, Level, Repair};
+use crate::event::{Admission, Adoption, Diagnostic, Event, Finding, Level, LibraryAnswer, Repair};
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
 
@@ -252,15 +252,17 @@ fn walk(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
     (found, nested)
 }
 
-/// A file of a library's store that could not be read as the record it
-/// claims to be.
+/// A file or directory of a library's store that could not be read as
+/// what it claims to be.
 ///
 /// One fault is one file: the store answers from everything else it
 /// read, so an unreadable or unparsable file costs its own record and
-/// no other.
+/// no other. A fault whose path is the store's directory is a store
+/// that could not be listed, in whole or in part, and costs every
+/// record it would have listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreFault {
-    /// The file the fault is about.
+    /// The file or directory the fault is about.
     pub path: PathBuf,
     /// Why it could not be read, as the reader or the parser put it.
     pub message: String,
@@ -270,35 +272,57 @@ pub struct StoreFault {
 /// path order, each as its text or the fault reading it produced.
 ///
 /// A directory that is not there yields nothing and no fault: a library
-/// that has recorded nothing yet has no store to read. A directory
-/// entry that cannot be listed is passed over for the same reason a
-/// file that cannot be read is a fault about itself alone.
+/// that has recorded nothing yet has no store to read. Any other
+/// failure to list it yields one fault whose path is `directory`, and
+/// so does an entry the listing could not produce. An entry whose
+/// metadata cannot be read is a fault about that entry alone, as a
+/// file that cannot be read is.
 fn store_files(directory: &Path) -> Vec<(PathBuf, Result<String, StoreFault>)> {
-    let Ok(listing) = fs::read_dir(directory) else {
-        return Vec::new();
+    let fault = |path: &Path, error: io::Error| {
+        (
+            path.to_path_buf(),
+            Err(StoreFault {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            }),
+        )
+    };
+    let listing = match fs::read_dir(directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => return vec![fault(directory, error)],
     };
 
-    let mut paths: Vec<PathBuf> = listing
-        .flatten()
-        .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.is_file()))
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case(RECORD_EXTENSION))
-        })
-        .collect();
-    paths.sort();
-
-    paths
-        .into_iter()
-        .map(|path| {
-            let text = fs::read_to_string(&path).map_err(|error| StoreFault {
-                path: path.clone(),
-                message: error.to_string(),
-            });
-            (path, text)
-        })
-        .collect()
+    let mut files = Vec::new();
+    for entry in listing {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                files.push(fault(directory, error));
+                continue;
+            }
+        };
+        let path = entry.path();
+        let is_record = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(RECORD_EXTENSION));
+        if !is_record {
+            continue;
+        }
+        match entry.metadata() {
+            Ok(metadata) if metadata.is_file() => {
+                let text = fs::read_to_string(&path).map_err(|error| StoreFault {
+                    path: path.clone(),
+                    message: error.to_string(),
+                });
+                files.push((path, text));
+            }
+            Ok(_) => {}
+            Err(error) => files.push(fault(&path, error)),
+        }
+    }
+    files.sort_by(|(left, _), (right, _)| left.cmp(right));
+    files
 }
 
 /// The identifier of `record` of the same kind as `wanted`, if it
@@ -561,6 +585,19 @@ pub struct Account<'a> {
     pub exists: &'a dyn Fn(&Path) -> bool,
 }
 
+/// Whether `recorded`, a library-relative path under `root` as a record
+/// stores one, names the file at `incoming`: the comparison
+/// [`Account::is_incoming`] documents.
+fn names(root: &Path, recorded: &str, incoming: &Path) -> bool {
+    match (lexical(&relative_to(root, recorded)), lexical(incoming)) {
+        (Some(recorded), Some(incoming)) => same_name(&recorded, &incoming),
+        // With no working directory there is nothing to resolve a
+        // relative path against, and nothing that can be said to be the
+        // same file as another.
+        _ => false,
+    }
+}
+
 /// The work an incoming file turned out to be a second file of.
 ///
 /// What a batch run reports and what an interactive run's question is
@@ -599,16 +636,7 @@ impl Account<'_> {
     /// them as one would mean a link into a library could keep the
     /// file it points at out of it.
     pub fn is_incoming(&self, recorded: &str, incoming: &Path) -> bool {
-        match (
-            lexical(&relative_to(self.root, recorded)),
-            lexical(incoming),
-        ) {
-            (Some(recorded), Some(incoming)) => same_name(&recorded, &incoming),
-            // With no working directory there is nothing to resolve a
-            // relative path against, and nothing that can be said to
-            // be the same file as another.
-            _ => false,
-        }
+        names(self.root, recorded, incoming)
     }
 
     /// The record of the file at `incoming` itself, where the library
@@ -744,7 +772,8 @@ impl Stores {
     ///
     /// Never fails, on [`ItemStore::read`]'s terms: a store directory
     /// that is not there is an empty store, so a directory borax has
-    /// never written to reads as a library holding nothing.
+    /// never written to reads as a library holding nothing, and one
+    /// that cannot be listed is a [`StoreFault`] at that directory.
     pub fn read(root: &Path) -> Stores {
         Stores {
             root: root.to_path_buf(),
@@ -762,6 +791,169 @@ impl Stores {
             records: &self.records,
             exists,
         }
+    }
+
+    /// What the library says about the file at `path`, whose content
+    /// hash is `hash`, or `None` when the file lies outside the library
+    /// or in a subtree it excludes ([`excludes`]).
+    ///
+    /// Root and path are compared normalised, as [`library_relative`]
+    /// compares them, and a record names the file when
+    /// [`Account::is_incoming`] would say it does. Only the records
+    /// naming the file's path are examined; among them, the checks run
+    /// in this order, the first that holds deciding:
+    ///
+    /// 1. None names it: [`LibraryAnswer::Untracked`], or
+    ///    [`LibraryAnswer::UnreadableRecords`] when the artifact store
+    ///    has faults ([`Stores::record_faults`]), since an unreadable
+    ///    record might.
+    /// 2. `hash` is `None`: [`LibraryAnswer::Unhashable`].
+    /// 3. None holds `hash` anywhere in its history:
+    ///    [`LibraryAnswer::UnrecognisedContent`].
+    /// 4. Several hold it: [`LibraryAnswer::Ambiguous`].
+    /// 5. The one that holds it links no item:
+    ///    [`LibraryAnswer::NoItem`].
+    /// 6. No item carries the linked identity:
+    ///    [`LibraryAnswer::UnreadableItem`] when the item store's
+    ///    directory, or an item file whose name claims that identity,
+    ///    could not be read, and [`LibraryAnswer::DanglingItem`]
+    ///    otherwise.
+    /// 7. Several item files carry it: [`LibraryAnswer::AmbiguousItem`].
+    /// 8. Exactly one does: [`LibraryAnswer::Tracked`], with that item.
+    ///
+    /// Reads nothing from disk beyond what [`excludes`] asks about
+    /// nested libraries: the answer is the stores as they were read.
+    pub fn consult(&self, path: &Path, hash: Option<&ContentHash>) -> Option<Consulted> {
+        if !self.covers(path) {
+            return None;
+        }
+        let answer = |answer: LibraryAnswer| Some(Consulted { answer, item: None });
+        let ids = |records: &[&ArtifactRecord]| -> Vec<String> {
+            records.iter().map(|record| record.id.to_string()).collect()
+        };
+
+        let at_path: Vec<&ArtifactRecord> = self
+            .records
+            .iter()
+            .filter(|record| names(&self.root, &record.path, path))
+            .collect();
+        if at_path.is_empty() {
+            return answer(match self.record_faults() {
+                Some(RecordFaults { listed, unreadable }) => {
+                    LibraryAnswer::UnreadableRecords { listed, unreadable }
+                }
+                None => LibraryAnswer::Untracked,
+            });
+        }
+        let Some(hash) = hash else {
+            return answer(LibraryAnswer::Unhashable {
+                artifacts: ids(&at_path),
+            });
+        };
+        let holding: Vec<&ArtifactRecord> = at_path
+            .iter()
+            .copied()
+            .filter(|record| record.holds(hash))
+            .collect();
+        let record = match holding.as_slice() {
+            [] => {
+                return answer(LibraryAnswer::UnrecognisedContent {
+                    artifacts: ids(&at_path),
+                });
+            }
+            [record] => *record,
+            _ => {
+                return answer(LibraryAnswer::Ambiguous {
+                    artifacts: ids(&holding),
+                });
+            }
+        };
+        let artifact = record.id.to_string();
+        let Some(linked) = &record.item else {
+            return answer(LibraryAnswer::NoItem { artifact });
+        };
+        let item = linked.to_string();
+
+        let carrying: Vec<&(Option<PathBuf>, Item)> = self
+            .items
+            .entries
+            .iter()
+            .filter(|(_, held)| &held.id == linked)
+            .collect();
+        match carrying.as_slice() {
+            [] => answer(match self.item_fault(linked) {
+                Some(fault) => LibraryAnswer::UnreadableItem {
+                    artifact,
+                    item,
+                    path: fault.path.clone(),
+                    message: fault.message.clone(),
+                },
+                None => LibraryAnswer::DanglingItem { artifact, item },
+            }),
+            [(_, held)] => Some(Consulted {
+                answer: LibraryAnswer::Tracked { artifact, item },
+                item: Some(held.clone()),
+            }),
+            several => answer(LibraryAnswer::AmbiguousItem {
+                artifact,
+                item,
+                files: several
+                    .iter()
+                    .filter_map(|(file, _)| file.clone())
+                    .collect(),
+            }),
+        }
+    }
+
+    /// Whether the file at `path` is one [`Stores::consult`] answers
+    /// about: it lies under the library root, compared normalised, and
+    /// in no subtree the library excludes.
+    pub fn covers(&self, path: &Path) -> bool {
+        library_relative(&self.root, path).is_some() && !excludes(&self.root, path)
+    }
+
+    /// The item-store fault that may have cost the item `id`: the
+    /// store's directory itself, else the first file whose name claims
+    /// that identity. `None` when no fault can be attributed to it.
+    fn item_fault(&self, id: &ItemId) -> Option<&StoreFault> {
+        let directory = self.root.join(ITEM_STORE);
+        let faults = &self.items.faults;
+        faults
+            .iter()
+            .find(|fault| fault.path == directory)
+            .or_else(|| {
+                faults.iter().find(|fault| {
+                    fault
+                        .path
+                        .file_name()
+                        .is_some_and(|name| name_uuid(&name.to_string_lossy()) == Some(id.uuid()))
+                })
+            })
+    }
+
+    /// What the artifact store could not read, or `None` when it was
+    /// read whole, an absent store included.
+    ///
+    /// `listed` is `false` when the store's directory could not be
+    /// listed, in whole or in part, and `unreadable` then 0. Otherwise
+    /// `unreadable` counts the record files that could not be read or
+    /// parsed.
+    pub fn record_faults(&self) -> Option<RecordFaults> {
+        let faults = &self.records.faults;
+        if faults.is_empty() {
+            return None;
+        }
+        let directory = self.root.join(STATE_DIR).join(ARTIFACT_STORE);
+        Some(match faults.iter().any(|fault| fault.path == directory) {
+            true => RecordFaults {
+                listed: false,
+                unreadable: 0,
+            },
+            false => RecordFaults {
+                listed: true,
+                unreadable: faults.len(),
+            },
+        })
     }
 
     /// Take in what [`admit`] wrote for `admitting`, which it reported
@@ -893,6 +1085,25 @@ impl Stores {
     }
 }
 
+/// What a library said about one file, and the item it answered with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Consulted {
+    pub answer: LibraryAnswer,
+    /// The item answered with: `Some` exactly when `answer` is
+    /// [`LibraryAnswer::Tracked`].
+    pub item: Option<Item>,
+}
+
+/// What a library's artifact store could not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordFaults {
+    /// Whether the store's directory could be listed.
+    pub listed: bool,
+    /// How many record files could not be read or parsed; 0 when the
+    /// directory could not be listed.
+    pub unreadable: usize,
+}
+
 /// What a run says about having matched a record whose artifact is no
 /// longer where the record says.
 ///
@@ -907,6 +1118,36 @@ pub fn stale_paths_warning() -> Diagnostic {
         message: "the library records artifacts that are no longer where it says, so it holds \
                   paths to reconcile; borax reconcile repairs them"
             .to_string(),
+    }
+}
+
+/// What a run says about consulting a library whose artifact store it
+/// could not read whole, as [`Stores::record_faults`] described it.
+///
+/// One warning however many files the run consulted: the fault is the
+/// store's, and each file it may have cost says so on its own event.
+/// Nothing was refused on the strength of it, so this is what the run
+/// has to say and not why it did less; `borax validate` names the files.
+pub fn record_faults_warning(faults: RecordFaults) -> Diagnostic {
+    let message = match faults {
+        RecordFaults { listed: false, .. } => {
+            "the library's artifact records could not be listed, so no file is resolved from \
+             the library; borax validate reports why"
+                .to_string()
+        }
+        RecordFaults { unreadable: 1, .. } => {
+            "1 artifact record could not be read, so a file it records is resolved as if the \
+             library did not track it; borax validate names it"
+                .to_string()
+        }
+        RecordFaults { unreadable, .. } => format!(
+            "{unreadable} artifact records could not be read, so a file one of them records is \
+             resolved as if the library did not track it; borax validate names them"
+        ),
+    };
+    Diagnostic {
+        level: Level::Warning,
+        message,
     }
 }
 

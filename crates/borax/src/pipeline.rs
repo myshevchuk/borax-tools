@@ -28,8 +28,10 @@ use borax_sources::pace::map_bounded;
 use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 
-use crate::event::{Attempt, Claim, ClaimOrigin, Counts, Event, Overridden, SkipReason};
-use crate::library::{Account, WorkDuplicate};
+use crate::event::{
+    Attempt, Claim, ClaimOrigin, Counts, Event, LibraryAnswer, Overridden, SkipReason,
+};
+use crate::library::{Account, Consulted, Stores, WorkDuplicate};
 
 /// The documents a run works on, as something that can be read.
 ///
@@ -37,8 +39,8 @@ use crate::library::{Account, WorkDuplicate};
 /// read through, and [`crate::library`] is the tree they sit in.
 ///
 /// The one seam to the filesystem. A run hashes a file before it opens
-/// it, because a hash that matches the content index makes opening it
-/// unnecessary.
+/// it, because a hash its library tracks, or one that matches the
+/// content index, makes opening it unnecessary.
 ///
 /// `Sync` because resolution runs files on a bounded pool of threads
 /// ([`borax_sources::pace::map_bounded`]) that share one reader.
@@ -58,19 +60,20 @@ pub trait Documents: Sync {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileRecord {
     pub record: Record,
-    /// Which service supplied it, or `None` when the content index
-    /// answered and the service is no longer known.
+    /// Which service supplied it, or `None` when nothing was looked up
+    /// — the content index or the library answered — and the service
+    /// is known only from the record's own provenance, if at all.
     pub source: Option<SourceName>,
     /// Where the identifier came from, or `None` when nothing was
     /// found or asked for because the content index answered.
     ///
     /// Named for the `resolved` event's `tier` field, which it is
-    /// rendered into and which it keeps in step: the three cases a
+    /// rendered into and which it keeps in step: the four cases a
     /// reader of the stream has to tell apart — a pass's own name,
-    /// `supplied`, and nothing — are the three this holds.
+    /// `supplied`, `library`, and nothing — are the four this holds.
     pub tier: Option<Provenance>,
     /// The identifier the run looked up, or `None` when the content
-    /// index answered and nothing was looked up at all.
+    /// index or the library answered and nothing was looked up at all.
     ///
     /// Kept beside the record because the record's own identifiers are
     /// not evidence about the file: a lookup by arXiv identifier can
@@ -81,7 +84,8 @@ pub struct FileRecord {
     /// read, and empty when the file was not opened.
     pub claims: Vec<Claim>,
     /// Whether the content index answered, making both extraction and
-    /// resolution unnecessary.
+    /// resolution unnecessary. `false` for a library answer, which is
+    /// not the content index.
     ///
     /// Narrower than "came from a cache": a response cache hit behind a
     /// [`Source`] is invisible from here, so a record served by
@@ -98,6 +102,14 @@ pub struct FileRecord {
     /// conflict it finds, so a record that reaches a caller from there
     /// has nothing to have overridden.
     pub overrode: Option<Overridden>,
+    /// What the run's library said about the file, or `None` when it
+    /// was not asked. [`LibraryAnswer::Tracked`] with `tier`
+    /// [`Provenance::Library`] is a record the library supplied; with
+    /// any other `tier`, the library answered and the record was
+    /// reached some other way, as when an operator re-identified the
+    /// file. A problem answer is a record reached by the passes the
+    /// library could not spare.
+    pub library: Option<LibraryAnswer>,
 }
 
 /// Where the identifier a record was reached by came from.
@@ -112,11 +124,14 @@ pub enum Provenance {
     Extracted(Tier),
     /// The operator typed it.
     Supplied,
+    /// The file's library item supplied the whole record, so no
+    /// identifier was looked for.
+    Library,
 }
 
 impl Provenance {
     /// The word the `resolved` event's `tier` field carries for it: the
-    /// pass's own name, or `supplied`.
+    /// pass's own name, `supplied`, or `library`.
     ///
     /// A bare `supplied` rather than "supplied by hand": the other
     /// values in that field name where the identifier was read, and
@@ -125,6 +140,7 @@ impl Provenance {
         match self {
             Provenance::Extracted(tier) => tier.as_str(),
             Provenance::Supplied => "supplied",
+            Provenance::Library => "library",
         }
     }
 }
@@ -153,42 +169,23 @@ pub struct ResolveConfig {
     pub cache: bool,
 }
 
-/// What the content index had for a file, and the hash it was asked
-/// about.
-///
-/// The hash is carried whether or not the index answered: it is what a
-/// renamed file is recorded under and what a record accepted later is
-/// remembered under, so a caller needs it even on a miss.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Indexed {
-    /// The file's content hash, or `None` when it could not be
-    /// computed. A hash failure is not yet a verdict — opening the file
-    /// reports a better one — so it reads here as a miss.
-    pub hash: Option<ContentHash>,
-    /// The record the index holds for that hash, or `None` when it
-    /// holds none or was not consulted.
-    pub record: Option<Record>,
-}
-
-/// The first pass: what the content index says about the file at
-/// `path`.
+/// The content-index pass: the record the index holds for a file
+/// whose content hash is `hash`.
 ///
 /// A hit means the file need not be opened at all, since a record is
-/// served for its content under any name. The index is not consulted
-/// when [`ResolveConfig::cache`] is `false` — the `--no-cache` bypass —
-/// and the hash is taken either way.
+/// served for its content under any name. `None` when the index holds
+/// nothing for the hash, when the file could not be hashed, and when
+/// [`ResolveConfig::cache`] is `false` — the `--no-cache` bypass — in
+/// which case the index is not read at all.
 pub fn from_index<C: Cache>(
-    path: &Path,
-    documents: &dyn Documents,
+    hash: Option<&ContentHash>,
     index: &ContentIndex<C>,
     config: &ResolveConfig,
-) -> Indexed {
-    let hash = documents.hash(path).ok();
-    let record = match config.cache {
-        true => hash.as_ref().and_then(|hash| index.get(hash)),
+) -> Option<Record> {
+    match config.cache {
+        true => index.get(hash?),
         false => None,
-    };
-    Indexed { hash, record }
+    }
 }
 
 /// The record a content-index hit stands for.
@@ -208,6 +205,30 @@ pub fn indexed_record(record: Record, hash: Option<ContentHash>) -> FileRecord {
         // A record served from the index was accepted by whatever run
         // put it there, not by this one.
         overrode: None,
+        library: None,
+    }
+}
+
+/// The record the library supplies for a file it tracks: its item's.
+///
+/// Nothing was read from the file and nothing was looked up, so there
+/// is no source, no identifier found and no claim; `tier` is
+/// [`Provenance::Library`], and `cached` is `false` because the
+/// content index did not answer.
+fn library_record(record: Record, hash: Option<ContentHash>, answer: LibraryAnswer) -> FileRecord {
+    FileRecord {
+        record,
+        source: None,
+        tier: Some(Provenance::Library),
+        found: None,
+        claims: Vec::new(),
+        cached: false,
+        hash,
+        // A library item is past the point of a conflict check: it was
+        // admitted, adopted or corrected, and nothing was overridden
+        // here to reach it.
+        overrode: None,
+        library: Some(answer),
     }
 }
 
@@ -261,29 +282,37 @@ pub fn disagreement(claims: &[Claim], record: &Record) -> Option<SkipReason> {
     })
 }
 
-/// Resolve one file.
+/// Resolve one file, asking no library.
 ///
-/// The four passes above, in order, each ending the run when it
-/// succeeds:
+/// The passes, in order, each ending the run when it succeeds:
 ///
-/// 1. **Content index**: the file's hash is looked up, and a hit is
+/// 1. **Library**: where the run has a library ([`standing`]'s
+///    `library`) and it tracks the file, the file's record is its
+///    item's, returned without opening the file, asking a service, or
+///    reading or writing the content index. Asked whatever
+///    [`ResolveConfig::cache`] says, since the library is not a cache.
+///    A library that cannot answer for the file says why, and the
+///    passes below run as for a file it does not track. This function
+///    passes no library, so it starts at the content index.
+/// 2. **Content index**: the file's hash is looked up, and a hit is
 ///    returned without opening the file at all. Skipped entirely when
 ///    [`ResolveConfig::cache`] is `false`, and treated as a miss when
 ///    the file cannot be hashed — a hash failure is not yet a reason to
 ///    give up, since opening the file reports a better one.
-/// 2. **Extraction**: [`borax_pdf::tiered::extract`] over the opened
+/// 3. **Extraction**: [`borax_pdf::tiered::extract`] over the opened
 ///    file.
-/// 3. **Resolution**: [`borax_sources::dispatch::resolve`] over
+/// 4. **Resolution**: [`borax_sources::dispatch::resolve`] over
 ///    `sources`, which are consulted in priority order for the
 ///    identifier's type.
-/// 4. **Conflict check**: the file's own title, when it has one, is
+/// 5. **Conflict check**: the file's own title, when it has one, is
 ///    compared against the resolved record's
 ///    ([`borax_sources::conflict::check_title`]). A disagreement is a
 ///    skip, not a result: a record for the wrong work is worse than no
 ///    record.
 ///
-/// A successful resolution is written to the content index under the
-/// file's hash, so a later run recognises the file under any name.
+/// A successful resolution by the last three passes is written to the
+/// content index under the file's hash, so a later run recognises the
+/// file under any name.
 /// The write happens even when [`ResolveConfig::cache`] is `false`:
 /// the bypass forces a live answer, and the point of forcing one is
 /// usually that the stored answer was wrong, so the fresh record
@@ -313,7 +342,7 @@ pub fn resolve_file<C: Cache>(
     index: &ContentIndex<C>,
     config: &ResolveConfig,
 ) -> FileOutcome {
-    standing(path, documents, sources, index, config, None).verdict
+    standing(path, documents, sources, index, config, None, None).verdict
 }
 
 /// Everything the passes produced about one file, for a caller that
@@ -360,6 +389,12 @@ pub struct Standing {
     /// so admits it under this record, as another artifact of that
     /// work.
     pub duplicated: Option<Duplicated>,
+    /// What the run's library said about the file, or `None` when it
+    /// was not asked: no library was given, the file lies outside it,
+    /// or the verdict was reached before it was asked. Kept here as
+    /// well as on a resolved verdict's [`FileRecord`], because a skip
+    /// has no record to carry it and still reports it.
+    pub library: Option<LibraryAnswer>,
 }
 
 /// A work the library already holds a file for, and the record an
@@ -385,6 +420,7 @@ impl Standing {
             unresolved: None,
             refused: None,
             duplicated: None,
+            library: None,
         }
     }
 }
@@ -435,16 +471,22 @@ fn duplicate(reason: DuplicateReason, existing: &Path) -> SkipReason {
 
 /// Resolve one file, keeping the working [`resolve_file`] discards.
 ///
-/// The four passes in the order [`resolve_file`] documents, with the
+/// The passes in the order [`resolve_file`] documents, with the
 /// library's two duplicate checks around them where the run keeps an
-/// account — before the file is opened, on its content, and after
-/// resolution, on the record's identifiers. `None` is a run that admits
-/// nothing anywhere, which runs neither check rather than running both
-/// against an empty store.
+/// account — before anything else is asked, on the file's content, and
+/// once a record is in hand, on the record's identifiers. `None` is a
+/// run that admits nothing anywhere, which runs neither check rather
+/// than running both against an empty store.
+///
+/// `library` is the run's library as read, asked about the file after
+/// the content check and before the content index. A record it answers
+/// with goes through the work check as any other does. `None` asks no
+/// library, and so does a file outside the one given; either leaves
+/// [`Standing::library`] and every record's `library` at `None`.
 ///
 /// The file is hashed once, whether or not the index is consulted and
-/// whether or not a duplicate check wants it: the hash identifies the
-/// file for every later decision about it.
+/// whether or not a duplicate check or the library wants it: the hash
+/// identifies the file for every later decision about it.
 pub fn standing<C: Cache>(
     path: &Path,
     documents: &dyn Documents,
@@ -452,15 +494,64 @@ pub fn standing<C: Cache>(
     index: &ContentIndex<C>,
     config: &ResolveConfig,
     account: Option<&Account<'_>>,
+    library: Option<&Stores>,
 ) -> Standing {
-    let Indexed { hash, record } = from_index(path, documents, index, config);
+    let hash = documents.hash(path).ok();
     if let Some(duplicate) =
         account.and_then(|account| content_duplicate(path, hash.as_ref(), account))
     {
         return Standing::of(FileOutcome::Skipped(duplicate), hash);
     }
-    if let Some(record) = record {
-        let (verdict, duplicated) = admissible(path, indexed_record(record, hash.clone()), account);
+
+    let consulted = library.and_then(|stores| stores.consult(path, hash.as_ref()));
+    let answer = consulted.as_ref().map(|consulted| consulted.answer.clone());
+    let mut standing = match consulted {
+        Some(Consulted {
+            answer,
+            item: Some(item),
+        }) => {
+            let file = library_record(item.record, hash.clone(), answer);
+            let (verdict, duplicated) = admissible(path, file, account);
+            Standing {
+                duplicated,
+                ..Standing::of(verdict, hash)
+            }
+        }
+        _ => beyond_library(
+            path,
+            hash,
+            documents,
+            sources,
+            index,
+            config,
+            account,
+            answer.as_ref(),
+        ),
+    };
+    standing.library = answer;
+    standing
+}
+
+/// The passes after the library, for a file whose hash is `hash` and
+/// which the library did not answer for: `answer` is what it said
+/// instead, carried onto every record reached here.
+#[allow(clippy::too_many_arguments)]
+fn beyond_library<C: Cache>(
+    path: &Path,
+    hash: Option<ContentHash>,
+    documents: &dyn Documents,
+    sources: &[&dyn Source],
+    index: &ContentIndex<C>,
+    config: &ResolveConfig,
+    account: Option<&Account<'_>>,
+    answer: Option<&LibraryAnswer>,
+) -> Standing {
+    if let Some(record) = from_index(hash.as_ref(), index, config) {
+        let file = FileRecord {
+            library: answer.cloned(),
+            ..indexed_record(record, hash.clone())
+        };
+        let (verdict, duplicated) = admissible(path, file, account);
         return Standing {
             duplicated,
             ..Standing::of(verdict, hash)
@@ -478,13 +569,11 @@ pub fn standing<C: Cache>(
     let resolved = match from_sources(sources, &looked_up) {
         Ok(resolved) => resolved,
         Err(unresolved) => {
+            let verdict = FileOutcome::Skipped(unresolvable(&unresolved, &looked_up, tier));
             return Standing {
-                verdict: FileOutcome::Skipped(unresolvable(&unresolved, &looked_up, tier)),
-                hash,
                 found,
                 unresolved: Some(unresolved),
-                refused: None,
-                duplicated: None,
+                ..Standing::of(verdict, hash)
             };
         }
     };
@@ -501,16 +590,14 @@ pub fn standing<C: Cache>(
         // about to pass, or this record is refused below and whoever
         // accepts it records what they accepted it over.
         overrode: None,
+        library: answer.cloned(),
     };
 
     if let Some(conflict) = disagreement(&file.claims, &file.record) {
         return Standing {
-            verdict: FileOutcome::Skipped(conflict),
-            hash,
             found,
-            unresolved: None,
             refused: Some(file),
-            duplicated: None,
+            ..Standing::of(FileOutcome::Skipped(conflict), hash)
         };
     }
 
@@ -520,12 +607,9 @@ pub fn standing<C: Cache>(
 
     let (verdict, duplicated) = admissible(path, file, account);
     Standing {
-        verdict,
-        hash,
         found,
-        unresolved: None,
-        refused: None,
         duplicated,
+        ..Standing::of(verdict, hash)
     }
 }
 
@@ -583,6 +667,9 @@ pub fn claims_of(path: &Path, documents: &dyn Documents) -> Vec<Claim> {
 /// Nothing is written to the content index here. A record reached this
 /// way is a candidate until somebody accepts it, and [`remember`] is
 /// what keeps one that was accepted.
+///
+/// No library is asked, so the record's `library` is `None`; a caller
+/// that asked one about the file sets it to what that library said.
 pub fn resolve_supplied(
     path: &Path,
     identifier: &Identifier,
@@ -613,6 +700,7 @@ pub fn resolve_supplied(
             // over `conflict` is the caller's decision, and the caller
             // records it.
             overrode: None,
+            library: None,
         },
         conflict,
     })
@@ -750,9 +838,10 @@ pub fn attempts_of(unresolved: &Unresolved) -> Vec<Attempt> {
 /// [`borax_sources::dispatch::priority`]'s, which differs by identifier
 /// type and omits services a record can still carry a field from.
 ///
-/// A record whose provenance names no such source reports the index
-/// itself, as `cache`, since nothing else is known about where it came
-/// from.
+/// A record whose provenance names no such source reports where it was
+/// kept instead, since nothing else is known about where it came from:
+/// `library` for a record the library supplied, and `cache` for one the
+/// content index did.
 fn sources_of(file: &FileRecord) -> String {
     if let Some(source) = file.source {
         return source.as_str().to_string();
@@ -781,22 +870,39 @@ fn sources_of(file: &FileRecord) -> String {
         .map(|(_, name)| *name)
         .collect();
 
-    match named.is_empty() {
-        true => "cache".to_string(),
-        false => named.join(", "),
+    match (named.is_empty(), file.tier) {
+        (false, _) => named.join(", "),
+        (true, Some(Provenance::Library)) => "library".to_string(),
+        (true, _) => "cache".to_string(),
     }
 }
 
 /// The event that reports `outcome` for `path`.
 ///
 /// A resolved file whose source is unknown — the content index
-/// answered — reports its source as `cache`.
+/// answered — reports its source as `cache`. A skip carries no library
+/// answer, having no record to carry one; [`verdict_event`] is the one
+/// that reports a skip's.
 pub fn event_for(path: &Path, outcome: &FileOutcome) -> Event {
     match outcome {
         FileOutcome::Resolved(file) => resolved_event(path, file),
         FileOutcome::Skipped(reason) => Event::Skipped {
             path: path.to_path_buf(),
             reason: reason.clone(),
+            library: None,
+        },
+    }
+}
+
+/// The event reporting `standing`'s verdict for `path`, carrying its
+/// library answer on a `skipped` event as on a `resolved` one.
+pub fn verdict_event(path: &Path, standing: &Standing) -> Event {
+    match &standing.verdict {
+        FileOutcome::Resolved(file) => resolved_event(path, file),
+        FileOutcome::Skipped(reason) => Event::Skipped {
+            path: path.to_path_buf(),
+            reason: reason.clone(),
+            library: standing.library.clone(),
         },
     }
 }
@@ -822,6 +928,7 @@ pub fn resolved_event(path: &Path, file: &FileRecord) -> Event {
         tier: file.tier.map(|whence| whence.as_str().to_string()),
         overrode: file.overrode.clone(),
         cached: file.cached,
+        library: file.library.clone(),
     }
 }
 
@@ -871,6 +978,10 @@ pub struct Run {
 /// the settings a file runs under come from its own directory: one
 /// invocation can span two trees that configure extraction differently.
 ///
+/// `library` is the run's library, asked about every file as
+/// [`standing`] asks it and shared by every worker: nothing is learned
+/// into it, so no file's answer depends on another's.
+///
 /// Up to `concurrency` files are resolved at once
 /// ([`borax_sources::pace::map_bounded`]). Ordering is unaffected: that
 /// helper restores input order whatever order the jobs finish in, so
@@ -884,22 +995,26 @@ pub fn resolve_batch<C: Cache>(
     documents: &dyn Documents,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
+    library: Option<&Stores>,
     config: &(dyn Fn(&Path) -> ResolveConfig + Sync),
     concurrency: usize,
 ) -> Run {
-    let outcomes = map_bounded(paths.to_vec(), concurrency, |path| {
-        let outcome = resolve_file(&path, documents, sources, index, &config(&path));
-        (path, outcome)
+    let mut events = map_bounded(paths.to_vec(), concurrency, |path| {
+        let standing = standing(
+            &path,
+            documents,
+            sources,
+            index,
+            &config(&path),
+            None,
+            library,
+        );
+        verdict_event(&path, &standing)
     });
 
-    let mut events = Vec::with_capacity(outcomes.len() + 1);
     let mut counts = Counts::default();
-    for (path, outcome) in &outcomes {
-        match outcome {
-            FileOutcome::Resolved(_) => counts.resolved += 1,
-            FileOutcome::Skipped(_) => counts.skipped += 1,
-        }
-        events.push(event_for(path, outcome));
+    for event in &events {
+        counts.observe(event);
     }
 
     events.push(Event::RunFinished { counts });

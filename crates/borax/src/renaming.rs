@@ -668,6 +668,7 @@ impl<'a> Applying<'a> {
                         reason: SkipReason::Unrecordable {
                             message: "the file's content hash is unknown".to_string(),
                         },
+                        library: None,
                     };
                 };
                 match self.filesystem.rename(path, target) {
@@ -681,6 +682,7 @@ impl<'a> Applying<'a> {
                         reason: SkipReason::RenameFailed {
                             message: error.message,
                         },
+                        library: None,
                     },
                 }
             }
@@ -694,10 +696,12 @@ impl<'a> Applying<'a> {
                 reason: SkipReason::TargetTaken {
                     target: target.clone(),
                 },
+                library: None,
             },
             PlannedRename::Unnameable { path } => Event::Skipped {
                 path: path.clone(),
                 reason: SkipReason::Unnameable,
+                library: None,
             },
         }
     }

@@ -44,13 +44,13 @@ use crate::config::{
 };
 use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
-    Admission, Counts, Diagnostic, Event, Format, Level, Overridden, SkipReason, Summary,
-    TableUsed, human_summary, render,
+    Admission, Counts, Diagnostic, Event, Format, Level, LibraryAnswer, Overridden, SkipReason,
+    Summary, TableUsed, human_summary, render,
 };
 use crate::library::Account;
 use crate::pipeline::{
     Documents, Duplicated, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig,
-    Standing, resolve_batch, resolve_file, resolved_event,
+    Standing, resolve_batch, resolved_event,
 };
 use crate::renaming::{
     Applying, Filesystem, Namespace, PlannedRename, Planning, Proposed, RealFilesystem,
@@ -653,16 +653,16 @@ pub enum Prepared {
     /// for its directory.
     Grouped {
         groups: Vec<Group>,
-        /// What the library held when the run started: its two stores,
-        /// read once here and then kept current by the run as it admits
-        /// files, because a check that walked the tree per file would
-        /// cost the run its whole saving.
+        /// What the run's library held when the run started: its two
+        /// stores, read once here, because a walk of the tree per file
+        /// would cost the run its whole saving. `None` is a run with no
+        /// library, and one that consults none.
         ///
-        /// `None` is a run that keeps no account — the `record` setting
-        /// is off, or there is no library to keep one in — which makes
-        /// neither duplicate check rather than making both against
-        /// nothing.
-        account: Option<crate::library::Stores>,
+        /// What the run reads is this, as read: every file is resolved
+        /// against it and never against what the run has written since.
+        /// A rename that keeps an account learns its admissions into a
+        /// copy of its own.
+        library: Option<crate::library::Stores>,
         /// What the run has to say, before it starts, about files that
         /// are not its inputs: every row a lookup table dropped. Empty
         /// when there is nothing to report.
@@ -712,10 +712,11 @@ pub enum Prepared {
 /// work is the part that can fail, so it belongs where there is still a
 /// way to refuse the run.
 ///
-/// A `rename` also reads the library's stores here — once, before the
-/// first file; the run keeps what it read current as it goes rather
-/// than reading again. Nothing about that read can refuse a run: a
-/// store that is not there is an empty one.
+/// A `rename` and a `bib` also read the run's library here — once,
+/// before the first file, and whatever the `record` setting says, since
+/// consulting the library is not recording. Nothing about that read can
+/// refuse a run: a store that is not there is an empty one, and one
+/// that cannot be read is reported file by file.
 pub fn preflight<C: Cache>(
     command: &Command,
     configs: &Configs,
@@ -744,13 +745,7 @@ pub fn preflight<C: Cache>(
                 compiled_groups(paths, configs, Renders::FilenamesAndCitationKeys)?;
             Ok(Prepared::Grouped {
                 groups,
-                account: configs
-                    .run()
-                    .config()
-                    .record
-                    .then_some(adapters.collection_root.as_deref())
-                    .flatten()
-                    .map(crate::library::Stores::read),
+                library: run_library(adapters),
                 warnings,
             })
         }
@@ -758,9 +753,7 @@ pub fn preflight<C: Cache>(
             let (groups, warnings) = compiled_groups(paths, configs, Renders::CitationKeysOnly)?;
             Ok(Prepared::Grouped {
                 groups,
-                // A bibliography run admits nothing, so it keeps no
-                // account and checks against none.
-                account: None,
+                library: run_library(adapters),
                 warnings,
             })
         }
@@ -783,13 +776,36 @@ pub fn preflight<C: Cache>(
             )?;
             Ok(Prepared::Grouped {
                 groups: vec![group],
-                // An adoption checks nothing against the account: it
+                // An adoption consults nothing and checks nothing: it
                 // admits orphans, which no record names by definition.
-                account: None,
+                library: None,
                 warnings,
             })
         }
     }
+}
+
+/// The stores of the run's library, read once, or `None` for a run in
+/// no library.
+fn run_library<C: Cache>(adapters: &Adapters<C>) -> Option<crate::library::Stores> {
+    adapters
+        .collection_root
+        .as_deref()
+        .map(crate::library::Stores::read)
+}
+
+/// What the run has to say about having consulted `library` for any of
+/// `paths` while its artifact store could not be read whole, or `None`
+/// when it could, or when no file was one the library answers about.
+fn consultation_warning<'a>(
+    library: Option<&crate::library::Stores>,
+    mut paths: impl Iterator<Item = &'a PathBuf>,
+) -> Option<Diagnostic> {
+    let library = library?;
+    let faults = library.record_faults()?;
+    paths
+        .any(|path| library.covers(path))
+        .then(|| crate::library::record_faults_warning(faults))
 }
 
 /// Which template tables a command renders from, and so which ones
@@ -1015,10 +1031,10 @@ pub fn emit_events<C: Cache>(
             sink.emit(report.clone());
             Aftermath::default()
         }
-        (Command::Resolve { paths, .. }, _) => {
-            resolve_events(paths, configs, adapters, sink);
-            Aftermath::default()
-        }
+        (Command::Resolve { paths, .. }, _) => Aftermath {
+            library: resolve_events(paths, configs, adapters, sink),
+            ..Aftermath::default()
+        },
         (Command::Status { identify, .. }, _) => {
             status_events(command, *identify, configs, adapters, sink);
             Aftermath::default()
@@ -1034,20 +1050,31 @@ pub fn emit_events<C: Cache>(
         (
             Command::Rename { apply, .. },
             Prepared::Grouped {
-                groups, account, ..
+                groups, library, ..
             },
         ) => rename_events(
             groups,
             *apply,
             session,
-            account.as_ref(),
+            library.as_ref(),
             configs,
             adapters,
             sink,
         ),
-        (Command::Bib { .. }, Prepared::Grouped { groups, .. }) => {
-            bib_events(groups, configs, adapters, sink);
-            Aftermath::default()
+        (
+            Command::Bib { .. },
+            Prepared::Grouped {
+                groups, library, ..
+            },
+        ) => {
+            bib_events(groups, library.as_ref(), configs, adapters, sink);
+            Aftermath {
+                library: consultation_warning(
+                    library.as_ref(),
+                    groups.iter().flat_map(|group| &group.paths),
+                ),
+                ..Aftermath::default()
+            }
         }
         (Command::Adopt { .. }, Prepared::Grouped { groups, .. }) => {
             if let [library] = groups.as_slice() {
@@ -1080,6 +1107,11 @@ pub struct Aftermath {
     /// a file: a library holding paths to reconcile, or the record
     /// failure that ended the run.
     pub diagnostic: Option<Diagnostic>,
+    /// What the run has to say about the library it consulted: that its
+    /// artifact store could not be read whole, so a file an unreadable
+    /// record might track was resolved as if untracked. `None` for a
+    /// library read whole, and for a run that consulted none.
+    pub library: Option<Diagnostic>,
 }
 
 /// The events `command` produces, between the run's first and last,
@@ -1131,17 +1163,24 @@ fn cache_report(clear: bool, root: &Path) -> Result<Event, Diagnostic> {
 /// order depend on that. Order is the property worth keeping — a run
 /// stays diffable against itself — so `resolve` waits where `rename`,
 /// which is serial, does not.
+///
+/// The run's library, where it has one, is read once before the first
+/// file and asked about every file ([`resolve_batch`]). Returns the
+/// warning a library whose artifact store could not be read whole calls
+/// for, once for the run ([`consultation_warning`]).
 fn resolve_events<C: Cache>(
     paths: &[PathBuf],
     configs: &Configs,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
-) {
+) -> Option<Diagnostic> {
+    let library = run_library(adapters);
     let mut run = resolve_batch(
         paths,
         adapters.documents,
         adapters.sources,
         adapters.index,
+        library.as_ref(),
         &|path| resolving(configs.for_path(path).config()),
         // How many files at once is a network setting, so it comes from
         // the run rather than from any one file's directory.
@@ -1153,6 +1192,7 @@ fn resolve_events<C: Cache>(
     for event in run.events {
         sink.emit(event);
     }
+    consultation_warning(library.as_ref(), paths.iter())
 }
 
 /// What a run may do while resolving, from `config`.
@@ -1170,9 +1210,14 @@ fn resolving(config: &Config) -> ResolveConfig {
 ///
 /// `groups` is what [`preflight`] made of the run's paths: each
 /// directory the run spans, the files in it, and the template tables its
-/// configuration compiled to. `stores` is the library's two stores as
-/// they stood before the first file was touched, and `None` is a run
-/// that keeps no account and checks against nothing.
+/// configuration compiled to. `snapshot` is the library's two stores as
+/// they stood before the first file was touched, and `None` is a run in
+/// no library.
+///
+/// Every file is resolved against `snapshot` as read, whatever the
+/// `record` setting says and whatever the run admits before reaching
+/// it, so a file's library answer is what the library's files say and
+/// never what an earlier file taught the run.
 ///
 /// Each file is checked for duplicates against the library as the run
 /// has left it so far. A file the run admits is, for every later file,
@@ -1182,8 +1227,9 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// same terms without writing it, and counts a path it would have moved
 /// a file to as holding that file, so it reports what the same run with
 /// `--apply` would. A file not admitted — skipped, declined, or refused
-/// — teaches the account nothing. `stores` itself is left as it is: the
-/// run learns into its own copy.
+/// — teaches the account nothing. `snapshot` itself is left as it is:
+/// the run learns into its own copy, and keeps none — and makes neither
+/// check — with the `record` setting off.
 ///
 /// A group is worked under its own directory's configuration — its
 /// templates, its collision policy, its bibliography destination — since
@@ -1216,8 +1262,10 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// and every file after it in [`Aftermath::unreached`], and still
 /// merges what the files it visited produced.
 ///
-/// Returns a warning when any record the run matched turned out to
-/// name a file that is no longer there. A record whose artifact this
+/// Returns the warning a library whose artifact store could not be read
+/// whole calls for ([`consultation_warning`]), and a warning when any
+/// record the run matched turned out to name a file that is no longer
+/// there. A record whose artifact this
 /// run moved names the path it moved to, so the path it moved from is
 /// never among them. It comes back at the end
 /// rather than as an event because it is one fact about the library and
@@ -1229,7 +1277,7 @@ fn rename_events<C: Cache>(
     groups: &[Group],
     apply: bool,
     session: &mut Session<'_>,
-    stores: Option<&crate::library::Stores>,
+    snapshot: Option<&crate::library::Stores>,
     configs: &Configs,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
@@ -1265,7 +1313,7 @@ fn rename_events<C: Cache>(
     // `--no-record` suppress the checks themselves and not merely the
     // writes behind them. The run's own copy, since what it admits is
     // learned into it.
-    let mut stores = stores.cloned();
+    let mut stores = snapshot.filter(|_| configs.run().config().record).cloned();
 
     // Across groups, because a table is named once for the run however
     // many directories consult one under that name.
@@ -1348,6 +1396,7 @@ fn rename_events<C: Cache>(
                     adapters.index,
                     &resolving(effective.config()),
                     account.as_ref(),
+                    snapshot,
                 );
                 let about = About {
                     path,
@@ -1410,7 +1459,11 @@ fn rename_events<C: Cache>(
                             diagnostic: None,
                         });
                     }
-                    Settled::Skip { file, reason } => {
+                    Settled::Skip {
+                        file,
+                        reason,
+                        library,
+                    } => {
                         sink.release();
                         if let Some(file) = &file {
                             sink.emit(crate::pipeline::resolved_event(path, file));
@@ -1418,6 +1471,7 @@ fn rename_events<C: Cache>(
                         let event = Event::Skipped {
                             path: path.clone(),
                             reason,
+                            library,
                         };
                         sink.emit(event.clone());
                         (file, event)
@@ -1569,6 +1623,7 @@ fn rename_events<C: Cache>(
         unreached: stopped
             .as_ref()
             .map_or(0, |stopped| unreached(groups, stopped.at)),
+        library: consultation_warning(snapshot, groups.iter().flat_map(|group| &group.paths)),
         // A run that could not record a move says so; otherwise the only
         // thing left to report is a record naming a file that has gone.
         diagnostic: stopped
@@ -1626,9 +1681,14 @@ enum Settled {
     /// that still stands for it where one does: a file that resolved
     /// and was not moved has one to be cited from, and a file nothing
     /// identified has none.
+    ///
+    /// `library` is what the run's library said about the file where the
+    /// skip is its resolution verdict, and `None` for a skip of a file
+    /// that resolved, whose record already carries the answer.
     Skip {
         file: Option<FileRecord>,
         reason: SkipReason,
+        library: Option<LibraryAnswer>,
     },
     /// End the run at this file, saying nothing about it.
     Stop,
@@ -1655,7 +1715,11 @@ fn alone(
     lookups: &mut Lookups<'_>,
 ) -> Settled {
     match standing.verdict {
-        FileOutcome::Skipped(reason) => Settled::Skip { file: None, reason },
+        FileOutcome::Skipped(reason) => Settled::Skip {
+            file: None,
+            reason,
+            library: standing.library,
+        },
         FileOutcome::Resolved(file) => Settled::CarryOut {
             decision: planning.proposed(about.path, &file, lookups).decision,
             file,
@@ -1734,6 +1798,9 @@ fn asked<C: Cache>(
     adapters: &Adapters<'_, C>,
     account: Option<&Account<'_>>,
 ) -> Settled {
+    // The verdict the run is holding for the file, which is what its
+    // question is described from and what a skip reports.
+    let mut held = crate::pipeline::verdict_event(about.path, &standing);
     let Standing {
         verdict,
         hash,
@@ -1741,10 +1808,8 @@ fn asked<C: Cache>(
         mut unresolved,
         refused,
         duplicated,
+        library,
     } = standing;
-    // The verdict the run is holding for the file, which is what its
-    // question is described from and what a skip reports.
-    let mut held = crate::pipeline::event_for(about.path, &verdict);
     // The record the file's own passes put on offer: the one they
     // resolved, or the one the conflict check refused and an operator
     // may yet accept.
@@ -1951,7 +2016,12 @@ fn asked<C: Cache>(
                 ) {
                     Ok(supplied) => {
                         offer = Some(Offer {
-                            file: supplied.file,
+                            // What the library said about the file
+                            // stands whatever the operator makes of it.
+                            file: FileRecord {
+                                library: library.clone(),
+                                ..supplied.file
+                            },
                             conflict: supplied.conflict,
                             kept: false,
                         });
@@ -1993,12 +2063,14 @@ fn asked<C: Cache>(
                             // asking a second time does not make it
                             // the operator's.
                             tier: Some(Provenance::Extracted(tier)),
+                            library: library.clone(),
                             ..supplied.file
                         };
                         held = match &supplied.conflict {
                             Some(conflict) => Event::Skipped {
                                 path: about.path.to_path_buf(),
                                 reason: conflict.clone(),
+                                library: library.clone(),
                             },
                             None => resolved_event(about.path, &file),
                         };
@@ -2026,6 +2098,7 @@ fn asked<C: Cache>(
                         held = Event::Skipped {
                             path: about.path.to_path_buf(),
                             reason: crate::pipeline::unresolvable(&unheld, &identifier, tier),
+                            library: library.clone(),
                         };
                         unresolved = Some(unheld);
                         own = None;
@@ -2165,13 +2238,17 @@ fn situation(
 /// was never the file's resolution and is not reported as one.
 fn skipped(own: Option<Offer>, held: &Event) -> Settled {
     match held {
-        Event::Skipped { reason, .. } => Settled::Skip {
+        Event::Skipped {
+            reason, library, ..
+        } => Settled::Skip {
             file: None,
             reason: reason.clone(),
+            library: library.clone(),
         },
         _ => Settled::Skip {
             file: own.map(|on| on.file),
             reason: SkipReason::Declined,
+            library: None,
         },
     }
 }
@@ -2576,6 +2653,7 @@ fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Set
         Some(id) => Settled::Skip {
             file: Some(file),
             reason: SkipReason::Stranding { id },
+            library: None,
         },
         None => Settled::CarryOut {
             file,
@@ -2720,24 +2798,28 @@ fn reidentified(file: &FileRecord) -> bool {
 ///
 /// Nothing here admits a file anywhere, so no duplicate check is made:
 /// the file is resolved as a run that keeps no account resolves it.
+/// `library` is the run's library, asked about the file first.
 ///
 /// Each file is resolved and reported before the next is opened, so a
 /// reader watching a network-bound run sees it make progress.
 fn resolved_record<C: Cache>(
     path: &Path,
     effective: &Effective,
+    library: Option<&crate::library::Stores>,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
 ) -> Option<FileRecord> {
-    let outcome = resolve_file(
+    let standing = crate::pipeline::standing(
         path,
         adapters.documents,
         adapters.sources,
         adapters.index,
         &resolving(effective.config()),
+        None,
+        library,
     );
-    sink.emit(crate::pipeline::event_for(path, &outcome));
-    match outcome {
+    sink.emit(crate::pipeline::verdict_event(path, &standing));
+    match standing.verdict {
         FileOutcome::Resolved(file) => Some(file),
         _ => None,
     }
@@ -2758,12 +2840,15 @@ fn resolved_record<C: Cache>(
 ///
 /// Nothing here admits a file to the library, so no duplicate check has
 /// any say in it: every file is resolved with nothing to check against,
-/// exactly as a run that keeps no account is.
+/// exactly as a run that keeps no account is. `library` is the run's
+/// library as [`preflight`] read it, asked about every file before
+/// anything else is.
 ///
 /// The lookups that found no row trail the whole run, as they do for
 /// [`rename_events`] and for the same reason.
 fn bib_events<C: Cache>(
     groups: &[Group],
+    library: Option<&crate::library::Stores>,
     configs: &Configs,
     adapters: &Adapters<C>,
     sink: &mut dyn Sink,
@@ -2781,7 +2866,7 @@ fn bib_events<C: Cache>(
         let mut lookups = Lookups::new(&group.tables);
 
         for path in &group.paths {
-            if let Some(file) = resolved_record(path, effective, adapters, sink) {
+            if let Some(file) = resolved_record(path, effective, library, adapters, sink) {
                 cited.add(
                     path.clone(),
                     file,
@@ -3105,9 +3190,10 @@ fn write_event(log: &mut fs::File, event: &Event) -> io::Result<()> {
 ///
 /// What [`preflight`] has to say about a lookup table goes to
 /// `streams.err` too, and the run goes ahead. What the run itself
-/// discovers about the library — that it records artifacts which are no
-/// longer where it says — follows on `streams.err` once the stream has
-/// closed, which is the first moment the whole batch has been checked.
+/// discovers about the library — that its artifact records could not
+/// all be read, or that it records artifacts which are no longer where
+/// it says — follows on `streams.err` once the stream has closed, which
+/// is the first moment the whole batch has been checked.
 pub fn dispatch<C: Cache>(
     cli: &Cli,
     configs: &Configs,
@@ -3196,7 +3282,7 @@ pub fn dispatch<C: Cache>(
     };
     sink.emit(Event::RunFinished { counts });
 
-    if let Some(diagnostic) = aftermath.diagnostic {
+    for diagnostic in aftermath.library.into_iter().chain(aftermath.diagnostic) {
         let _ = writeln!(streams.err, "{diagnostic}");
     }
 
