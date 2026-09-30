@@ -408,6 +408,37 @@ fn a_relative_path_inside_the_root_is_not_excluded() {
     assert!(excludes(&working, Path::new("../paper.pdf")));
 }
 
+/// design D1a / reviewer finding: `library_relative` compares its
+/// stripped prefix with `strip_prefix`, which is case-sensitive, while
+/// `contains` and `Account::is_incoming` compare with `same_name`,
+/// which is case-insensitive on Windows. A root and a path differing
+/// only in case must still be found relative on that platform, or the
+/// two comparisons disagree about where the library's boundary runs.
+#[cfg(windows)]
+#[test]
+fn library_relative_is_case_insensitive_on_windows() {
+    assert_eq!(
+        library_relative(
+            Path::new("C:/Library"),
+            Path::new("c:/library/sub/paper.pdf")
+        )
+        .as_deref(),
+        Some("sub/paper.pdf")
+    );
+}
+
+/// The same case-insensitivity for `excludes`: a path spelled in a
+/// different case from the root it lies under must not be excluded on
+/// that account alone.
+#[cfg(windows)]
+#[test]
+fn excludes_is_case_insensitive_on_windows() {
+    assert!(!excludes(
+        Path::new("C:/Library"),
+        Path::new("c:/library/sub/paper.pdf")
+    ));
+}
+
 // ---------------------------------------------------------------------
 // 3.1: ItemStore
 // ---------------------------------------------------------------------
@@ -3962,6 +3993,88 @@ fn consult_normalises_a_relative_spelling_of_the_root() {
     );
 }
 
+/// design D3: `UnreadableItem.path` and `AmbiguousItem.files` are full
+/// paths, "as `duplicate.existing_path` is, so a reader can open them" —
+/// even when the library was read through a relative spelling of the
+/// root. The working directory is never changed; `paths::route` builds
+/// the relative spelling from it instead.
+#[test]
+fn consult_reports_full_paths_even_when_the_root_was_read_relatively() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let cwd = std::env::current_dir().unwrap();
+    let relative_root = borax::paths::route(root, &cwd);
+
+    // An unreadable item file.
+    let bad_path = write_file(root, "unreadable.pdf", b"unreadable item bytes");
+    let bad_item = item_id(UUID_B);
+    let bad_record = artifact_record(
+        artifact_id(UUID_A),
+        Some(bad_item.clone()),
+        "unreadable.pdf",
+        vec![hash_entry("unreadable item bytes", "run-0")],
+    );
+    write_artifact_record(root, &bad_record);
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    let bad_item_path = items.join(format!("badkey.{UUID_B}.toml"));
+    fs::write(&bad_item_path, "not valid toml {{{").unwrap();
+
+    let unreadable = consult(
+        &relative_root,
+        &bad_path,
+        Some(&hash("unreadable item bytes")),
+    )
+    .unwrap();
+    match unreadable.answer {
+        LibraryAnswer::UnreadableItem { path, .. } => {
+            assert!(
+                path.is_absolute(),
+                "UnreadableItem.path must be a full path even over a relative root: {path:?}"
+            );
+            assert_eq!(path, bad_item_path);
+        }
+        other => panic!("expected UnreadableItem, got {other:?}"),
+    }
+
+    // Two item files carrying one identity.
+    let ambiguous_path = write_file(root, "ambiguous.pdf", b"ambiguous item bytes");
+    let shared_item = item_id(UUID_C);
+    let ambiguous_record = artifact_record(
+        artifact_id(UUID_D),
+        Some(shared_item.clone()),
+        "ambiguous.pdf",
+        vec![hash_entry("ambiguous item bytes", "run-0")],
+    );
+    write_artifact_record(root, &ambiguous_record);
+    let item = item_at(shared_item);
+    write_item(root, &format!("a-first.{UUID_C}.toml"), &item);
+    write_item(root, &format!("b-second.{UUID_C}.toml"), &item);
+
+    let ambiguous = consult(
+        &relative_root,
+        &ambiguous_path,
+        Some(&hash("ambiguous item bytes")),
+    )
+    .unwrap();
+    match ambiguous.answer {
+        LibraryAnswer::AmbiguousItem { files, .. } => {
+            assert!(
+                files.iter().all(|file| file.is_absolute()),
+                "AmbiguousItem.files must be full paths even over a relative root: {files:?}"
+            );
+            assert_eq!(
+                files,
+                vec![
+                    items.join(format!("a-first.{UUID_C}.toml")),
+                    items.join(format!("b-second.{UUID_C}.toml")),
+                ]
+            );
+        }
+        other => panic!("expected AmbiguousItem, got {other:?}"),
+    }
+}
+
 // --- Ambiguity among records at one path ---
 
 /// `UnrecognisedContent` lists every record naming the path when none
@@ -4130,6 +4243,58 @@ fn consult_reports_dangling_item_when_no_item_file_claims_the_uuid() {
         LibraryAnswer::DanglingItem {
             artifact: UUID_A.to_string(),
             item: UUID_B.to_string(),
+        }
+    );
+}
+
+/// The one record at the path holds the hash but links no item at all:
+/// `NoItem`, naming the artifact (design D1's table, row 5).
+#[test]
+fn consult_reports_no_item_when_the_holding_record_links_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("paper bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::NoItem {
+            artifact: UUID_A.to_string(),
+        }
+    );
+    assert_eq!(found.item, None);
+}
+
+/// A record names the path, but the file could not be hashed:
+/// `Unhashable`, naming the artifact — no record can be confirmed
+/// without a hash to check it against (design D1's table, row 3).
+#[test]
+fn consult_reports_unhashable_when_a_record_names_the_path_and_the_file_has_no_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, None).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Unhashable {
+            artifacts: vec![UUID_A.to_string()],
         }
     );
 }

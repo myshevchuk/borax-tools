@@ -12615,15 +12615,15 @@ fn bib_reports_the_librarys_corrected_title() {
         content.contains("REVIEW CORRECTION"),
         "the master bib file must carry the corrected title: {content:?}"
     );
-    let sidecar_write = bib_files.writes().into_iter().find(|(path, _)| {
-        path.to_string_lossy().ends_with(".bib") && path != Path::new("refs.bib")
-    });
-    if let Some((_, sidecar_content)) = sidecar_write {
-        assert!(
-            sidecar_content.contains("REVIEW CORRECTION"),
-            "the sidecar must carry the corrected title too: {sidecar_content:?}"
-        );
-    }
+    let (_, sidecar_content) = bib_files
+        .writes()
+        .into_iter()
+        .find(|(path, _)| path.to_string_lossy().ends_with(".bib") && path != Path::new("refs.bib"))
+        .unwrap_or_else(|| panic!("no sidecar written: {:?}", bib_files.writes()));
+    assert!(
+        sidecar_content.contains("REVIEW CORRECTION"),
+        "the sidecar must carry the corrected title too: {sidecar_content:?}"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -13641,4 +13641,178 @@ fn status_over_an_unlistable_artifact_store_is_unaffected() {
     assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("\"records\":0"), "got {text:?}");
+}
+
+// ---------------------------------------------------------------------
+// consult-library-first, third pass: the artifact-store warning only
+// for a run that actually consulted the library (reviewer finding —
+// `consultation_warning` is asked over every grouped input path, quit
+// or not, rather than over the ones the run reached)
+// ---------------------------------------------------------------------
+
+/// An interactive rename under `--no-record` whose library has one
+/// unparsable artifact record: the first file lies outside the
+/// library, the second inside it. The operator quits at the first
+/// file, so the second — and the library's own fault — is never
+/// reached, and the run must not warn about it.
+#[test]
+fn quitting_before_the_librarys_own_file_writes_no_artifact_store_warning() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    fs::create_dir_all(&root).unwrap();
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let first = outside.join("first.pdf");
+    let second = root.join("second.pdf");
+
+    let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records).unwrap();
+    fs::write(records.join("broken.toml"), "not valid toml {{{").unwrap();
+
+    let documents = FakeDocuments::new()
+        .with_file(
+            &first,
+            hash_for("quit-before-library-first"),
+            pdf_with_embedded_doi("10.1000/quit-before-library-first"),
+        )
+        .with_file(
+            &second,
+            hash_for("quit-before-library-second"),
+            pdf_with_embedded_doi("10.1000/quit-before-library-second"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/quit-before-library-first",
+            record_by("Smith", 2024, "10.1000/quit-before-library-first"),
+        )
+        .answering(
+            "doi:10.1000/quit-before-library-second",
+            record_by("Doe", 2023, "10.1000/quit-before-library-second"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.record = Some(false);
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+    });
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Quit]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![first, second], false), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let stderr = String::from_utf8(err).unwrap();
+    assert!(
+        !stderr.contains("artifact record"),
+        "a run that quit before reaching the library's own file must not warn about it: \
+         got {stderr:?}"
+    );
+}
+
+/// The positive control: the same library and the same fault, but the
+/// operator answers the first file and the run reaches the second,
+/// inside the library — the warning is emitted.
+#[test]
+fn reaching_the_librarys_own_file_still_writes_the_artifact_store_warning() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    fs::create_dir_all(&root).unwrap();
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let first = outside.join("first.pdf");
+    let second = root.join("second.pdf");
+
+    let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records).unwrap();
+    fs::write(records.join("broken.toml"), "not valid toml {{{").unwrap();
+
+    let documents = FakeDocuments::new()
+        .with_file(
+            &first,
+            hash_for("reach-library-first"),
+            pdf_with_embedded_doi("10.1000/reach-library-first"),
+        )
+        .with_file(
+            &second,
+            hash_for("reach-library-second"),
+            pdf_with_embedded_doi("10.1000/reach-library-second"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/reach-library-first",
+            record_by("Smith", 2024, "10.1000/reach-library-first"),
+        )
+        .answering(
+            "doi:10.1000/reach-library-second",
+            record_by("Doe", 2023, "10.1000/reach-library-second"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.record = Some(false);
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+    });
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip, Answer::Skip]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![first, second], false), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let stderr = String::from_utf8(err).unwrap();
+    assert!(
+        stderr.contains("artifact record"),
+        "a run that reached the library's own file must warn about its fault: got {stderr:?}"
+    );
 }

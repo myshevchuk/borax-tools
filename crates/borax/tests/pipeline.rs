@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use borax::event::{Attempt, Claim, ClaimOrigin, Counts, Event, LibraryAnswer, SkipReason};
-use borax::library::{ArtifactStore, Stores};
+use borax::library::{ArtifactStore, ItemStore, Stores};
 use borax::pipeline::{
     Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, claims_of,
     event_for, remember, resolve_batch, resolve_file, resolve_supplied, standing, verdict_event,
@@ -2826,4 +2826,336 @@ fn a_dangling_item_problem_on_a_conflict_skip_carries_through() {
         Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
         other => panic!("expected Event::Skipped, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// consult-library-first, third pass: every one of D1's problem kinds
+// drives `standing` against a real fixture library, not only
+// `DanglingItem` (reviewer finding).
+// ---------------------------------------------------------------------
+
+/// Runs `standing` for `path` against `stores` with a fixture that
+/// resolves successfully by fallback, and asserts `expected` is carried
+/// on the resolved `FileRecord`, on `Standing::library`, and on
+/// `verdict_event`'s `resolved` event alike.
+fn assert_problem_propagates_through_a_successful_fallback(
+    path: &Path,
+    hash: ContentHash,
+    stores: &Stores,
+    doi_value: &str,
+    expected: LibraryAnswer,
+) {
+    let documents = FakeDocuments::new().with_file(path, hash, pdf_with_embedded_doi(doi_value));
+    let (crossref, _) = fake_source(SourceName::Crossref, Ok(record_with_doi(doi_value)));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(stores),
+    );
+
+    match &result.verdict {
+        FileOutcome::Resolved(file) => {
+            assert_eq!(file.library, Some(expected.clone()), "on the FileRecord");
+        }
+        other => panic!("expected a resolved fallback, got {other:?}"),
+    }
+    assert_eq!(
+        result.library,
+        Some(expected.clone()),
+        "on Standing::library"
+    );
+    match verdict_event(path, &result) {
+        Event::Resolved { library, .. } => assert_eq!(library, Some(expected), "on verdict_event"),
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// `UnrecognisedContent`: a record names the path, but none of its
+/// history holds the file's current hash.
+#[test]
+fn unrecognised_content_propagates_through_standing_and_verdict_event() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    record_at(
+        root,
+        "paper.pdf",
+        hash_for("stale bytes"),
+        Some(ItemId::from_uuid(fresh_uuid())),
+    );
+    let artifact = ArtifactStore::read(root)
+        .by_path("paper.pdf")
+        .expect("record_at must have written a record")
+        .id
+        .to_string();
+    let stores = Stores::read(root);
+
+    assert_problem_propagates_through_a_successful_fallback(
+        &path,
+        hash_for("current bytes"),
+        &stores,
+        "10.1000/unrecognised-content",
+        LibraryAnswer::UnrecognisedContent {
+            artifacts: vec![artifact],
+        },
+    );
+}
+
+/// `Ambiguous`: two records at the path both hold the file's hash.
+#[test]
+fn ambiguous_propagates_through_standing_and_verdict_event() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let hash = hash_for("shared bytes");
+    record_at(root, "paper.pdf", hash.clone(), None);
+    record_at(root, "paper.pdf", hash.clone(), None);
+    let mut artifacts: Vec<String> = ArtifactStore::read(root)
+        .iter()
+        .map(|record| record.id.to_string())
+        .collect();
+    artifacts.sort();
+    let stores = Stores::read(root);
+
+    assert_problem_propagates_through_a_successful_fallback(
+        &path,
+        hash,
+        &stores,
+        "10.1000/ambiguous",
+        LibraryAnswer::Ambiguous { artifacts },
+    );
+}
+
+/// `NoItem`: the one record holding the hash links no item.
+#[test]
+fn no_item_propagates_through_standing_and_verdict_event() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let hash = hash_for("no item bytes");
+    record_at(root, "paper.pdf", hash.clone(), None);
+    let artifact = ArtifactStore::read(root)
+        .by_path("paper.pdf")
+        .expect("record_at must have written a record")
+        .id
+        .to_string();
+    let stores = Stores::read(root);
+
+    assert_problem_propagates_through_a_successful_fallback(
+        &path,
+        hash,
+        &stores,
+        "10.1000/no-item",
+        LibraryAnswer::NoItem { artifact },
+    );
+}
+
+/// `UnreadableItem`: the linked item's own file does not parse.
+#[test]
+fn unreadable_item_propagates_through_standing_and_verdict_event() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let hash = hash_for("unreadable item bytes");
+    let bad_item = ItemId::from_uuid(fresh_uuid());
+    record_at(root, "paper.pdf", hash.clone(), Some(bad_item.clone()));
+    let items = root.join("items");
+    fs::create_dir_all(&items).unwrap();
+    let item_path = items.join(format!("badkey.{bad_item}.toml"));
+    fs::write(&item_path, "not valid toml {{{").unwrap();
+    let artifact = ArtifactStore::read(root)
+        .by_path("paper.pdf")
+        .expect("record_at must have written a record")
+        .id
+        .to_string();
+    let message = ItemStore::read(root)
+        .faults
+        .iter()
+        .find(|fault| fault.path == item_path)
+        .expect("the bad item file must be a fault")
+        .message
+        .clone();
+    let stores = Stores::read(root);
+
+    assert_problem_propagates_through_a_successful_fallback(
+        &path,
+        hash,
+        &stores,
+        "10.1000/unreadable-item",
+        LibraryAnswer::UnreadableItem {
+            artifact,
+            item: bad_item.to_string(),
+            path: item_path,
+            message,
+        },
+    );
+}
+
+/// `AmbiguousItem`: two item files carry the linked identity.
+#[test]
+fn ambiguous_item_propagates_through_standing_and_verdict_event() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let hash = hash_for("ambiguous item bytes");
+    let shared_item = ItemId::from_uuid(fresh_uuid());
+    record_at(root, "paper.pdf", hash.clone(), Some(shared_item.clone()));
+    let item = Item {
+        id: shared_item.clone(),
+        record: record_with_doi("10.1000/ambiguous-item"),
+    };
+    let items = root.join("items");
+    fs::create_dir_all(&items).unwrap();
+    fs::write(
+        items.join(format!("a-first.{shared_item}.toml")),
+        item.to_toml(),
+    )
+    .unwrap();
+    fs::write(
+        items.join(format!("b-second.{shared_item}.toml")),
+        item.to_toml(),
+    )
+    .unwrap();
+    let artifact = ArtifactStore::read(root)
+        .by_path("paper.pdf")
+        .expect("record_at must have written a record")
+        .id
+        .to_string();
+    let stores = Stores::read(root);
+
+    assert_problem_propagates_through_a_successful_fallback(
+        &path,
+        hash,
+        &stores,
+        "10.1000/ambiguous-item",
+        LibraryAnswer::AmbiguousItem {
+            artifact,
+            item: shared_item.to_string(),
+            files: vec![
+                items.join(format!("a-first.{shared_item}.toml")),
+                items.join(format!("b-second.{shared_item}.toml")),
+            ],
+        },
+    );
+}
+
+/// `Unhashable`: a record names the path, but the file could not be
+/// hashed — `Documents::hash` fails, so `from_index` reports `None`.
+#[test]
+fn unhashable_propagates_through_standing_and_verdict_event() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    record_at(root, "paper.pdf", hash_for("irrelevant"), None);
+    let artifact = ArtifactStore::read(root)
+        .by_path("paper.pdf")
+        .expect("record_at must have written a record")
+        .id
+        .to_string();
+    let stores = Stores::read(root);
+    let documents = FakeDocuments::new().with_hash_error(
+        &path,
+        ExtractionError::Unreadable {
+            message: "cannot hash".to_string(),
+        },
+        pdf_with_embedded_doi("10.1000/unhashable"),
+    );
+    let (crossref, _) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/unhashable")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+
+    let expected = LibraryAnswer::Unhashable {
+        artifacts: vec![artifact],
+    };
+    match &result.verdict {
+        FileOutcome::Resolved(file) => assert_eq!(file.library, Some(expected.clone())),
+        other => panic!("expected a resolved fallback, got {other:?}"),
+    }
+    assert_eq!(result.library, Some(expected.clone()));
+    match verdict_event(&path, &result) {
+        Event::Resolved { library, .. } => assert_eq!(library, Some(expected)),
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// `UnreadableRecords { listed: true, .. }`: no readable record names
+/// the path, but an unrelated record file does not parse.
+#[test]
+fn unreadable_records_listed_propagates_through_standing_and_verdict_event() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("unrecorded.pdf");
+    let records = root.join(".borax").join("artifacts");
+    fs::create_dir_all(&records).unwrap();
+    fs::write(records.join("broken.toml"), "not valid toml {{{").unwrap();
+    let stores = Stores::read(root);
+
+    assert_problem_propagates_through_a_successful_fallback(
+        &path,
+        hash_for("unrecorded bytes"),
+        &stores,
+        "10.1000/unreadable-records-listed",
+        LibraryAnswer::UnreadableRecords {
+            listed: true,
+            unreadable: 1,
+        },
+    );
+}
+
+/// `UnreadableRecords { listed: false, .. }`: `.borax/artifacts/`
+/// itself cannot be listed.
+#[cfg(unix)]
+#[test]
+fn unreadable_records_unlistable_propagates_through_standing_and_verdict_event() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("unrecorded.pdf");
+    let records = root.join(".borax").join("artifacts");
+    fs::create_dir_all(&records).unwrap();
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if fs::read_dir(&records).is_ok() {
+        fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping unreadable_records_unlistable_propagates_through_standing_and_verdict_event: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+    let stores = Stores::read(root);
+
+    assert_problem_propagates_through_a_successful_fallback(
+        &path,
+        hash_for("unrecorded bytes 2"),
+        &stores,
+        "10.1000/unreadable-records-unlisted",
+        LibraryAnswer::UnreadableRecords {
+            listed: false,
+            unreadable: 0,
+        },
+    );
+
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
 }
