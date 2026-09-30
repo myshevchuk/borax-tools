@@ -1699,7 +1699,7 @@ fn json_line_writes_library_null_when_the_library_was_not_consulted() {
 #[test]
 fn a_resolved_line_with_no_library_key_deserializes_with_library_none() {
     let without_library = r#"{"schema":3,"event":"resolved","path":"paper.pdf",
-        "identifier":"doi:10.1000/xyz","record":{},"source":"crossref",
+        "identifier":"doi:10.1000/xyz","record":{"type":"article-journal"},"source":"crossref",
         "found":"doi:10.1000/xyz","claims":[],"tier":null,"overrode":null,"cached":false}"#;
 
     let value: serde_json::Value = serde_json::from_str(without_library).unwrap();

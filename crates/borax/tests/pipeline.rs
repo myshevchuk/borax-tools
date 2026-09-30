@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use borax::event::{Attempt, Claim, ClaimOrigin, Counts, Event, LibraryAnswer, SkipReason};
-use borax::library::Stores;
+use borax::library::{ArtifactStore, Stores};
 use borax::pipeline::{
     Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, claims_of,
     event_for, remember, resolve_batch, resolve_file, resolve_supplied, standing, verdict_event,
@@ -2281,8 +2281,10 @@ fn a_tracked_file_resolves_from_its_item_with_no_extraction_no_source_and_no_ind
         let hash = hash_for("tracked bytes");
         let item = library_item(root, record_with_doi("10.1000/tracked"));
         let stores = tracked_library(root, "paper.pdf", hash.clone(), &item);
-        let documents = FakeDocuments::new().with_file(&path, hash, pdf_with_no_text_layer());
-        let (crossref, calls) = fake_source(SourceName::Crossref, Ok(record_with_doi("wrong")));
+        let documents =
+            FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_text_layer());
+        let (crossref, calls) =
+            fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/wrong")));
         let sources: Vec<&dyn Source> = vec![&crossref];
         let index = CountingCache::new();
         let content_index = ContentIndex::new(index.clone());
@@ -2501,15 +2503,11 @@ fn a_dangling_item_problem_falls_back_and_writes_the_content_index() {
 /// The artifact identity of the one record `record_at` wrote at
 /// `relative` under `root`, read back from disk.
 fn record_id_at(root: &Path, relative: &str) -> String {
-    let stores = Stores::read(root);
-    stores
-        .consult(&root.join(relative), None)
-        .and_then(|consulted| match consulted.answer {
-            LibraryAnswer::DanglingItem { artifact, .. } => Some(artifact),
-            LibraryAnswer::NoItem { artifact } => Some(artifact),
-            _ => None,
-        })
-        .expect("record_at must have written exactly one record at this path")
+    ArtifactStore::read(root)
+        .by_path(relative)
+        .expect("record_at must have written a record at this path")
+        .id
+        .to_string()
 }
 
 /// A dangling-linked record whose file carries no identifier at all:
@@ -2566,7 +2564,7 @@ fn a_dangling_item_problem_on_a_file_with_no_identifier_carries_through_to_the_s
 fn a_content_duplicate_is_skipped_before_the_library_is_asked() {
     let dir = tempdir().unwrap();
     let root = dir.path();
-    let existing = write_file_for_test(root, "existing.pdf", b"shared bytes");
+    let _existing = write_file_for_test(root, "existing.pdf", b"shared bytes");
     let incoming = root.join("incoming.pdf");
     let hash = hash_bytes(b"shared bytes");
     record_at(root, "existing.pdf", hash.clone(), None);

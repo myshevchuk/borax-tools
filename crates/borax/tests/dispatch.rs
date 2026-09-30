@@ -18,7 +18,7 @@ use borax::event::{
     Admission, Adoption, Event, Level, LibraryAnswer, Overridden, Repair, SCHEMA, SkipReason,
     human_line,
 };
-use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR, Stores};
+use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RealFilesystem, RenameError, counts_for};
 use borax::run::{Adapters, Configs, Streams, dispatch, entry_type, events_for, templates};
@@ -12103,12 +12103,17 @@ fn resolve_with_one_unreadable_record_warns_once_and_still_tracks_the_rest() {
         .collect();
     let good_event = lines
         .iter()
-        .find(|line| line["path"] == "good.pdf")
+        .find(|line| line["path"].as_str().unwrap_or("").ends_with("good.pdf"))
         .unwrap_or_else(|| panic!("no event for good.pdf: {lines:?}"));
     assert_eq!(good_event["library"]["kind"], "tracked");
     let unrecorded_event = lines
         .iter()
-        .find(|line| line["path"] == "unrecorded.pdf")
+        .find(|line| {
+            line["path"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("unrecorded.pdf")
+        })
         .unwrap_or_else(|| panic!("no event for unrecorded.pdf: {lines:?}"));
     assert_eq!(unrecorded_event["library"]["kind"], "unreadable-records");
 }
@@ -12811,7 +12816,8 @@ fn supplying_a_different_identifier_for_a_tracked_file_reports_supplied_and_reli
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let filesystem = FakeFilesystem::new();
+    fs::write(&path, b"interactive tracked supply").unwrap();
+    let filesystem = RealFilesystem;
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
     let adapters = Adapters {
@@ -13261,7 +13267,16 @@ fn batch_target_taken_stays_library_null_while_resolved_carries_the_problem() {
 
     let events = events_for(
         &Command::rename(vec![path.clone()], true),
-        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &Configs::uniform(effective_with(|layer| {
+            layer.templates = Some(BTreeMap::from([(
+                "default".to_string(),
+                "[auth][year]".to_string(),
+            )]));
+            layer.rename = Some(borax::config::RenameLayer {
+                collision: Some("skip".to_string()),
+                ..Default::default()
+            });
+        })),
         &adapters,
         &mut Session::batch(),
     )
@@ -13294,11 +13309,11 @@ fn batch_target_taken_stays_library_null_while_resolved_carries_the_problem() {
 /// The artifact identity of the one record written at `relative` under
 /// `root`, for a dangling-item fixture: read back through `consult`.
 fn record_id_at_path(root: &Path, relative: &str) -> String {
-    let stores = Stores::read(root);
-    match stores.consult(&root.join(relative), None).unwrap().answer {
-        LibraryAnswer::DanglingItem { artifact, .. } => artifact,
-        other => panic!("expected DanglingItem, got {other:?}"),
-    }
+    library::ArtifactStore::read(root)
+        .by_path(relative)
+        .unwrap_or_else(|| panic!("no artifact record at {relative}"))
+        .id
+        .to_string()
 }
 
 // ---------------------------------------------------------------------

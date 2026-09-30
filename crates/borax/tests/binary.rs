@@ -428,8 +428,8 @@ fn seed_stale_content_index(cache_home: &Path, bytes: &[u8], stale_title: &str) 
     let root = cache_home.join("borax").join("v1");
     let key = content_key(&hash_bytes(bytes));
     let path = entry_path(&root, &key).expect("a well-formed cache key");
-    fs::create_dir_all(path.parent().unwrap()).expect("cache dir");
-    fs::write(&path, serde_json::to_vec(&record).unwrap()).expect("stale cache entry");
+    fs::create_dir_all(path.parent().expect("parent")).expect("cache dir");
+    fs::write(&path, serde_json::to_vec(&record).expect("json")).expect("stale cache entry");
 }
 
 /// `borax resolve --json paper.pdf` and
@@ -463,7 +463,7 @@ fn resolve_reports_a_tracked_file_the_same_way_for_every_relative_spelling() {
 
         let resolved: serde_json::Value = stdout
             .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
+            .map(|line| serde_json::from_str(line).expect("json"))
             .find(|line: &serde_json::Value| line["event"] == "resolved")
             .unwrap_or_else(|| panic!("no resolved event for {spelling:?}: {stdout}"));
 

@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borax::event::{Admission, Event, Finding, LibraryAnswer, Repair};
 use borax::library::{
-    ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, ITEM_STORE, ItemStore,
+    ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, Consulted, ITEM_STORE, ItemStore,
     RecordFaults, STATE_DIR, Stores, Unrecorded, WorkDuplicate, admission_event, admit, artifacts,
     contains, excludes, item_file_name, library_relative, missing, orphans, reconcile,
     reconciliation_events, recorded_at, relative_to, store_write, strands, survey, validate,
