@@ -327,8 +327,8 @@ and return early when a probe shows the directory is still listable
 
 ## 8. Close
 
-- [ ] 8.1 `openspec validate consult-library-first --strict` and
+- [x] 8.1 `openspec validate consult-library-first --strict` and
       `python3 scripts/check-spec-deltas.py` pass.
-- [ ] 8.2 `cargo fmt --all --check`,
+- [x] 8.2 `cargo fmt --all --check`,
       `cargo clippy --workspace --all-targets -- -D warnings` and
       `cargo test --workspace` pass, as CI runs them.
