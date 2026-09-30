@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `resolved` events and resolution-verdict `skipped` events now include
+  a `library` field that distinguishes a tracked answer, an untracked
+  file, and each reason the library could not answer. Library answers
+  use `tier: "library"`, `cached: false`, empty `claims`, and
+  `source: "library"` when the item names no service. Human and
+  interactive output identify library answers and library problems. The
+  event schema remains at version 3.
+
 ### Changed
+
+- `resolve`, `rename`, and `bib` now consult the run's library before
+  the content index. A tracked file resolves from its linked item's
+  record without opening the file, querying services, comparing titles,
+  or reading or writing either cache. The stores are read once at the
+  start of the run, so later files do not see admissions made earlier in
+  that run. `--no-cache` and `--no-record` do not bypass library
+  resolution; `--no-record` still disables duplicate checks and all
+  library writes.
+
+- A recorded path whose library cannot supply one unambiguous item now
+  falls back to ordinary resolution and reports why. This does not by
+  itself skip the file, create a finding, or change the exit status.
+  Artifact-store read failures also produce one warning per run. A
+  byte-identical copy at another path and a recorded artifact moved
+  without `borax reconcile` remain untracked and resolve as before.
+
+- `borax validate` now reports an existing `items/` or
+  `.borax/artifacts/` directory that cannot be listed as an `unreadable`
+  finding. A missing store directory still means an empty store.
+  `status`, `reconcile`, and `adopt` are unchanged.
 
 - Human output now closes with a summary fitted to each command.
   `status`, with or without `--identify`, `validate`, `reconcile`,
@@ -15,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skipped totals to their own output. `resolve` and `bib` omit the
   renamed count, while `rename` output is unchanged. JSON output and run
   logs are unchanged, and the event schema remains at version 3.
+
+### Fixed
+
+- Relative inputs such as `./paper.pdf` now find a `.borax.toml` above
+  the working directory instead of missing the library, its settings,
+  and its run-log location.
+
+- Applying `rename paper.pdf` with a relative path inside a library now
+  records the file instead of treating it as outside the library.
 
 ## [0.6.0] - 2026-09-24
 

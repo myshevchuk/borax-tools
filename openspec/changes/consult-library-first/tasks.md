@@ -28,7 +28,7 @@ and return early when a probe shows the directory is still listable
 
 ## 1. What the library says about one file
 
-- [ ] 1.1 Red: `crates/borax/tests/library.rs`, `Stores::consult` over
+- [x] 1.1 Red: `crates/borax/tests/library.rs`, `Stores::consult` over
       fixture libraries, one test per row of design D1's table, plus:
       - `Tracked` when the file's hash is the record's newest entry, and
         when it is only an older entry (rollback). `Consulted::item` is
@@ -79,7 +79,7 @@ and return early when a probe shows the directory is still listable
         answers `Tracked` with work B's item for work A's bytes at its
         path. The test's comment names it an interim policy owned by
         change 15.
-- [ ] 1.2 Green:
+- [x] 1.2 Green:
       - `LibraryAnswer` in `crates/borax/src/event.rs`, serde only, no
         rendering yet.
       - In `crates/borax/src/library.rs`: `Consulted`, `RecordFaults`,
@@ -95,7 +95,7 @@ and return early when a probe shows the directory is still listable
 
 ## 2. The event carries it
 
-- [ ] 2.1 Red: `crates/borax/tests/event.rs`:
+- [x] 2.1 Red: `crates/borax/tests/event.rs`:
       - `json_line` of a `resolved` event with each `LibraryAnswer`
         variant gives the objects in design D3, tagged by `kind` in
         kebab-case, with `"library":null` for `None`. The same holds for
@@ -109,12 +109,12 @@ and return early when a probe shows the directory is still listable
         `skipped` line alike, with one artifact and with several.
         `Tracked` with `tier: Some("supplied")`, `Untracked` and `None`
         leave the line byte-identical to today's.
-- [ ] 2.2 Red, mechanical: add `library: None` to every existing
+- [x] 2.2 Red, mechanical: add `library: None` to every existing
       `Event::Resolved`, `Event::Skipped` and `FileRecord` literal under
       `crates/borax/tests/`. Give every exhaustive pattern on those
       variants a `..`. Change no assertion. State in the commit that
       the edit is mechanical.
-- [ ] 2.3 Green: the `library` fields, `#[serde(default)]` and always
+- [x] 2.3 Green: the `library` fields, `#[serde(default)]` and always
       serialized. `Provenance::Library` with `as_str` `"library"`.
       `FileRecord::library`. `human_line` and a private function
       rendering `<what>`. `sources_of` reports `library` for a library
@@ -128,7 +128,7 @@ and return early when a probe shows the directory is still listable
 
 ## 3. The pipeline asks the library first
 
-- [ ] 3.1 Red: `crates/borax/tests/pipeline.rs`, `standing` with a
+- [x] 3.1 Red: `crates/borax/tests/pipeline.rs`, `standing` with a
       fixture library, stub `Documents` and `Source`s, and a content
       index over a cache that counts reads and writes:
       - Tracked: the verdict is `Resolved` with the item's record,
@@ -155,10 +155,10 @@ and return early when a probe shows the directory is still listable
         today's (`library: None` on every event).
       - `resolve_batch` with a fixture library gives the same events at
         concurrency 1 and 8.
-- [ ] 3.2 Red, mechanical: pass `None` as the new `library` argument at
+- [x] 3.2 Red, mechanical: pass `None` as the new `library` argument at
       every existing call of `standing` and `resolve_batch` in
       `crates/borax/tests/`. Change no assertion.
-- [ ] 3.3 Green: `standing` takes `library: Option<&Stores>`. It asks
+- [x] 3.3 Green: `standing` takes `library: Option<&Stores>`. It asks
       the library after the content-duplicate check and before the
       content index, and skips the index read when the library answers.
       A library answer goes through `admissible`'s work check as a
@@ -170,7 +170,7 @@ and return early when a probe shows the directory is still listable
 
 ## 4. `resolve` reads the run's library
 
-- [ ] 4.1 Red: `crates/borax/tests/dispatch.rs`, through `events_for`
+- [x] 4.1 Red: `crates/borax/tests/dispatch.rs`, through `events_for`
       and `dispatch` with `Adapters::collection_root` set to a fixture
       library:
       - The review case: an item whose title starts `REVIEW
@@ -200,14 +200,14 @@ and return early when a probe shows the directory is still listable
         content-index entry present.
       - Human mode: the tracked file's line ends ` (from the library)`,
         and the closing line is `1 resolved, 0 skipped`.
-- [ ] 4.2 Green: `resolve_events` reads `Stores` once from
+- [x] 4.2 Green: `resolve_events` reads `Stores` once from
       `adapters.collection_root` and passes it to `resolve_batch`. Write
       the D5 warning that `record_faults` calls for. A read never
       refuses the run.
 
 ## 5. `rename` reads it under every setting
 
-- [ ] 5.1 Red: `crates/borax/tests/dispatch.rs` or `end_to_end.rs`,
+- [x] 5.1 Red: `crates/borax/tests/dispatch.rs` or `end_to_end.rs`,
       batch runs over a fixture library:
       - `rename --apply` over a tracked file whose item's record renders
         a different name: the file is renamed to the item's name, no
@@ -224,7 +224,7 @@ and return early when a probe shows the directory is still listable
         `resolved` event carries the problem. Today's record-update
         behaviour is unchanged, and this change does not alter it
         (design, Risks).
-- [ ] 5.2 Red: interactive runs through a scripted asker:
+- [x] 5.2 Red: interactive runs through a scripted asker:
       - `crates/borax/tests/describe.rs`: for a `resolved` event with
         `tier: "library"`, the `identifier` line has no origin clause,
         `record` reads `Crossref, from the library` (or `the library`
@@ -240,7 +240,7 @@ and return early when a probe shows the directory is still listable
         `resolved` event has `tier` `supplied` and `library` of kind
         `tracked`, and the `library-admission` `relinked` event follows
         as today.
-- [ ] 5.3 Red: the consultation survives a rename (design D8, D11).
+- [x] 5.3 Red: the consultation survives a rename (design D8, D11).
       Use a file whose record links a missing item (`dangling-item`):
       - Batch `rename` over it when it carries no identifier: the
         `skipped` event (`no-identifier`) carries `dangling-item`. The
@@ -262,7 +262,7 @@ and return early when a probe shows the directory is still listable
         fallback and is admitted. The second's event still carries
         `dangling-item`, not `tracked` with the first file's record,
         under both `--record` and `--no-record`.
-- [ ] 5.4 Red, audit: find existing tests that run in a library
+- [x] 5.4 Red, audit: find existing tests that run in a library
       (`collection_root` set, or a `.borax.toml` fixture) and assert a
       content-index answer (`cached: true`, `(cached)`, `from an earlier
       run`) for a file an earlier run or fixture recorded with a linked
@@ -270,7 +270,7 @@ and return early when a probe shows the directory is still listable
       library answer and state each update in the commit. Where the
       test's point was the content index, give the file no artifact
       record instead, and say so.
-- [ ] 5.5 Green: `preflight` reads the run's `Stores` whenever
+- [x] 5.5 Green: `preflight` reads the run's `Stores` whenever
       `adapters.collection_root` is set, and keeps that read as an
       immutable snapshot for consultation. The account, and every
       `learn`/`foresee` into its own copy, stays behind the `record`
@@ -284,17 +284,17 @@ and return early when a probe shows the directory is still listable
 
 ## 6. `bib` reads it too
 
-- [ ] 6.1 Red: `crates/borax/tests/bib.rs` or `dispatch.rs`: `bib` over
+- [x] 6.1 Red: `crates/borax/tests/bib.rs` or `dispatch.rs`: `bib` over
       a tracked file whose item's title is corrected. The `resolved`
       event is the library answer, and the entry written to the master
       `.bib` and to the sidecar carries the corrected title.
-- [ ] 6.2 Green: `preflight` gives `bib` the run's `Stores`, and
+- [x] 6.2 Green: `preflight` gives `bib` the run's `Stores`, and
       `resolved_record` resolves through `standing` with no account and
       that library, emitting `verdict_event`.
 
 ## 7. Documents
 
-- [ ] 7.1 Doc writer (`codex-docs`), update jobs on `docs/manual.org`.
+- [x] 7.1 Doc writer (`codex-docs`), update jobs on `docs/manual.org`.
       Sources: this proposal, its design and its spec deltas. The
       implementer does not write these. The orchestrator checks the diff
       against the sources:
@@ -315,14 +315,14 @@ and return early when a probe shows the directory is still listable
       - Run logs, the JSONL paragraph (around 1288–1306):
         `resolved.library` and `skipped.library`, the `tier` value
         `library`, and the `source` value `library`.
-- [ ] 7.2 Doc writer, `CHANGELOG.md`, an Unreleased "Changed" entry:
+- [x] 7.2 Doc writer, `CHANGELOG.md`, an Unreleased "Changed" entry:
       inside a library, `resolve`, `rename` and `bib` take a tracked
       file's record from its library item before the content index, and
       `--no-cache` does not bypass it. A library that cannot answer is
       reported, and the file is resolved as before. Also an "Added"
       entry for the `library` field and the `library` values of `tier`
       and `source`, with the schema still 3.
-- [ ] 7.3 Record the built state in `openspec/STATE.md`, as
+- [x] 7.3 Record the built state in `openspec/STATE.md`, as
       `fit-summary-to-command` did.
 
 ## 8. Close
