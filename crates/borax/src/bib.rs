@@ -216,6 +216,7 @@ pub fn write_sidecar(
             Some(Event::Skipped {
                 path: path.to_path_buf(),
                 reason: SkipReason::Unciteable,
+                library: None,
             }),
         );
     };
@@ -229,6 +230,7 @@ pub fn write_sidecar(
         false => Event::Skipped {
             path: path.to_path_buf(),
             reason: SkipReason::SidecarTaken { target },
+            library: None,
         },
         true => match files.write(&target, &sidecar(&file.record, &key)) {
             Ok(()) => Event::Sidecar {
@@ -344,6 +346,7 @@ fn bib_failed(path: &Path, message: String) -> Event {
     Event::Skipped {
         path: path.to_path_buf(),
         reason: SkipReason::BibWriteFailed { message },
+        library: None,
     }
 }
 

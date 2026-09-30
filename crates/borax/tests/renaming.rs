@@ -182,6 +182,7 @@ fn resolved(path: &str, record: Record, hash: Option<ContentHash>) -> (PathBuf, 
             cached: false,
             hash,
             overrode: None,
+            library: None,
         },
     )
 }
@@ -1108,6 +1109,7 @@ fn a_failing_rename_is_skipped_with_the_error_message_and_the_batch_continues() 
                 reason: SkipReason::RenameFailed {
                     message: "permission denied".to_string(),
                 },
+                library: None,
             },
             Event::Renamed {
                 path: PathBuf::from("/lib/b.pdf"),
@@ -1158,6 +1160,7 @@ fn target_taken_reports_the_same_way_in_preview_and_applying() {
         reason: SkipReason::TargetTaken {
             target: PathBuf::from("/lib/Smith2024.pdf"),
         },
+        library: None,
     }];
     assert_eq!(preview, expected);
     assert_eq!(applying, expected);
@@ -1175,6 +1178,7 @@ fn unnameable_reports_the_same_way_in_preview_and_applying() {
     let expected = vec![Event::Skipped {
         path: PathBuf::from("/lib/mystery.pdf"),
         reason: SkipReason::Unnameable,
+        library: None,
     }];
     assert_eq!(preview, expected);
     assert_eq!(applying, expected);
@@ -1212,6 +1216,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
             tier: None,
             cached: false,
             overrode: None,
+            library: None,
         },
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
@@ -1225,6 +1230,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
             tier: None,
             cached: false,
             overrode: None,
+            library: None,
         },
         Event::Renamed {
             path: PathBuf::from("a.pdf"),
@@ -1234,6 +1240,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
         Event::Skipped {
             path: PathBuf::from("c.pdf"),
             reason: SkipReason::NoIdentifier,
+            library: None,
         },
         Event::AlreadyNamed {
             path: PathBuf::from("d.pdf"),
@@ -1241,6 +1248,7 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
         Event::Skipped {
             path: PathBuf::from("e.pdf"),
             reason: SkipReason::Unnameable,
+            library: None,
         },
     ];
 
@@ -1275,6 +1283,7 @@ fn a_preview_runs_counts_report_zero_renamed_however_many_moves_were_planned() {
             tier: None,
             cached: false,
             overrode: None,
+            library: None,
         },
         Event::Planned {
             path: PathBuf::from("a.pdf"),
@@ -1482,6 +1491,7 @@ fn carry_out_of_an_applying_rename_with_no_hash_skips_it_unrecordable_and_moves_
             reason: SkipReason::Unrecordable {
                 message: "the file's content hash is unknown".to_string(),
             },
+            library: None,
         }
     );
     assert!(
@@ -1534,6 +1544,7 @@ fn a_batch_continues_past_an_unrecordable_file_to_rename_the_rest() {
                 reason: SkipReason::Unrecordable {
                     message: "the file's content hash is unknown".to_string(),
                 },
+                library: None,
             },
             Event::Renamed {
                 path: PathBuf::from("/lib/b.pdf"),
@@ -1585,10 +1596,12 @@ fn several_unrecordable_files_in_one_batch_are_each_skipped_independently() {
             Event::Skipped {
                 path: PathBuf::from("/lib/a.pdf"),
                 reason: unrecordable.clone(),
+                library: None,
             },
             Event::Skipped {
                 path: PathBuf::from("/lib/b.pdf"),
                 reason: unrecordable,
+                library: None,
             },
         ]
     );
@@ -1759,6 +1772,7 @@ fn a_known_hash_that_then_fails_to_move_reports_the_filesystem_failure() {
             reason: SkipReason::RenameFailed {
                 message: "permission denied".to_string(),
             },
+            library: None,
         }
     );
 }

@@ -6,12 +6,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borax::event::{Admission, Event, Finding, Repair};
+use borax::event::{Admission, Event, Finding, LibraryAnswer, Repair};
 use borax::library::{
-    ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, ITEM_STORE, ItemStore, STATE_DIR,
-    Unrecorded, WorkDuplicate, admission_event, admit, artifacts, contains, item_file_name,
-    missing, orphans, reconcile, reconciliation_events, recorded_at, relative_to, store_write,
-    strands, survey, validate,
+    ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, Consulted, ITEM_STORE, ItemStore,
+    RecordFaults, STATE_DIR, Stores, Unrecorded, WorkDuplicate, admission_event, admit, artifacts,
+    contains, excludes, item_file_name, library_relative, missing, orphans, reconcile,
+    reconciliation_events, recorded_at, relative_to, store_write, strands, survey, validate,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -359,6 +359,84 @@ fn artifacts_excludes_everything_beneath_a_nested_marker() {
     fs::write(root.join("outer.pdf"), b"").unwrap();
 
     assert_eq!(artifacts(root), vec![root.join("outer.pdf")]);
+}
+
+// ---------------------------------------------------------------------
+// library_relative() and excludes() under any spelling
+// ---------------------------------------------------------------------
+
+// A run given `paper.pdf` discovers its library root as an absolute
+// directory. The file is inside that library by lexical containment,
+// however it was spelled, so an applying run records it there.
+#[test]
+fn a_relative_path_is_library_relative_to_an_absolute_root() {
+    let working = std::env::current_dir().unwrap();
+
+    assert_eq!(
+        library_relative(&working, Path::new("paper.pdf")).as_deref(),
+        Some("paper.pdf")
+    );
+    assert_eq!(
+        library_relative(&working, Path::new("./sub/x/../paper.pdf")).as_deref(),
+        Some("sub/paper.pdf")
+    );
+}
+
+#[test]
+fn an_absolute_path_is_library_relative_to_a_relative_root() {
+    let working = std::env::current_dir().unwrap();
+
+    assert_eq!(
+        library_relative(Path::new("."), &working.join("sub/paper.pdf")).as_deref(),
+        Some("sub/paper.pdf")
+    );
+}
+
+#[test]
+fn a_relative_path_climbing_out_of_the_root_is_not_library_relative() {
+    let working = std::env::current_dir().unwrap();
+
+    assert_eq!(library_relative(&working, Path::new("../paper.pdf")), None);
+}
+
+#[test]
+fn a_relative_path_inside_the_root_is_not_excluded() {
+    let working = std::env::current_dir().unwrap();
+
+    assert!(!excludes(&working, Path::new("paper.pdf")));
+    assert!(!excludes(Path::new("."), &working.join("paper.pdf")));
+    assert!(excludes(&working, Path::new("../paper.pdf")));
+}
+
+/// design D1a / reviewer finding: `library_relative` compares its
+/// stripped prefix with `strip_prefix`, which is case-sensitive, while
+/// `contains` and `Account::is_incoming` compare with `same_name`,
+/// which is case-insensitive on Windows. A root and a path differing
+/// only in case must still be found relative on that platform, or the
+/// two comparisons disagree about where the library's boundary runs.
+#[cfg(windows)]
+#[test]
+fn library_relative_is_case_insensitive_on_windows() {
+    assert_eq!(
+        library_relative(
+            Path::new("C:/Library"),
+            Path::new("c:/library/sub/paper.pdf")
+        )
+        .as_deref(),
+        Some("sub/paper.pdf")
+    );
+}
+
+/// The same case-insensitivity for `excludes`: a path spelled in a
+/// different case from the root it lies under must not be excluded on
+/// that account alone.
+#[cfg(windows)]
+#[test]
+fn excludes_is_case_insensitive_on_windows() {
+    assert!(!excludes(
+        Path::new("C:/Library"),
+        Path::new("c:/library/sub/paper.pdf")
+    ));
 }
 
 // ---------------------------------------------------------------------
@@ -3604,5 +3682,968 @@ fn work_duplicate_still_finds_a_duplicate_of_a_different_item() {
         }),
         "the own item's identifier must be passed over without hiding a real duplicate: \
          got {found:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// consult-library-first, task 1.1: Stores::consult / Stores::record_faults
+//
+// design D1's table, in order, plus D1a (normalised paths), D2/D2a (the
+// eight problem kinds and the store-fault rules) and the interim
+// rollback policy. Fixtures follow this file's own convention: a
+// `tempdir` holding `items/` and `.borax/artifacts/`, written as
+// `Item::to_toml` and `ArtifactRecord::to_toml` write them.
+// ---------------------------------------------------------------------
+
+/// An [`Item`] carrying `id` and a minimal article record, for fixtures
+/// that only need an identity to link an artifact record to.
+fn item_at(id: ItemId) -> Item {
+    Item {
+        id,
+        record: minimal_record(EntryType::Article),
+    }
+}
+
+/// Reads the two stores at `root` and consults them about `path`, over
+/// `hash` — the one call [`Stores::consult`] exists for.
+fn consult(root: &Path, path: &Path, hash: Option<&ContentHash>) -> Option<Consulted> {
+    Stores::read(root).consult(path, hash)
+}
+
+// --- Tracked (design D1's table, and the interim rollback policy) ---
+
+/// A record whose current hash is the file's own: the ordinary case,
+/// answering with the linked item.
+#[test]
+fn consult_reports_tracked_when_the_hash_is_the_records_newest_entry() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("paper bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Tracked {
+            artifact: UUID_A.to_string(),
+            item: UUID_B.to_string(),
+        }
+    );
+    assert_eq!(found.item, Some(item), "the linked item must come back too");
+}
+
+/// The interim policy (design D1, Risks): a rollback to an earlier
+/// history entry still answers `Tracked`, with the item the record
+/// links to *now* — not the item that entry was accepted under, which
+/// nothing here records. Binding an entry to the item it was accepted
+/// under is change 15's acceptance policy, not this one's.
+#[test]
+fn consult_reports_tracked_for_a_rollback_to_an_older_history_entry_interim_policy() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"work a bytes");
+    let item_b = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item_b.id), &item_b);
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_b.id.clone()),
+        "paper.pdf",
+        vec![
+            hash_entry("work a bytes", "run-0"),
+            hash_entry("work b bytes", "run-1"),
+        ],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("work a bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Tracked {
+            artifact: UUID_A.to_string(),
+            item: UUID_B.to_string(),
+        },
+        "work A's bytes, restored at a record re-linked to work B, answer as work B \
+         (interim policy, owned by change 15)"
+    );
+}
+
+// --- Untracked ---
+
+/// A PDF no record names at all.
+#[test]
+fn consult_is_untracked_for_a_pdf_no_record_names() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "orphan.pdf", b"orphan bytes");
+
+    let found = consult(root, &path, Some(&hash("orphan bytes"))).unwrap();
+
+    assert_eq!(found.answer, LibraryAnswer::Untracked);
+    assert_eq!(found.item, None);
+}
+
+/// A byte-identical copy of a recorded artifact, at a path no record
+/// names: only the records naming *this* path are examined (design D1),
+/// so a copy elsewhere is untracked even though its bytes are in the
+/// library's history.
+#[test]
+fn consult_is_untracked_for_a_byte_identical_copy_at_another_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "original.pdf", b"shared bytes");
+    let copy = write_file(root, "copy.pdf", b"shared bytes");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "original.pdf",
+        vec![hash_entry("shared bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &copy, Some(&hash("shared bytes"))).unwrap();
+
+    assert_eq!(found.answer, LibraryAnswer::Untracked);
+}
+
+/// A recorded artifact moved to a path no record names: reconciling is
+/// the remedy the library already names for this (design D1).
+#[test]
+fn consult_is_untracked_for_an_artifact_moved_to_a_path_no_record_names() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let moved = write_file(root, "new-home/paper.pdf", b"paper bytes");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "old-home/paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &moved, Some(&hash("paper bytes"))).unwrap();
+
+    assert_eq!(found.answer, LibraryAnswer::Untracked);
+}
+
+/// A file that cannot be hashed (`hash: None`) and whose path no record
+/// names is plainly untracked (design D2), not `unhashable`.
+#[test]
+fn consult_is_untracked_for_an_unhashable_file_no_record_names() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "unreadable.pdf", b"whatever");
+
+    let found = consult(root, &path, None).unwrap();
+
+    assert_eq!(found.answer, LibraryAnswer::Untracked);
+}
+
+// --- None: outside the library, or in a nested one ---
+
+/// A path outside the root is not consulted at all.
+#[test]
+fn consult_is_none_for_a_path_outside_the_root() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    fs::create_dir_all(&root).unwrap();
+    let outside = dir.path().join("elsewhere").join("paper.pdf");
+
+    assert_eq!(consult(&root, &outside, Some(&hash("x"))), None);
+}
+
+/// A path inside a nested library (a `.borax.toml` below the root) is
+/// not consulted either: the run's library stops at the nested marker,
+/// as [`excludes`] already does for every other check (design D8).
+#[test]
+fn consult_is_none_for_a_path_inside_a_nested_library() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let nested = root.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join(".borax.toml"), "").unwrap();
+    let path = write_file(root, "nested/paper.pdf", b"paper bytes");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "nested/paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    assert_eq!(consult(root, &path, Some(&hash("paper bytes"))), None);
+}
+
+// --- D1a: paths compared normalised ---
+
+/// A record naming `sub/paper.pdf` answers for the file reached with a
+/// `.` and a `..` in its spelling, as `Account::is_incoming` already
+/// treats them (design D1a).
+#[test]
+fn consult_normalises_dot_and_dotdot_in_the_input_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "sub/paper.pdf", b"paper bytes");
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item.id.clone()),
+        "sub/paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let tracked = LibraryAnswer::Tracked {
+        artifact: UUID_A.to_string(),
+        item: UUID_B.to_string(),
+    };
+
+    let via_dot = root.join("sub").join(".").join("paper.pdf");
+    assert_eq!(
+        consult(root, &via_dot, Some(&hash("paper bytes")))
+            .unwrap()
+            .answer,
+        tracked,
+        "a `.` component must not change the answer"
+    );
+
+    let via_dotdot = root.join("x").join("..").join("sub").join("paper.pdf");
+    assert_eq!(
+        consult(root, &via_dotdot, Some(&hash("paper bytes")))
+            .unwrap()
+            .answer,
+        tracked,
+        "a `..` climbing back into the tree must not change the answer"
+    );
+}
+
+/// A relative spelling of the file, from the test's own working
+/// directory, is the same file to the consultation ([`paths::route`]
+/// rather than a `chdir`, since tests run in one process).
+#[test]
+fn consult_normalises_a_relative_spelling_of_the_input_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "paper.pdf", b"paper bytes");
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let cwd = std::env::current_dir().unwrap();
+    let relative = borax::paths::route(&root.join("paper.pdf"), &cwd);
+
+    let found = consult(root, &relative, Some(&hash("paper bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Tracked {
+            artifact: UUID_A.to_string(),
+            item: UUID_B.to_string(),
+        },
+        "a relative spelling of the same file must answer the same way: {relative:?}"
+    );
+}
+
+/// A relative spelling of the *root* answers the same way too.
+#[test]
+fn consult_normalises_a_relative_spelling_of_the_root() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "paper.pdf", b"paper bytes");
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let cwd = std::env::current_dir().unwrap();
+    let relative_root = borax::paths::route(root, &cwd);
+
+    let found = consult(
+        &relative_root,
+        &root.join("paper.pdf"),
+        Some(&hash("paper bytes")),
+    )
+    .unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Tracked {
+            artifact: UUID_A.to_string(),
+            item: UUID_B.to_string(),
+        },
+        "a relative root must answer the same way: {relative_root:?}"
+    );
+}
+
+/// design D3: `UnreadableItem.path` and `AmbiguousItem.files` are full
+/// paths, "as `duplicate.existing_path` is, so a reader can open them" —
+/// even when the library was read through a relative spelling of the
+/// root. The working directory is never changed; `paths::route` builds
+/// the relative spelling from it instead.
+#[test]
+fn consult_reports_full_paths_even_when_the_root_was_read_relatively() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let cwd = std::env::current_dir().unwrap();
+    let relative_root = borax::paths::route(root, &cwd);
+
+    // An unreadable item file.
+    let bad_path = write_file(root, "unreadable.pdf", b"unreadable item bytes");
+    let bad_item = item_id(UUID_B);
+    let bad_record = artifact_record(
+        artifact_id(UUID_A),
+        Some(bad_item.clone()),
+        "unreadable.pdf",
+        vec![hash_entry("unreadable item bytes", "run-0")],
+    );
+    write_artifact_record(root, &bad_record);
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    let bad_item_path = items.join(format!("badkey.{UUID_B}.toml"));
+    fs::write(&bad_item_path, "not valid toml {{{").unwrap();
+
+    let unreadable = consult(
+        &relative_root,
+        &bad_path,
+        Some(&hash("unreadable item bytes")),
+    )
+    .unwrap();
+    match unreadable.answer {
+        LibraryAnswer::UnreadableItem { path, .. } => {
+            assert!(
+                path.is_absolute(),
+                "UnreadableItem.path must be a full path even over a relative root: {path:?}"
+            );
+            assert_eq!(path, bad_item_path);
+        }
+        other => panic!("expected UnreadableItem, got {other:?}"),
+    }
+
+    // Two item files carrying one identity.
+    let ambiguous_path = write_file(root, "ambiguous.pdf", b"ambiguous item bytes");
+    let shared_item = item_id(UUID_C);
+    let ambiguous_record = artifact_record(
+        artifact_id(UUID_D),
+        Some(shared_item.clone()),
+        "ambiguous.pdf",
+        vec![hash_entry("ambiguous item bytes", "run-0")],
+    );
+    write_artifact_record(root, &ambiguous_record);
+    let item = item_at(shared_item);
+    write_item(root, &format!("a-first.{UUID_C}.toml"), &item);
+    write_item(root, &format!("b-second.{UUID_C}.toml"), &item);
+
+    let ambiguous = consult(
+        &relative_root,
+        &ambiguous_path,
+        Some(&hash("ambiguous item bytes")),
+    )
+    .unwrap();
+    match ambiguous.answer {
+        LibraryAnswer::AmbiguousItem { files, .. } => {
+            assert!(
+                files.iter().all(|file| file.is_absolute()),
+                "AmbiguousItem.files must be full paths even over a relative root: {files:?}"
+            );
+            assert_eq!(
+                files,
+                vec![
+                    items.join(format!("a-first.{UUID_C}.toml")),
+                    items.join(format!("b-second.{UUID_C}.toml")),
+                ]
+            );
+        }
+        other => panic!("expected AmbiguousItem, got {other:?}"),
+    }
+}
+
+// --- Ambiguity among records at one path ---
+
+/// `UnrecognisedContent` lists every record naming the path when none
+/// of them holds the hash.
+#[test]
+fn consult_reports_unrecognised_content_listing_every_record_at_the_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"edited bytes");
+    let first = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    let second = artifact_record(
+        artifact_id(UUID_C),
+        Some(item_id(UUID_B)),
+        "paper.pdf",
+        vec![hash_entry("another original", "run-0")],
+    );
+    write_artifact_record(root, &first);
+    write_artifact_record(root, &second);
+
+    let found = consult(root, &path, Some(&hash("edited bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::UnrecognisedContent {
+            artifacts: vec![UUID_A.to_string(), UUID_C.to_string()],
+        },
+        "both records naming the path, in read order, must be listed"
+    );
+}
+
+/// `Ambiguous` lists every record at the path that holds the hash, in
+/// read order — the library declines to guess which is the file's
+/// (design D1, "Rejected: resolving ambiguity by preferring one
+/// record").
+#[test]
+fn consult_reports_ambiguous_listing_every_record_holding_the_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"shared bytes");
+    let first = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "paper.pdf",
+        vec![hash_entry("shared bytes", "run-0")],
+    );
+    let second = artifact_record(
+        artifact_id(UUID_C),
+        Some(item_id(UUID_B)),
+        "paper.pdf",
+        vec![hash_entry("shared bytes", "run-0")],
+    );
+    write_artifact_record(root, &first);
+    write_artifact_record(root, &second);
+
+    let found = consult(root, &path, Some(&hash("shared bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Ambiguous {
+            artifacts: vec![UUID_A.to_string(), UUID_C.to_string()],
+        }
+    );
+    assert_eq!(found.item, None);
+}
+
+/// When two records name the path and only one holds the hash, that
+/// one answers — the file is `Tracked`, not `Ambiguous`.
+#[test]
+fn consult_prefers_the_one_record_that_actually_holds_the_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"current bytes");
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    let stale = artifact_record(
+        artifact_id(UUID_A),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("stale bytes", "run-0")],
+    );
+    let current = artifact_record(
+        artifact_id(UUID_C),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("current bytes", "run-0")],
+    );
+    write_artifact_record(root, &stale);
+    write_artifact_record(root, &current);
+
+    let found = consult(root, &path, Some(&hash("current bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Tracked {
+            artifact: UUID_C.to_string(),
+            item: UUID_B.to_string(),
+        }
+    );
+}
+
+// --- Item-side problems ---
+
+/// The linked item's file is named `<key>.<item-uuid>.toml` and does
+/// not parse: `UnreadableItem` carries that path and the parser's
+/// message.
+#[test]
+fn consult_reports_unreadable_item_when_the_linked_items_file_does_not_parse() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let item_id_b = item_id(UUID_B);
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    let item_path = items.join(format!("badkey.{UUID_B}.toml"));
+    fs::write(&item_path, "not valid toml {{{").unwrap();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id_b),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("paper bytes"))).unwrap();
+
+    match found.answer {
+        LibraryAnswer::UnreadableItem {
+            artifact,
+            item,
+            path: reported_path,
+            ..
+        } => {
+            assert_eq!(artifact, UUID_A.to_string());
+            assert_eq!(item, UUID_B.to_string());
+            assert_eq!(reported_path, item_path);
+        }
+        other => panic!("expected UnreadableItem, got {other:?}"),
+    }
+    assert_eq!(found.item, None);
+}
+
+/// No item file claims the linked UUID at all, and the item store has
+/// no fault: `DanglingItem`, not `UnreadableItem`.
+#[test]
+fn consult_reports_dangling_item_when_no_item_file_claims_the_uuid() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("paper bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::DanglingItem {
+            artifact: UUID_A.to_string(),
+            item: UUID_B.to_string(),
+        }
+    );
+}
+
+/// The one record at the path holds the hash but links no item at all:
+/// `NoItem`, naming the artifact (design D1's table, row 5).
+#[test]
+fn consult_reports_no_item_when_the_holding_record_links_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("paper bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::NoItem {
+            artifact: UUID_A.to_string(),
+        }
+    );
+    assert_eq!(found.item, None);
+}
+
+/// A record names the path, but the file could not be hashed:
+/// `Unhashable`, naming the artifact — no record can be confirmed
+/// without a hash to check it against (design D1's table, row 3).
+#[test]
+fn consult_reports_unhashable_when_a_record_names_the_path_and_the_file_has_no_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, None).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Unhashable {
+            artifacts: vec![UUID_A.to_string()],
+        }
+    );
+}
+
+/// `items/` cannot be listed at all: `UnreadableItem` carrying the
+/// directory itself, never `DanglingItem` — a store that could not be
+/// read cannot say an item is absent (design D2).
+#[cfg(unix)]
+#[test]
+fn consult_reports_unreadable_item_naming_the_items_directory_when_it_cannot_be_listed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    fs::set_permissions(&items, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if fs::read_dir(&items).is_ok() {
+        fs::set_permissions(&items, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping consult_reports_unreadable_item_naming_the_items_directory_when_it_cannot_be_listed: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let found = consult(root, &path, Some(&hash("paper bytes")));
+
+    fs::set_permissions(&items, fs::Permissions::from_mode(0o755)).unwrap();
+
+    match found.unwrap().answer {
+        LibraryAnswer::UnreadableItem {
+            artifact,
+            item,
+            path: reported_path,
+            ..
+        } => {
+            assert_eq!(artifact, UUID_A.to_string());
+            assert_eq!(item, UUID_B.to_string());
+            assert_eq!(reported_path, items);
+        }
+        other => panic!("expected UnreadableItem naming items/, got {other:?}"),
+    }
+}
+
+/// Two item files carry the linked identity: `AmbiguousItem`, naming
+/// both files in read order, and `Consulted::item` is `None`.
+#[test]
+fn consult_reports_ambiguous_item_when_two_item_files_carry_the_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &format!("a-first.{UUID_B}.toml"), &item);
+    write_item(root, &format!("b-second.{UUID_B}.toml"), &item);
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("paper bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::AmbiguousItem {
+            artifact: UUID_A.to_string(),
+            item: UUID_B.to_string(),
+            files: vec![
+                root.join(ITEM_STORE).join(format!("a-first.{UUID_B}.toml")),
+                root.join(ITEM_STORE)
+                    .join(format!("b-second.{UUID_B}.toml")),
+            ],
+        }
+    );
+    assert_eq!(found.item, None);
+}
+
+// --- Record-store faults (design D2a) ---
+
+/// One artifact-record file does not parse, and no readable record
+/// names the path: `UnreadableRecords { listed: true, unreadable: 1 }`.
+#[test]
+fn consult_reports_unreadable_records_when_one_record_file_does_not_parse() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "unrecorded.pdf", b"unrecorded bytes");
+    let dir_path = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&dir_path).unwrap();
+    fs::write(
+        dir_path.join(format!("{UUID_A}.toml")),
+        "not valid toml {{{",
+    )
+    .unwrap();
+
+    let found = consult(root, &path, Some(&hash("unrecorded bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::UnreadableRecords {
+            listed: true,
+            unreadable: 1,
+        }
+    );
+    assert_eq!(
+        Stores::read(root).record_faults(),
+        Some(RecordFaults {
+            listed: true,
+            unreadable: 1,
+        })
+    );
+}
+
+/// `.borax/artifacts/` cannot be listed at all:
+/// `UnreadableRecords { listed: false, unreadable: 0 }`.
+#[cfg(unix)]
+#[test]
+fn consult_reports_unreadable_records_when_the_artifact_store_cannot_be_listed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "unrecorded.pdf", b"unrecorded bytes");
+    let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records).unwrap();
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if fs::read_dir(&records).is_ok() {
+        fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping consult_reports_unreadable_records_when_the_artifact_store_cannot_be_listed: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let found = consult(root, &path, Some(&hash("unrecorded bytes")));
+    let faults = Stores::read(root).record_faults();
+
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(
+        found.unwrap().answer,
+        LibraryAnswer::UnreadableRecords {
+            listed: false,
+            unreadable: 0,
+        }
+    );
+    assert_eq!(
+        faults,
+        Some(RecordFaults {
+            listed: false,
+            unreadable: 0,
+        })
+    );
+}
+
+/// A tracked file whose own record parses cleanly is still `Tracked`,
+/// even while an unrelated record file in the same store is unreadable:
+/// one fault costs its own record and no other (design D2).
+#[test]
+fn consult_reports_tracked_even_when_an_unrelated_record_file_is_unreadable() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let dir_path = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::write(
+        dir_path.join(format!("{UUID_C}.toml")),
+        "not valid toml {{{",
+    )
+    .unwrap();
+
+    let found = consult(root, &path, Some(&hash("paper bytes"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Tracked {
+            artifact: UUID_A.to_string(),
+            item: UUID_B.to_string(),
+        },
+        "the file's own record is clean, so the unrelated fault must not affect it"
+    );
+}
+
+/// [`Stores::record_faults`] is `None` when the artifact store was read
+/// whole: no fault at all, and an absent store directory alike.
+#[test]
+fn record_faults_is_none_for_a_store_read_whole_or_absent() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    assert_eq!(
+        Stores::read(root).record_faults(),
+        None,
+        "an absent store directory has nothing to fault"
+    );
+
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_B)),
+        "paper.pdf",
+        vec![hash_entry("paper bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    assert_eq!(
+        Stores::read(root).record_faults(),
+        None,
+        "a store read whole, with nothing unreadable, has no fault to report"
+    );
+}
+
+// --- ItemStore::read / ArtifactStore::read over an unlistable directory ---
+
+/// An absent store directory is an empty store with no fault, on
+/// [`ItemStore::read`]'s documented terms.
+#[test]
+fn item_store_of_an_absent_directory_has_no_fault() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    let store = ItemStore::read(root);
+
+    assert!(store.is_empty());
+    assert_eq!(store.faults, Vec::new());
+}
+
+/// An unlistable `items/` directory gives one fault whose path is the
+/// directory itself (design D2a).
+#[cfg(unix)]
+#[test]
+fn item_store_of_an_unlistable_directory_gives_a_fault_at_the_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    fs::set_permissions(&items, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if fs::read_dir(&items).is_ok() {
+        fs::set_permissions(&items, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping item_store_of_an_unlistable_directory_gives_a_fault_at_the_directory: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let store = ItemStore::read(root);
+
+    fs::set_permissions(&items, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(store.is_empty());
+    assert_eq!(store.faults.len(), 1, "got {:?}", store.faults);
+    assert_eq!(store.faults[0].path, items);
+}
+
+/// The same, on the artifact-record side: an unlistable
+/// `.borax/artifacts/` gives one fault at that directory.
+#[cfg(unix)]
+#[test]
+fn artifact_store_of_an_unlistable_directory_gives_a_fault_at_the_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records).unwrap();
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if fs::read_dir(&records).is_ok() {
+        fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping artifact_store_of_an_unlistable_directory_gives_a_fault_at_the_directory: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let store = ArtifactStore::read(root);
+
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(store.is_empty());
+    assert_eq!(store.faults.len(), 1, "got {:?}", store.faults);
+    assert_eq!(store.faults[0].path, records);
+}
+
+// --- validate() over an unlistable artifact store (design D2a) ---
+
+/// `borax validate` over a library whose `.borax/artifacts/` cannot be
+/// listed reports an `unreadable` finding at that directory, instead of
+/// certifying an empty, clean library.
+#[cfg(unix)]
+#[test]
+fn validate_reports_an_unreadable_finding_for_an_unlistable_artifact_store() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records).unwrap();
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if fs::read_dir(&records).is_ok() {
+        fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping validate_reports_an_unreadable_finding_for_an_unlistable_artifact_store: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let result = validate(root);
+
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(
+        result.findings.len(),
+        1,
+        "an unlistable artifact-record store must be a finding, not a clean, empty library: \
+         got {:?}",
+        result.findings
+    );
+    let (path, finding) = &result.findings[0];
+    assert_eq!(path, &records);
+    assert!(
+        matches!(finding, Finding::Unreadable { .. }),
+        "got {finding:?}"
     );
 }

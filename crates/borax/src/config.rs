@@ -1009,8 +1009,16 @@ pub fn resolve(layers: Vec<(Origin, Layer)>) -> Result<Effective, ConfigError> {
 /// wins — nearest overrides furthest, and no more than one override
 /// file applies to any file. `exists` answers whether a path is a
 /// readable file, so the walk is testable without a filesystem.
+///
+/// A relative `start` is climbed from where it lies, made absolute
+/// against the working directory and normalised as
+/// [`crate::paths::lexical`] normalises, so `.` and `paper.pdf`'s
+/// directory find the same file. The candidates are then absolute. With
+/// no working directory to resolve against, `start` is climbed as
+/// spelled.
 pub fn nearest_override(start: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    start
+    crate::paths::lexical(start)
+        .unwrap_or_else(|| start.to_path_buf())
         .ancestors()
         .map(|directory| directory.join(OVERRIDE_FILE))
         .find(|candidate| exists(candidate))

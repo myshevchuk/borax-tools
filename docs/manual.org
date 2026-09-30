@@ -8,6 +8,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-23 Wed 22:15] -- library store
 #+AI_PASS: claude-opus-5-5 [2026-09-23 Wed] -- fact check of the library-store pass
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-29 Tue 21:51] -- command summaries
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-09-30 Wed 02:39] -- library-first resolution
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -18,29 +19,74 @@ how to install it, and a handful of examples.
 
 * What a run does
 
-  borax turns a file into a record, and then does something with the
-  record. Every subcommand shares the first half of that sentence and
-  differs in the second.
+  ~resolve~, ~rename~, and ~bib~ turn a file into a record, and then do
+  something with the record. They share the first half of that sentence
+  and differ in the second.
 
   1. *Identify the file by its contents.* A file is hashed before it is
      opened, so borax knows which file it is looking at whatever the
      file is currently called.
-  2. *Extract an identifier.* The cheap passes run first and the first
-     hit wins: the PDF's embedded metadata — the XMP packet, then the
-     Info dictionary — and after that the page text layer, reading as
-     many pages from the front as ~extraction.page-limit~ allows. What
-     it is looking for is a DOI or an arXiv id.
-  3. *Resolve that identifier to a record.* The enabled services are
+  2. *Ask the library.* If the run's library tracks this path and these
+     bytes, its linked item's record is the answer. borax does not open
+     the file, extract anything, ask a service or either cache, compare
+     titles, or update the content index for that file.
+  3. *Otherwise, extract an identifier.* borax first asks the content
+     index unless you used ~--no-cache~. On a miss, the cheap passes run
+     and the first hit wins: the PDF's embedded metadata — the XMP
+     packet, then the Info dictionary — and after that the page text
+     layer, reading as many pages from the front as
+     ~extraction.page-limit~ allows. What it is looking for is a DOI or
+     an arXiv id.
+  4. *Resolve that identifier to a record.* The enabled services are
      asked in turn — Crossref, OpenAlex, arXiv — through an on-disk
      response cache, and no faster than the pacing allows. What comes
      back is normalized into one record model, a superset of CSL-JSON.
-  4. *Render a name, a citation key, or both.* The record's entry type
+  5. *Render a name, a citation key, or both.* The record's entry type
      chooses the template; the template renders a string; sanitization
      makes that string a legal file name on every supported platform.
-  5. *Do the command's work.* ~resolve~ reports what it found and stops.
+  6. *Do the command's work.* ~resolve~ reports what it found and stops.
      ~bib~ writes bibliography output. ~rename~ plans a move for each
      file, then either asks about the move or handles it as part of a
      batch.
+
+  The run's library is the nearest ~.borax.toml~ at or above the run's
+  start directory, or the configured ~library-root~. borax reads its
+  item and artifact stores once, before the first file. Every file is resolved
+  against that start-of-run snapshot. An applying rename may record
+  earlier files, but those writes do not become answers for later files
+  in the same run.
+
+  The library tracks a file when exactly one artifact record at the
+  file's normalized path contains its content hash anywhere in its hash
+  history, and that record links to an identity carried by exactly one
+  item file. Relative paths and spellings that contain ~.~ or ~..~ are
+  compared as the same path. Every history entry counts. This means
+  restored older bytes resolve from the currently linked item, including
+  bytes recorded before the artifact was re-linked to another item.
+  A byte-identical copy at another path, or a file moved without
+  ~borax reconcile~, is untracked and follows the ordinary resolution
+  path.
+
+  The library may fail to answer because records at the path do not hold
+  these bytes, several records match, the matching record has no usable
+  item, a recorded file cannot be hashed, or no readable record names
+  the path and the artifact store could not be read completely. borax
+  reports that problem with the file, then resolves it through the
+  content index, extraction, services, and conflict check as if it were
+  untracked. The problem is not itself a skip or finding and does not
+  change the exit status.
+
+  When a consulted artifact store could not be listed or contains
+  unreadable records, borax writes at most one of these warnings on
+  standard error:
+
+  #+begin_example
+    the library's artifact records could not be listed, so no file is resolved from the library; borax validate reports why
+    1 artifact record could not be read, so a file it records is resolved as if the library did not track it; borax validate names it
+    <n> artifact records could not be read, so a file one of them records is resolved as if the library did not track it; borax validate names them
+  #+end_example
+
+  The warning does not change the exit status.
 
   Three properties hold across all of it, and they are the reason the
   tool is shaped this way:
@@ -91,9 +137,17 @@ how to install it, and a handful of examples.
    #+end_src
 
    Resolves each file to a record and reports what was found, changing
-   nothing on disk beyond the response cache and the run log. This is
-   the command to reach for when you want to know whether borax can
-   identify a batch at all.
+   nothing on disk beyond the caches and the run log. This is the
+   command to reach for when you want to know whether borax can identify
+   a batch at all.
+
+   Inside a library, ~resolve~ asks the library before the content
+   index. A tracked file reports
+   ~<path>: resolved <identifier> via <source> (from the library)~. If
+   the library cannot answer, borax appends ~; the library could not
+   answer: <what>~ to the ordinary resolution or skip line after the
+   fallback. ~--no-cache~ still asks the library because the library is
+   authoritative state, not a cache.
 
    It is the one command that resolves files concurrently, so it takes
    ~--concurrency~.
@@ -150,9 +204,10 @@ how to install it, and a handful of examples.
    file a work duplicate of the item its own record already links to,
    so the several artifacts of one item never skip each other.
    ~--no-record~ disables both checks and writes no artifact record or
-   item. If moving a changed artifact without updating its record would
-   strand that record, borax refuses the move and tells you to run
-   ~borax reconcile --rehash~ first.
+   item. It does not stop ~rename~ from asking the start-of-run library
+   what a tracked file is. If moving a changed artifact without updating
+   its record would strand that record, borax refuses the move and tells
+   you to run ~borax reconcile --rehash~ first.
 
    It works one file at a time, so that a file's verdict and its fate
    stay adjacent in the stream. That is why it takes no
@@ -192,14 +247,25 @@ how to install it, and a handful of examples.
 
     The rule gives this file's position in the run. ~file~ names it as
     the run does: relative to where you started the run, or in full when
-    it lies outside. ~identifier~ is the identifier borax looked up
-    and says whether it came from embedded metadata or the text layer.
-    It is kept on one line. ~record~ names the service or services that
-    supplied the record, and adds ~from an earlier run~ when the answer
-    came from the content index rather than from a service asked now —
-    in which case the identifier line says nothing about where the
-    identifier came from, because the index keeps records rather than
-    the identifiers they were reached by.
+    it lies outside. ~identifier~ is the identifier borax looked up and
+    says whether it came from embedded metadata or the text layer. It is
+    kept on one line. For a library answer, it names the item's
+    identifier without an origin clause because nothing was looked up.
+    ~record~ names the service or services that supplied the record. It
+    adds ~from an earlier run~ when the content index answered, and
+    ~from the library~ when an item's provenance names services. If the
+    item names no service, it reads ~the library~.
+
+    When the library could not answer, a ~library~ line states the
+    problem. It follows ~record~ for a resolved file and follows the
+    reason lines for a file that did not resolve.
+
+    A library-answered file gets the same move question as any other
+    resolved file. Supplying another identifier re-identifies it and
+    re-links its artifact as described under
+    [[*Remembering your answer][Remembering your answer]]. An
+    already-named tracked file is still passed over when
+    ~rename.skip-named~ is on.
 
     ~type~, ~title~, ~authors~, ~issued~, and ~in~ come from the record.
     A field the record does not contain is omitted. The author line
@@ -218,8 +284,8 @@ how to install it, and a handful of examples.
     leftover rather than a title, since you are better placed to say
     which is the work's. It reads ~nothing read~ when there was nothing
     to read: the file carries no title of its own, or the content index
-    answered and the file was never opened. ~new name~ is the name the
-    file would take.
+    or library answered and the file was never opened. ~new name~ is the
+    name the file would take.
 
     The target includes a collision suffix when one is needed. A
     separate line below ~new name~ then names the rendered name that was
@@ -305,6 +371,13 @@ how to install it, and a handful of examples.
     interactive or batch run can use that record without extraction, a
     service lookup, a conflict check, or another question.
 
+    Inside a library, the applying rename also links the artifact record
+    to the item for the accepted record. Supplying a different identifier
+    for a tracked file re-identifies the file and re-links that artifact.
+    A later run resolves the tracked file from the linked item before it
+    asks the content index. ~borax cache --clear~ and ~--no-cache~ do not
+    remove or bypass that library answer.
+
     borax writes this entry only when you accept the rename. Supplying
     an identifier and then skipping stores no candidate record and
     produces no sidecar or master-bibliography entry for that candidate.
@@ -364,6 +437,11 @@ how to install it, and a handful of examples.
    master ~.bib~, sidecars beside the files, or both — and renames
    nothing. It renders citation keys but no file names, so a
    ~templates.default~ that will not compile does not stop it.
+
+   Inside a library, ~bib~ asks the library before the content index.
+   A tracked file is cited from its linked item's record, so a correction
+   made directly to that item appears in the bibliography without a
+   service query.
 
    ~bib~ takes files as input. An item with no artifact has no file for
    this command to resolve, so it produces no bibliography entry.
@@ -446,7 +524,10 @@ how to install it, and a handful of examples.
    It reports a dangling item link, a duplicate identity, a store file
    whose name disagrees with the identity inside it, a path that is not
    library-relative, an empty hash history, a malformed hash, a history
-   entry without a run, or a store file that cannot be read.
+   entry without a run, a store file that cannot be read, or an existing
+   ~items/~ or ~.borax/artifacts/~ directory that cannot be listed. An
+   unlistable directory is an ~unreadable~ finding; a missing directory
+   remains an empty store.
 
    Orphans, missing artifacts, and items no artifact record links to are
    counts rather than findings. They are valid library states. The
@@ -603,12 +684,15 @@ how to install it, and a handful of examples.
    - ~record~ :: Whether ~rename~ checks the library's artifact records
      for content and work duplicates, and whether an applying run writes
      artifact records and items. With it off, no duplicate check or
-     store write is made. The safety check that prevents a move from
-     stranding an existing record still runs.
+     store write is made. It does not disable reading the library before
+     resolution. The safety check that prevents a move from stranding an
+     existing record still runs.
    - ~mailto~ :: The contact address sent to the polite pools. Setting
      it is how you get the better rate limits, and it is good manners.
    - ~network.cache~ :: Whether resolving reads and writes the on-disk
-     response cache.
+     response cache. Turning it off also bypasses the content index, but
+     it does not bypass a library item because the library is not a
+     cache.
    - ~network.concurrency~ :: How many files ~resolve~ may work on at
      once.
    - ~network.min-interval-ms~ :: The floor on the gap between two
@@ -1291,21 +1375,58 @@ how to install it, and a handful of examples.
   borax looked up, while ~identifier~ remains the identifier under which
   the record is filed. Its ~claims~ field lists every title read from
   the file, in order, with ~from~ set to ~xmp~ or ~info~. The list is
-  empty when the content index answered without opening the file.
+  empty when the content index or library answered without opening the
+  file.
 
   ~resolved.source~ names the services that supplied the record. When
   the content index answers, borax reads those services from the
   record's per-field provenance in this order: Crossref, OpenAlex,
   arXiv, DataCite, PubMed, then a sidecar. It reports ~cache~ only when
   that provenance names none of them; ~cached~ separately records that
-  the content index answered.
+  the content index answered. A library answer uses the same provenance
+  order and reports ~library~ as its source when the item names no
+  service. It always reports ~cached: false~.
 
   ~resolved.tier~ names the extraction pass that found the identifier.
   It is ~supplied~ when you entered the identifier and ~null~ when the
-  content index answered. ~resolved.overrode~ records a title conflict
-  you accepted. It contains ~field~, ~extracted~, ~resolved~, and
-  ~similarity~, the same values carried by a skipped conflict, and is
-  ~null~ when you overrode nothing.
+  content index answered. It is ~library~ when the library item supplied
+  the record; ~found~ is then the record's own identifier. A supplied
+  re-identification of a tracked file keeps ~tier: supplied~ because the
+  operator, not the library, supplied that answer. ~resolved.overrode~
+  records a title conflict you accepted. It contains ~field~,
+  ~extracted~, ~resolved~, and ~similarity~, the same values carried by
+  a skipped conflict, and is ~null~ when you overrode nothing.
+
+  Every ~resolved~ and ~skipped~ event has a ~library~ field. It is
+  ~null~ when no library was asked: there is no run library, the file is
+  outside it or in an excluded subtree, or resolution ended first with
+  a content duplicate. It is also ~null~ on a skip that is not the
+  file's resolution verdict, such as ~target-taken~, ~declined~, or
+  ~stranding~, because the earlier ~resolved~ event already carries the
+  answer.
+
+  Otherwise ~library~ is an object tagged by ~kind~. ~tracked~ carries
+  the artifact and item identities, and ~untracked~ carries no further
+  evidence. The other kinds explain why the library could not answer:
+
+  - ~unrecognised-content~ :: Records name the path, but none holds the
+    file's bytes. It carries those artifact identities.
+  - ~ambiguous~ :: Several records at the path hold the bytes. It
+    carries their artifact identities.
+  - ~no-item~ :: The one matching artifact links to no item. It carries
+    the artifact identity.
+  - ~dangling-item~ :: The linked item is absent. It carries the
+    artifact and item identities.
+  - ~unreadable-item~ :: The linked item could not be read from its file
+    or the item store could not be listed. It adds the path and reading
+    error to the artifact and item identities.
+  - ~ambiguous-item~ :: Several item files carry the linked identity. It
+    carries the artifact and item identities and those file paths.
+  - ~unhashable~ :: Records name the path, but the file could not be
+    hashed. It carries their artifact identities.
+  - ~unreadable-records~ :: No readable record names the path, but the
+    artifact store could not be read completely. It carries whether the
+    store was listed and how many record files were unreadable.
 
   An ~unresolvable~ skip reason contains ~found~, the identifier that
   was looked up, ~tier~, the extraction pass that read it, and
@@ -1322,7 +1443,8 @@ how to install it, and a handful of examples.
   and the counts include ~named~. An interactive run waits until you
   settle a file before it emits that file's outcome, so a supplied
   identifier does not produce a second verdict. Questions are not
-  events. The event schema version is 3.
+  events. The new ~library~ field and the ~library~ values for ~tier~ and
+  ~source~ are additions. The event schema version remains 3.
 
   Schema 3 adds the library events. ~library-status~ carries ~root~,
   ~artifacts~, ~items~, ~records~, ~orphans~, ~nested~, and

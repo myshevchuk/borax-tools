@@ -15,7 +15,7 @@ use std::path::Path;
 
 use borax_core::record::{DateParts, EntryType, Name, Record};
 
-use crate::event::{Attempt, Claim, ClaimOrigin, Event, SkipReason};
+use crate::event::{Attempt, Claim, ClaimOrigin, Event, LibraryAnswer, SkipReason, why_unanswered};
 
 /// The move a description is about: where the file would go, and the
 /// name the template rendered before a collision moved it aside.
@@ -74,7 +74,8 @@ const NAMED_AUTHORS: usize = 3;
 /// The lines, in order, leaving out every field the record does not
 /// hold: a rule carrying `position`; `name`; the identifier
 /// the run looked up and where it was found; the services that
-/// supplied the record; its type, title, authors, date of issue and
+/// supplied the record; why the library could not answer for the file,
+/// where it could not; its type, title, authors, date of issue and
 /// container; the titles the file claims for itself with where each was
 /// read; and the name the file would take, with a line saying which
 /// rendered name was taken when a suffix moved it aside.
@@ -106,11 +107,16 @@ pub fn describe(
         tier,
         overrode,
         cached,
+        library,
         ..
     } = resolved
     else {
-        if let Event::Skipped { reason, .. } = resolved {
+        if let Event::Skipped {
+            reason, library, ..
+        } = resolved
+        {
             failure(&mut description, reason);
+            unanswered(&mut description, library.as_ref());
             return description.lines;
         }
         return Vec::new();
@@ -135,7 +141,11 @@ pub fn describe(
             },
         );
     }
-    description.field("record", &record_from(source, *cached));
+    description.field(
+        "record",
+        &record_from(source, *cached, tier.as_deref() == Some("library")),
+    );
+    unanswered(&mut description, library.as_ref());
     description.field("type", type_name(record.entry_type));
     if let Some(title) = held(record.title.as_deref()) {
         description.field("title", title);
@@ -295,6 +305,9 @@ fn whence(tier: Option<&str>) -> Option<&'static str> {
         // value in this slot names where the identifier was read, and
         // this one names that it was not read at all.
         Some("supplied") => Some("supplied"),
+        // The library supplied the whole record, so nothing was read
+        // or looked up; [`record_from`] says where the record is from.
+        Some("library") => None,
         Some(_) => Some("from the file"),
         // Nothing was looked up, so nothing is known about where the
         // record's identifier came from. [`record_from`] says what is
@@ -493,12 +506,23 @@ fn alike(field: &str, similarity: f64) -> String {
 }
 
 /// The services line: who supplied the record, and whether it was
-/// asked this time or kept from before.
-fn record_from(source: &str, cached: bool) -> String {
+/// asked this time, kept from before, or held by the library, which
+/// `library` says it was.
+fn record_from(source: &str, cached: bool, library: bool) -> String {
     let named = services(source);
-    match cached && !named.is_empty() {
-        true => format!("{named}, from an earlier run"),
-        false => named,
+    match (library, cached) {
+        (true, _) if source == "library" => named,
+        (true, _) => format!("{named}, from the library"),
+        (false, true) if !named.is_empty() => format!("{named}, from an earlier run"),
+        _ => named,
+    }
+}
+
+/// The `library` line, saying why the library could not answer for the
+/// file, where `library` is such an answer; nothing otherwise.
+fn unanswered(description: &mut Description, library: Option<&LibraryAnswer>) {
+    if let Some(what) = library.and_then(why_unanswered) {
+        description.field("library", &what);
     }
 }
 
@@ -508,7 +532,8 @@ fn record_from(source: &str, cached: bool) -> String {
 /// form a `--json` consumer matches on; here each is spelled as its
 /// service spells itself, and the content index answering for a record
 /// whose makers are unknown is an earlier run rather than a cache the
-/// operator has no reason to think about.
+/// operator has no reason to think about. A library answer whose makers
+/// are unknown is the library's.
 fn services(source: &str) -> String {
     source
         .split(", ")
@@ -520,6 +545,7 @@ fn services(source: &str) -> String {
             "pubmed" => "PubMed",
             "sidecar" => "a sidecar",
             "cache" => "an earlier run",
+            "library" => "the library",
             other => other,
         })
         .collect::<Vec<_>>()

@@ -108,7 +108,8 @@ writes bibliography output for a file, and SHALL NOT read one to decide
 what a file's record is or what name that file is given. A sidecar is a
 citation artifact for whoever reads `.bib` files — LaTeX, another
 bibliography tool, a person — and borax's own knowledge of a file comes
-from extraction, the services, and the content index.
+from extraction, the services, the content index, and, for a file its
+library tracks, that file's library item.
 
 A sidecar SHALL NOT be an artifact record, and nothing in the library
 SHALL depend on one. The two are different files with different
@@ -151,6 +152,7 @@ default.
 - **WHEN** a sidecar is edited by hand to name a different work and the
   run reaches its file again
 - **THEN** the file's record and its rendered name are what extraction,
-  the services and the content index give, and the edited sidecar is
-  overwritten with the regenerated one
+  the services and the content index give — or, where its library
+  tracks the file, what its library item gives — and the edited sidecar
+  is overwritten with the regenerated one
 

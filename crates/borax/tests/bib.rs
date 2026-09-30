@@ -181,6 +181,7 @@ fn resolved(path: &str, record: Record) -> (PathBuf, FileRecord) {
             cached: false,
             hash: None,
             overrode: None,
+            library: None,
         },
     )
 }
@@ -469,6 +470,7 @@ fn a_sidecar_target_holding_foreign_content_is_left_alone_and_reported() {
             reason: SkipReason::SidecarTaken {
                 target: target.clone(),
             },
+            library: None,
         }]
     );
     assert!(
@@ -660,6 +662,7 @@ fn a_record_with_no_citation_key_is_skipped_as_unciteable_and_touches_neither_de
             Event::Skipped {
                 path: mystery.0.clone(),
                 reason: SkipReason::Unciteable,
+                library: None,
             },
             Event::Sidecar {
                 path: keyed.0.clone(),
@@ -712,6 +715,7 @@ fn events_come_back_as_every_sidecar_and_unciteable_event_in_input_order_then_ev
         Event::Skipped {
             path: p2.0.clone(),
             reason: SkipReason::Unciteable,
+            library: None,
         },
         Event::Sidecar {
             path: p3.0.clone(),
@@ -720,6 +724,7 @@ fn events_come_back_as_every_sidecar_and_unciteable_event_in_input_order_then_ev
         Event::Skipped {
             path: p4.0.clone(),
             reason: SkipReason::Unciteable,
+            library: None,
         },
     ];
     expected.extend(bib_entry_events(
@@ -752,6 +757,7 @@ fn a_sidecar_write_failure_is_skipped_for_that_file_alone_and_the_batch_continue
             Event::Skipped {
                 path,
                 reason: SkipReason::BibWriteFailed { .. },
+                ..
             } if *path == p1.0
         ),
         "expected the failing file to be BibWriteFailed, got {:?}",
@@ -790,6 +796,7 @@ fn a_master_read_failure_skips_every_keyed_file_as_bib_write_failed_and_writes_n
                 Event::Skipped {
                     path: got,
                     reason: SkipReason::BibWriteFailed { .. },
+                    ..
                 } if got == path
             ),
             "expected BibWriteFailed for {}, got {event:?}",
@@ -825,6 +832,7 @@ fn a_master_write_failure_skips_every_keyed_file_as_bib_write_failed_after_one_a
                 Event::Skipped {
                     path: got,
                     reason: SkipReason::BibWriteFailed { .. },
+                    ..
                 } if got == path
             ),
             "expected BibWriteFailed for {}, got {event:?}",

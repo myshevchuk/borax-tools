@@ -69,6 +69,10 @@ pub enum Event {
         /// Boxed because events accumulate in a `Vec` for the whole
         /// run, where every event pays the size of the largest variant.
         record: Box<Record>,
+        /// The services that supplied the record. Where nothing was
+        /// looked up, these are the services the record's own
+        /// provenance names, or `cache` for a content-index answer and
+        /// `library` for a library answer whose provenance names none.
         source: String,
         /// The identifier the run looked up, in the form the stream
         /// writes one — `doi:…`, `arXiv:…`. Not always `identifier`,
@@ -78,11 +82,12 @@ pub enum Event {
         found: String,
         /// Every title the file claims for itself, in the order they
         /// were read. Empty when the file was not opened, which is
-        /// what a content-index answer means.
+        /// what a content-index answer and a library answer both mean.
         claims: Vec<Claim>,
         /// Which extraction pass supplied the identifier, `supplied`
-        /// when the operator named it, or `None` when neither a file
-        /// nor an operator did — a content-index answer.
+        /// when the operator named it, `library` when the file's
+        /// library item did, or `None` when none of them did — a
+        /// content-index answer.
         tier: Option<String>,
         /// The conflict the operator accepted to reach this record, or
         /// `None` when nothing was overridden. A record that cleared
@@ -91,8 +96,20 @@ pub enum Event {
         overrode: Option<Overridden>,
         /// Whether the content index answered, so the file was neither
         /// opened nor looked up. A response cache hit behind a source
-        /// is not visible here and reports `false`.
+        /// is not visible here and reports `false`, and so does an
+        /// answer from the file's library item.
         cached: bool,
+        /// What the run's library said about the file, or `None` when
+        /// it was not asked: the run has no library, the file lies
+        /// outside it or in a subtree it excludes, or the resolution
+        /// ended before the library was asked.
+        ///
+        /// Says what the library answered, not where the record came
+        /// from, which is `tier`'s to say: a file the library tracks
+        /// and the operator then re-identified reports
+        /// [`LibraryAnswer::Tracked`] beside `tier: "supplied"`.
+        #[serde(default)]
+        library: Option<LibraryAnswer>,
     },
     /// A rename that would happen. Emitted by a preview run only; an
     /// applying run emits [`Event::Renamed`] instead, so no file is
@@ -114,7 +131,17 @@ pub enum Event {
         hash: ContentHash,
     },
     /// A file the run declined to act on, and why.
-    Skipped { path: PathBuf, reason: SkipReason },
+    Skipped {
+        path: PathBuf,
+        reason: SkipReason,
+        /// What the run's library said about the file, where this skip
+        /// is the file's resolution verdict and the library was asked.
+        /// `None` on every other skip — one made after the file
+        /// resolved, whose `resolved` event already carries the answer —
+        /// and wherever [`Event::Resolved`]'s `library` would be `None`.
+        #[serde(default)]
+        library: Option<LibraryAnswer>,
+    },
     /// A file that already carries the name its record implies, or
     /// whose target is held by a byte-identical file.
     ///
@@ -403,11 +430,75 @@ pub enum Finding {
     /// A history entry naming no run, so what it records cannot be
     /// attributed to anything the library did.
     HistoryEntryWithoutRun { hash: String },
-    /// A file of one of the stores that does not parse as the record
-    /// it claims to be, including an item whose verbatim source fields
-    /// do not parse as JSON. One such file is a finding about itself
-    /// and about no other.
+    /// A file of one of the stores that cannot be read or does not
+    /// parse as the record it claims to be, including an item whose
+    /// verbatim source fields do not parse as JSON, or a store
+    /// directory that cannot be listed. One such file is a finding
+    /// about itself and about no other; a directory is a finding about
+    /// every record it would have listed.
     Unreadable { message: String },
+}
+
+/// What a library said about one file a run resolved.
+///
+/// [`LibraryAnswer::Tracked`] is the library answering for the file,
+/// and [`LibraryAnswer::Untracked`] is the library having no record of
+/// it. Every other variant is a library that could not say which: the
+/// file was resolved as if untracked, and the variant says why the
+/// library could not answer, with the evidence a reader needs to go
+/// and look.
+///
+/// Identities are canonical UUID text. Lists are in the order the
+/// stores were read, and paths are full paths. Serialized with a `kind`
+/// tag, nested under the event's `library` field, as [`SkipReason`] is
+/// under `reason`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum LibraryAnswer {
+    /// The artifact record `artifact` names the file's path and holds
+    /// its bytes, and links the item `item`, which exactly one item
+    /// file carries. The item's record is the file's.
+    Tracked { artifact: String, item: String },
+    /// No artifact record names the file's path, and the artifact store
+    /// was read whole.
+    Untracked,
+    /// The records naming the file's path hold none of the file's
+    /// bytes in their histories: the file changed since the library
+    /// last recorded it.
+    UnrecognisedContent { artifacts: Vec<String> },
+    /// Several records naming the file's path hold its bytes.
+    Ambiguous { artifacts: Vec<String> },
+    /// The one record holding the file links no item.
+    NoItem { artifact: String },
+    /// The one record holding the file links an item the item store
+    /// does not hold.
+    DanglingItem { artifact: String, item: String },
+    /// The one record holding the file links an item the item store
+    /// does not hold, and `path` could not be read: an item file whose
+    /// name claims that item, or the item store's directory itself.
+    /// `message` is the reader's.
+    UnreadableItem {
+        artifact: String,
+        item: String,
+        path: PathBuf,
+        message: String,
+    },
+    /// The one record holding the file links an item several item
+    /// files carry: `files`.
+    AmbiguousItem {
+        artifact: String,
+        item: String,
+        files: Vec<PathBuf>,
+    },
+    /// Records name the file's path, and the file could not be hashed,
+    /// so none of them can be confirmed as its record.
+    Unhashable { artifacts: Vec<String> },
+    /// No readable record names the file's path, and the artifact store
+    /// has files it could not read, one of which might. `listed` is
+    /// `false` when the store directory could not be listed at all, and
+    /// `unreadable` counts the record files that could not be read, 0
+    /// when `listed` is `false`.
+    UnreadableRecords { listed: bool, unreadable: usize },
 }
 
 /// What a reconcile made of one artifact record.
@@ -707,11 +798,18 @@ pub fn human_line(event: &Event) -> Option<String> {
             identifier,
             source,
             cached,
+            tier,
+            library,
             ..
         } => Some(format!(
-            "{}: resolved {identifier} via {source}{}",
+            "{}: resolved {identifier} via {source}{}{}",
             path.display(),
-            if *cached { " (cached)" } else { "" }
+            match (*cached, tier.as_deref()) {
+                (true, _) => " (cached)",
+                (false, Some("library")) => " (from the library)",
+                (false, _) => "",
+            },
+            unanswered(library.as_ref())
         )),
         Event::Planned { path, target } => Some(format!(
             "{}: would rename to {}",
@@ -723,10 +821,15 @@ pub fn human_line(event: &Event) -> Option<String> {
             path.display(),
             target.display()
         )),
-        Event::Skipped { path, reason } => Some(format!(
-            "{}: skipped, {}",
+        Event::Skipped {
+            path,
+            reason,
+            library,
+        } => Some(format!(
+            "{}: skipped, {}{}",
             path.display(),
-            skipped_because(reason)
+            skipped_because(reason),
+            unanswered(library.as_ref())
         )),
         Event::AlreadyNamed { path } => Some(format!("{}: already named", path.display())),
         Event::BibEntry { path, key, outcome } => Some(format!(
@@ -964,6 +1067,90 @@ fn skipped_because(reason: &SkipReason) -> String {
              moving it would strand the record; borax reconcile --rehash records them"
         ),
     }
+}
+
+/// The clause a resolution's human line ends with when its library
+/// could not answer for the file, and nothing otherwise.
+fn unanswered(library: Option<&LibraryAnswer>) -> String {
+    match library.and_then(why_unanswered) {
+        Some(what) => format!("; the library could not answer: {what}"),
+        None => String::new(),
+    }
+}
+
+/// Why the library could not answer for a file, as a clause whose
+/// subject is the library's own records, or `None` when `answer` is
+/// [`LibraryAnswer::Tracked`] or [`LibraryAnswer::Untracked`] and it
+/// did answer.
+///
+/// Shared by the human line and the interactive description, so the
+/// terminal and the batch output state a problem in the same words.
+pub(crate) fn why_unanswered(answer: &LibraryAnswer) -> Option<String> {
+    let artifacts = |ids: &[String]| match ids {
+        [id] => format!("artifact {id}"),
+        ids => format!("artifacts {}", ids.join(", ")),
+    };
+    let paths = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Some(match answer {
+        LibraryAnswer::Tracked { .. } | LibraryAnswer::Untracked => return None,
+        LibraryAnswer::UnrecognisedContent { artifacts: ids } => format!(
+            "the library records {} at this path, but not these bytes",
+            artifacts(ids)
+        ),
+        LibraryAnswer::Ambiguous { artifacts: ids } => format!(
+            "{} artifact records claim this file: {}",
+            ids.len(),
+            ids.join(", ")
+        ),
+        LibraryAnswer::NoItem { artifact } => {
+            format!("artifact {artifact} is linked to no item")
+        }
+        LibraryAnswer::DanglingItem { artifact, item } => {
+            format!("artifact {artifact} links to item {item}, which the library does not hold")
+        }
+        LibraryAnswer::UnreadableItem {
+            artifact,
+            item,
+            path,
+            message,
+        } => format!(
+            "artifact {artifact} links to item {item}, which could not be read from {}: \
+             {message}",
+            path.display()
+        ),
+        LibraryAnswer::AmbiguousItem {
+            artifact,
+            item,
+            files,
+        } => format!(
+            "artifact {artifact} links to item {item}, which {} item files claim: {}",
+            files.len(),
+            paths(files)
+        ),
+        LibraryAnswer::Unhashable { artifacts: ids } => format!(
+            "the file could not be hashed, so {} recorded at this path cannot be confirmed",
+            artifacts(ids)
+        ),
+        LibraryAnswer::UnreadableRecords { listed: false, .. } => {
+            "the library's artifact records could not be listed, so it cannot say whether it \
+             tracks this file"
+                .to_string()
+        }
+        LibraryAnswer::UnreadableRecords {
+            listed: true,
+            unreadable,
+        } => format!(
+            "{unreadable} artifact record {} could not be read, so the library cannot say \
+             whether it tracks this file",
+            if *unreadable == 1 { "file" } else { "files" }
+        ),
+    })
 }
 
 /// What `finding` says is wrong with the file, as the clause following

@@ -272,6 +272,7 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
         tier: Some("embedded-metadata".to_string()),
         cached: false,
         overrode: None,
+        library: None,
     }
 }
 
@@ -573,6 +574,7 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_in_preview() {
             Event::Skipped {
                 path: blank,
                 reason: SkipReason::NoIdentifier,
+                library: None,
             },
             resolved_event(
                 &paper1,
@@ -651,6 +653,7 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
             Event::Skipped {
                 path: blank,
                 reason: SkipReason::NoIdentifier,
+                library: None,
             },
             resolved_event(
                 &paper1,

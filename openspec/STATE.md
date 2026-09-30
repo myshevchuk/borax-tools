@@ -6,8 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-09-24, before 0.6.0, with `add-library-store`
-implemented and archived.
+Last reviewed: 2026-09-30, after 0.6.0, with `consult-library-first`
+implemented.
 
 ## What is built
 
@@ -291,6 +291,27 @@ event does not name the command. JSON and run logs are unchanged and
 the event schema version is still 3. It is the first change of the
 roadmap drawn from the interactive reviews of 0.6.0, which lives
 outside the repository.
+
+`consult-library-first` is implemented on top of that, as the second.
+`resolve`, `rename` and `bib` read a start-of-run snapshot of the
+run's library (`Stores::consult`) before the content index. A file
+whose recorded path holds a record with its bytes in any history
+entry, linking one readable item, resolves from that item with no
+extraction, no service and no content-index traffic, whatever
+`--no-cache` or `--no-record` say. Any other answer from a library
+that records the path is a `LibraryAnswer` problem carried on the
+fallback's `resolved` or `skipped` event, never a skip of its own.
+`store_files` now treats only a missing directory as an empty store,
+so `validate` reports an unlistable one. Schema 3 is kept: the
+`library` field and the `library` values of `tier` and `source` are
+additions, and Phase 3 of the roadmap migrates them. Two restorations
+landed with it: override discovery climbs from a normalised start, and
+`library_relative` and `excludes` normalise both sides, so relative
+input spellings find and are admitted into their library. Still open,
+and handed to the roadmap's change 15: reconciliation and an applying
+rename append unrecognised bytes at a recorded path to its history,
+after which the item answers for them, and history entries record no
+item, so bytes restored after a re-link answer with the new item.
 
 ## Not built yet
 
