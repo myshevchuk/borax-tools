@@ -29,7 +29,7 @@ use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 
 use crate::event::{
-    Attempt, Claim, ClaimOrigin, Counts, Event, LibraryAnswer, Overridden, SkipReason,
+    Attempt, Claim, ClaimOrigin, Counts, Event, Extraction, LibraryAnswer, Overridden, SkipReason,
 };
 use crate::library::{Account, Consulted, Stores, WorkDuplicate};
 
@@ -250,6 +250,41 @@ pub fn from_file(
     let pdf = documents.open(path)?;
     let claims = claimed_titles(pdf.as_ref());
     Ok((extract(pdf.as_ref(), config)?, claims))
+}
+
+/// What extraction made of the file at `path`, in the reported
+/// vocabulary: [`from_file`]'s answer with the claims dropped, passed
+/// through [`extraction_of`].
+///
+/// Opens `path` and no other file, runs the passes resolution runs
+/// under `config`, asks no service, reads and writes no cache, and
+/// writes nothing to a library. Never fails: a file that
+/// cannot be opened, or yields no identifier, is a result like any
+/// other.
+pub fn extraction(path: &Path, documents: &dyn Documents, config: &ExtractionConfig) -> Extraction {
+    extraction_of(&from_file(path, documents, config).map(|(extracted, _)| extracted))
+}
+
+/// `result` in the reported vocabulary, one variant for each outcome
+/// the extractor tells apart.
+///
+/// The identifier is written as the stream writes one (`doi:…`,
+/// `arXiv:…`) and the pass by its own name. Each failure maps to its
+/// own variant, and an unreadable file keeps the reader's message
+/// unchanged.
+pub fn extraction_of(result: &Result<Extracted, ExtractionError>) -> Extraction {
+    match result {
+        Ok(Extracted { identifier, tier }) => Extraction::Found {
+            identifier: Identifier::from(identifier.clone()).to_string(),
+            tier: tier.as_str().to_string(),
+        },
+        Err(ExtractionError::NoTextLayer) => Extraction::NoTextLayer,
+        Err(ExtractionError::NoIdentifierFound) => Extraction::TextWithoutIdentifier,
+        Err(ExtractionError::Encrypted) => Extraction::Encrypted,
+        Err(ExtractionError::Unreadable { message }) => Extraction::Unreadable {
+            message: message.clone(),
+        },
+    }
 }
 
 /// The third pass: the record `sources` hold for `identifier`.

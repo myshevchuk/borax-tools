@@ -313,6 +313,21 @@ rename append unrecognised bytes at a recorded path to its history,
 after which the item answers for them, and history entries record no
 item, so bytes restored after a re-link answer with the new item.
 
+`report-extraction-per-file` is implemented on top, after 0.7.0, and
+opens Phase 2 of the roadmap. `status --identify` writes a
+`library-extraction` event per surveyed artifact as its extraction
+finishes, carrying `found` with the identifier and pass, or one of
+`no-text-layer`, `text-without-identifier`, `encrypted` and
+`unreadable`; `identifiable` is counted from the same results.
+`pipeline::extraction` is the reusable per-file operation, built on
+`from_file` so status and resolution run the same passes, and
+`pipeline::extraction_of` maps each extractor outcome to its own kind
+with no wildcard arm. It records the boundary change 5 follows: the
+command selects the subjects (`status_events` over
+`survey.artifacts`), an inspection gives one result per subject and
+writes nothing, and the renderers present typed events, with any
+totals taken over the same results. Schema 3 is kept.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
@@ -384,6 +399,17 @@ item, so bytes restored after a re-link answer with the new item.
   than the same defect. Closing it properly means escaping every value
   a rendering takes from a record or a file, in one place, rather than
   in each line that happens to print one.
+
+- **Resolution skip reasons merge distinct extraction failures.**
+  `pipeline::skipped_for` reports both `NoTextLayer` and
+  `NoIdentifierFound` as `no-identifier`, and `Encrypted` as
+  `unreadable`, although the `extraction` requirement "Extraction
+  failures are typed and non-fatal" requires the four modes to be told
+  apart. `status --identify` now reports them distinctly, so the
+  information exists; restoring it in `skipped` needs a schema bump,
+  and Phase 3 of the roadmap owns it. A regression guard in
+  `crates/borax/tests/pipeline.rs` pins the current collapse so it is
+  changed deliberately.
 
 - **A sidecar is never moved with its file, so a rename can orphan
   one.** `write_sidecar` writes beside the path the file has when it is

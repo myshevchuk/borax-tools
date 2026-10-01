@@ -8,20 +8,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use borax::event::{Attempt, Claim, ClaimOrigin, Counts, Event, LibraryAnswer, SkipReason};
+use borax::event::{
+    Attempt, Claim, ClaimOrigin, Counts, Event, Extraction, LibraryAnswer, SkipReason,
+};
 use borax::library::{ArtifactStore, ItemStore, Stores};
 use borax::pipeline::{
     Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, claims_of,
-    event_for, remember, resolve_batch, resolve_file, resolve_supplied, standing, verdict_event,
+    event_for, extraction, extraction_of, remember, resolve_batch, resolve_file, resolve_supplied,
+    standing, verdict_event,
 };
 use borax_core::content::{ContentHash, hash_bytes};
-use borax_core::identifier::{Doi, Identifier};
+use borax_core::identifier::{ArxivId, Doi, Identifier};
 use borax_core::library::{
     ArtifactId, ArtifactRecord, DuplicateReason, HashEntry, Item, ItemId, RunId as LibraryRunId,
 };
 use borax_core::record::{EntryType, Record};
+use borax_pdf::scan::FoundIdentifier;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
-use borax_pdf::tiered::{ExtractionConfig, Tier};
+use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier};
 use borax_sources::cache::{Cache, MemoryCache};
 use borax_sources::source::{Source, SourceError, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
@@ -3158,4 +3162,314 @@ fn unreadable_records_unlistable_propagates_through_standing_and_verdict_event()
     );
 
     fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// ---------------------------------------------------------------------
+// report-extraction-per-file, task 1.2: extraction_of and extraction
+// (design D2, D3, D10)
+// ---------------------------------------------------------------------
+
+/// A PDF whose only page is blank and whose metadata carries a title
+/// holding no identifier — the "no text layer" controlled case design
+/// D2 fixes the boundary with.
+fn pdf_blank_with_title() -> FakePdf {
+    FakePdf::new()
+        .with_pages(vec![Ok(" \n".to_string())])
+        .with_title("A Title")
+}
+
+/// A PDF with a page of readable prose and no identifier, whose
+/// metadata also carries a title holding no identifier — the "text
+/// without identifier" controlled case beside [`pdf_blank_with_title`].
+fn pdf_prose_with_title() -> FakePdf {
+    pdf_with_no_identifier().with_title("A Title")
+}
+
+/// The blank-page fake whose Info title itself holds a DOI: `scan_info`
+/// scans the title, so this is `found` with `embedded-metadata`.
+fn pdf_blank_with_doi_title(value: &str) -> FakePdf {
+    FakePdf::new()
+        .with_pages(vec![Ok(" \n".to_string())])
+        .with_title(value)
+}
+
+/// A PDF carrying `value` as an arXiv identifier in its first page's
+/// text, resolved on the text-layer pass.
+fn pdf_with_text_arxiv(value: &str) -> FakePdf {
+    FakePdf::new().with_pages(vec![Ok(format!("see arXiv:{value} for details"))])
+}
+
+/// A PDF whose first page cannot be read at all.
+fn pdf_with_page_error(error: ExtractionError) -> FakePdf {
+    FakePdf::new().with_pages(vec![Err(error)])
+}
+
+#[test]
+fn extraction_of_maps_an_embedded_doi_to_found_with_its_tier() {
+    let result: Result<Extracted, ExtractionError> = Ok(Extracted {
+        identifier: FoundIdentifier::Doi(doi("10.1234/embedded")),
+        tier: Tier::EmbeddedMetadata,
+    });
+
+    assert_eq!(
+        extraction_of(&result),
+        Extraction::Found {
+            identifier: "doi:10.1234/embedded".to_string(),
+            tier: "embedded-metadata".to_string(),
+        }
+    );
+}
+
+#[test]
+fn extraction_of_maps_a_versioned_arxiv_id_to_found_with_text_layer() {
+    let result: Result<Extracted, ExtractionError> = Ok(Extracted {
+        identifier: FoundIdentifier::Arxiv(ArxivId::parse("2401.12345v2").unwrap()),
+        tier: Tier::TextLayer,
+    });
+
+    assert_eq!(
+        extraction_of(&result),
+        Extraction::Found {
+            identifier: "arXiv:2401.12345v2".to_string(),
+            tier: "text-layer".to_string(),
+        }
+    );
+}
+
+/// design D2's table, mapped exhaustively: `Unreadable` keeps its
+/// message unchanged, `Encrypted` becomes `Encrypted`, `NoTextLayer`
+/// stays `NoTextLayer`, and `NoIdentifierFound` becomes
+/// `TextWithoutIdentifier` — the one row that renames its
+/// `ExtractionError` counterpart.
+#[test]
+fn extraction_of_maps_every_extraction_error_to_its_design_d2_row() {
+    let cases: Vec<(ExtractionError, Extraction)> = vec![
+        (
+            ExtractionError::Unreadable {
+                message: "corrupt stream".to_string(),
+            },
+            Extraction::Unreadable {
+                message: "corrupt stream".to_string(),
+            },
+        ),
+        (ExtractionError::Encrypted, Extraction::Encrypted),
+        (ExtractionError::NoTextLayer, Extraction::NoTextLayer),
+        (
+            ExtractionError::NoIdentifierFound,
+            Extraction::TextWithoutIdentifier,
+        ),
+    ];
+
+    for (error, expected) in cases {
+        let result: Result<Extracted, ExtractionError> = Err(error.clone());
+        assert_eq!(extraction_of(&result), expected, "error {error:?}");
+    }
+}
+
+#[test]
+fn extraction_over_a_blank_page_with_a_title_is_no_text_layer() {
+    let path = Path::new("paper.pdf");
+    let documents =
+        FakeDocuments::new().with_file(path, hash_for("blank-with-title"), pdf_blank_with_title());
+
+    let result = extraction(path, &documents, &ExtractionConfig::default());
+
+    assert_eq!(result, Extraction::NoTextLayer);
+}
+
+#[test]
+fn extraction_over_readable_prose_with_a_title_is_text_without_identifier() {
+    let path = Path::new("paper.pdf");
+    let documents =
+        FakeDocuments::new().with_file(path, hash_for("prose-with-title"), pdf_prose_with_title());
+
+    let result = extraction(path, &documents, &ExtractionConfig::default());
+
+    assert_eq!(result, Extraction::TextWithoutIdentifier);
+}
+
+/// design D2: a blank page whose Info title itself holds a DOI is
+/// `found` with `embedded-metadata`, because `scan_info` scans the
+/// title among its other fields.
+#[test]
+fn extraction_over_a_blank_page_whose_title_holds_a_doi_is_found() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("blank-with-doi-title"),
+        pdf_blank_with_doi_title("10.1234/example"),
+    );
+
+    let result = extraction(path, &documents, &ExtractionConfig::default());
+
+    assert_eq!(
+        result,
+        Extraction::Found {
+            identifier: "doi:10.1234/example".to_string(),
+            tier: "embedded-metadata".to_string(),
+        }
+    );
+}
+
+#[test]
+fn extraction_over_a_document_with_no_pages_is_no_text_layer() {
+    let path = Path::new("paper.pdf");
+    let documents =
+        FakeDocuments::new().with_file(path, hash_for("no-pages"), pdf_with_no_text_layer());
+
+    let result = extraction(path, &documents, &ExtractionConfig::default());
+
+    assert_eq!(result, Extraction::NoTextLayer);
+}
+
+#[test]
+fn extraction_over_an_xmp_doi_is_found_with_embedded_metadata() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("xmp-doi"),
+        pdf_with_embedded_doi("10.1234/xmp"),
+    );
+
+    let result = extraction(path, &documents, &ExtractionConfig::default());
+
+    assert_eq!(
+        result,
+        Extraction::Found {
+            identifier: "doi:10.1234/xmp".to_string(),
+            tier: "embedded-metadata".to_string(),
+        }
+    );
+}
+
+#[test]
+fn extraction_over_an_open_error_of_encrypted_is_encrypted() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_open_error(
+        path,
+        hash_for("encrypted"),
+        ExtractionError::Encrypted,
+    );
+
+    let result = extraction(path, &documents, &ExtractionConfig::default());
+
+    assert_eq!(result, Extraction::Encrypted);
+}
+
+#[test]
+fn extraction_over_an_open_error_of_unreadable_keeps_its_message() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_open_error(
+        path,
+        hash_for("unreadable"),
+        ExtractionError::Unreadable {
+            message: "corrupt stream".to_string(),
+        },
+    );
+
+    let result = extraction(path, &documents, &ExtractionConfig::default());
+
+    assert_eq!(
+        result,
+        Extraction::Unreadable {
+            message: "corrupt stream".to_string(),
+        }
+    );
+}
+
+#[test]
+fn extraction_over_a_page_text_error_of_unreadable_on_the_first_page_is_unreadable() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("page-text-unreadable"),
+        pdf_with_page_error(ExtractionError::Unreadable {
+            message: "malformed content stream".to_string(),
+        }),
+    );
+
+    let result = extraction(path, &documents, &ExtractionConfig::default());
+
+    assert_eq!(
+        result,
+        Extraction::Unreadable {
+            message: "malformed content stream".to_string(),
+        }
+    );
+}
+
+/// design D2's "no page it read held text, including when it read none
+/// at all" clause, from the `page_limit: 0` side: a document whose only
+/// page would print a DOI gives `no-text-layer` when the text pass is
+/// disabled before it can read that page.
+#[test]
+fn extraction_with_page_limit_zero_over_a_doi_bearing_page_is_no_text_layer() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("page-limit-zero"),
+        pdf_with_text_arxiv("2401.12345"),
+    );
+
+    let result = extraction(path, &documents, &ExtractionConfig { page_limit: 0 });
+
+    assert_eq!(result, Extraction::NoTextLayer);
+}
+
+// ---------------------------------------------------------------------
+// report-extraction-per-file, task 1.2: regression guard
+// ---------------------------------------------------------------------
+//
+// `resolve_file` must keep collapsing `NoTextLayer` and
+// `NoIdentifierFound` into `SkipReason::NoIdentifier`, and `Encrypted`
+// into `SkipReason::Unreadable`, exactly as it does today. This change
+// adds a per-file report beside resolution; it does not touch
+// resolution's own skip reasons. The collapse is a known deviation that
+// Phase 3 owns (design D9, `openspec/STATE.md`).
+
+#[test]
+fn resolve_file_still_skips_a_blank_page_with_a_title_as_no_identifier() {
+    let path = Path::new("paper.pdf");
+    let documents =
+        FakeDocuments::new().with_file(path, hash_for("regression-blank"), pdf_blank_with_title());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
+
+    assert_eq!(skipped_outcome(outcome), SkipReason::NoIdentifier);
+}
+
+#[test]
+fn resolve_file_still_skips_prose_with_a_title_as_no_identifier() {
+    let path = Path::new("paper.pdf");
+    let documents =
+        FakeDocuments::new().with_file(path, hash_for("regression-prose"), pdf_prose_with_title());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
+
+    assert_eq!(skipped_outcome(outcome), SkipReason::NoIdentifier);
+}
+
+#[test]
+fn resolve_file_still_skips_an_encrypted_file_as_unreadable_with_its_message() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_open_error(
+        path,
+        hash_for("regression-encrypted"),
+        ExtractionError::Encrypted,
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
+
+    assert_eq!(
+        skipped_outcome(outcome),
+        SkipReason::Unreadable {
+            message: "PDF is encrypted".to_string(),
+        }
+    );
 }

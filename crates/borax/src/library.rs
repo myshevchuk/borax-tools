@@ -35,7 +35,9 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, valu
 use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
-use crate::event::{Admission, Adoption, Diagnostic, Event, Finding, Level, LibraryAnswer, Repair};
+use crate::event::{
+    Admission, Adoption, Diagnostic, Event, Extraction, Finding, Level, LibraryAnswer, Repair,
+};
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
 
@@ -1207,9 +1209,10 @@ pub fn missing<'a>(
 /// two stores found it.
 ///
 /// The counts `borax status` reports, with the paths behind two of them
-/// kept rather than only their totals: a caller asked for more — the
-/// identifiable count — needs the artifacts themselves, and a walk is
-/// the one part of the survey worth not doing twice.
+/// kept rather than only their totals: a caller asked for more — each
+/// artifact's extraction result, and the identifiable count taken over
+/// those results — needs the artifacts themselves, and a walk is the
+/// one part of the survey worth not doing twice.
 ///
 /// Nothing here opens a document. The cost of a survey is the directory
 /// walk and the store read, which is what lets a library borax has
@@ -1412,12 +1415,32 @@ fn record_findings(records: &ArtifactStore, items: &ItemStore) -> Vec<(PathBuf, 
     found
 }
 
+/// The `library-extraction` event reporting `extraction` for the
+/// surveyed artifact at `artifact`, named relative to `survey.root`.
+///
+/// The path is `/`-separated on every platform, as an artifact record
+/// stores one. An artifact the survey found always lies under its
+/// root; one that does not is named as `artifact` spells it, with the
+/// platform's separator written as `/`.
+pub fn extraction_event(survey: &Survey, artifact: &Path, extraction: Extraction) -> Event {
+    Event::LibraryExtraction {
+        path: library_relative(&survey.root, artifact).unwrap_or_else(|| {
+            artifact
+                .display()
+                .to_string()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        }),
+        extraction,
+    }
+}
+
 /// The event reporting `survey`, carrying `identifiable` as the count
 /// of artifacts an identifier could be extracted from.
 ///
 /// `identifiable` is `None` when the run was not asked for it: the
 /// survey itself never opens a document, so the count comes from the
-/// caller that did.
+/// caller that did, taken over the per-artifact results it reported
+/// through [`extraction_event`] so that the two cannot disagree.
 pub fn status_event(survey: &Survey, identifiable: Option<usize>) -> Event {
     Event::LibraryStatus {
         root: survey.root.clone(),

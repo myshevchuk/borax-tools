@@ -9,6 +9,7 @@
 #+AI_PASS: claude-opus-5-5 [2026-09-23 Wed] -- fact check of the library-store pass
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-29 Tue 21:51] -- command summaries
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-30 Wed 02:39] -- library-first resolution
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-01 Thu 21:16] -- borax status and JSONL schema
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -499,20 +500,48 @@ how to install it, and a handful of examples.
    an artifact whose path no artifact record names. A record whose path
    holds no file is missing, not orphaned.
 
-   The command opens no document and writes no library state. It also
-   works on an unmarked directory, treating that directory as the root
-   for this report. ~--identify~ additionally opens each artifact and
-   runs the extraction passes to count how many yield an identifier. It
-   queries no service. ~status~ also accepts ~--page-limit~ for that
-   extraction. If you omit ~PATH~, the working directory is used.
+   Without ~--identify~, the command opens no document. It writes no
+   library state with or without the flag. It also works on an unmarked
+   directory, treating that directory as the root for this report. If
+   you omit ~PATH~, the working directory is used.
+
+   ~--identify~ opens every surveyed artifact, tracked or not, and runs
+   the same extraction passes as ~resolve~. It queries no service and
+   writes one result per artifact in survey order. ~status~ also accepts
+   ~--page-limit~ for this extraction.
+
+   A successful result names the identifier and the pass that found it.
+   A failed result distinguishes a missing text layer, readable text
+   without an identifier, an encrypted document, and an unreadable
+   file:
+
+   #+begin_example
+     <path>: identifier <identifier> from embedded metadata
+     <path>: identifier <identifier> from the text layer
+     <path>: identifier <identifier> from the file
+     <path>: no identifier found; the pages read hold no text
+     <path>: no identifier found in its metadata or the pages read
+     <path>: encrypted, so no identifier could be read
+     <path>: unreadable (<message>)
+   #+end_example
+
+   Each ~<path>~ is library-relative and uses ~/~ as its separator.
+   Control characters in a path, identifier, or reader message appear
+   as ~\xNN~ rather than reaching the terminal. A metadata title counts
+   only when the metadata pass finds an identifier in it.
+
+   The report's ~identifiable~ total counts the artifacts whose result
+   names an identifier. It does not mean that a service recognised the
+   identifier. A failed extraction is neither a skip nor a finding and
+   does not change the exit status.
 
    A nested directory with its own ~.borax.toml~ is another library.
    ~status~ excludes its entire subtree from the parent counts and lists
    it as a nested library.
 
-   Human output ends with that library report, with or without
-   ~--identify~. It does not add a resolved, renamed, and skipped
-   summary.
+   With ~--identify~, the per-artifact lines precede the library report.
+   Human output ends with that report, with or without the flag. It does
+   not add a resolved, renamed, and skipped summary.
 
 ** borax validate
 
@@ -1446,13 +1475,32 @@ how to install it, and a handful of examples.
   events. The new ~library~ field and the ~library~ values for ~tier~ and
   ~source~ are additions. The event schema version remains 3.
 
-  Schema 3 adds the library events. ~library-status~ carries ~root~,
-  ~artifacts~, ~items~, ~records~, ~orphans~, ~nested~, and
-  ~identifiable~. ~library-finding~ carries ~path~ and ~finding~, and
-  ~library-validated~ carries ~root~, ~findings~, ~orphans~, ~missing~,
-  and ~unlinked~. ~library-repair~ carries ~id~, ~path~, and ~repair~;
-  ~library-reconciled~ carries ~root~, ~records~, ~confirmed~,
-  ~repaired~, ~changed~, ~ambiguous~, ~missing~, and ~hashed~.
+  Schema 3 adds the library events. ~status --identify~ emits one
+  ~library-extraction~ event for each surveyed artifact as its
+  extraction finishes, in survey order. Its ~path~ is library-relative
+  and ~/~ separated. Its ~extraction~ object is tagged by ~kind~:
+  ~found~ carries ~identifier~ and ~tier~, which is
+  ~embedded-metadata~ or ~text-layer~; the other kinds are
+  ~no-text-layer~, ~text-without-identifier~, ~encrypted~, and
+  ~unreadable~, which carries ~message~.
+
+  #+begin_src json
+    {"schema":3,"event":"library-extraction","path":"sub/a.pdf","extraction":{"kind":"found","identifier":"doi:10.1234/x","tier":"text-layer"}}
+  #+end_src
+
+  JSON fields keep their raw values, with any required escaping supplied
+  by JSON encoding. Every ~library-extraction~ precedes
+  ~library-status~, which stays the last event before ~run-finished~.
+  ~run-finished~ counts none of these results. This addition does not
+  change the event schema version.
+
+  ~library-status~ carries ~root~, ~artifacts~, ~items~, ~records~,
+  ~orphans~, ~nested~, and ~identifiable~. ~library-finding~ carries
+  ~path~ and ~finding~, and ~library-validated~ carries ~root~,
+  ~findings~, ~orphans~, ~missing~, and ~unlinked~. ~library-repair~
+  carries ~id~, ~path~, and ~repair~; ~library-reconciled~ carries
+  ~root~, ~records~, ~confirmed~, ~repaired~, ~changed~, ~ambiguous~,
+  ~missing~, and ~hashed~.
 
   An applying rename may emit ~library-admission~ with ~path~ and an
   ~admission~ whose ~kind~ is ~relinked~, ~outside~, or ~unwritten~.

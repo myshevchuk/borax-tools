@@ -3352,12 +3352,14 @@ fn reported_root<C: Cache>(command: &Command, adapters: &Adapters<'_, C>) -> Pat
 
 /// Write `status`'s events into `sink`.
 ///
-/// One event, carrying what [`crate::library::survey`] counted. When
-/// `identify`, each artifact is additionally opened and run through the
-/// extraction passes [`crate::pipeline::from_file`] runs, and how many
-/// yielded an identifier is reported alongside; no service is asked
-/// anything either way, and without the flag no document is opened at
-/// all.
+/// Without `identify`, one event, carrying what
+/// [`crate::library::survey`] counted, and no document is opened. With
+/// it, each surveyed artifact in survey order is run through
+/// [`crate::pipeline::extraction`] and its `library-extraction` event
+/// written as soon as that artifact is done; the totals follow, with
+/// the number of those results that found an identifier as
+/// `identifiable`. The survey's artifacts are the whole selection, and
+/// no service is asked anything either way.
 fn status_events<C: Cache>(
     command: &Command,
     identify: bool,
@@ -3371,13 +3373,15 @@ fn status_events<C: Cache>(
     // directory to resolve them from.
     let extraction = resolving(configs.run().config()).extraction;
     let identifiable = identify.then(|| {
-        surveyed
-            .artifacts
-            .iter()
-            .filter(|path| {
-                crate::pipeline::from_file(path, adapters.documents, &extraction).is_ok()
-            })
-            .count()
+        let mut found = 0;
+        for artifact in &surveyed.artifacts {
+            let result = crate::pipeline::extraction(artifact, adapters.documents, &extraction);
+            found += usize::from(result.is_found());
+            sink.emit(crate::library::extraction_event(
+                &surveyed, artifact, result,
+            ));
+        }
+        found
     });
 
     sink.emit(crate::library::status_event(&surveyed, identifiable));
