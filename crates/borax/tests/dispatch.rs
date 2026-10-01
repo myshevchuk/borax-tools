@@ -12299,7 +12299,7 @@ fn adopt_every_orphan_is_accounted_for() {
         &ArtifactRecord {
             id: lib_artifact_id(G7_UUID_A),
             item: None,
-            path: "b-held.pdf".to_string(),
+            path: "elsewhere/b-held.pdf".to_string(),
             size,
             modified_millis,
             history: vec![hash_entry_for(hash_bytes(b"task-5.1 held"), "run-0")],
@@ -12488,7 +12488,7 @@ fn adopt_after_the_cache_is_cleared_still_tells_unindexed_held_and_unreadable_ap
         &ArtifactRecord {
             id: lib_artifact_id(G7_UUID_A),
             item: None,
-            path: "b-held.pdf".to_string(),
+            path: "elsewhere/b-held.pdf".to_string(),
             size,
             modified_millis,
             history: vec![hash_entry_for(hash_bytes(b"task-5.1b held"), "run-0")],
