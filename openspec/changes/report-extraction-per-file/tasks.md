@@ -239,7 +239,7 @@ The real backend is exercised on the committed corpus in task 3.3.
 
 ## 4. Documents
 
-- [ ] 4.1 Doc writer (`codex-docs`), an update job on `docs/manual.org`.
+- [x] 4.1 Doc writer (`codex-docs`), an update job on `docs/manual.org`.
       Sources: this proposal, its design and its spec deltas. The
       implementer does not write it. The orchestrator checks the diff
       against the sources.
@@ -257,13 +257,13 @@ The real backend is exercised on the committed corpus in task 3.3.
         `encrypted`, or `unreadable` (with `message`). It precedes
         `library-status`. Skip reasons are unchanged, and the schema
         is still 3.
-- [ ] 4.2 Doc writer, `CHANGELOG.md`, under Unreleased:
+- [x] 4.2 Doc writer, `CHANGELOG.md`, under Unreleased:
       - An "Added" entry for the `library-extraction` event and its
         five kinds, with the schema still 3.
       - A "Changed" entry: human output of `status --identify` lists
         each artifact's result before the report line, with exit
         status unchanged.
-- [ ] 4.3 Record the built state in `openspec/STATE.md`, as
+- [x] 4.3 Record the built state in `openspec/STATE.md`, as
       `consult-library-first` did:
       - a paragraph under "What is built" naming the D1 boundary that
         change 5 follows;
