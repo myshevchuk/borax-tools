@@ -277,8 +277,8 @@ The real backend is exercised on the committed corpus in task 3.3.
 
 ## 5. Close
 
-- [ ] 5.1 `openspec validate report-extraction-per-file --strict` and
+- [x] 5.1 `openspec validate report-extraction-per-file --strict` and
       `python3 scripts/check-spec-deltas.py` pass.
-- [ ] 5.2 `cargo fmt --all --check`,
+- [x] 5.2 `cargo fmt --all --check`,
       `cargo clippy --workspace --all-targets -- -D warnings` and
       `cargo test --workspace` pass, as CI runs them.
