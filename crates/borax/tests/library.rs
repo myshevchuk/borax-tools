@@ -6,13 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borax::event::{Admission, Event, Extraction, Finding, LibraryAnswer, Repair};
+use borax::event::{Admission, Condition, Event, Extraction, Finding, LibraryAnswer, Repair};
 use borax::library::{
     ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, Consulted, ITEM_STORE, ItemStore,
     RecordFaults, STATE_DIR, Stores, Unrecorded, WorkDuplicate, admission_event, admit, artifacts,
-    contains, excludes, extraction_event, item_file_name, library_relative, missing, orphans,
-    reconcile, reconciliation_events, recorded_at, relative_to, store_write, strands, survey,
-    validate,
+    contains, excludes, extraction_event, item_file_name, library_relative, missing, orphan_events,
+    orphans, reconcile, reconciliation_events, recorded_at, relative_to, store_write, strands,
+    survey, validate,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -892,6 +892,57 @@ fn survey_excludes_a_nested_librarys_subtree_from_orphans_and_names_it_nested() 
 }
 
 // ---------------------------------------------------------------------
+// 3.5: orphan_events() — design D3, D5, D10
+// ---------------------------------------------------------------------
+
+/// `orphan_events(&survey)` gives one `Event::LibraryCondition` of kind
+/// `Orphan` per entry of `survey.orphans`, in that order, named
+/// library-relative and `/`-separated as [`extraction_event`] names an
+/// artifact — covering an orphan at the root and one two directories
+/// down.
+#[test]
+fn orphan_events_names_each_orphan_of_the_survey_in_survey_order() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("a.pdf"), b"").unwrap();
+    fs::create_dir_all(root.join("sub/deeper")).unwrap();
+    fs::write(root.join("sub/deeper/b.pdf"), b"").unwrap();
+    fs::write(root.join("recorded.pdf"), b"").unwrap();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "recorded.pdf",
+        vec![hash_entry("r", "run-1")],
+    );
+    write_artifact_record(root, &record);
+
+    let found = survey(root);
+    assert_eq!(
+        found.orphans,
+        vec![root.join("a.pdf"), root.join("sub/deeper/b.pdf")],
+        "fixture assumption: the recorded artifact must be excluded, got {:?}",
+        found.orphans
+    );
+
+    let events = orphan_events(&found);
+
+    assert_eq!(
+        events,
+        vec![
+            Event::LibraryCondition {
+                path: "a.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
+            Event::LibraryCondition {
+                path: "sub/deeper/b.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
+        ],
+        "got {events:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
 // 5.1: validate() — one test per finding
 // ---------------------------------------------------------------------
 
@@ -1266,7 +1317,7 @@ fn validate_over_a_library_of_only_orphans_is_clean() {
     let result = validate(root);
 
     assert!(result.findings.is_empty(), "got {:?}", result.findings);
-    assert_eq!(result.orphans, 3, "got {}", result.orphans);
+    assert_eq!(result.orphans(), 3, "got {}", result.orphans());
 }
 
 /// A record whose artifact cannot be found is the `missing` count, not
@@ -1286,7 +1337,7 @@ fn validate_reports_a_records_missing_artifact_as_a_count_not_a_finding() {
     let result = validate(root);
 
     assert!(result.findings.is_empty(), "got {:?}", result.findings);
-    assert_eq!(result.missing, 1, "got {}", result.missing);
+    assert_eq!(result.missing(), 1, "got {}", result.missing());
 }
 
 /// A record whose last-known path points into a nested library is an
@@ -1314,8 +1365,8 @@ fn validate_counts_a_record_inside_a_nested_library_as_missing() {
     let result = validate(root);
 
     assert!(result.findings.is_empty(), "got {:?}", result.findings);
-    assert_eq!(result.missing, 1, "got {}", result.missing);
-    assert_eq!(result.orphans, 0, "got {}", result.orphans);
+    assert_eq!(result.missing(), 1, "got {}", result.missing());
+    assert_eq!(result.orphans(), 0, "got {}", result.orphans());
 }
 
 /// An item nothing links to is the `unlinked` count, not a finding.
@@ -1332,7 +1383,7 @@ fn validate_reports_an_unlinked_item_as_a_count_not_a_finding() {
     let result = validate(root);
 
     assert!(result.findings.is_empty(), "got {:?}", result.findings);
-    assert_eq!(result.unlinked, 1, "got {}", result.unlinked);
+    assert_eq!(result.unlinked(), 1, "got {}", result.unlinked());
 }
 
 /// Scenario "A library observed mid-edit": a half-written artifact
@@ -1365,8 +1416,8 @@ fn a_half_written_record_is_a_finding_about_itself_and_the_rest_of_the_library_i
         "got {:?}",
         result.findings[0].1
     );
-    assert_eq!(result.orphans, 1, "got {}", result.orphans);
-    assert_eq!(result.missing, 0, "got {}", result.missing);
+    assert_eq!(result.orphans(), 1, "got {}", result.orphans());
+    assert_eq!(result.missing(), 0, "got {}", result.missing());
 }
 
 // ---------------------------------------------------------------------
@@ -1400,6 +1451,618 @@ fn validate_leaves_the_store_byte_identical_even_when_it_reports_findings() {
         before,
         "validate must write nothing to the store"
     );
+}
+
+// ---------------------------------------------------------------------
+// 5.4: validate() — Validation::conditions, task 4.2
+// ---------------------------------------------------------------------
+
+/// What `Validation::orphans()` counted before this change
+/// (design D5's "Context"), kept here so a test can show the migrated
+/// method's total is unchanged without restating its own definition
+/// back at it.
+fn pre_change_orphans(root: &Path) -> usize {
+    survey(root).orphans.len()
+}
+
+/// What `Validation::missing()` counted before this change.
+fn pre_change_missing(root: &Path) -> usize {
+    let records = ArtifactStore::read(root);
+    missing(root, &records, &|path: &Path| {
+        !excludes(root, path) && path.is_file()
+    })
+    .len()
+}
+
+/// What `Validation::unlinked()` counted before this change.
+fn pre_change_unlinked(root: &Path) -> usize {
+    let records = ArtifactStore::read(root);
+    let items = ItemStore::read(root);
+    items
+        .iter()
+        .filter(|item| records.by_item(&item.id).is_empty())
+        .count()
+}
+
+/// Scenario "Validation names each condition it counts": an orphan, a
+/// missing record and an unlinked item each give exactly one
+/// condition, in kind order (orphan, missing, unlinked), and no
+/// finding.
+#[test]
+fn validate_conditions_name_an_orphan_a_missing_record_and_an_unlinked_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("new.pdf"), b"").unwrap();
+    let missing_record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "gone.pdf",
+        vec![hash_entry("g", "run-1")],
+    );
+    write_artifact_record(root, &missing_record);
+    let item = Item {
+        id: item_id(UUID_B),
+        record: minimal_record(EntryType::Article),
+    };
+    let item_name = item_file_name(Some("milner1978"), &item.id);
+    write_item(root, &item_name, &item);
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+    assert_eq!(
+        result.conditions,
+        vec![
+            ("new.pdf".to_string(), Condition::Orphan),
+            (
+                "gone.pdf".to_string(),
+                Condition::Missing {
+                    id: UUID_A.to_string(),
+                    record: format!("{STATE_DIR}/{ARTIFACT_STORE}/{UUID_A}.toml"),
+                },
+            ),
+            (
+                format!("{ITEM_STORE}/{item_name}"),
+                Condition::Unlinked {
+                    id: UUID_B.to_string(),
+                },
+            ),
+        ],
+        "got {:?}",
+        result.conditions
+    );
+    assert_eq!(result.orphans(), 1, "got {}", result.orphans());
+    assert_eq!(result.missing(), 1, "got {}", result.missing());
+    assert_eq!(result.unlinked(), 1, "got {}", result.unlinked());
+    assert_eq!(result.orphans(), pre_change_orphans(root));
+    assert_eq!(result.missing(), pre_change_missing(root));
+    assert_eq!(result.unlinked(), pre_change_unlinked(root));
+}
+
+/// Scenario "A record inside a nested library is missing, not an
+/// orphan": a record naming a path under a nested library gives one
+/// `Missing` condition and no `Orphan`.
+#[test]
+fn validate_conditions_name_a_record_inside_a_nested_library_as_missing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested/.borax.toml"), b"").unwrap();
+    fs::write(root.join("nested/kept.pdf"), b"kept bytes").unwrap();
+    let record = fresh_record(
+        root,
+        artifact_id(UUID_A),
+        None,
+        "nested/kept.pdf",
+        vec![hash_entry("kept bytes", "run-1")],
+    );
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+    assert_eq!(
+        result.conditions,
+        vec![(
+            "nested/kept.pdf".to_string(),
+            Condition::Missing {
+                id: UUID_A.to_string(),
+                record: format!("{STATE_DIR}/{ARTIFACT_STORE}/{UUID_A}.toml"),
+            },
+        )],
+        "got {:?}",
+        result.conditions
+    );
+    assert_eq!(result.orphans(), pre_change_orphans(root));
+    assert_eq!(result.missing(), pre_change_missing(root));
+    assert_eq!(result.unlinked(), pre_change_unlinked(root));
+}
+
+/// Scenario "Two item files carrying one identity, neither linked":
+/// two `Unlinked` conditions and one `DuplicateIdentity` finding —
+/// today's count of 2, unchanged.
+#[test]
+fn validate_conditions_give_two_unlinked_for_two_item_files_of_one_unlinked_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    let first = format!("a-first.{UUID_A}.toml");
+    let second = format!("b-second.{UUID_A}.toml");
+    write_item(root, &first, &item);
+    write_item(root, &second, &item);
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            root.join(ITEM_STORE).join(&second),
+            Finding::DuplicateIdentity {
+                id: UUID_A.to_string(),
+                other: root.join(ITEM_STORE).join(&first),
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+    assert_eq!(
+        result.conditions,
+        vec![
+            (
+                format!("{ITEM_STORE}/{first}"),
+                Condition::Unlinked {
+                    id: UUID_A.to_string()
+                },
+            ),
+            (
+                format!("{ITEM_STORE}/{second}"),
+                Condition::Unlinked {
+                    id: UUID_A.to_string()
+                },
+            ),
+        ],
+        "got {:?}",
+        result.conditions
+    );
+    assert_eq!(result.unlinked(), 2, "today's count of 2, unchanged");
+    assert_eq!(result.unlinked(), pre_change_unlinked(root));
+}
+
+/// Scenario "Two records of one identity are both named missing": the
+/// shared identity is a `DuplicateIdentity` finding, and two `Missing`
+/// conditions name `gone.pdf` and the identity, each with a different
+/// `record`.
+#[test]
+fn validate_conditions_give_two_missing_for_two_records_of_one_missing_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let dir_path = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&dir_path).unwrap();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "gone.pdf",
+        vec![hash_entry("g1", "run-1")],
+    );
+    let first = format!("a-first.{UUID_A}.toml");
+    fs::write(dir_path.join(&first), record.to_toml()).unwrap();
+    let other_record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "gone.pdf",
+        vec![hash_entry("g2", "run-1")],
+    );
+    let second = format!("b-second.{UUID_A}.toml");
+    fs::write(dir_path.join(&second), other_record.to_toml()).unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(
+        result.findings,
+        vec![(
+            dir_path.join(&second),
+            Finding::DuplicateIdentity {
+                id: UUID_A.to_string(),
+                other: dir_path.join(&first),
+            }
+        )],
+        "got {:?}",
+        result.findings
+    );
+    assert_eq!(
+        result.conditions,
+        vec![
+            (
+                "gone.pdf".to_string(),
+                Condition::Missing {
+                    id: UUID_A.to_string(),
+                    record: format!("{STATE_DIR}/{ARTIFACT_STORE}/{first}"),
+                },
+            ),
+            (
+                "gone.pdf".to_string(),
+                Condition::Missing {
+                    id: UUID_A.to_string(),
+                    record: format!("{STATE_DIR}/{ARTIFACT_STORE}/{second}"),
+                },
+            ),
+        ],
+        "got {:?}",
+        result.conditions
+    );
+    assert_eq!(result.missing(), 2, "today's count of 2, unchanged");
+    assert_eq!(result.missing(), pre_change_missing(root));
+}
+
+/// Scenario "Every check still reports" (D8's gate): a library holding
+/// one instance of every finding kind, beside an orphan, a clean
+/// missing record and a clean unlinked item. Every finding fixture here
+/// is otherwise clean — its own record or item file is linked, present
+/// and well formed apart from the one thing that triggers its finding —
+/// so each of the twelve contributes no condition of its own, and the
+/// three extra, deliberately clean fixtures are the only entries in
+/// `conditions`. The findings equal, kind for kind and file for file,
+/// what the per-finding tests above already pin; none of the three
+/// conditions is reported as a finding.
+#[test]
+fn validate_every_check_still_reports_beside_all_three_conditions() {
+    fn gate_uuid(tag: u8) -> String {
+        format!("0198bbbb-0000-7000-8000-0000000000{tag:02x}")
+    }
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // --- item-store findings ---
+
+    // 1. An item file that cannot be read at all.
+    let items_dir = root.join(ITEM_STORE);
+    fs::create_dir_all(&items_dir).unwrap();
+    fs::write(items_dir.join("bad.toml"), b"this is not [ valid toml").unwrap();
+
+    // 2. An item file whose name disagrees with the identity inside it,
+    //    linked by a control record so it is not also unlinked.
+    let name_disagrees_item = Item {
+        id: item_id(&gate_uuid(2)),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, "notes-on-this.toml", &name_disagrees_item);
+
+    // 3. An item whose verbatim source fields do not parse as JSON,
+    //    linked the same way.
+    let mut bad_source_record = minimal_record(EntryType::Article);
+    bad_source_record
+        .borax
+        .source_fields
+        .insert("crossref-note".to_string(), serde_json::json!(42));
+    let bad_source_item = Item {
+        id: item_id(&gate_uuid(3)),
+        record: bad_source_record,
+    };
+    let mut bad_source_text = bad_source_item.to_toml();
+    assert!(
+        bad_source_text.contains("\"42\""),
+        "fixture assumption: a source field round-trips as its JSON text"
+    );
+    bad_source_text = bad_source_text.replace("\"42\"", "\"not json {\"");
+    let bad_source_path = items_dir.join(format!("bad-source.{}.toml", gate_uuid(3)));
+    fs::write(&bad_source_path, bad_source_text).unwrap();
+
+    // 4. Two item files carrying one identity, linked the same way so
+    //    this fixture contributes no condition either.
+    let dup_item = Item {
+        id: item_id(&gate_uuid(4)),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("dup-a.{}.toml", gate_uuid(4)), &dup_item);
+    write_item(root, &format!("dup-b.{}.toml", gate_uuid(4)), &dup_item);
+
+    // Three control records, each existing and clean, that link the
+    // three items above so none of them is also `unlinked`.
+    for (tag, control_id, path) in [
+        (2u8, gate_uuid(2), "linked-2.pdf"),
+        (3u8, gate_uuid(3), "linked-3.pdf"),
+        (4u8, gate_uuid(4), "linked-4.pdf"),
+    ] {
+        fs::write(root.join(path), b"control bytes").unwrap();
+        let control = fresh_record(
+            root,
+            artifact_id(&gate_uuid(100 + tag)),
+            Some(item_id(&control_id)),
+            path,
+            vec![hash_entry("control bytes", "run-1")],
+        );
+        write_artifact_record(root, &control);
+    }
+
+    // --- artifact-record findings ---
+
+    // a. An artifact record that cannot be read at all.
+    let records_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records_dir).unwrap();
+    fs::write(records_dir.join("bad-record.toml"), b"id = \"not-a-uuid").unwrap();
+
+    // b. A record whose file name disagrees with the identity inside
+    //    it. Given a real, present path so it is not also missing.
+    fs::write(root.join("name-disagrees.pdf"), b"nd").unwrap();
+    let name_disagrees_record = fresh_record(
+        root,
+        artifact_id(&gate_uuid(10)),
+        None,
+        "name-disagrees.pdf",
+        vec![hash_entry("nd", "run-1")],
+    );
+    let name_disagrees_path = records_dir.join(format!("{}.toml", gate_uuid(11)));
+    fs::write(&name_disagrees_path, name_disagrees_record.to_toml()).unwrap();
+
+    // c. A record whose last-known path is not library-relative. Given
+    //    a real file at that absolute-looking path (still under the
+    //    tempdir, since `relative_to` resolves it against `root`), so
+    //    it is not also missing.
+    fs::create_dir_all(root.join("etc")).unwrap();
+    fs::write(root.join("etc").join("passwd"), b"not a pdf").unwrap();
+    let nonrelative = artifact_record(
+        artifact_id(&gate_uuid(12)),
+        None,
+        "/etc/passwd",
+        vec![hash_entry("not a pdf", "run-1")],
+    );
+    write_artifact_record(root, &nonrelative);
+
+    // d. An artifact record with an empty hash history.
+    fs::write(root.join("empty-history.pdf"), b"eh").unwrap();
+    let empty_history = fresh_record(
+        root,
+        artifact_id(&gate_uuid(13)),
+        None,
+        "empty-history.pdf",
+        Vec::new(),
+    );
+    write_artifact_record(root, &empty_history);
+
+    // e. A record holding a malformed hash.
+    fs::write(root.join("malformed-hash.pdf"), b"mh").unwrap();
+    let mut malformed_entry = hash_entry("mh", "run-1");
+    malformed_entry.hash = malformed_hash("sha256-deadbeef");
+    let malformed = fresh_record(
+        root,
+        artifact_id(&gate_uuid(14)),
+        None,
+        "malformed-hash.pdf",
+        vec![malformed_entry],
+    );
+    write_artifact_record(root, &malformed);
+
+    // f. A history entry naming no run.
+    fs::write(root.join("no-run.pdf"), b"nr").unwrap();
+    let mut no_run_entry = hash_entry("nr", "run-1");
+    no_run_entry.run = RunId::new("");
+    let no_run = fresh_record(
+        root,
+        artifact_id(&gate_uuid(15)),
+        None,
+        "no-run.pdf",
+        vec![no_run_entry],
+    );
+    write_artifact_record(root, &no_run);
+
+    // g. A record naming an item the library does not hold.
+    fs::write(root.join("dangling-link.pdf"), b"dl").unwrap();
+    let dangling = fresh_record(
+        root,
+        artifact_id(&gate_uuid(16)),
+        Some(item_id(&gate_uuid(99))),
+        "dangling-link.pdf",
+        vec![hash_entry("dl", "run-1")],
+    );
+    write_artifact_record(root, &dangling);
+
+    // h. Two artifact records carrying one identity, each with its own
+    //    present file, so neither is also missing.
+    fs::write(root.join("dup-record-1.pdf"), b"dr1").unwrap();
+    fs::write(root.join("dup-record-2.pdf"), b"dr2").unwrap();
+    let dup_record_1 = fresh_record(
+        root,
+        artifact_id(&gate_uuid(17)),
+        None,
+        "dup-record-1.pdf",
+        vec![hash_entry("dr1", "run-1")],
+    );
+    let dup_record_1_name = format!("dup-record-a.{}.toml", gate_uuid(17));
+    fs::write(records_dir.join(&dup_record_1_name), dup_record_1.to_toml()).unwrap();
+    let dup_record_2 = fresh_record(
+        root,
+        artifact_id(&gate_uuid(17)),
+        None,
+        "dup-record-2.pdf",
+        vec![hash_entry("dr2", "run-1")],
+    );
+    let dup_record_2_name = format!("dup-record-b.{}.toml", gate_uuid(17));
+    fs::write(records_dir.join(&dup_record_2_name), dup_record_2.to_toml()).unwrap();
+
+    // --- the three clean, condition-only fixtures ---
+
+    fs::write(root.join("orphan.pdf"), b"").unwrap();
+    let clean_missing = artifact_record(
+        artifact_id(&gate_uuid(18)),
+        None,
+        "clean-missing.pdf",
+        vec![hash_entry("cm", "run-1")],
+    );
+    write_artifact_record(root, &clean_missing);
+    let clean_unlinked_item = Item {
+        id: item_id(&gate_uuid(19)),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(
+        root,
+        &format!("{}.toml", gate_uuid(19)),
+        &clean_unlinked_item,
+    );
+
+    let result = validate(root);
+
+    // The findings: exactly what the per-finding tests above pin, one
+    // of each kind.
+    assert_eq!(result.findings.len(), 12, "got {:?}", result.findings);
+    let has = |predicate: &dyn Fn(&Finding) -> bool| {
+        result
+            .findings
+            .iter()
+            .any(|(_, finding)| predicate(finding))
+    };
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|(path, finding)| path == &items_dir.join("bad.toml")
+                && matches!(finding, Finding::Unreadable { .. })),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        result.findings.contains(&(
+            root.join(ITEM_STORE).join("notes-on-this.toml"),
+            Finding::NameDisagrees { id: gate_uuid(2) }
+        )),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        result.findings.contains(&(
+            bad_source_path.clone(),
+            Finding::Unreadable {
+                message: "dropped unreadable source field \"crossref-note\"".to_string(),
+            }
+        )),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        has(&|finding: &Finding| matches!(
+            finding,
+            Finding::DuplicateIdentity { id, .. } if id == &gate_uuid(4)
+        )),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        result.findings.iter().any(
+            |(path, finding)| path == &records_dir.join("bad-record.toml")
+                && matches!(finding, Finding::Unreadable { .. })
+        ),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        result.findings.contains(&(
+            name_disagrees_path.clone(),
+            Finding::NameDisagrees { id: gate_uuid(10) }
+        )),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        result.findings.contains(&(
+            records_dir.join(format!("{}.toml", gate_uuid(12))),
+            Finding::PathNotRelative {
+                path: "/etc/passwd".to_string(),
+            }
+        )),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        result.findings.contains(&(
+            records_dir.join(format!("{}.toml", gate_uuid(13))),
+            Finding::EmptyHistory,
+        )),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        result.findings.contains(&(
+            records_dir.join(format!("{}.toml", gate_uuid(14))),
+            Finding::MalformedHash {
+                hash: "sha256-deadbeef".to_string(),
+            }
+        )),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        has(&|finding: &Finding| matches!(
+            finding,
+            Finding::HistoryEntryWithoutRun { hash: found } if found == &hash("nr").to_string()
+        )),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        result.findings.contains(&(
+            records_dir.join(format!("{}.toml", gate_uuid(16))),
+            Finding::DanglingItem {
+                item: gate_uuid(99),
+            }
+        )),
+        "got {:?}",
+        result.findings
+    );
+    assert!(
+        has(&|finding: &Finding| matches!(
+            finding,
+            Finding::DuplicateIdentity { id, .. } if id == &gate_uuid(17)
+        )),
+        "got {:?}",
+        result.findings
+    );
+
+    // No condition is a finding: every finding's path is one of the
+    // files above, never `orphan.pdf`, `clean-missing.pdf` or the clean
+    // unlinked item's file.
+    let condition_paths: Vec<PathBuf> = vec![
+        root.join("orphan.pdf"),
+        records_dir.join(format!("{}.toml", gate_uuid(18))),
+        items_dir.join(format!("{}.toml", gate_uuid(19))),
+    ];
+    for (path, finding) in &result.findings {
+        assert!(
+            !condition_paths.contains(path),
+            "finding {finding:?} names a condition's own file {path:?}"
+        );
+    }
+
+    // The three conditions: the orphan, the clean missing record and
+    // the clean unlinked item — in kind order, each the only entry of
+    // its kind.
+    assert_eq!(
+        result.conditions,
+        vec![
+            ("orphan.pdf".to_string(), Condition::Orphan),
+            (
+                "clean-missing.pdf".to_string(),
+                Condition::Missing {
+                    id: gate_uuid(18),
+                    record: format!("{STATE_DIR}/{ARTIFACT_STORE}/{}.toml", gate_uuid(18)),
+                },
+            ),
+            (
+                format!("{ITEM_STORE}/{}.toml", gate_uuid(19)),
+                Condition::Unlinked { id: gate_uuid(19) },
+            ),
+        ],
+        "got {:?}",
+        result.conditions
+    );
+    assert_eq!(result.orphans(), 1);
+    assert_eq!(result.missing(), 1);
+    assert_eq!(result.unlinked(), 1);
+    assert_eq!(result.orphans(), pre_change_orphans(root));
+    assert_eq!(result.missing(), pre_change_missing(root));
+    assert_eq!(result.unlinked(), pre_change_unlinked(root));
 }
 
 // ---------------------------------------------------------------------
