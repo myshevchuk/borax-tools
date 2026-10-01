@@ -6,8 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-09-30, after 0.6.0, with `consult-library-first`
-implemented.
+Last reviewed: 2026-10-01, at 0.7.0.
 
 ## What is built
 
@@ -279,8 +278,8 @@ Template filing becomes assignment to that view once views exist, and
 the `rename` filing requirement was left untouched here for that
 reason.
 
-`fit-summary-to-command` is implemented on top, after 0.6.0. The human
-rendering of `run-finished` is chosen per command through
+`fit-summary-to-command` is implemented on top and ships in 0.7.0.
+The human rendering of `run-finished` is chosen per command through
 `Command::summary`: `rename` keeps its line byte for byte, `resolve`
 and `bib` close on `N resolved, N skipped`, and the library commands,
 `config` and `cache` close on their own report line. A skipped,
@@ -292,7 +291,8 @@ the event schema version is still 3. It is the first change of the
 roadmap drawn from the interactive reviews of 0.6.0, which lives
 outside the repository.
 
-`consult-library-first` is implemented on top of that, as the second.
+`consult-library-first` is implemented on top of that, as the second,
+and ships in 0.7.0 beside it.
 `resolve`, `rename` and `bib` read a start-of-run snapshot of the
 run's library (`Stores::consult`) before the content index. A file
 whose recorded path holds a record with its bytes in any history
