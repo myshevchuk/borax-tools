@@ -427,8 +427,8 @@ doc comment, and a sentence naming the new events is added.
 
 ## 7. Close
 
-- [ ] 7.1 `openspec validate list-untracked-missing-unlinked --strict`
+- [x] 7.1 `openspec validate list-untracked-missing-unlinked --strict`
       and `python3 scripts/check-spec-deltas.py` pass.
-- [ ] 7.2 `cargo fmt --all --check`,
+- [x] 7.2 `cargo fmt --all --check`,
       `cargo clippy --workspace --all-targets -- -D warnings` and
       `cargo test --workspace` pass, as CI runs them.
