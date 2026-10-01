@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-01, at 0.7.0.
+Last reviewed: 2026-10-01, at 0.8.0.
 
 ## What is built
 
@@ -313,8 +313,8 @@ rename append unrecognised bytes at a recorded path to its history,
 after which the item answers for them, and history entries record no
 item, so bytes restored after a re-link answer with the new item.
 
-`report-extraction-per-file` is implemented on top, after 0.7.0, and
-opens Phase 2 of the roadmap. `status --identify` writes a
+`report-extraction-per-file` is implemented on top, ships in 0.8.0,
+and opens Phase 2 of the roadmap. `status --identify` writes a
 `library-extraction` event per surveyed artifact as its extraction
 finishes, carrying `found` with the identifier and pass, or one of
 `no-text-layer`, `text-without-identifier`, `encrypted` and
@@ -329,7 +329,7 @@ writes nothing, and the renderers present typed events, with any
 totals taken over the same results. Schema 3 is kept.
 
 `list-untracked-missing-unlinked` is implemented on top, as the second
-user of that boundary, and closes Phase 2's per-object work. A
+user of that boundary, ships in 0.8.0 beside it, and closes Phase 2. A
 `library-condition` event names each counted object: `status` writes
 one per orphan as soon as the survey is read and before any document
 opens, and `validate` writes one per orphan, missing record (with its
