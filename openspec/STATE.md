@@ -436,6 +436,19 @@ kept.
   `crates/borax/tests/pipeline.rs` pins the current collapse so it is
   changed deliberately.
 
+- **A DOI keeps a closing Unicode bracket.** `Doi::parse`
+  (`crates/borax-core/src/identifier.rs`, line 103) trims only ASCII
+  closers from a candidate's end, and the text scan cuts a candidate
+  at ASCII whitespace alone. HAL cover pages print the DOI as
+  `⟨10.1039/D0CS01430C⟩.`, so the trailing `.` goes and `⟩` (U+27E9)
+  stays: the real corpus's `Manuscript(revised).pdf` extracts
+  `doi:10.1039/d0cs01430c⟩`, which no service holds. Likely every HAL
+  deposit with a cover page. The `extraction` requirement "Extracted
+  identifiers are validated and normalized" already requires
+  surrounding punctuation stripped, so the fix is a restoration and
+  needs no proposal. Found by `status --identify` over the corpus once
+  it printed per-file results.
+
 - **A sidecar is never moved with its file, so a rename can orphan
   one.** `write_sidecar` writes beside the path the file has when it is
   reached, and no code path renames or removes an existing sidecar when
