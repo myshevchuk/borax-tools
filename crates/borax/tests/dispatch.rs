@@ -7283,8 +7283,10 @@ fn status_identify_opens_only_the_surveyed_artifact() {
     fs::write(root.join("nested").join(".borax.toml"), b"").unwrap();
     fs::write(root.join("nested").join("inner.pdf"), b"").unwrap();
     #[cfg(unix)]
+    let elsewhere = tempdir().unwrap();
+    #[cfg(unix)]
     {
-        let outside = dir.path().parent().unwrap().join("outside.pdf");
+        let outside = elsewhere.path().join("outside.pdf");
         fs::write(&outside, b"").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link.pdf")).unwrap();
     }
