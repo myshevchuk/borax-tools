@@ -19,6 +19,8 @@ use borax_core::library::DuplicateReason;
 use borax_core::record::Record;
 use serde::{Deserialize, Serialize};
 
+use crate::describe::escaped;
+
 /// The version of the event schema, emitted on every JSON line.
 ///
 /// Consumers pin it: within a major version of borax the shape of an
@@ -182,12 +184,28 @@ pub enum Event {
         entries: usize,
         bytes: u64,
     },
+    /// What extraction made of one artifact a `status --identify` run
+    /// inspected.
+    ///
+    /// One per surveyed artifact, in survey order, each written once
+    /// that artifact's extraction is done and all of them before the
+    /// run's [`Event::LibraryStatus`]. Neither a skip nor a finding: it
+    /// describes a file, and counts toward no total of the run's.
+    LibraryExtraction {
+        /// The artifact, library-relative and `/`-separated, as
+        /// [`Event::LibraryAdoption`] names one.
+        path: String,
+        extraction: Extraction,
+    },
     /// What a library holds, counted from its tree and from its two
     /// stores.
     ///
     /// `identifiable` is `None` when the run was not asked for it: a
     /// count nobody asked for and a count of zero are different
-    /// answers, and only `--identify` opens a document.
+    /// answers, and only `--identify` opens a document. When it was
+    /// asked for, it is the number of the run's
+    /// [`Event::LibraryExtraction`] events whose result
+    /// [`Extraction::is_found`].
     LibraryStatus {
         root: PathBuf,
         artifacts: usize,
@@ -613,6 +631,41 @@ pub enum Adoption {
     Unwritten { message: String },
 }
 
+/// What extraction made of one file: the identifier and the pass that
+/// found it, or the way extraction failed.
+///
+/// Serialized with a `kind` tag, nested under the event's `extraction`
+/// field. No two failures share a variant: a file with no text to read
+/// and a file whose text holds no identifier are different answers, as
+/// are a file locked by a password and one that is not a PDF at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Extraction {
+    /// A pass found an identifier. `identifier` is in the form the
+    /// stream writes one (`doi:…`, `arXiv:…`), and `tier` names the
+    /// pass that read it (`embedded-metadata` or `text-layer`).
+    Found { identifier: String, tier: String },
+    /// The metadata held no identifier, and no page the text pass read
+    /// held text, including when it read none.
+    NoTextLayer,
+    /// The metadata held no identifier, and the text the pages held
+    /// had none either.
+    TextWithoutIdentifier,
+    /// The document cannot be read without a password.
+    Encrypted,
+    /// The file could not be opened or parsed as a PDF, with `message`
+    /// as the reader gave it.
+    Unreadable { message: String },
+}
+
+impl Extraction {
+    /// Whether an identifier was found: the results `identifiable`
+    /// counts.
+    pub fn is_found(&self) -> bool {
+        matches!(self, Extraction::Found { .. })
+    }
+}
+
 /// A title a file claims for itself, and where it was read.
 ///
 /// Claims are reported as the file makes them, including one the
@@ -859,6 +912,11 @@ pub fn human_line(event: &Event) -> Option<String> {
             root.display()
         )),
         Event::LookupMissed { table, input } => Some(format!("{table}: no row for {input:?}")),
+        Event::LibraryExtraction { path, extraction } => Some(format!(
+            "{}: {}",
+            escaped(path),
+            what_was_extracted(extraction)
+        )),
         Event::LibraryStatus {
             root,
             artifacts,
@@ -1212,6 +1270,32 @@ fn what_was_admitted(admission: &Admission) -> String {
         Admission::Unwritten { message } => {
             format!("renamed but not recorded ({message})")
         }
+    }
+}
+
+/// `extraction` as the end of a sentence whose subject is the artifact,
+/// for the human rendering of [`Event::LibraryExtraction`], with the
+/// identifier and the reader's message escaped.
+///
+/// A `tier` naming neither pass is said to be from the file, as the
+/// interactive description says it.
+fn what_was_extracted(extraction: &Extraction) -> String {
+    match extraction {
+        Extraction::Found { identifier, tier } => format!(
+            "identifier {} {}",
+            escaped(identifier),
+            match tier.as_str() {
+                "embedded-metadata" => "from embedded metadata",
+                "text-layer" => "from the text layer",
+                _ => "from the file",
+            }
+        ),
+        Extraction::NoTextLayer => "no identifier found; the pages read hold no text".to_string(),
+        Extraction::TextWithoutIdentifier => {
+            "no identifier found in its metadata or the pages read".to_string()
+        }
+        Extraction::Encrypted => "encrypted, so no identifier could be read".to_string(),
+        Extraction::Unreadable { message } => format!("unreadable ({})", escaped(message)),
     }
 }
 

@@ -37,7 +37,7 @@ The real backend is exercised on the committed corpus in task 3.3.
 
 ## 1. The result vocabulary and the mapping
 
-- [ ] 1.1 Red: `crates/borax/tests/event.rs`:
+- [x] 1.1 Red: `crates/borax/tests/event.rs`:
       - For each `Extraction` variant, `json_line` of an
         `Event::LibraryExtraction` gives the exact line design D4 shows.
         That is `"schema":3`, `"event":"library-extraction"`, `path`
@@ -49,7 +49,7 @@ The real backend is exercised on the committed corpus in task 3.3.
       - `Extraction::is_found` is true for `Found` alone.
       - `Counts::observe` of a `LibraryExtraction` event, of each
         kind, leaves every counter at zero (design D8).
-- [ ] 1.2 Red: `crates/borax/tests/pipeline.rs`:
+- [x] 1.2 Red: `crates/borax/tests/pipeline.rs`:
       - `extraction_of` maps `Ok(Extracted)` with a DOI and
         `Tier::EmbeddedMetadata` to `Found { identifier: "doi:…",
         tier: "embedded-metadata" }`.
@@ -80,7 +80,7 @@ The real backend is exercised on the committed corpus in task 3.3.
         encrypted one still skips with `SkipReason::Unreadable`
         carrying `"PDF is encrypted"`. Doc comment: the collapse is a
         known deviation that Phase 3 owns.
-- [ ] 1.3 Green:
+- [x] 1.3 Green:
       - `Extraction` and `Extraction::is_found` in
         `crates/borax/src/event.rs`, serde only, with
         `Event::LibraryExtraction { path: String, extraction:
@@ -98,7 +98,7 @@ The real backend is exercised on the committed corpus in task 3.3.
 
 ## 2. The human line
 
-- [ ] 2.1 Red: `crates/borax/tests/event.rs`:
+- [x] 2.1 Red: `crates/borax/tests/event.rs`:
       - `human_line` of `LibraryExtraction` gives each string in
         design D7's table exactly, including the `from the file`
         fallback for a `tier` that is neither pass.
@@ -108,14 +108,14 @@ The real backend is exercised on the committed corpus in task 3.3.
         of the same event carries the raw character, encoded by JSON.
       - `render(Format::Human, e)` equals `human_line(e)` for every
         kind.
-- [ ] 2.2 Green: replace the placeholder arm with the D7 rendering in
+- [x] 2.2 Green: replace the placeholder arm with the D7 rendering in
       `crates/borax/src/event.rs`, passing the path, the identifier and
       the message through `crate::describe::escaped`. Do not change any
       existing line's rendering.
 
 ## 3. `status --identify` reports every artifact
 
-- [ ] 3.1 Red: `crates/borax/tests/dispatch.rs`, `events_for` with
+- [x] 3.1 Red: `crates/borax/tests/dispatch.rs`, `events_for` with
       `Command::status(.., true)`:
       - Update
         `status_identify_counts_artifacts_yielding_an_identifier_and_queries_no_source`
@@ -147,7 +147,7 @@ The real backend is exercised on the committed corpus in task 3.3.
         `LibraryExtraction` event.
       - An unmarked directory (`collection_root: None`) names paths
         relative to the directory given.
-- [ ] 3.2 Red: `crates/borax/tests/dispatch.rs`, the selection
+- [x] 3.2 Red: `crates/borax/tests/dispatch.rs`, the selection
       boundary. Use a `Documents` fake that records every path passed
       to `open` and `hash`. The library holds:
       - `paper.pdf`;
@@ -159,7 +159,7 @@ The real backend is exercised on the committed corpus in task 3.3.
 
       Exactly one `LibraryExtraction` event is emitted, for
       `"paper.pdf"`, and the fake saw `paper.pdf` alone.
-- [ ] 3.3 Red: `crates/borax/tests/end_to_end.rs`, the real backend.
+- [x] 3.3 Red: `crates/borax/tests/end_to_end.rs`, the real backend.
       Run `status --identify --json` through `invoke` over
       `library_of` copies of these fixtures:
       - `publisher-info-doi.pdf`;
@@ -186,7 +186,7 @@ The real backend is exercised on the committed corpus in task 3.3.
       is `Outcome::Success`, and the transport saw no request. Avoid
       `publisher-text-doi.pdf` and `doi-on-third-page.pdf`, which the
       corpus README records as red on the pure backend.
-- [ ] 3.4 Red: `crates/borax/tests/dispatch.rs`, `dispatch` in human
+- [x] 3.4 Red: `crates/borax/tests/dispatch.rs`, `dispatch` in human
       mode:
       - Over a library holding only the two controlled cases and an
         unreadable file, the output is one D7 line per artifact in path
@@ -197,7 +197,7 @@ The real backend is exercised on the committed corpus in task 3.3.
         seven counters zero.
       - An unreadable artifact whose message holds `\u{1b}` renders
         `\x1b` on its line.
-- [ ] 3.5 Red: `crates/borax/tests/streaming.rs`, liveness, modelled on
+- [x] 3.5 Red: `crates/borax/tests/streaming.rs`, liveness, modelled on
       `rename_preview_writes_each_file_s_resolved_line_before_the_next_file_is_hashed`.
       - `LiveDocuments` snapshots the shared writer when a file is
         hashed, and `status --identify` never hashes. Give the fake a
@@ -218,12 +218,12 @@ The real backend is exercised on the committed corpus in task 3.3.
         a `library-status` line.
       - The test fails against an implementation that collects the
         events and emits them after the loop (design D5).
-- [ ] 3.6 Red: `crates/borax/tests/library.rs`, `extraction_event`
+- [x] 3.6 Red: `crates/borax/tests/library.rs`, `extraction_event`
       over a `survey` of a fixture library gives
       `Event::LibraryExtraction` with the artifact's library-relative,
       `/`-separated path and the extraction unchanged. This covers an
       artifact at the root and one two directories down.
-- [ ] 3.7 Green:
+- [x] 3.7 Green:
       - `library::extraction_event` in `crates/borax/src/library.rs`,
         through `library_relative`, with the fallback design D6
         states.
