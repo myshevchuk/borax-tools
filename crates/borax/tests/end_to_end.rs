@@ -1178,3 +1178,115 @@ fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_ru
         transport.seen()
     );
 }
+
+// ---------------------------------------------------------------------
+// report-extraction-per-file, task 3.3: `status --identify` over the
+// real backend
+// ---------------------------------------------------------------------
+
+/// Six fixtures covering every `extraction` result kind, run through
+/// the pure-Rust PDF backend rather than a fake. Avoids
+/// `publisher-text-doi.pdf` and `doi-on-third-page.pdf`, which the
+/// corpus README records as red on the pure backend.
+const IDENTIFY_FIXTURES: [&str; 6] = [
+    "publisher-info-doi.pdf",
+    "arxiv-new-id.pdf",
+    "no-text-layer.pdf",
+    "no-identifier.pdf",
+    "encrypted-user-password.pdf",
+    "malformed-truncated.pdf",
+];
+
+#[test]
+fn status_identify_over_the_real_backend_reports_every_fixture() {
+    let library = library_of(&IDENTIFY_FIXTURES);
+    let state = tempdir().unwrap();
+    let master = state.path().join("refs.bib");
+
+    let ran = invoke(
+        Command::status(Some(library.path().to_path_buf()), true),
+        &master,
+        state.path(),
+        Some(library.path()),
+    );
+
+    assert_eq!(ran.outcome, Outcome::Success, "got {:?}", ran.outcome);
+    assert_eq!(ran.urls, Vec::<String>::new(), "got {:?}", ran.urls);
+
+    let extractions = ran.tagged("library-extraction");
+    let mut by_path: BTreeMap<String, Value> = BTreeMap::new();
+    for event in &extractions {
+        by_path.insert(
+            event["path"].as_str().unwrap().to_string(),
+            event["extraction"].clone(),
+        );
+    }
+
+    let found = &by_path["publisher-info-doi.pdf"];
+    assert_eq!(found["kind"], Value::from("found"));
+    assert_eq!(
+        found["identifier"],
+        Value::from("doi:10.1234/borax.2024.001")
+    );
+    assert_eq!(found["tier"], Value::from("embedded-metadata"));
+
+    let arxiv = &by_path["arxiv-new-id.pdf"];
+    assert_eq!(arxiv["kind"], Value::from("found"));
+    assert_eq!(arxiv["identifier"], Value::from("arXiv:2401.12345v2"));
+    assert_eq!(arxiv["tier"], Value::from("text-layer"));
+
+    assert_eq!(
+        by_path["no-text-layer.pdf"]["kind"],
+        Value::from("no-text-layer")
+    );
+    assert_eq!(
+        by_path["no-identifier.pdf"]["kind"],
+        Value::from("text-without-identifier")
+    );
+    assert_eq!(
+        by_path["encrypted-user-password.pdf"]["kind"],
+        Value::from("encrypted")
+    );
+
+    let unreadable = &by_path["malformed-truncated.pdf"];
+    assert_eq!(unreadable["kind"], Value::from("unreadable"));
+    assert!(
+        unreadable["message"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty()),
+        "got {unreadable:?}"
+    );
+
+    assert_eq!(
+        extractions.len(),
+        IDENTIFY_FIXTURES.len(),
+        "got {:?}",
+        ran.events
+    );
+
+    let statuses = ran.tagged("library-status");
+    assert_eq!(statuses.len(), 1, "got {:?}", ran.events);
+    assert_eq!(statuses[0]["identifiable"], Value::from(2));
+
+    assert_eq!(
+        ran.events
+            .iter()
+            .position(|event| event["event"] == "library-status"),
+        Some(ran.events.len() - 2),
+        "library-status must be the last event before run-finished: got {:?}",
+        ran.events
+    );
+    assert_eq!(
+        ran.events.last().unwrap()["event"],
+        Value::from("run-finished")
+    );
+    assert_eq!(
+        ran.events.last().unwrap()["counts"],
+        serde_json::json!({
+            "resolved": 0, "renamed": 0, "skipped": 0, "named": 0,
+            "unmatched": 0, "unreached": 0, "findings": 0,
+        }),
+        "got {:?}",
+        ran.events.last()
+    );
+}

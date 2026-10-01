@@ -6,12 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borax::event::{Admission, Event, Finding, LibraryAnswer, Repair};
+use borax::event::{Admission, Event, Extraction, Finding, LibraryAnswer, Repair};
 use borax::library::{
     ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, Consulted, ITEM_STORE, ItemStore,
     RecordFaults, STATE_DIR, Stores, Unrecorded, WorkDuplicate, admission_event, admit, artifacts,
-    contains, excludes, item_file_name, library_relative, missing, orphans, reconcile,
-    reconciliation_events, recorded_at, relative_to, store_write, strands, survey, validate,
+    contains, excludes, extraction_event, item_file_name, library_relative, missing, orphans,
+    reconcile, reconciliation_events, recorded_at, relative_to, store_write, strands, survey,
+    validate,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
@@ -4645,5 +4646,46 @@ fn validate_reports_an_unreadable_finding_for_an_unlistable_artifact_store() {
     assert!(
         matches!(finding, Finding::Unreadable { .. }),
         "got {finding:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// report-extraction-per-file, task 3.6: extraction_event names the
+// artifact library-relative (design D6, D10)
+// ---------------------------------------------------------------------
+
+/// `extraction_event` reports `extraction` for `artifact`, named
+/// relative to `survey.root` and `/`-separated, for an artifact at the
+/// root and one two directories down.
+#[test]
+fn extraction_event_names_the_artifact_library_relative() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("root.pdf"), b"").unwrap();
+    fs::create_dir_all(root.join("a/b")).unwrap();
+    fs::write(root.join("a/b/nested.pdf"), b"").unwrap();
+
+    let surveyed = survey(root);
+
+    let root_event = extraction_event(&surveyed, &root.join("root.pdf"), Extraction::NoTextLayer);
+    assert_eq!(
+        root_event,
+        Event::LibraryExtraction {
+            path: "root.pdf".to_string(),
+            extraction: Extraction::NoTextLayer,
+        }
+    );
+
+    let nested_event = extraction_event(
+        &surveyed,
+        &root.join("a/b/nested.pdf"),
+        Extraction::Encrypted,
+    );
+    assert_eq!(
+        nested_event,
+        Event::LibraryExtraction {
+            path: "a/b/nested.pdf".to_string(),
+            extraction: Extraction::Encrypted,
+        }
     );
 }

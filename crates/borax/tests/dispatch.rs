@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use borax::bib::{BibFiles, citation_key, sidecar_path};
 use borax::cache::{cleared_event, inspect, status_event};
@@ -15,8 +15,8 @@ use borax::config::{
     ValueKindName, resolve,
 };
 use borax::event::{
-    Admission, Adoption, Event, Level, LibraryAnswer, Overridden, Repair, SCHEMA, SkipReason,
-    human_line,
+    Admission, Adoption, Event, Extraction, Level, LibraryAnswer, Overridden, Repair, SCHEMA,
+    SkipReason, human_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -104,6 +104,36 @@ fn pdf_with_embedded_doi(value: &str) -> FakePdf {
 /// A PDF with a page of ordinary prose holding no identifier.
 fn pdf_with_no_identifier() -> FakePdf {
     FakePdf::new().with_pages(vec![Ok("just some prose, no identifiers here".to_string())])
+}
+
+/// A PDF whose only page is blank and whose metadata carries a title
+/// holding no identifier — the "no text layer" controlled case design
+/// D2 fixes the boundary with.
+fn pdf_blank_with_title() -> FakePdf {
+    FakePdf::new()
+        .with_pages(vec![Ok(" \n".to_string())])
+        .with_title("A Title")
+}
+
+/// A PDF with a page of readable prose and no identifier, whose
+/// metadata also carries a title holding no identifier — the "text
+/// without identifier" controlled case beside [`pdf_blank_with_title`].
+fn pdf_prose_with_title() -> FakePdf {
+    pdf_with_no_identifier().with_title("A Title")
+}
+
+/// The blank-page fake whose Info title itself holds a DOI.
+fn pdf_blank_with_doi_title(value: &str) -> FakePdf {
+    FakePdf::new()
+        .with_pages(vec![Ok(" \n".to_string())])
+        .with_title(value)
+}
+
+/// A PDF carrying `value` as an arXiv identifier in its first page's
+/// text, resolved on the text-layer pass, with no identifier anywhere
+/// in its metadata.
+fn pdf_with_text_arxiv(value: &str) -> FakePdf {
+    FakePdf::new().with_pages(vec![Ok(format!("see arXiv:{value} for details"))])
 }
 
 /// What [`FakeDocuments`] answers for one path.
@@ -6643,7 +6673,11 @@ fn status_without_identify_never_calls_documents_open() {
 
 /// Scenario "What is identifiable is asked for": `--identify` reports
 /// how many artifacts yield an identifier, and queries no service — the
-/// source it is given panics if it is ever asked anything.
+/// source it is given panics if it is ever asked anything. Each
+/// artifact is reported with what extraction found (updated assertion:
+/// a `library-extraction` event precedes `library-status` for each of
+/// the two artifacts, naming its result, with `identifiable` agreeing
+/// with how many of them were `found`).
 #[test]
 fn status_identify_counts_artifacts_yielding_an_identifier_and_queries_no_source() {
     let dir = tempdir().unwrap();
@@ -6694,17 +6728,878 @@ fn status_identify_counts_artifacts_yielding_an_identifier_and_queries_no_source
 
     assert_eq!(
         events,
-        vec![Event::LibraryStatus {
+        vec![
+            Event::LibraryExtraction {
+                path: "has-doi.pdf".to_string(),
+                extraction: Extraction::Found {
+                    identifier: "doi:10.1000/identify".to_string(),
+                    tier: "embedded-metadata".to_string(),
+                },
+            },
+            Event::LibraryExtraction {
+                path: "no-doi.pdf".to_string(),
+                extraction: Extraction::TextWithoutIdentifier,
+            },
+            Event::LibraryStatus {
+                root: root.clone(),
+                artifacts: 2,
+                items: 0,
+                records: 0,
+                orphans: 2,
+                nested: Vec::new(),
+                identifiable: Some(1),
+            },
+        ],
+        "got {events:?}"
+    );
+}
+
+/// Scenario "Each artifact is reported with what extraction found":
+/// `a.pdf` carries a DOI in its XMP packet, `sub/b.pdf` carries an
+/// arXiv identifier on its first page and none in its metadata. Both
+/// `library-extraction` events precede `library-status`, in survey
+/// order, `sub/b.pdf` is named with a `/` separator, and `identifiable`
+/// is `Some(2)`.
+#[test]
+fn status_identify_reports_each_artifact_in_survey_order_before_the_totals() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let a = root.join("a.pdf");
+    fs::create_dir_all(root.join("sub")).unwrap();
+    let b = root.join("sub").join("b.pdf");
+    fs::write(&a, b"").unwrap();
+    fs::write(&b, b"").unwrap();
+    let documents = FakeDocuments::new()
+        .with_file(
+            &a,
+            hash_for("survey-a"),
+            pdf_with_embedded_doi("10.1000/survey-a"),
+        )
+        .with_file(&b, hash_for("survey-b"), pdf_with_text_arxiv("2401.00001"));
+    let panicking = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panicking];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            Event::LibraryExtraction {
+                path: "a.pdf".to_string(),
+                extraction: Extraction::Found {
+                    identifier: "doi:10.1000/survey-a".to_string(),
+                    tier: "embedded-metadata".to_string(),
+                },
+            },
+            Event::LibraryExtraction {
+                path: "sub/b.pdf".to_string(),
+                extraction: Extraction::Found {
+                    identifier: "arXiv:2401.00001".to_string(),
+                    tier: "text-layer".to_string(),
+                },
+            },
+            Event::LibraryStatus {
+                root: root.clone(),
+                artifacts: 2,
+                items: 0,
+                records: 0,
+                orphans: 2,
+                nested: Vec::new(),
+                identifiable: Some(2),
+            },
+        ],
+        "got {events:?}"
+    );
+}
+
+/// Scenario "A blank page with an embedded title has no text layer" and
+/// "Readable text without an identifier is told apart": the two
+/// controlled cases are told apart from each other, and neither counts
+/// as identifiable.
+#[test]
+fn status_identify_tells_the_two_controlled_cases_apart() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let blank = root.join("blank.pdf");
+    let prose = root.join("prose.pdf");
+    fs::write(&blank, b"").unwrap();
+    fs::write(&prose, b"").unwrap();
+    let documents = FakeDocuments::new()
+        .with_file(&blank, hash_for("controlled-blank"), pdf_blank_with_title())
+        .with_file(&prose, hash_for("controlled-prose"), pdf_prose_with_title());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            Event::LibraryExtraction {
+                path: "blank.pdf".to_string(),
+                extraction: Extraction::NoTextLayer,
+            },
+            Event::LibraryExtraction {
+                path: "prose.pdf".to_string(),
+                extraction: Extraction::TextWithoutIdentifier,
+            },
+            Event::LibraryStatus {
+                root: root.clone(),
+                artifacts: 2,
+                items: 0,
+                records: 0,
+                orphans: 2,
+                nested: Vec::new(),
+                identifiable: Some(0),
+            },
+        ],
+        "got {events:?}"
+    );
+}
+
+/// Adding a third artifact whose title itself holds a DOI to the two
+/// controlled cases gives it `found` with `embedded-metadata`, and
+/// `identifiable` becomes `Some(1)`.
+#[test]
+fn status_identify_counts_a_title_holding_a_doi_as_identifiable() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let blank = root.join("blank.pdf");
+    let prose = root.join("prose.pdf");
+    let doi_title = root.join("doi-title.pdf");
+    fs::write(&blank, b"").unwrap();
+    fs::write(&prose, b"").unwrap();
+    fs::write(&doi_title, b"").unwrap();
+    let documents = FakeDocuments::new()
+        .with_file(&blank, hash_for("title-blank"), pdf_blank_with_title())
+        .with_file(&prose, hash_for("title-prose"), pdf_prose_with_title())
+        .with_file(
+            &doi_title,
+            hash_for("title-doi"),
+            pdf_blank_with_doi_title("10.1234/example"),
+        );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let doi_event = events
+        .iter()
+        .find(|event| matches!(event, Event::LibraryExtraction { path, .. } if path == "doi-title.pdf"))
+        .unwrap_or_else(|| panic!("no library-extraction event for doi-title.pdf: {events:?}"));
+    assert_eq!(
+        doi_event,
+        &Event::LibraryExtraction {
+            path: "doi-title.pdf".to_string(),
+            extraction: Extraction::Found {
+                identifier: "doi:10.1234/example".to_string(),
+                tier: "embedded-metadata".to_string(),
+            },
+        }
+    );
+    assert_eq!(
+        events.last(),
+        Some(&Event::LibraryStatus {
             root: root.clone(),
-            artifacts: 2,
+            artifacts: 3,
             items: 0,
             records: 0,
-            orphans: 2,
+            orphans: 3,
             nested: Vec::new(),
             identifiable: Some(1),
+        }),
+        "got {events:?}"
+    );
+}
+
+/// Scenario "Encrypted and unreadable artifacts are told apart":
+/// neither is reported as a file without an identifier.
+#[test]
+fn status_identify_tells_encrypted_and_unreadable_apart() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let encrypted = root.join("encrypted.pdf");
+    let unreadable = root.join("unreadable.pdf");
+    fs::write(&encrypted, b"").unwrap();
+    fs::write(&unreadable, b"").unwrap();
+    let documents = FakeDocuments::new()
+        .with_open_error(
+            &encrypted,
+            hash_for("encrypted"),
+            ExtractionError::Encrypted,
+        )
+        .with_open_error(
+            &unreadable,
+            hash_for("unreadable"),
+            ExtractionError::Unreadable {
+                message: "truncated stream".to_string(),
+            },
+        );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            Event::LibraryExtraction {
+                path: "encrypted.pdf".to_string(),
+                extraction: Extraction::Encrypted,
+            },
+            Event::LibraryExtraction {
+                path: "unreadable.pdf".to_string(),
+                extraction: Extraction::Unreadable {
+                    message: "truncated stream".to_string(),
+                },
+            },
+            Event::LibraryStatus {
+                root: root.clone(),
+                artifacts: 2,
+                items: 0,
+                records: 0,
+                orphans: 2,
+                nested: Vec::new(),
+                identifiable: Some(0),
+            },
+        ],
+        "got {events:?}"
+    );
+}
+
+/// design D5: `identifiable` equals the number of `library-extraction`
+/// events whose result `is_found()`, counted from the returned events
+/// themselves rather than asserted to equal some other number — so the
+/// totals and the per-file results cannot disagree by construction.
+#[test]
+fn status_identify_identifiable_agrees_with_the_found_extraction_events() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let found = root.join("found.pdf");
+    let blank = root.join("blank.pdf");
+    let prose = root.join("prose.pdf");
+    fs::write(&found, b"").unwrap();
+    fs::write(&blank, b"").unwrap();
+    fs::write(&prose, b"").unwrap();
+    let documents = FakeDocuments::new()
+        .with_file(
+            &found,
+            hash_for("agree-found"),
+            pdf_with_embedded_doi("10.1000/agree"),
+        )
+        .with_file(&blank, hash_for("agree-blank"), pdf_blank_with_title())
+        .with_file(&prose, hash_for("agree-prose"), pdf_prose_with_title());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let found_count = events
+        .iter()
+        .filter(|event| match event {
+            Event::LibraryExtraction { extraction, .. } => extraction.is_found(),
+            _ => false,
+        })
+        .count();
+    let identifiable = events.iter().find_map(|event| match event {
+        Event::LibraryStatus { identifiable, .. } => Some(*identifiable),
+        _ => None,
+    });
+
+    assert_eq!(identifiable, Some(Some(found_count)), "got {events:?}");
+    assert_eq!(found_count, 1, "got {events:?}");
+}
+
+/// Scenario "What is identifiable is asked for" / design D5: plain
+/// `status` over the same library emits no `library-extraction` event
+/// at all.
+#[test]
+fn status_without_identify_emits_no_library_extraction_event() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let path = root.join("has-doi.pdf");
+    fs::write(&path, b"").unwrap();
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("no-identify-flag"),
+        pdf_with_embedded_doi("10.1000/no-flag"),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::LibraryExtraction { .. })),
+        "got {events:?}"
+    );
+}
+
+/// An unmarked directory (`collection_root: None`) names paths relative
+/// to the directory given, the same as a marked one.
+#[test]
+fn status_identify_over_an_unmarked_directory_names_paths_relative_to_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    // Deliberately no `.borax.toml`: nobody has marked this directory.
+    let path = root.join("has-doi.pdf");
+    fs::write(&path, b"").unwrap();
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("unmarked"),
+        pdf_with_embedded_doi("10.1000/unmarked"),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events.first(),
+        Some(&Event::LibraryExtraction {
+            path: "has-doi.pdf".to_string(),
+            extraction: Extraction::Found {
+                identifier: "doi:10.1000/unmarked".to_string(),
+                tier: "embedded-metadata".to_string(),
+            },
+        }),
+        "got {events:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// events_for: Command::Status --identify — the selection boundary
+// (task 3.2)
+// ---------------------------------------------------------------------
+
+/// A [`Documents`] fake that records every path passed to `open` and
+/// `hash`, so a test can prove the selection `status --identify`
+/// inspects is exactly `survey.artifacts` — no sidecar, item, `.borax/`
+/// file, nested library or symlink target is ever touched.
+struct RecordingDocuments {
+    inner: FakeDocuments,
+    opened: Mutex<Vec<PathBuf>>,
+    hashed: Mutex<Vec<PathBuf>>,
+}
+
+impl RecordingDocuments {
+    fn new(inner: FakeDocuments) -> RecordingDocuments {
+        RecordingDocuments {
+            inner,
+            opened: Mutex::new(Vec::new()),
+            hashed: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn opened(&self) -> Vec<PathBuf> {
+        self.opened.lock().unwrap().clone()
+    }
+
+    fn hashed(&self) -> Vec<PathBuf> {
+        self.hashed.lock().unwrap().clone()
+    }
+}
+
+impl Documents for RecordingDocuments {
+    fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
+        self.hashed.lock().unwrap().push(path.to_path_buf());
+        self.inner.hash(path)
+    }
+
+    fn open(&self, path: &Path) -> Result<Box<dyn PdfSource>, ExtractionError> {
+        self.opened.lock().unwrap().push(path.to_path_buf());
+        self.inner.open(path)
+    }
+}
+
+/// Scenario "Only the counted artifacts are inspected": `paper.pdf`'s
+/// sidecar, a PDF under `items/`, a PDF under `.borax/`, a PDF in a
+/// nested library and, on Unix, a symlink to a PDF outside the tree are
+/// all left out of the selection `status --identify` inspects.
+#[test]
+fn status_identify_opens_only_the_surveyed_artifact() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let paper = root.join("paper.pdf");
+    fs::write(&paper, b"").unwrap();
+    fs::write(root.join("paper.pdf.bib"), b"").unwrap();
+    fs::create_dir_all(root.join("items")).unwrap();
+    fs::write(root.join("items").join("item.pdf"), b"").unwrap();
+    fs::create_dir_all(root.join(".borax")).unwrap();
+    fs::write(root.join(".borax").join("hidden.pdf"), b"").unwrap();
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested").join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("nested").join("inner.pdf"), b"").unwrap();
+    #[cfg(unix)]
+    {
+        let outside = dir.path().parent().unwrap().join("outside.pdf");
+        fs::write(&outside, b"").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.pdf")).unwrap();
+    }
+
+    let documents = RecordingDocuments::new(FakeDocuments::new().with_file(
+        &paper,
+        hash_for("selection-boundary"),
+        pdf_with_embedded_doi("10.1000/selection"),
+    ));
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let extractions: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::LibraryExtraction { .. }))
+        .collect();
+    assert_eq!(
+        extractions,
+        vec![&Event::LibraryExtraction {
+            path: "paper.pdf".to_string(),
+            extraction: Extraction::Found {
+                identifier: "doi:10.1000/selection".to_string(),
+                tier: "embedded-metadata".to_string(),
+            },
         }],
         "got {events:?}"
     );
+    assert_eq!(
+        documents.opened(),
+        vec![paper.clone()],
+        "got {:?}",
+        documents.opened()
+    );
+    assert!(
+        documents.hashed().is_empty(),
+        "extraction hashes nothing: got {:?}",
+        documents.hashed()
+    );
+}
+
+// ---------------------------------------------------------------------
+// dispatch, human mode: status --identify (task 3.4)
+// ---------------------------------------------------------------------
+
+/// Scenario "Failed extraction is not a partial run": one D7 line per
+/// artifact in path order, then the report line ending `0
+/// identifiable` as the last line. No line contains `resolved,` or
+/// `skipped`, and the outcome is `Outcome::Success`.
+#[test]
+fn status_identify_human_mode_lists_each_artifact_before_the_report_line() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let blank = root.join("a-blank.pdf");
+    let prose = root.join("b-prose.pdf");
+    let unreadable = root.join("c-unreadable.pdf");
+    fs::write(&blank, b"").unwrap();
+    fs::write(&prose, b"").unwrap();
+    fs::write(&unreadable, b"").unwrap();
+    let documents = FakeDocuments::new()
+        .with_file(&blank, hash_for("human-blank"), pdf_blank_with_title())
+        .with_file(&prose, hash_for("human-prose"), pdf_prose_with_title())
+        .with_open_error(
+            &unreadable,
+            hash_for("human-unreadable"),
+            ExtractionError::Unreadable {
+                message: "truncated stream".to_string(),
+            },
+        );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::status(Some(root.clone()), true), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "a-blank.pdf: no identifier found; the pages read hold no text",
+            "b-prose.pdf: no identifier found in its metadata or the pages read",
+            "c-unreadable.pdf: unreadable (truncated stream)",
+            &format!(
+                "{}: 3 artifacts, 0 items, 0 records, 3 orphans, 0 identifiable",
+                root.display()
+            ),
+        ],
+        "got {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("resolved,") || line.contains("skipped")),
+        "got {lines:?}"
+    );
+}
+
+/// The same run with `--json` ends on `run-finished` with all seven
+/// counters zero: an extraction result is not a skip and not a finding.
+#[test]
+fn status_identify_json_run_finished_counts_nothing_for_extraction_results() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let blank = root.join("a-blank.pdf");
+    let prose = root.join("b-prose.pdf");
+    let unreadable = root.join("c-unreadable.pdf");
+    fs::write(&blank, b"").unwrap();
+    fs::write(&prose, b"").unwrap();
+    fs::write(&unreadable, b"").unwrap();
+    let documents = FakeDocuments::new()
+        .with_file(&blank, hash_for("json-blank"), pdf_blank_with_title())
+        .with_file(&prose, hash_for("json-prose"), pdf_prose_with_title())
+        .with_open_error(
+            &unreadable,
+            hash_for("json-unreadable"),
+            ExtractionError::Unreadable {
+                message: "truncated stream".to_string(),
+            },
+        );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::status(Some(root.clone()), true), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(last["event"], serde_json::Value::from("run-finished"));
+    assert_eq!(
+        last["counts"],
+        serde_json::json!({
+            "resolved": 0, "renamed": 0, "skipped": 0, "named": 0,
+            "unmatched": 0, "unreached": 0, "findings": 0,
+        }),
+        "got {last}"
+    );
+}
+
+/// An unreadable artifact whose message holds `\u{1b}` renders `\x1b`
+/// on its line.
+#[test]
+fn status_identify_human_mode_escapes_an_escape_character_in_the_message() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let unreadable = root.join("paper.pdf");
+    fs::write(&unreadable, b"").unwrap();
+    let documents = FakeDocuments::new().with_open_error(
+        &unreadable,
+        hash_for("escape-message"),
+        ExtractionError::Unreadable {
+            message: "\u{1b}[2J".to_string(),
+        },
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::status(Some(root.clone()), true), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.lines()
+            .any(|line| line == "paper.pdf: unreadable (\\x1b[2J)"),
+        "got {text:?}"
+    );
+    assert!(!text.contains('\u{1b}'), "got {text:?}");
+}
+
+/// Scenario "A blank page with an embedded title has no text layer" /
+/// "Only the counted artifacts are inspected": `status` run in human
+/// mode over a library in which no artifact yields an identifier is a
+/// success, not a partial run.
+#[test]
+fn status_identify_human_mode_over_all_failures_still_exits_success() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let path = root.join("blank.pdf");
+    fs::write(&path, b"").unwrap();
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_for("all-fail"), pdf_blank_with_title());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::status(Some(root.clone()), true), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
 }
 
 /// Scenario "A library nobody marked": a directory with no

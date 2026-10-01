@@ -3,8 +3,9 @@
 use std::path::PathBuf;
 
 use borax::event::{
-    Attempt, Claim, ClaimOrigin, Counts, Diagnostic, Event, Format, Level, LibraryAnswer, SCHEMA,
-    SkipReason, Summary, TableUsed, human_line, human_summary, json_line, render,
+    Attempt, Claim, ClaimOrigin, Counts, Diagnostic, Event, Extraction, Format, Level,
+    LibraryAnswer, SCHEMA, SkipReason, Summary, TableUsed, human_line, human_summary, json_line,
+    render,
 };
 use borax::pipeline::{FileOutcome, FileRecord, event_for};
 use borax_core::content::{ContentHash, hash_bytes};
@@ -1911,4 +1912,243 @@ fn human_line_with_no_library_consultation_is_unchanged() {
         human_line(&resolved()).unwrap(),
         "paper.pdf: resolved 10.1000/xyz123 via crossref"
     );
+}
+
+// ---------------------------------------------------------------------
+// Event::LibraryExtraction — report-extraction-per-file, task 1.1
+// ---------------------------------------------------------------------
+
+fn library_extraction(path: &str, extraction: Extraction) -> Event {
+    Event::LibraryExtraction {
+        path: path.to_string(),
+        extraction,
+    }
+}
+
+/// One instance of every [`Extraction`] variant, paired with the
+/// `extraction` object design D4 shows for it.
+fn all_extractions() -> Vec<(Extraction, serde_json::Value)> {
+    vec![
+        (
+            Extraction::Found {
+                identifier: "doi:10.1234/x".to_string(),
+                tier: "text-layer".to_string(),
+            },
+            serde_json::json!({
+                "kind": "found",
+                "identifier": "doi:10.1234/x",
+                "tier": "text-layer",
+            }),
+        ),
+        (
+            Extraction::NoTextLayer,
+            serde_json::json!({"kind": "no-text-layer"}),
+        ),
+        (
+            Extraction::TextWithoutIdentifier,
+            serde_json::json!({"kind": "text-without-identifier"}),
+        ),
+        (
+            Extraction::Encrypted,
+            serde_json::json!({"kind": "encrypted"}),
+        ),
+        (
+            Extraction::Unreadable {
+                message: "truncated stream".to_string(),
+            },
+            serde_json::json!({"kind": "unreadable", "message": "truncated stream"}),
+        ),
+    ]
+}
+
+/// design D4: `json_line` of `Event::LibraryExtraction` carries
+/// `schema`, `event`, `path` and `extraction`, the last tagged by
+/// `kind` in kebab-case, for every result kind.
+#[test]
+fn json_line_of_library_extraction_matches_design_d4_for_every_kind() {
+    for (extraction, expected_extraction) in all_extractions() {
+        let event = library_extraction("sub/a.pdf", extraction.clone());
+        let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema": 3,
+                "event": "library-extraction",
+                "path": "sub/a.pdf",
+                "extraction": expected_extraction,
+            }),
+            "extraction {extraction:?} produced {value}"
+        );
+    }
+}
+
+/// Every `library-extraction` line deserializes back to the event it
+/// was rendered from.
+#[test]
+fn json_line_of_library_extraction_round_trips_for_every_kind() {
+    for (extraction, _) in all_extractions() {
+        let event = library_extraction("sub/a.pdf", extraction);
+        let line = json_line(&event);
+        let parsed: Event = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed, event);
+    }
+}
+
+/// `Extraction::is_found` is true for `Found` alone.
+#[test]
+fn extraction_is_found_is_true_for_found_alone() {
+    for (extraction, _) in all_extractions() {
+        let expected = matches!(extraction, Extraction::Found { .. });
+        assert_eq!(
+            extraction.is_found(),
+            expected,
+            "is_found() disagreed for {extraction:?}"
+        );
+    }
+}
+
+/// design D8: a `library-extraction` event is neither a skip nor a
+/// finding, for every result kind — `Counts::observe` leaves every
+/// counter at zero.
+#[test]
+fn counts_observe_of_library_extraction_counts_nothing_for_every_kind() {
+    for (extraction, _) in all_extractions() {
+        let mut counts = Counts::default();
+        counts.observe(&library_extraction("sub/a.pdf", extraction.clone()));
+        assert_eq!(
+            counts,
+            Counts::default(),
+            "extraction {extraction:?} changed the totals"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Event::LibraryExtraction — human rendering, task 2.1
+// ---------------------------------------------------------------------
+
+/// design D7: the exact human line for every result kind.
+#[test]
+fn human_line_of_library_extraction_matches_design_d7_for_every_kind() {
+    let cases: Vec<(Extraction, &str)> = vec![
+        (
+            Extraction::Found {
+                identifier: "doi:10.1234/x".to_string(),
+                tier: "embedded-metadata".to_string(),
+            },
+            "sub/a.pdf: identifier doi:10.1234/x from embedded metadata",
+        ),
+        (
+            Extraction::Found {
+                identifier: "doi:10.1234/x".to_string(),
+                tier: "text-layer".to_string(),
+            },
+            "sub/a.pdf: identifier doi:10.1234/x from the text layer",
+        ),
+        (
+            Extraction::Found {
+                identifier: "doi:10.1234/x".to_string(),
+                tier: "supplied".to_string(),
+            },
+            "sub/a.pdf: identifier doi:10.1234/x from the file",
+        ),
+        (
+            Extraction::NoTextLayer,
+            "sub/a.pdf: no identifier found; the pages read hold no text",
+        ),
+        (
+            Extraction::TextWithoutIdentifier,
+            "sub/a.pdf: no identifier found in its metadata or the pages read",
+        ),
+        (
+            Extraction::Encrypted,
+            "sub/a.pdf: encrypted, so no identifier could be read",
+        ),
+        (
+            Extraction::Unreadable {
+                message: "truncated stream".to_string(),
+            },
+            "sub/a.pdf: unreadable (truncated stream)",
+        ),
+    ];
+
+    for (extraction, expected) in cases {
+        let event = library_extraction("sub/a.pdf", extraction.clone());
+        assert_eq!(
+            human_line(&event).unwrap(),
+            expected,
+            "extraction {extraction:?}"
+        );
+    }
+}
+
+/// design D7: a control character in the path is written as `\xNN` on
+/// the human line, and carried raw by the JSON line — JSON is escaped
+/// by its own encoding.
+#[test]
+fn human_line_of_library_extraction_escapes_control_characters_in_the_path() {
+    let path = "\u{1b}[2Jpaper.pdf";
+    let event = library_extraction(path, Extraction::NoTextLayer);
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "\\x1b[2Jpaper.pdf: no identifier found; the pages read hold no text"
+    );
+
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(value["path"], Value::from(path));
+}
+
+/// The same escaping applies to the identifier on a `found` line.
+#[test]
+fn human_line_of_library_extraction_escapes_control_characters_in_the_identifier() {
+    let event = library_extraction(
+        "paper.pdf",
+        Extraction::Found {
+            identifier: "doi:10.1234/\u{1b}[2J".to_string(),
+            tier: "text-layer".to_string(),
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: identifier doi:10.1234/\\x1b[2J from the text layer"
+    );
+
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(
+        value["extraction"]["identifier"],
+        Value::from("doi:10.1234/\u{1b}[2J")
+    );
+}
+
+/// design D7's own example: a message holding `"\u{1b}[2J"` renders
+/// `\x1b[2J` on an `unreadable` line, while `json_line` of the same
+/// event carries the message unchanged.
+#[test]
+fn human_line_of_library_extraction_escapes_control_characters_in_the_message() {
+    let event = library_extraction(
+        "paper.pdf",
+        Extraction::Unreadable {
+            message: "\u{1b}[2J".to_string(),
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: unreadable (\\x1b[2J)"
+    );
+
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(value["extraction"]["message"], Value::from("\u{1b}[2J"));
+}
+
+/// `render(Format::Human, e)` equals `human_line(e)` for every kind.
+#[test]
+fn render_human_equals_human_line_for_every_library_extraction_kind() {
+    for (extraction, _) in all_extractions() {
+        let event = library_extraction("sub/a.pdf", extraction);
+        assert_eq!(render(Format::Human, &event), human_line(&event));
+    }
 }

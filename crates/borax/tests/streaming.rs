@@ -17,6 +17,7 @@
 //! still leaves stdout without `run-started` or `run-finished`.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -36,22 +37,24 @@ use borax_sources::cache::MemoryCache;
 use borax_sources::source::{Source, SourceError, SourceName};
 use borax_sources::store::ContentIndex;
 use serde_json::Value;
+use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
 // Fakes
 // ---------------------------------------------------------------------
 
-/// A [`PdfSource`] fake carrying an embedded DOI in its XMP packet,
-/// following the shape of the one in `dispatch.rs`.
+/// A [`PdfSource`] fake carrying an embedded DOI in its XMP packet, or a
+/// page of text, following the shape of the one in `dispatch.rs`.
 #[derive(Clone)]
 struct FakePdf {
     info: InfoMetadata,
     xmp: Option<String>,
+    pages: Vec<Result<String, ExtractionError>>,
 }
 
 impl PdfSource for FakePdf {
     fn page_count(&self) -> usize {
-        0
+        self.pages.len()
     }
 
     fn info_metadata(&self) -> &InfoMetadata {
@@ -62,8 +65,8 @@ impl PdfSource for FakePdf {
         self.xmp.as_deref()
     }
 
-    fn page_text(&self, _index: usize) -> Result<String, ExtractionError> {
-        Ok(String::new())
+    fn page_text(&self, index: usize) -> Result<String, ExtractionError> {
+        self.pages[index].clone()
     }
 }
 
@@ -73,6 +76,17 @@ fn pdf_with_embedded_doi(value: &str) -> FakePdf {
     FakePdf {
         info: InfoMetadata::default(),
         xmp: Some(format!("<prism:doi>{value}</prism:doi>")),
+        pages: Vec::new(),
+    }
+}
+
+/// A PDF with a page of ordinary prose holding no identifier, carrying
+/// no identifier in its metadata either.
+fn pdf_with_no_identifier() -> FakePdf {
+    FakePdf {
+        info: InfoMetadata::default(),
+        xmp: None,
+        pages: vec![Ok("just some prose, no identifiers here".to_string())],
     }
 }
 
@@ -93,6 +107,11 @@ struct LiveDocuments {
     entries: BTreeMap<PathBuf, LibraryEntry>,
     out: Arc<Mutex<Vec<u8>>>,
     snapshots: Mutex<Vec<(PathBuf, String)>>,
+    /// What `out` held, in call order, the moment each file was
+    /// *opened* — the seam `status --identify` drives instead of
+    /// `hash`, so the liveness proof for that command is taken here
+    /// rather than on [`LiveDocuments::snapshots`].
+    open_snapshots: Mutex<Vec<(PathBuf, String)>>,
 }
 
 impl LiveDocuments {
@@ -101,6 +120,7 @@ impl LiveDocuments {
             entries: BTreeMap::new(),
             out,
             snapshots: Mutex::new(Vec::new()),
+            open_snapshots: Mutex::new(Vec::new()),
         }
     }
 
@@ -118,6 +138,11 @@ impl LiveDocuments {
     /// requested.
     fn snapshots(&self) -> Vec<(PathBuf, String)> {
         self.snapshots.lock().unwrap().clone()
+    }
+
+    /// What `out` held, in call order, the moment each file was opened.
+    fn open_snapshots(&self) -> Vec<(PathBuf, String)> {
+        self.open_snapshots.lock().unwrap().clone()
     }
 }
 
@@ -138,6 +163,12 @@ impl Documents for LiveDocuments {
     }
 
     fn open(&self, path: &Path) -> Result<Box<dyn PdfSource>, ExtractionError> {
+        let seen = String::from_utf8(self.out.lock().unwrap().clone()).unwrap();
+        self.open_snapshots
+            .lock()
+            .unwrap()
+            .push((path.to_path_buf(), seen));
+
         self.entries
             .get(path)
             .map(|entry| Box::new(entry.pdf.clone()) as Box<dyn PdfSource>)
@@ -606,4 +637,121 @@ fn a_normal_json_run_emits_both_run_started_and_run_finished() {
         lines.iter().any(|line| line["event"] == "run-finished"),
         "got {lines:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Liveness: status --identify (task 3.5)
+// ---------------------------------------------------------------------
+
+/// `status --identify` drives [`Documents::open`], not
+/// [`Documents::hash`] — unlike `rename`'s liveness test above, each
+/// file's `library-extraction` line must already be on the writer
+/// before the next file is opened. The test fails against an
+/// implementation that collects the events and emits them only after
+/// the loop over the library's artifacts is done (design D5).
+#[test]
+fn status_identify_writes_each_artifact_s_extraction_line_before_the_next_file_is_opened() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let a = root.join("a.pdf");
+    let b = root.join("b.pdf");
+    let c = root.join("c.pdf");
+    fs::write(&a, b"").unwrap();
+    fs::write(&b, b"").unwrap();
+    fs::write(&c, b"").unwrap();
+
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let documents = LiveDocuments::new(Arc::clone(&buffer))
+        .with_file(
+            &a,
+            hash_for("status-a"),
+            pdf_with_embedded_doi("10.1000/status-a"),
+        )
+        .with_file(&b, hash_for("status-b"), pdf_with_no_identifier())
+        .with_file(
+            &c,
+            hash_for("status-c"),
+            pdf_with_embedded_doi("10.1000/status-c"),
+        );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem;
+    let bib_files = FakeBibFiles;
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let mut out = SharedWriter(Arc::clone(&buffer));
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::status(Some(root.clone()), true), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let opens = documents.open_snapshots();
+    assert_eq!(
+        opens.len(),
+        3,
+        "expected one open() call per file, got {opens:?}"
+    );
+
+    assert_eq!(opens[0].0, a);
+    let extraction_lines = |text: &str| -> usize {
+        json_lines(text.as_bytes())
+            .iter()
+            .filter(|line| line["event"] == "library-extraction")
+            .count()
+    };
+    assert_eq!(
+        extraction_lines(&opens[0].1),
+        0,
+        "nothing has been extracted yet when the first file is opened:\n{}",
+        opens[0].1
+    );
+
+    assert_eq!(opens[1].0, b);
+    assert_eq!(
+        extraction_lines(&opens[1].1),
+        1,
+        "a.pdf's library-extraction line must already be on the writer before b.pdf is opened:\n{}",
+        opens[1].1
+    );
+
+    assert_eq!(opens[2].0, c);
+    assert_eq!(
+        extraction_lines(&opens[2].1),
+        2,
+        "a.pdf's and b.pdf's library-extraction lines must already be on the writer before \
+         c.pdf is opened:\n{}",
+        opens[2].1
+    );
+
+    for (path, seen) in &opens {
+        assert!(
+            !json_lines(seen.as_bytes())
+                .iter()
+                .any(|line| line["event"] == "library-status"),
+            "no open-time snapshot may hold the totals event, got one when {} was opened:\n{}",
+            path.display(),
+            seen
+        );
+    }
 }
