@@ -369,7 +369,7 @@ doc comment, and a sentence naming the new events is added.
 
 ## 6. Documents
 
-- [ ] 6.1 Doc writer (`codex-docs`), an update job on `docs/manual.org`.
+- [x] 6.1 Doc writer (`codex-docs`), an update job on `docs/manual.org`.
       Sources: this proposal, its design and its spec delta. The
       implementer does not write it. The orchestrator checks the diff
       against the sources.
@@ -399,7 +399,7 @@ doc comment, and a sentence naming the new events is added.
         - where it comes in `status` and `validate` streams;
         - the new `adoption` kind `unindexed`;
         - the schema is still 3.
-- [ ] 6.2 Doc writer, `CHANGELOG.md`, under Unreleased:
+- [x] 6.2 Doc writer, `CHANGELOG.md`, under Unreleased:
       - "Added": the `library-condition` event and its three kinds, and
         the `unindexed` adoption kind, with the schema still 3.
       - "Changed":
@@ -410,7 +410,7 @@ doc comment, and a sentence naming the new events is added.
           index cannot answer for, so a consumer counting
           `library-adoption` events should dispatch on `adoption.kind`;
         - exit status is unchanged.
-- [ ] 6.3 Record the built state in `openspec/STATE.md`:
+- [x] 6.3 Record the built state in `openspec/STATE.md`:
       - Under "What is built", a paragraph naming:
         - the second use of the D1 boundary;
         - the `library-condition` event;
