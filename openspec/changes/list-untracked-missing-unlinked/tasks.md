@@ -39,7 +39,7 @@ doc comment, and a sentence naming the new events is added.
 
 ## 1. The vocabulary
 
-- [ ] 1.1 Red: `crates/borax/tests/event.rs`:
+- [x] 1.1 Red: `crates/borax/tests/event.rs`:
       - `json_line` of `Event::LibraryCondition` gives exactly the lines
         of design D3, one per kind:
         - `{"schema":3,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}`;
@@ -56,7 +56,7 @@ doc comment, and a sentence naming the new events is added.
         tag, round trip, `render` agreement).
       - `Counts::observe` of each new event leaves every counter at
         zero (D8).
-- [ ] 1.2 Green:
+- [x] 1.2 Green:
       - `Condition` and `Event::LibraryCondition { path: String,
         condition: Condition }` in `crates/borax/src/event.rs`, with
         serde only.
@@ -70,7 +70,7 @@ doc comment, and a sentence naming the new events is added.
 
 ## 2. The human lines
 
-- [ ] 2.1 Red: `crates/borax/tests/event.rs`:
+- [x] 2.1 Red: `crates/borax/tests/event.rs`:
       - `human_line` gives each string in design D7's table exactly,
         for each condition kind and for `Adoption::Unindexed`. For
         example:
@@ -88,7 +88,7 @@ doc comment, and a sentence naming the new events is added.
         existing kind.
       - `render(Format::Human, e)` equals `human_line(e)` for every new
         event.
-- [ ] 2.2 Green: replace both placeholders with the D7 rendering in
+- [x] 2.2 Green: replace both placeholders with the D7 rendering in
       `crates/borax/src/event.rs`. Pass every condition `path`, and the
       `LibraryAdoption` arm's `path`, through
       `crate::describe::escaped`. Leave every other line's rendering
@@ -96,7 +96,7 @@ doc comment, and a sentence naming the new events is added.
 
 ## 3. `status` names every orphan
 
-- [ ] 3.1 Red: update the existing tests in
+- [x] 3.1 Red: update the existing tests in
       `crates/borax/tests/dispatch.rs` that the orphan events break.
       Each library they build has no records, so every artifact is an
       orphan:
@@ -129,7 +129,7 @@ doc comment, and a sentence naming the new events is added.
       test that fails only because an orphan condition appears is
       updated the same way and named in the commit. One that fails for
       another reason goes back to the orchestrator.
-- [ ] 3.2 Red: `crates/borax/tests/dispatch.rs`, `events_for` with
+- [x] 3.2 Red: `crates/borax/tests/dispatch.rs`, `events_for` with
       `Command::status`:
       - A library holding `kept.pdf`, which a record names at its own
         path, and `new.pdf`. Plain `status` emits exactly
@@ -150,7 +150,7 @@ doc comment, and a sentence naming the new events is added.
       - No `LibraryCondition` from `status` has kind `Missing` or
         `Unlinked`, even over a library holding a record whose path
         holds no file and an item no record links to (D4).
-- [ ] 3.3 Red: `crates/borax/tests/dispatch.rs`, `dispatch` in human
+- [x] 3.3 Red: `crates/borax/tests/dispatch.rs`, `dispatch` in human
       mode:
       - Plain `status` over two orphans prints the two D7 orphan lines
         in path order, then the report line as the last line. No line
@@ -160,7 +160,7 @@ doc comment, and a sentence naming the new events is added.
         its line. The `--json` run carries the raw path.
       - The `--json` run ends on `run-finished` with all seven counters
         zero.
-- [ ] 3.4 Red: `crates/borax/tests/streaming.rs`, liveness. Model it on
+- [x] 3.4 Red: `crates/borax/tests/streaming.rs`, liveness. Model it on
       `status_identify_writes_each_artifact_s_extraction_line_before_the_next_file_is_opened`,
       using the same `LiveDocuments` open snapshots, which are not
       changed:
@@ -171,13 +171,13 @@ doc comment, and a sentence naming the new events is added.
       - No open-time snapshot holds a `library-status` line.
       - The test fails against an implementation that writes the orphan
         events after the extraction loop (D5).
-- [ ] 3.5 Red: `crates/borax/tests/library.rs`, `orphan_events` over a
+- [x] 3.5 Red: `crates/borax/tests/library.rs`, `orphan_events` over a
       `survey` of a fixture library. It gives one
       `Event::LibraryCondition { path, Orphan }` per entry of
       `survey.orphans`, in that order, with library-relative,
       `/`-separated paths. Cover an orphan at the root and one two
       directories down. A recorded artifact is absent.
-- [ ] 3.6 Green:
+- [x] 3.6 Green:
       - `library::orphan_events` in `crates/borax/src/library.rs`. Share
         the library-relative fallback with `extraction_event` through
         one private helper (D10).
@@ -189,7 +189,7 @@ doc comment, and a sentence naming the new events is added.
 
 ## 4. `validate` names every condition it counts
 
-- [ ] 4.1 Red: update existing tests to the new `Validation` and to the
+- [x] 4.1 Red: update existing tests to the new `Validation` and to the
       new events:
       - `crates/borax/tests/library.rs`, the mechanical change from
         `result.orphans`, `.missing` and `.unlinked` to
@@ -215,7 +215,7 @@ doc comment, and a sentence naming the new events is added.
         Rename the test to say what it now asserts, keeping its doc
         comment's scenario reference.
       - No other existing `validate_reports_*` test is edited.
-- [ ] 4.2 Red: `crates/borax/tests/library.rs`, `validate`:
+- [x] 4.2 Red: `crates/borax/tests/library.rs`, `validate`:
       - A library holding the following gives `conditions` equal to
         `[("new.pdf", Orphan), ("gone.pdf", Missing { id, record }),
         ("items/milner1978.<uuid>.toml", Unlinked { id })]`, with no
@@ -274,7 +274,7 @@ doc comment, and a sentence naming the new events is added.
         with `validate`'s `exists`; and the items with no
         `by_item` record. Compute these in the test, so the totals are
         shown unchanged for every fixture (D5).
-- [ ] 4.3 Red: `crates/borax/tests/dispatch.rs`, `validate` through
+- [x] 4.3 Red: `crates/borax/tests/dispatch.rs`, `validate` through
       `events_for` and `dispatch`:
       - Over the three-condition library of 4.2, the events are the
         three `LibraryCondition`s, then `LibraryValidated { findings:
@@ -299,7 +299,7 @@ doc comment, and a sentence naming the new events is added.
         finding.
       - In every case, each total on `LibraryValidated` equals the
         number of `LibraryCondition` events of its kind.
-- [ ] 4.4 Green:
+- [x] 4.4 Green:
       - In `crates/borax/src/library.rs`, `Validation` replaces
         `orphans`, `missing` and `unlinked` with `conditions:
         Vec<(String, Condition)>` and the three counting methods.
@@ -319,7 +319,7 @@ doc comment, and a sentence naming the new events is added.
 
 ## 5. `adopt` reports what it leaves unindexed
 
-- [ ] 5.1 Red: `crates/borax/tests/dispatch.rs`:
+- [x] 5.1 Red: `crates/borax/tests/dispatch.rs`:
       - Update
         `adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent`:
         - in the first run, `adoptions(&events)` holds
@@ -358,7 +358,7 @@ doc comment, and a sentence naming the new events is added.
       - New: in human mode, a library with one unindexed orphan prints
         its D7 line, then the `library-adopted` line as the last line,
         with no summary line. The outcome is `Outcome::Success`.
-- [ ] 5.2 Green:
+- [x] 5.2 Green:
       - In `library::adopt`, push `(relative, Adoption::Unindexed)`
         where the `None` arm of `lookup` now `continue`s.
       - Update the docstrings of `adopt`, `Adoptions::adoptions`,

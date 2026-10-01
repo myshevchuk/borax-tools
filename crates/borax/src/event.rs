@@ -219,6 +219,23 @@ pub enum Event {
         nested: Vec<String>,
         identifiable: Option<usize>,
     },
+    /// A library condition a run counted, named: an artifact no record
+    /// names, a record whose artifact the library does not have, or an
+    /// item no record links to.
+    ///
+    /// One per object behind the `orphans` count of
+    /// [`Event::LibraryStatus`], and behind the `orphans`, `missing` and
+    /// `unlinked` counts of [`Event::LibraryValidated`], all of them
+    /// before that totals event. Neither a skip nor a finding: a
+    /// condition is an ordinary library state, and counts toward no
+    /// total of the run's.
+    LibraryCondition {
+        /// Library-relative and `/`-separated: the artifact for an
+        /// orphan, the record's last-known path as recorded for a
+        /// missing record, and the item file for an unlinked item.
+        path: String,
+        condition: Condition,
+    },
     /// Something wrong with a library's own records, about the file at
     /// `path` and about no other.
     LibraryFinding { path: PathBuf, finding: Finding },
@@ -240,12 +257,16 @@ pub enum Event {
     },
     /// What validating a library amounted to: how many findings were
     /// reported, and the three counts that are not findings.
+    ///
+    /// Each of `orphans`, `missing` and `unlinked` is the number of the
+    /// run's [`Event::LibraryCondition`] events of the matching kind.
     LibraryValidated {
         root: PathBuf,
         findings: usize,
         orphans: usize,
-        /// Records whose last-known path holds no file. History the
-        /// library deliberately keeps, not a malformed record.
+        /// Records whose last-known path holds no artifact of this
+        /// library. History the library deliberately keeps, not a
+        /// malformed record.
         missing: usize,
         /// Items no artifact record links to. An ordinary item for a
         /// work the library holds no file for.
@@ -296,10 +317,9 @@ pub enum Event {
     },
     /// What an adoption made of one orphan.
     ///
-    /// Only an orphan the run adopted or tried to adopt produces one:
-    /// an orphan the content index has no record for is left an orphan
-    /// silently, and the count of orphans in [`Event::LibraryAdopted`]
-    /// is where it shows.
+    /// Every orphan the run found produces exactly one, so the count of
+    /// orphans in [`Event::LibraryAdopted`] is the number of these
+    /// whose adoption is not [`Adoption::Recorded`].
     LibraryAdoption {
         /// The orphan, library-relative, as [`Event::LibraryRepair`]
         /// names an artifact.
@@ -602,8 +622,7 @@ pub enum Admission {
     Unwritten { message: String },
 }
 
-/// What an adoption made of one orphan the content index answered
-/// for, or could not be asked about.
+/// What an adoption made of one orphan.
 ///
 /// Serialized with a `kind` tag, nested under the event's `adoption`
 /// field, as [`Repair`] is under `repair`.
@@ -629,6 +648,30 @@ pub enum Adoption {
     /// `message` as the filesystem put it. The orphan is still one, and
     /// the next adoption tries it again.
     Unwritten { message: String },
+    /// The content index holds no record for the orphan's bytes, so
+    /// there was nothing to adopt it from and it is still an orphan.
+    Unindexed,
+}
+
+/// Which library condition a [`Event::LibraryCondition`] names.
+///
+/// Each kind is named after the count it adds to. Serialized with a
+/// `kind` tag, nested under the event's `condition` field, as
+/// [`Repair`] is under `repair`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Condition {
+    /// An artifact no artifact record names by path.
+    Orphan,
+    /// The artifact record `id`, stored in the file `record`
+    /// (library-relative, under `.borax/artifacts/`), names a path
+    /// that holds no artifact of this library.
+    ///
+    /// A file standing there inside a nested library, the item store
+    /// or `.borax/` does not count as one.
+    Missing { id: String, record: String },
+    /// The item `id` is linked to by no artifact record.
+    Unlinked { id: String },
 }
 
 /// What extraction made of one file: the identifier and the pass that
@@ -937,6 +980,11 @@ pub fn human_line(event: &Event) -> Option<String> {
                 false => format!(" (excluding nested libraries: {})", nested.join(", ")),
             }
         )),
+        Event::LibraryCondition { path, condition } => Some(format!(
+            "{}: {}",
+            escaped(path),
+            what_the_condition_is(condition)
+        )),
         Event::LibraryFinding { path, finding } => {
             Some(format!("{}: {}", path.display(), what_is_wrong(finding)))
         }
@@ -974,7 +1022,7 @@ pub fn human_line(event: &Event) -> Option<String> {
             root.display()
         )),
         Event::LibraryAdoption { path, adoption } => {
-            Some(format!("{path}: {}", what_was_adopted(adoption)))
+            Some(format!("{}: {}", escaped(path), what_was_adopted(adoption)))
         }
         Event::LibraryAdopted {
             root,
@@ -1316,6 +1364,26 @@ fn what_was_adopted(adoption: &Adoption) -> String {
         Adoption::Unwritten { message } => {
             format!("could not be recorded ({message}), so it is still an orphan")
         }
+        Adoption::Unindexed => {
+            "the content index holds no record of its bytes, so it is still an orphan".to_string()
+        }
+    }
+}
+
+/// `condition` as the end of a sentence whose subject is the path it is
+/// about, for the human rendering of [`Event::LibraryCondition`], with
+/// a missing record's file escaped.
+///
+/// Each clause begins with the word the totals line counts it under.
+fn what_the_condition_is(condition: &Condition) -> String {
+    match condition {
+        Condition::Orphan => "orphan; no artifact record names it".to_string(),
+        Condition::Missing { id, record } => format!(
+            "missing; artifact record {id} ({}) names this path and the library \
+             has no artifact here",
+            escaped(record)
+        ),
+        Condition::Unlinked { id } => format!("unlinked; no artifact record links item {id}"),
     }
 }
 
