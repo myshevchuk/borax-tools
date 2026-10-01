@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `status --identify --json` now emits one `library-extraction` event
+  per surveyed artifact as extraction finishes, in survey order and
+  before `library-status`. Each event carries the library-relative path
+  and an extraction result: `found`, `no-text-layer`,
+  `text-without-identifier`, `encrypted`, or `unreadable`. A `found`
+  result includes the identifier and extraction tier; an `unreadable`
+  result includes the reader's message. `run-finished` does not count
+  these events, and the event schema remains at version 3.
+
+### Changed
+
+- `borax status --identify` now prints one line per surveyed artifact
+  before the library report. Each line names the extracted identifier
+  and its pass or distinguishes a missing text layer, readable text
+  without an identifier, an encrypted document, and an unreadable file.
+  Paths are library-relative, and terminal control characters from file
+  names, identifiers, and reader messages are escaped. Extraction
+  failures remain neither skips nor findings and do not change the exit
+  status; the library report remains the last line.
+
 ## [0.7.0] - 2026-10-01
 
 ### Added
