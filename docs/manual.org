@@ -10,6 +10,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-29 Tue 21:51] -- command summaries
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-30 Wed 02:39] -- library-first resolution
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-01 Thu 21:16] -- borax status and JSONL schema
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-01 Thu 22:19] -- library conditions and adoption
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -500,6 +501,17 @@ how to install it, and a handful of examples.
    an artifact whose path no artifact record names. A record whose path
    holds no file is missing, not orphaned.
 
+   Before it writes the report, ~status~ names each orphan in path
+   order:
+
+   #+begin_example
+     <path>: orphan; no artifact record names it
+   #+end_example
+
+   The command names only the condition it counts: it does not list
+   missing records or unlinked items. Control characters in an orphan's
+   path appear as ~\xNN~ rather than reaching the terminal.
+
    Without ~--identify~, the command opens no document. It writes no
    library state with or without the flag. It also works on an unmarked
    directory, treating that directory as the root for this report. If
@@ -539,9 +551,10 @@ how to install it, and a handful of examples.
    ~status~ excludes its entire subtree from the parent counts and lists
    it as a nested library.
 
-   With ~--identify~, the per-artifact lines precede the library report.
-   Human output ends with that report, with or without the flag. It does
-   not add a resolved, renamed, and skipped summary.
+   With ~--identify~, every orphan line precedes every per-artifact
+   extraction line. Human output ends with the library report, with or
+   without the flag. It does not add a resolved, renamed, and skipped
+   summary.
 
 ** borax validate
 
@@ -558,14 +571,36 @@ how to install it, and a handful of examples.
    unlistable directory is an ~unreadable~ finding; a missing directory
    remains an empty store.
 
-   Orphans, missing artifacts, and items no artifact record links to are
-   counts rather than findings. They are valid library states. The
-   command exits with the partial-success code, 2, when it reports a
-   finding, and exits 0 when it reports none.
+   Orphans, missing artifact records, and items no artifact record links
+   to are conditions rather than findings. They are valid library
+   states. After its findings, ~validate~ names each orphan, then each
+   missing record, then each unlinked item:
 
-   Each finding has its own line. Human output ends with the validation
-   totals, including the findings count, and does not repeat that count
-   in another summary line.
+   #+begin_example
+     <path>: orphan; no artifact record names it
+     <path>: missing; artifact record <id> (<record>) names this path and the library has no artifact here
+     <path>: unlinked; no artifact record links item <id>
+   #+end_example
+
+   For a missing record, ~<path>~ is its stored last-known path and
+   ~<record>~ is its own file under ~.borax/artifacts/~. The record file
+   distinguishes two missing records that carry the same identity. A
+   record is missing when its last-known path holds no artifact owned by
+   this library. A file inside a nested library, ~items/~, or ~.borax/~
+   does not count as that artifact. This differs from ~reconcile~'s
+   ~missing~ result, which means that no artifact matched the record by
+   hash. For an unlinked item, ~<path>~ is its
+   ~items/<key>.<uuid>.toml~ file. Control characters in these paths and
+   in ~<record>~ appear as ~\xNN~ rather than reaching the terminal.
+
+   Conditions do not change the set of findings. The command exits with
+   the partial-success code, 2, when it reports a finding. It exits 0
+   when it reports none, even when it reports orphans, missing records,
+   or unlinked items.
+
+   Each finding and condition has its own line. Human output ends with
+   the unchanged validation totals, including the findings count, and
+   does not repeat that count in another summary line.
 
 ** borax reconcile
 
@@ -606,13 +641,26 @@ how to install it, and a handful of examples.
    item. It queries no service, opens no document, and moves, renames,
    and deletes nothing.
 
-   An unknown orphan stays an orphan. An orphan whose bytes already
-   occur in an artifact record's hash history also stays an orphan and
-   is reported as held by that record. It may be a recorded artifact
-   moved outside borax, in which case run ~reconcile~, or a copy. Running
-   ~adopt~ again does not change records it already wrote. After ~borax
-   cache --clear~, the content index is empty, so adoption records
-   nothing and still succeeds.
+   Every orphan gets one report. An orphan is reported as ~unindexed~
+   when borax can read it, no artifact record holds its bytes, and the
+   content index holds no record for them. Human output says:
+
+   #+begin_example
+     <path>: the content index holds no record of its bytes, so it is still an orphan
+   #+end_example
+
+   An orphan whose bytes already occur in an artifact record's hash
+   history also stays an orphan and is reported as held by that record.
+   It may be a recorded artifact moved outside borax, in which case run
+   ~reconcile~, or a copy. Unreadable and held orphans are decided before
+   borax asks the content index. Control characters in every adoption
+   path appear as ~\xNN~ rather than reaching the terminal; adoption
+   messages are unchanged.
+
+   Running ~adopt~ again does not change records it already wrote. After
+   ~borax cache --clear~, the content index is empty, so adoption records
+   nothing. It reports each readable orphan whose bytes no artifact
+   record holds as ~unindexed~ and still succeeds.
 
    ~adopt~ neither reads citation sidecars nor the retired
    ~.borax/ledger.jsonl~. It refuses to run outside a library established
@@ -1489,10 +1537,40 @@ how to install it, and a handful of examples.
   #+end_src
 
   JSON fields keep their raw values, with any required escaping supplied
-  by JSON encoding. Every ~library-extraction~ precedes
-  ~library-status~, which stays the last event before ~run-finished~.
-  ~run-finished~ counts none of these results. This addition does not
-  change the event schema version.
+  by JSON encoding. In ~status~, each orphan produces a
+  ~library-condition~ event immediately after ~run-started~ and before
+  any ~library-extraction~ event. In ~validate~, the condition events
+  follow every ~library-finding~ and precede ~library-validated~. The
+  totals event stays last before ~run-finished~, and each condition total
+  equals the number of events of that kind. ~run-finished~ counts none
+  of the condition or extraction events.
+
+  A ~library-condition~ carries ~path~ and a ~condition~ object tagged by
+  ~kind~. For ~orphan~, ~path~ is the artifact. For ~missing~, it is the
+  record's stored last-known path; the condition also carries the
+  artifact identity as ~id~ and the record's own library-relative file
+  as ~record~. For ~unlinked~, ~path~ is the item file and the condition
+  carries the item's ~id~. Library-relative paths use ~/~ as their
+  separator.
+
+  #+begin_src json
+    {"schema":3,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}
+    {"schema":3,"event":"library-condition","path":"gone.pdf","condition":{"kind":"missing","id":"0190c3a2-…","record":".borax/artifacts/0190c3a2-….toml"}}
+    {"schema":3,"event":"library-condition","path":"items/milner1978.0190c3a3-….toml","condition":{"kind":"unlinked","id":"0190c3a3-…"}}
+  #+end_src
+
+  Conditions do not change a command's exit status. A script that needs
+  to fail on one can test the totals event. Each command below exits 1
+  when the tested condition is present:
+
+  #+begin_src sh
+    borax validate --json | jq -e 'select(.event == "library-validated") | .missing == 0'
+    borax reconcile --json | jq -e 'select(.event == "library-reconciled") | .ambiguous + .missing == 0'
+  #+end_src
+
+  The corresponding ~library-condition~ and ~library-repair~ events name
+  the affected objects. These additions do not change the event schema
+  version.
 
   ~library-status~ carries ~root~, ~artifacts~, ~items~, ~records~,
   ~orphans~, ~nested~, and ~identifiable~. ~library-finding~ carries
@@ -1504,11 +1582,14 @@ how to install it, and a handful of examples.
 
   An applying rename may emit ~library-admission~ with ~path~ and an
   ~admission~ whose ~kind~ is ~relinked~, ~outside~, or ~unwritten~.
-  Adoption emits ~library-adoption~ with ~path~ and an ~adoption~ whose
-  ~kind~ is ~recorded~, ~held~, ~unreadable~, or ~unwritten~, followed
-  by ~library-adopted~ with ~root~, ~adopted~, and ~orphans~. The
-  ~ledger-rebuilt~ event is gone. A ~skipped~ event may now carry the
-  reason kind ~stranding~.
+  Adoption emits one ~library-adoption~ event per orphan, with ~path~ and
+  an ~adoption~ whose ~kind~ is ~recorded~, ~held~, ~unreadable~,
+  ~unwritten~, or ~unindexed~. A consumer that counts these events
+  should dispatch on ~adoption.kind~. The events are followed by
+  ~library-adopted~ with ~root~, ~adopted~, and ~orphans~; its ~orphans~
+  count equals the number of adoption events whose kind is not
+  ~recorded~. The ~ledger-rebuilt~ event is gone. A ~skipped~ event may
+  now carry the reason kind ~stranding~.
 
 ** Recovering the names a run replaced
 

@@ -328,6 +328,21 @@ command selects the subjects (`status_events` over
 writes nothing, and the renderers present typed events, with any
 totals taken over the same results. Schema 3 is kept.
 
+`list-untracked-missing-unlinked` is implemented on top, as the second
+user of that boundary, and closes Phase 2's per-object work. A
+`library-condition` event names each counted object: `status` writes
+one per orphan as soon as the survey is read and before any document
+opens, and `validate` writes one per orphan, missing record (with its
+artifact id and its own record file, which tells apart records sharing
+an identity) and unlinked item after its findings, with every total
+counted from `Validation::conditions`. `adopt` reports an orphan the
+content index cannot answer for as `Adoption::Unindexed`, so each
+orphan it sees gets exactly one event. Conditions are never findings,
+and exit status is unchanged: the living requirements call these
+healthy states and a missing record never clears, so scripts read the
+stream; an opt-in failure flag is the deferred route. Schema 3 is
+kept.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
@@ -398,7 +413,17 @@ totals taken over the same results. Schema 3 is kept.
   the skip line asks for no answer, which is why it is a defect rather
   than the same defect. Closing it properly means escaping every value
   a rendering takes from a record or a file, in one place, rather than
-  in each line that happens to print one.
+  in each line that happens to print one. The `library-extraction`,
+  `library-condition` and `library-adoption` path lines escape what
+  they print, but adoption's `unreadable` and `unwritten` messages
+  still do not.
+
+- **`adopt` and `reconcile` report after the pass, not as they go.**
+  `run::adopt_events` and `run::reconcile_events` collect every
+  per-object event and write them after the last file is hashed,
+  contrary to the `cli` requirement "A run reports as it goes".
+  Restoring it means passing a sink into `library::adopt` and
+  `library::reconcile`; it is a restoration and needs no proposal.
 
 - **Resolution skip reasons merge distinct extraction failures.**
   `pipeline::skipped_for` reports both `NoTextLayer` and

@@ -755,3 +755,102 @@ fn status_identify_writes_each_artifact_s_extraction_line_before_the_next_file_i
         );
     }
 }
+
+/// design D5: the orphans are known once the survey is read, before any
+/// document is opened, so their `library-condition` events are written
+/// first. Modelled on the `status --identify` liveness test above,
+/// using the same `LiveDocuments` open snapshots, which are not
+/// changed: when `a.pdf`, the first file, is opened, the buffer already
+/// holds three `library-condition` lines, one per orphan, and no
+/// open-time snapshot holds the totals event. The test fails against an
+/// implementation that writes the orphan events after the extraction
+/// loop.
+#[test]
+fn status_identify_writes_every_orphan_condition_before_the_first_file_is_opened() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let a = root.join("a.pdf");
+    let b = root.join("b.pdf");
+    let c = root.join("c.pdf");
+    fs::write(&a, b"").unwrap();
+    fs::write(&b, b"").unwrap();
+    fs::write(&c, b"").unwrap();
+
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let documents = LiveDocuments::new(Arc::clone(&buffer))
+        .with_file(
+            &a,
+            hash_for("condition-a"),
+            pdf_with_embedded_doi("10.1000/condition-a"),
+        )
+        .with_file(&b, hash_for("condition-b"), pdf_with_no_identifier())
+        .with_file(
+            &c,
+            hash_for("condition-c"),
+            pdf_with_embedded_doi("10.1000/condition-c"),
+        );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem;
+    let bib_files = FakeBibFiles;
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let mut out = SharedWriter(Arc::clone(&buffer));
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::status(Some(root.clone()), true), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let opens = documents.open_snapshots();
+    assert_eq!(
+        opens.len(),
+        3,
+        "expected one open() call per file, got {opens:?}"
+    );
+    assert_eq!(opens[0].0, a);
+
+    let condition_lines = |text: &str| -> usize {
+        json_lines(text.as_bytes())
+            .iter()
+            .filter(|line| line["event"] == "library-condition")
+            .count()
+    };
+    assert_eq!(
+        condition_lines(&opens[0].1),
+        3,
+        "every orphan must be named before the first file is opened:\n{}",
+        opens[0].1
+    );
+
+    for (path, seen) in &opens {
+        assert!(
+            !json_lines(seen.as_bytes())
+                .iter()
+                .any(|line| line["event"] == "library-status"),
+            "no open-time snapshot may hold the totals event, got one when {} was opened:\n{}",
+            path.display(),
+            seen
+        );
+    }
+}

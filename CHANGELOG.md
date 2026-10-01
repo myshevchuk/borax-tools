@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `status` and `validate` now emit one `library-condition` event for
+  every condition they count. The event names the affected path and
+  tags the condition as `orphan`, `missing`, or `unlinked`; missing
+  records also carry their identity and record file, and unlinked items
+  carry their identity. Condition events precede their totals, each
+  total equals the number of events of that kind, and the event schema
+  remains at version 3.
+
+- `library-adoption.adoption.kind` now includes `unindexed` for a
+  readable orphan whose bytes occur in neither an artifact record nor
+  the content index. `adopt` now emits exactly one `library-adoption`
+  event per orphan, so consumers should dispatch on `adoption.kind` when
+  counting these events.
+
 - `status --identify --json` now emits one `library-extraction` event
   per surveyed artifact as extraction finishes, in survey order and
   before `library-status`. Each event carries the library-relative path
@@ -19,6 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   these events, and the event schema remains at version 3.
 
 ### Changed
+
+- `borax status` now prints every orphan before its report. With
+  `--identify`, all orphan lines precede the extraction lines. The
+  `borax validate` command now prints every orphan, missing record, and
+  unlinked item after its findings and before its unchanged totals.
+  These conditions remain valid library states: they are not findings or
+  skips, do not appear in `run-finished` counts, and do not change exit
+  status.
+
+- `borax adopt` now reports an orphan when the content index has no
+  record for its bytes instead of leaving it silent. Adoption paths now
+  escape terminal control characters for every adoption result;
+  ordinary paths and existing adoption messages are unchanged.
 
 - `borax status --identify` now prints one line per surveyed artifact
   before the library report. Each line names the extracted identifier

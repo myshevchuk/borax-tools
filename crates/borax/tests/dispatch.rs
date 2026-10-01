@@ -15,8 +15,8 @@ use borax::config::{
     ValueKindName, resolve,
 };
 use borax::event::{
-    Admission, Adoption, Event, Extraction, Level, LibraryAnswer, Overridden, Repair, SCHEMA,
-    SkipReason, human_line,
+    Admission, Adoption, Condition, Event, Extraction, Level, LibraryAnswer, Overridden, Repair,
+    SCHEMA, SkipReason, human_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -6614,19 +6614,22 @@ fn status_over_a_marked_directory_of_new_pdfs_reports_every_count_unopened() {
     )
     .unwrap();
 
-    assert_eq!(
-        events,
-        vec![Event::LibraryStatus {
-            root: root.clone(),
-            artifacts: 12,
-            items: 0,
-            records: 0,
-            orphans: 12,
-            nested: Vec::new(),
-            identifiable: None,
-        }],
-        "got {events:?}"
-    );
+    let mut expected: Vec<Event> = (0..12)
+        .map(|i| Event::LibraryCondition {
+            path: format!("paper-{i:02}.pdf"),
+            condition: Condition::Orphan,
+        })
+        .collect();
+    expected.push(Event::LibraryStatus {
+        root: root.clone(),
+        artifacts: 12,
+        items: 0,
+        records: 0,
+        orphans: 12,
+        nested: Vec::new(),
+        identifiable: None,
+    });
+    assert_eq!(events, expected, "got {events:?}");
 }
 
 /// The stronger form of the same guarantee: a recording fake shows
@@ -6729,6 +6732,14 @@ fn status_identify_counts_artifacts_yielding_an_identifier_and_queries_no_source
     assert_eq!(
         events,
         vec![
+            Event::LibraryCondition {
+                path: "has-doi.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
+            Event::LibraryCondition {
+                path: "no-doi.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
             Event::LibraryExtraction {
                 path: "has-doi.pdf".to_string(),
                 extraction: Extraction::Found {
@@ -6808,6 +6819,14 @@ fn status_identify_reports_each_artifact_in_survey_order_before_the_totals() {
     assert_eq!(
         events,
         vec![
+            Event::LibraryCondition {
+                path: "a.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
+            Event::LibraryCondition {
+                path: "sub/b.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
             Event::LibraryExtraction {
                 path: "a.pdf".to_string(),
                 extraction: Extraction::Found {
@@ -6880,6 +6899,14 @@ fn status_identify_tells_the_two_controlled_cases_apart() {
     assert_eq!(
         events,
         vec![
+            Event::LibraryCondition {
+                path: "blank.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
+            Event::LibraryCondition {
+                path: "prose.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
             Event::LibraryExtraction {
                 path: "blank.pdf".to_string(),
                 extraction: Extraction::NoTextLayer,
@@ -7030,6 +7057,14 @@ fn status_identify_tells_encrypted_and_unreadable_apart() {
     assert_eq!(
         events,
         vec![
+            Event::LibraryCondition {
+                path: "encrypted.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
+            Event::LibraryCondition {
+                path: "unreadable.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
             Event::LibraryExtraction {
                 path: "encrypted.pdf".to_string(),
                 extraction: Extraction::Encrypted,
@@ -7207,13 +7242,25 @@ fn status_identify_over_an_unmarked_directory_names_paths_relative_to_it() {
 
     assert_eq!(
         events.first(),
-        Some(&Event::LibraryExtraction {
+        Some(&Event::LibraryCondition {
+            path: "has-doi.pdf".to_string(),
+            condition: Condition::Orphan,
+        }),
+        "got {events:?}"
+    );
+    let extraction = events
+        .iter()
+        .find(|event| matches!(event, Event::LibraryExtraction { .. }))
+        .unwrap_or_else(|| panic!("no library-extraction event: {events:?}"));
+    assert_eq!(
+        extraction,
+        &Event::LibraryExtraction {
             path: "has-doi.pdf".to_string(),
             extraction: Extraction::Found {
                 identifier: "doi:10.1000/unmarked".to_string(),
                 tier: "embedded-metadata".to_string(),
             },
-        }),
+        },
         "got {events:?}"
     );
 }
@@ -7415,6 +7462,9 @@ fn status_identify_human_mode_lists_each_artifact_before_the_report_line() {
     assert_eq!(
         lines,
         vec![
+            "a-blank.pdf: orphan; no artifact record names it",
+            "b-prose.pdf: orphan; no artifact record names it",
+            "c-unreadable.pdf: orphan; no artifact record names it",
             "a-blank.pdf: no identifier found; the pages read hold no text",
             "b-prose.pdf: no identifier found in its metadata or the pages read",
             "c-unreadable.pdf: unreadable (truncated stream)",
@@ -7655,15 +7705,21 @@ fn status_over_an_unmarked_directory_is_reported_as_given_and_writes_nothing() {
 
     assert_eq!(
         events,
-        vec![Event::LibraryStatus {
-            root: root.clone(),
-            artifacts: 1,
-            items: 0,
-            records: 0,
-            orphans: 1,
-            nested: Vec::new(),
-            identifiable: None,
-        }],
+        vec![
+            Event::LibraryCondition {
+                path: "paper.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
+            Event::LibraryStatus {
+                root: root.clone(),
+                artifacts: 1,
+                items: 0,
+                records: 0,
+                orphans: 1,
+                nested: Vec::new(),
+                identifiable: None,
+            },
+        ],
         "got {events:?}"
     );
     assert!(
@@ -7678,14 +7734,544 @@ fn status_over_an_unmarked_directory_is_reported_as_given_and_writes_nothing() {
 }
 
 // ---------------------------------------------------------------------
+// events_for: Command::Status — orphan conditions, task 3.2
+// ---------------------------------------------------------------------
+
+/// design D3/D4: plain `status` over a library holding one recorded
+/// artifact and one orphan names the orphan alone, before the totals,
+/// and opens no document — a `CountingDocuments` records no open.
+#[test]
+fn status_names_only_the_orphan_and_opens_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("kept.pdf"), b"").unwrap();
+    fs::write(root.join("new.pdf"), b"").unwrap();
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "kept.pdf".to_string(),
+        size: 0,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("kept-bytes", "run-1")],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            Event::LibraryCondition {
+                path: "new.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
+            Event::LibraryStatus {
+                root: root.clone(),
+                artifacts: 2,
+                items: 0,
+                records: 1,
+                orphans: 1,
+                nested: Vec::new(),
+                identifiable: None,
+            },
+        ],
+        "got {events:?}"
+    );
+    assert_eq!(documents.open_count(), 0, "got {}", documents.open_count());
+}
+
+/// design D3: a nested library's PDF is named `"sub/deeper/x.pdf"` with
+/// `/` on every platform, and the orphan condition names it the same
+/// way the orphan itself appears among the counted artifacts.
+#[test]
+fn status_names_an_orphan_two_directories_down_with_a_forward_slash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    fs::create_dir_all(root.join("sub/deeper")).unwrap();
+    fs::write(root.join("sub/deeper/x.pdf"), b"").unwrap();
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events.first(),
+        Some(&Event::LibraryCondition {
+            path: "sub/deeper/x.pdf".to_string(),
+            condition: Condition::Orphan,
+        }),
+        "got {events:?}"
+    );
+}
+
+/// design D4: nothing beneath a nested `.borax.toml` directory, a
+/// `.bib` sidecar, a PDF under `items/`, or (on Unix) a symlink to a
+/// PDF outside the tree is ever named — the same selection boundary
+/// `status --identify` already keeps for extraction.
+#[test]
+fn status_names_no_orphan_outside_the_selection() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("paper.pdf"), b"").unwrap();
+    fs::write(root.join("paper.pdf.bib"), b"").unwrap();
+    fs::create_dir_all(root.join("items")).unwrap();
+    fs::write(root.join("items").join("item.pdf"), b"").unwrap();
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested").join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("nested").join("inner.pdf"), b"").unwrap();
+    #[cfg(unix)]
+    let elsewhere = tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        let outside = elsewhere.path().join("outside.pdf");
+        fs::write(&outside, b"").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.pdf")).unwrap();
+    }
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let conditions: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::LibraryCondition { .. }))
+        .collect();
+    assert_eq!(
+        conditions,
+        vec![&Event::LibraryCondition {
+            path: "paper.pdf".to_string(),
+            condition: Condition::Orphan,
+        }],
+        "got {events:?}"
+    );
+}
+
+/// design D5: with `--identify`, every `library-condition` precedes
+/// every `library-extraction`, and `library-status` is last.
+#[test]
+fn status_identify_names_every_orphan_before_every_extraction() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let a = root.join("a.pdf");
+    let b = root.join("b.pdf");
+    fs::write(&a, b"").unwrap();
+    fs::write(&b, b"").unwrap();
+    let documents = FakeDocuments::new()
+        .with_file(&a, hash_for("order-a"), pdf_with_no_identifier())
+        .with_file(&b, hash_for("order-b"), pdf_with_no_identifier());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let last_condition = events
+        .iter()
+        .rposition(|event| matches!(event, Event::LibraryCondition { .. }));
+    let first_extraction = events
+        .iter()
+        .position(|event| matches!(event, Event::LibraryExtraction { .. }));
+    match (last_condition, first_extraction) {
+        (Some(last_condition), Some(first_extraction)) => {
+            assert!(last_condition < first_extraction, "got {events:?}")
+        }
+        other => panic!("expected both kinds of event: {other:?} in {events:?}"),
+    }
+    assert!(
+        matches!(events.last(), Some(Event::LibraryStatus { .. })),
+        "got {events:?}"
+    );
+}
+
+/// design D3/D4: `status`'s `orphans` total equals the number of
+/// `library-condition` events of kind `orphan`, counted from the
+/// returned events themselves (D5) — and no `library-condition` is
+/// ever `missing` or `unlinked`, even over a library holding a record
+/// whose path holds no file and an item no record links to.
+#[test]
+fn status_orphans_total_equals_its_own_orphan_condition_events() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("new.pdf"), b"").unwrap();
+    let dangling = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "gone.pdf".to_string(),
+        size: 0,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("gone-bytes", "run-1")],
+    };
+    write_lib_artifact_record(&root, &dangling);
+    let item = Item {
+        id: lib_item_id(LIB_UUID_B),
+        record: lib_minimal_record(EntryType::Article),
+    };
+    write_lib_item(&root, "unlinked-item", &item);
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let orphan_conditions = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::LibraryCondition {
+                    condition: Condition::Orphan,
+                    ..
+                }
+            )
+        })
+        .count();
+    let other_conditions = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::LibraryCondition {
+                    condition: Condition::Missing { .. } | Condition::Unlinked { .. },
+                    ..
+                }
+            )
+        })
+        .count();
+    let total = events.iter().find_map(|event| match event {
+        Event::LibraryStatus { orphans, .. } => Some(*orphans),
+        _ => None,
+    });
+
+    assert_eq!(other_conditions, 0, "got {events:?}");
+    assert_eq!(total, Some(orphan_conditions), "got {events:?}");
+    assert_eq!(orphan_conditions, 1, "got {events:?}");
+}
+
+// ---------------------------------------------------------------------
+// dispatch, human mode: status — orphan conditions, task 3.3
+// ---------------------------------------------------------------------
+
+/// design D7: plain `status` over two orphans prints the two D7 orphan
+/// lines in path order, then the report line as the last line. No line
+/// contains `resolved,` or `skipped`, and the outcome is
+/// `Outcome::Success`.
+#[test]
+fn status_human_mode_lists_each_orphan_before_the_report_line() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("a.pdf"), b"").unwrap();
+    fs::write(root.join("b.pdf"), b"").unwrap();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::status(Some(root.clone()), false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "a.pdf: orphan; no artifact record names it",
+            "b.pdf: orphan; no artifact record names it",
+            &format!(
+                "{}: 2 artifacts, 0 items, 0 records, 2 orphans",
+                root.display()
+            ),
+        ],
+        "got {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("resolved,") || line.contains("skipped")),
+        "got {lines:?}"
+    );
+}
+
+/// design D7: an orphan whose name holds an escape character renders it
+/// as `\x1b` on its human line, while the `--json` run carries the raw
+/// path.
+#[test]
+fn status_human_mode_escapes_an_escape_character_in_an_orphan_s_name() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let path = root.join("e\u{1b}[2J.pdf");
+    fs::write(&path, b"").unwrap();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::status(Some(root.clone()), false), false),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.lines()
+            .any(|line| line == "e\\x1b[2J.pdf: orphan; no artifact record names it"),
+        "got {text:?}"
+    );
+
+    let mut json_out = Vec::new();
+    let mut json_err = Vec::new();
+    let mut json_streams = Streams {
+        out: &mut json_out,
+        err: &mut json_err,
+    };
+    dispatch(
+        &cli(Command::status(Some(root.clone()), false), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut json_streams,
+    );
+    let json_text = String::from_utf8(json_out).unwrap();
+    let condition_line = json_text
+        .lines()
+        .find(|line| line.contains("\"event\":\"library-condition\""))
+        .unwrap_or_else(|| panic!("no library-condition line: {json_text:?}"));
+    let value: serde_json::Value = serde_json::from_str(condition_line).unwrap();
+    assert_eq!(
+        value["path"],
+        serde_json::Value::from("e\u{1b}[2J.pdf"),
+        "got {condition_line:?}"
+    );
+}
+
+/// design D8: the `--json` run ends on `run-finished` with all seven
+/// counters zero — an orphan condition is neither a skip nor a finding.
+#[test]
+fn status_json_run_finished_counts_nothing_for_orphan_conditions() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("a.pdf"), b"").unwrap();
+    fs::write(root.join("b.pdf"), b"").unwrap();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::status(Some(root.clone()), false), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(last["event"], serde_json::Value::from("run-finished"));
+    assert_eq!(
+        last["counts"],
+        serde_json::json!({
+            "resolved": 0, "renamed": 0, "skipped": 0, "named": 0,
+            "unmatched": 0, "unreached": 0, "findings": 0,
+        }),
+        "got {last}"
+    );
+}
+
+// ---------------------------------------------------------------------
 // events_for / dispatch: Command::Validate — task 5.1/5.2 (exit codes)
 // ---------------------------------------------------------------------
 
-/// One event per finding, then the totals
-/// ([`borax::library::validation_events`]'s contract, exercised through
-/// the command).
+/// The finding, then the orphan and missing conditions, then the
+/// totals ([`borax::library::validation_events`]'s contract, exercised
+/// through the command). The fixture holds the dangling record (`id`
+/// `LIB_UUID_A`, path `"orphaned-link.pdf"`, which holds no file) and
+/// `orphan.pdf`, so the same run also carries one missing artifact — a
+/// count and not a second finding — and one orphan.
 #[test]
-fn validate_emits_one_finding_event_then_the_totals() {
+fn validate_emits_the_finding_then_the_orphan_and_missing_conditions_then_the_totals() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
     write_dangling_artifact_record(&root);
@@ -7717,7 +8303,7 @@ fn validate_emits_one_finding_event_then_the_totals() {
     )
     .unwrap();
 
-    assert_eq!(events.len(), 2, "got {events:?}");
+    assert_eq!(events.len(), 4, "got {events:?}");
     assert!(
         matches!(events[0], Event::LibraryFinding { .. }),
         "got {:?}",
@@ -7725,18 +8311,36 @@ fn validate_emits_one_finding_event_then_the_totals() {
     );
     assert_eq!(
         events[1],
+        Event::LibraryCondition {
+            path: "orphan.pdf".to_string(),
+            condition: Condition::Orphan,
+        },
+        "got {:?}",
+        events[1]
+    );
+    assert_eq!(
+        events[2],
+        Event::LibraryCondition {
+            path: "orphaned-link.pdf".to_string(),
+            condition: Condition::Missing {
+                id: LIB_UUID_A.to_string(),
+                record: format!("{STATE_DIR}/{ARTIFACT_STORE}/{LIB_UUID_A}.toml"),
+            },
+        },
+        "got {:?}",
+        events[2]
+    );
+    assert_eq!(
+        events[3],
         Event::LibraryValidated {
             root: root.clone(),
             findings: 1,
             orphans: 1,
-            // The dangling record's own path holds no file either, so
-            // the same fixture carries one missing artifact — a count
-            // and not a second finding.
             missing: 1,
             unlinked: 0,
         },
         "got {:?}",
-        events[1]
+        events[3]
     );
 }
 
@@ -7830,6 +8434,460 @@ fn validate_with_no_finding_returns_success_whatever_the_orphan_and_unlinked_cou
     );
 
     assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+}
+
+// ---------------------------------------------------------------------
+// events_for / dispatch: Command::Validate — conditions, task 4.3
+// ---------------------------------------------------------------------
+
+/// `new.pdf`, which no record names (orphan); a record naming
+/// `gone.pdf`, which holds no file (missing); and an item file no
+/// record links (unlinked). No finding. Returns the item file's
+/// library-relative, `/`-separated path.
+fn write_three_condition_library(root: &Path) -> String {
+    fs::write(root.join("new.pdf"), b"").unwrap();
+    let missing_record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "gone.pdf".to_string(),
+        size: 0,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("gone-bytes", "run-1")],
+    };
+    write_lib_artifact_record(root, &missing_record);
+    let item = Item {
+        id: lib_item_id(LIB_UUID_B),
+        record: lib_minimal_record(EntryType::Article),
+    };
+    write_lib_item(root, "milner1978", &item);
+    format!("{ITEM_STORE}/milner1978.{LIB_UUID_B}.toml")
+}
+
+/// Scenario "Validation names each condition it counts", through the
+/// command: the orphan, missing and unlinked conditions in that order,
+/// then the totals, and `Outcome::Success` (scenario "A condition does
+/// not fail a run").
+#[test]
+fn validate_names_all_three_conditions_in_kind_order_and_succeeds() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let item_path = write_three_condition_library(&root);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::validate(Some(root.clone())),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            Event::LibraryCondition {
+                path: "new.pdf".to_string(),
+                condition: Condition::Orphan,
+            },
+            Event::LibraryCondition {
+                path: "gone.pdf".to_string(),
+                condition: Condition::Missing {
+                    id: LIB_UUID_A.to_string(),
+                    record: format!("{STATE_DIR}/{ARTIFACT_STORE}/{LIB_UUID_A}.toml"),
+                },
+            },
+            Event::LibraryCondition {
+                path: item_path,
+                condition: Condition::Unlinked {
+                    id: LIB_UUID_B.to_string(),
+                },
+            },
+            Event::LibraryValidated {
+                root: root.clone(),
+                findings: 0,
+                orphans: 1,
+                missing: 1,
+                unlinked: 1,
+            },
+        ],
+        "got {events:?}"
+    );
+
+    let outcome = dispatch(
+        &cli(Command::validate(Some(root.clone())), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut Streams {
+            out: &mut Vec::new(),
+            err: &mut Vec::new(),
+        },
+    );
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+}
+
+/// Scenario "A missing artifact alone exits 0": a library holding only
+/// the missing record exits `Outcome::Success`, and `run-finished`
+/// counts zero findings.
+#[test]
+fn validate_over_only_a_missing_record_exits_success() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let missing_record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "gone.pdf".to_string(),
+        size: 0,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("gone-bytes", "run-1")],
+    };
+    write_lib_artifact_record(&root, &missing_record);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::validate(Some(root.clone())), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(last["event"], serde_json::Value::from("run-finished"));
+    assert_eq!(last["counts"]["findings"], serde_json::Value::from(0));
+}
+
+/// Scenario "Conditions are named beside the findings": a dangling link
+/// whose file is present, an orphan and an unlinked item. The events
+/// are the finding, the orphan condition, the unlinked condition, then
+/// the totals; the outcome is `Outcome::Partial` because of the finding
+/// alone.
+#[test]
+fn validate_names_conditions_beside_a_finding_and_is_partial() {
+    const DANGLING_TARGET_UUID: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef9";
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join("dangling-link.pdf"), b"present").unwrap();
+    let dangling = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        // Named for an item the library does not hold, so the record
+        // carries a `DanglingItem` finding — deliberately distinct from
+        // `LIB_UUID_B`, which the unlinked item fixture below uses.
+        item: Some(lib_item_id(DANGLING_TARGET_UUID)),
+        path: "dangling-link.pdf".to_string(),
+        size: 7,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("present", "run-1")],
+    };
+    write_lib_artifact_record(&root, &dangling);
+    fs::write(root.join("orphan.pdf"), b"").unwrap();
+    let unlinked = Item {
+        id: lib_item_id(LIB_UUID_B),
+        record: lib_minimal_record(EntryType::Article),
+    };
+    write_lib_item(&root, "unlinked", &unlinked);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::validate(Some(root.clone())),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(events.len(), 4, "got {events:?}");
+    assert!(
+        matches!(events[0], Event::LibraryFinding { .. }),
+        "got {:?}",
+        events[0]
+    );
+    assert_eq!(
+        events[1],
+        Event::LibraryCondition {
+            path: "orphan.pdf".to_string(),
+            condition: Condition::Orphan,
+        },
+        "got {:?}",
+        events[1]
+    );
+    assert_eq!(
+        events[2],
+        Event::LibraryCondition {
+            path: format!("{ITEM_STORE}/unlinked.{LIB_UUID_B}.toml"),
+            condition: Condition::Unlinked {
+                id: LIB_UUID_B.to_string(),
+            },
+        },
+        "got {:?}",
+        events[2]
+    );
+    assert_eq!(
+        events[3],
+        Event::LibraryValidated {
+            root: root.clone(),
+            findings: 1,
+            orphans: 1,
+            missing: 0,
+            unlinked: 1,
+        },
+        "got {:?}",
+        events[3]
+    );
+
+    let outcome = dispatch(
+        &cli(Command::validate(Some(root.clone())), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut Streams {
+            out: &mut Vec::new(),
+            err: &mut Vec::new(),
+        },
+    );
+    assert_eq!(
+        outcome,
+        Outcome::Partial,
+        "got {outcome:?}: a condition does not fail a run, but the finding does"
+    );
+}
+
+/// In human mode over the three-condition library: the three D7 lines
+/// in kind order, then the existing totals line as the last line, with
+/// no summary line after it.
+#[test]
+fn validate_human_mode_lists_all_three_conditions_before_the_totals_line() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    write_three_condition_library(&root);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::validate(Some(root.clone())), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "new.pdf: orphan; no artifact record names it",
+            &format!(
+                "gone.pdf: missing; artifact record {LIB_UUID_A} \
+                 ({STATE_DIR}/{ARTIFACT_STORE}/{LIB_UUID_A}.toml) names this path \
+                 and the library has no artifact here"
+            ),
+            &format!(
+                "{ITEM_STORE}/milner1978.{LIB_UUID_B}.toml: unlinked; no artifact \
+                 record links item {LIB_UUID_B}"
+            ),
+            &format!(
+                "{}: 0 findings, 1 orphans, 1 missing, 1 unlinked",
+                root.display()
+            ),
+        ],
+        "got {lines:?}"
+    );
+}
+
+/// Scenario "Two records of one identity are both named missing",
+/// through the command: the `DuplicateIdentity` finding, then two
+/// `missing` conditions that differ in `record` alone, then the totals
+/// with `missing: 2`. `Outcome::Partial`, because of the finding.
+#[test]
+fn validate_names_two_missing_conditions_for_two_records_of_one_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let dir_path = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&dir_path).unwrap();
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "gone.pdf".to_string(),
+        size: 0,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("g1", "run-1")],
+    };
+    let first = format!("a-first.{LIB_UUID_A}.toml");
+    fs::write(dir_path.join(&first), record.to_toml()).unwrap();
+    let other = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "gone.pdf".to_string(),
+        size: 0,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("g2", "run-1")],
+    };
+    let second = format!("b-second.{LIB_UUID_A}.toml");
+    fs::write(dir_path.join(&second), other.to_toml()).unwrap();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::validate(Some(root.clone())),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(events.len(), 4, "got {events:?}");
+    assert!(
+        matches!(events[0], Event::LibraryFinding { .. }),
+        "got {:?}",
+        events[0]
+    );
+    assert_eq!(
+        events[1],
+        Event::LibraryCondition {
+            path: "gone.pdf".to_string(),
+            condition: Condition::Missing {
+                id: LIB_UUID_A.to_string(),
+                record: format!("{STATE_DIR}/{ARTIFACT_STORE}/{first}"),
+            },
+        },
+        "got {:?}",
+        events[1]
+    );
+    assert_eq!(
+        events[2],
+        Event::LibraryCondition {
+            path: "gone.pdf".to_string(),
+            condition: Condition::Missing {
+                id: LIB_UUID_A.to_string(),
+                record: format!("{STATE_DIR}/{ARTIFACT_STORE}/{second}"),
+            },
+        },
+        "got {:?}",
+        events[2]
+    );
+    assert_eq!(
+        events[3],
+        Event::LibraryValidated {
+            root: root.clone(),
+            findings: 1,
+            orphans: 0,
+            missing: 2,
+            unlinked: 0,
+        },
+        "got {:?}",
+        events[3]
+    );
+
+    let outcome = dispatch(
+        &cli(Command::validate(Some(root.clone())), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut Streams {
+            out: &mut Vec::new(),
+            err: &mut Vec::new(),
+        },
+    );
+    assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
 }
 
 // ---------------------------------------------------------------------
@@ -10851,6 +11909,39 @@ fn adopted_totals(events: &[Event]) -> (usize, usize) {
     }
 }
 
+/// design D6: every orphan the walk found before the run gets exactly
+/// one `library-adoption` event, and the orphans the totals leave equal
+/// the adoption events that did not record one. `orphans_before` is
+/// `library::survey(root).orphans.len()`, taken before `adopt_over`
+/// runs. An addition to an existing test's assertions, never a
+/// replacement of them.
+fn assert_every_orphan_is_accounted_for(orphans_before: usize, events: &[Event]) {
+    let adoption_events = events
+        .iter()
+        .filter(|event| matches!(event, Event::LibraryAdoption { .. }))
+        .count();
+    assert_eq!(
+        adoption_events, orphans_before,
+        "every orphan the run reached must get exactly one adoption event: got {events:?}"
+    );
+    let left = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::LibraryAdoption { adoption, .. }
+                    if !matches!(adoption, Adoption::Recorded { .. })
+            )
+        })
+        .count();
+    assert_eq!(
+        adopted_totals(events).1,
+        left,
+        "the orphans left must equal the adoption events that did not record one: \
+         got {events:?}"
+    );
+}
+
 /// Run `borax adopt` over the library at `root`, answering from
 /// `index`, with a document reader that counts every open and sources
 /// that panic when asked anything — so a run that succeeds is a run
@@ -10922,9 +12013,11 @@ fn adopt_records_each_orphan_the_content_index_answers_for() {
     );
     index.put(&hash_bytes(b"task-8.1 copy"), &cached);
     let untouched = outside_the_stores(&root);
+    let orphans_before = library::survey(&root).orphans.len();
 
     let events = adopt_over(&root, &index);
 
+    assert_every_orphan_is_accounted_for(orphans_before, &events);
     assert_eq!(adopted_totals(&events), (3, 0), "got {events:?}");
     let reported: Vec<String> = adoptions(&events)
         .into_iter()
@@ -11033,12 +12126,29 @@ fn adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent() {
         &record_by("Other", 2022, "10.1000/task-8.2-other"),
     );
 
+    let orphans_before = library::survey(&root).orphans.len();
     let events = adopt_over(&root, &index);
 
+    assert_every_orphan_is_accounted_for(orphans_before, &events);
     assert_eq!(
         adopted_totals(&events),
         (1, 1),
         "known adopted, unknown still an orphan: got {events:?}"
+    );
+    let reported = adoptions(&events);
+    assert!(
+        reported
+            .iter()
+            .any(|(path, adoption)| path == "unknown.pdf" && adoption == &Adoption::Unindexed),
+        "the content index holds nothing for `unknown.pdf`, so it must be reported \
+         `unindexed`, not left out: got {reported:?}"
+    );
+    assert!(
+        reported
+            .iter()
+            .any(|(path, adoption)| path == "known.pdf"
+                && matches!(adoption, Adoption::Recorded { .. })),
+        "got {reported:?}"
     );
     assert_eq!(
         fs::read(&record_file).unwrap(),
@@ -11059,10 +12169,18 @@ fn adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent() {
         .map(|path| (path.clone(), real_stat(path)))
         .collect();
 
+    let orphans_before_again = library::survey(&root).orphans.len();
     let again = adopt_over(&root, &index);
 
+    assert_every_orphan_is_accounted_for(orphans_before_again, &again);
     assert_eq!(adopted_totals(&again), (0, 1), "got {again:?}");
-    assert!(adoptions(&again).is_empty(), "got {again:?}");
+    assert_eq!(
+        adoptions(&again),
+        vec![("unknown.pdf".to_string(), Adoption::Unindexed)],
+        "the unknown orphan is reported again, every run, since it is still \
+         an orphan: got {:?}",
+        adoptions(&again)
+    );
     assert_eq!(snapshot(&root), before, "a second run writes nothing");
     let restamped: Vec<(PathBuf, (u64, i64))> = before
         .keys()
@@ -11114,9 +12232,11 @@ fn adopt_holds_an_orphan_whose_bytes_a_record_already_holds() {
         &hash_bytes(b"task-8.2a twin"),
         &record_by("Twin", 2023, "10.1000/task-8.2a-twin"),
     );
+    let orphans_before = library::survey(&root).orphans.len();
 
     let events = adopt_over(&root, &index);
 
+    assert_every_orphan_is_accounted_for(orphans_before, &events);
     assert_eq!(adopted_totals(&events), (1, 2), "got {events:?}");
     let reported = adoptions(&events);
     assert_eq!(
@@ -11161,6 +12281,65 @@ fn adopt_holds_an_orphan_whose_bytes_a_record_already_holds() {
     assert_eq!(repaired.item, Some(item.id.clone()));
 }
 
+/// Scenario "Every orphan is accounted for": three orphans — one the
+/// index answers for, one whose bytes an existing record holds, and one
+/// the index holds nothing for. In walk order the adoptions are
+/// `Recorded`, `Held` and `Unindexed`, one each, and `adopted_totals`
+/// is `(1, 2)`.
+#[test]
+fn adopt_every_orphan_is_accounted_for() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "a-recorded.pdf", b"task-5.1 recorded");
+    let held_path = write_real_file(&root, "b-held.pdf", b"task-5.1 held");
+    write_real_file(&root, "c-unindexed.pdf", b"task-5.1 unindexed");
+    let (size, modified_millis) = real_stat(&held_path);
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(G7_UUID_A),
+            item: None,
+            path: "elsewhere/b-held.pdf".to_string(),
+            size,
+            modified_millis,
+            history: vec![hash_entry_for(hash_bytes(b"task-5.1 held"), "run-0")],
+        },
+    );
+
+    let index = ContentIndex::new(MemoryCache::new());
+    index.put(
+        &hash_bytes(b"task-5.1 recorded"),
+        &record_by("Recorded", 2020, "10.1000/task-5.1-recorded"),
+    );
+    let orphans_before = library::survey(&root).orphans.len();
+
+    let events = adopt_over(&root, &index);
+
+    assert_every_orphan_is_accounted_for(orphans_before, &events);
+    assert_eq!(adopted_totals(&events), (1, 2), "got {events:?}");
+    let reported = adoptions(&events);
+    assert_eq!(reported.len(), 3, "got {reported:?}");
+    assert!(
+        matches!(
+            reported.iter().find(|(path, _)| path == "a-recorded.pdf"),
+            Some((_, Adoption::Recorded { .. }))
+        ),
+        "got {reported:?}"
+    );
+    assert!(
+        matches!(
+            reported.iter().find(|(path, _)| path == "b-held.pdf"),
+            Some((_, Adoption::Held { .. }))
+        ),
+        "got {reported:?}"
+    );
+    assert_eq!(
+        reported.iter().find(|(path, _)| path == "c-unindexed.pdf"),
+        Some(&("c-unindexed.pdf".to_string(), Adoption::Unindexed)),
+        "got {reported:?}"
+    );
+}
+
 /// task 8.3, scenario "Adoption reads neither the sidecars nor the old
 /// ledger": over a library whose file has a lossless sidecar and which
 /// holds a ledger naming that file's hash, with the content index
@@ -11186,9 +12365,11 @@ fn adopt_reads_neither_a_sidecar_nor_the_retired_ledger() {
     );
     fs::write(&ledger, &ledger_line).unwrap();
     let sidecar_bytes = fs::read(&sidecar).unwrap();
+    let orphans_before = library::survey(&root).orphans.len();
 
     let events = adopt_over(&root, &ContentIndex::new(MemoryCache::new()));
 
+    assert_every_orphan_is_accounted_for(orphans_before, &events);
     assert_eq!(adopted_totals(&events), (0, 1), "got {events:?}");
     assert!(library::ArtifactStore::read(&root).is_empty());
     assert!(library::ItemStore::read(&root).is_empty());
@@ -11271,8 +12452,142 @@ fn adopt_after_the_cache_is_cleared_adopts_nothing_and_succeeds() {
             && out.contains("\"orphans\":2"),
         "got {out:?}"
     );
+    for path in ["one.pdf", "two.pdf"] {
+        assert!(
+            out.lines().any(|line| {
+                line.contains("\"event\":\"library-adoption\"")
+                    && line.contains(&format!("\"path\":\"{path}\""))
+                    && line.contains("\"kind\":\"unindexed\"")
+            }),
+            "an emptied cache must still report {path} as `unindexed`, not just \
+             left out: got {out:?}"
+        );
+    }
     assert!(library::ArtifactStore::read(&root).is_empty());
     assert!(library::ItemStore::read(&root).is_empty());
+}
+
+/// New ("Adoption after the cache is cleared does not make every orphan
+/// `unindexed`", D6): a readable orphan no record holds is `unindexed`,
+/// an orphan whose bytes an existing record holds is `held`, and (on
+/// Unix) an orphan that cannot be read is `unreadable` — clearing the
+/// cache changes none of that.
+#[test]
+fn adopt_after_the_cache_is_cleared_still_tells_unindexed_held_and_unreadable_apart() {
+    use borax_sources::store::FileCache;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "a-unindexed.pdf", b"task-5.1b unindexed");
+    let held_path = write_real_file(&root, "b-held.pdf", b"task-5.1b held");
+    let (size, modified_millis) = real_stat(&held_path);
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(G7_UUID_A),
+            item: None,
+            path: "elsewhere/b-held.pdf".to_string(),
+            size,
+            modified_millis,
+            history: vec![hash_entry_for(hash_bytes(b"task-5.1b held"), "run-0")],
+        },
+    );
+    #[cfg(unix)]
+    let unreadable_path = write_real_file(&root, "c-unreadable.pdf", b"task-5.1b unreadable");
+
+    let cache_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(cache_dir.path()));
+    index.put(
+        &hash_bytes(b"task-5.1b unindexed"),
+        &record_by("Unindexed", 2020, "10.1000/task-5.1b-unindexed"),
+    );
+
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&unreadable_path).is_ok() {
+            fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o644)).unwrap();
+            eprintln!(
+                "skipping adopt_after_the_cache_is_cleared_still_tells_unindexed_held_and_unreadable_apart: \
+                 file permissions were not enforced (running as root?)"
+            );
+            return;
+        }
+    }
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: Some(cache_dir.path().to_path_buf()),
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    // Clear the cache the index was just primed through.
+    events_for(
+        &Command::cache(true),
+        &Configs::uniform(effective.clone()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+    dispatch(
+        &cli(Command::adopt(Some(root.clone())), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    #[cfg(unix)]
+    fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let out = String::from_utf8(out).unwrap();
+    let adoption_kind = |path: &str| -> Option<String> {
+        out.lines().find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            if value["event"] == "library-adoption" && value["path"] == path {
+                Some(value["adoption"]["kind"].as_str().unwrap().to_string())
+            } else {
+                None
+            }
+        })
+    };
+
+    assert_eq!(
+        adoption_kind("a-unindexed.pdf"),
+        Some("unindexed".to_string()),
+        "got {out:?}"
+    );
+    assert_eq!(
+        adoption_kind("b-held.pdf"),
+        Some("held".to_string()),
+        "got {out:?}"
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        adoption_kind("c-unreadable.pdf"),
+        Some("unreadable".to_string()),
+        "clearing the cache must not turn an unreadable orphan into `unindexed`: got {out:?}"
+    );
 }
 
 /// Adoption writes library state, and a directory nobody marked holds
@@ -12159,6 +13474,65 @@ fn adopt_human_mode_ends_on_its_own_totals_line_with_no_summary() {
     let expected_last = format!("{}: 0 adopted, 0 orphans", root.display());
 
     assert_eq!(lines.last(), Some(&expected_last.as_str()), "got {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("resolved,")),
+        "got {lines:?}"
+    );
+}
+
+/// design D7: in human mode, a library with one unindexed orphan prints
+/// its D7 line, then the `library-adopted` line as the last line, with
+/// no summary line.
+#[test]
+fn adopt_human_mode_lists_an_unindexed_orphan_before_the_totals_line() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("new.pdf"), b"unindexed bytes").unwrap();
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::adopt(Some(root.clone())), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "new.pdf: the content index holds no record of its bytes, so it is \
+             still an orphan",
+            &format!("{}: 0 adopted, 1 orphans", root.display()),
+        ],
+        "got {lines:?}"
+    );
     assert!(
         !lines.iter().any(|line| line.contains("resolved,")),
         "got {lines:?}"

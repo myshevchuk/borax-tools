@@ -3352,12 +3352,15 @@ fn reported_root<C: Cache>(command: &Command, adapters: &Adapters<'_, C>) -> Pat
 
 /// Write `status`'s events into `sink`.
 ///
-/// Without `identify`, one event, carrying what
-/// [`crate::library::survey`] counted, and no document is opened. With
-/// it, each surveyed artifact in survey order is run through
+/// First one `library-condition` per orphan
+/// ([`crate::library::orphan_events`]), written as soon as the survey
+/// is read and before any document is opened, and last the totals,
+/// carrying what [`crate::library::survey`] counted. Without
+/// `identify`, nothing comes between them and no document is opened.
+/// With it, each surveyed artifact in survey order is run through
 /// [`crate::pipeline::extraction`] and its `library-extraction` event
-/// written as soon as that artifact is done; the totals follow, with
-/// the number of those results that found an identifier as
+/// written as soon as that artifact is done, and the totals carry the
+/// number of those results that found an identifier as
 /// `identifiable`. The survey's artifacts are the whole selection, and
 /// no service is asked anything either way.
 fn status_events<C: Cache>(
@@ -3368,6 +3371,9 @@ fn status_events<C: Cache>(
     sink: &mut dyn Sink,
 ) {
     let surveyed = crate::library::survey(&reported_root(command, adapters));
+    for event in crate::library::orphan_events(&surveyed) {
+        sink.emit(event);
+    }
     // The extraction settings are the run's own: a library command is
     // given a library rather than input files, so there is no per-file
     // directory to resolve them from.
@@ -3387,8 +3393,8 @@ fn status_events<C: Cache>(
     sink.emit(crate::library::status_event(&surveyed, identifiable));
 }
 
-/// Write `validate`'s events into `sink`: one per finding, then the
-/// totals ([`crate::library::validation_events`]).
+/// Write `validate`'s events into `sink`: one per finding, then one per
+/// condition, then the totals ([`crate::library::validation_events`]).
 fn validation_events<C: Cache>(command: &Command, adapters: &Adapters<'_, C>, sink: &mut dyn Sink) {
     let validation = crate::library::validate(&reported_root(command, adapters));
     for event in crate::library::validation_events(&validation) {
@@ -3423,9 +3429,9 @@ fn reconcile_events<C: Cache>(
     }
 }
 
-/// Write `adopt`'s events into `sink`: one per orphan the run adopted
-/// or tried to adopt, then every lookup the citation keys found no row
-/// for, then the totals ([`crate::library::adoption_events`]).
+/// Write `adopt`'s events into `sink`: one per orphan, then every
+/// lookup the citation keys found no row for, then the totals
+/// ([`crate::library::adoption_events`]).
 ///
 /// `library` is the group [`preflight`] prepared: the library root,
 /// with the citation-key table an item minted here is named by. The

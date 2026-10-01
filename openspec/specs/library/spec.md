@@ -126,11 +126,22 @@ An extraction result SHALL NOT be a skip or a finding. `run-finished`
 counts nothing for it, `status` gains no summary line, and the run's
 exit status does not depend on what extraction found.
 
+`borax status` SHALL also name each orphan it counts, with or without
+`--identify`, as the `library-condition` event of kind `orphan` that
+"Library conditions are named where they are counted" defines. The
+orphans are known once the tree is walked and the store is read, so
+their events SHALL be written before any document is opened, and
+therefore before every `library-extraction` event of the run. The
+orphan count SHALL equal the number of those events. Naming an orphan
+opens nothing, and an artifact an artifact record names by its path is
+never named an orphan.
+
 #### Scenario: Two hundred files borax has never seen
 - **WHEN** `borax status` runs over a marked directory holding 200 PDFs,
   no items and no artifact records
 - **THEN** it reports 200 artifacts, 0 items, 0 artifact records and 200
-  orphans, having been given no command before it
+  orphans, naming each of the 200 orphans ahead of the report, having
+  been given no command before it
 
 #### Scenario: What is identifiable is asked for
 - **WHEN** `borax status --identify` runs over the same directory
@@ -199,6 +210,20 @@ exit status does not depend on what extraction found.
 - **THEN** the human line writes that character as `\x1b`, and the
   `library-extraction` event in `--json` output carries the message
   unchanged
+
+#### Scenario: Each orphan is named before anything is opened
+- **WHEN** `borax status --identify` runs over a library holding
+  `a.pdf`, `b.pdf` and `c.pdf`, none of which an artifact record names
+- **THEN** a `library-condition` event of kind `orphan` names each of
+  the three, all three are written before the first document is
+  opened, and the report counts 3 orphans
+
+#### Scenario: A recorded artifact is not named as an orphan
+- **WHEN** `borax status` runs over a library holding `kept.pdf`, which
+  an artifact record names, and `new.pdf`, which none does
+- **THEN** exactly one `library-condition` event is written, naming
+  `new.pdf` as an orphan, the report counts 1 orphan, and no document
+  is opened
 
 ### Requirement: An artifact is a document in the tree, and one without a record is a worklist item
 An artifact SHALL be a file inside the library tree whose extension
@@ -651,10 +676,14 @@ exit with the partial-success code when it reports any finding and 0
 when it reports none.
 
 An orphan, an artifact borax cannot find, and an item nothing links to
-SHALL be reported as counts rather than as findings. None is a malformed
-library: the first is work to do, the second is history the library
-deliberately keeps, and the third is an ordinary item for a work with no
-file.
+SHALL be reported as conditions rather than as findings: each one named
+by a `library-condition` event of its own, as "Library conditions are
+named where they are counted" requires, and each kind reported as a
+count. None is a malformed library: the first is work to do, the second
+is history the library deliberately keeps, and the third is an ordinary
+item for a work with no file. Naming them SHALL leave the findings
+exactly as they are: no condition is a finding, and no finding is
+reported or withheld because a condition is named beside it.
 
 No invariant SHALL depend on holding continuously, and no advisory lock
 SHALL be a precondition for correctness. A library has no single
@@ -689,6 +718,29 @@ run cut short.
   agree
 - **THEN** it reports no finding and exits 0, whatever the number of
   orphans and whatever the number of items nothing links to
+
+#### Scenario: Conditions are named beside the findings
+- **WHEN** `borax validate` runs over a library holding an artifact
+  record whose file is at its last-known path and which names an item
+  the library does not hold, an orphan, and an item nothing links to
+- **THEN** the dangling link is reported as a finding, the orphan and
+  the item are each named by a `library-condition` event after it, the
+  totals count 1 finding, 1 orphan and 1 unlinked, and the exit code is
+  the partial-success code because of the finding alone
+
+#### Scenario: A missing artifact alone exits 0
+- **WHEN** `borax validate` runs over a library whose records and items
+  agree except that one record's last-known path holds no file
+- **THEN** it names that record as `missing`, reports no finding, and
+  exits 0
+
+#### Scenario: Every check still reports
+- **WHEN** `borax validate` runs over a library holding one instance of
+  every finding listed above beside an orphan, a missing artifact and
+  an unlinked item
+- **THEN** each of those findings is reported as a finding and counted
+  in the totals, and none of the three conditions is reported as a
+  finding
 
 ### Requirement: borax brings no file into the library
 borax SHALL NOT copy or move a file into a library. A file named as input
@@ -998,7 +1050,21 @@ record borax resolved for those bytes, the run SHALL write an artifact
 record for the artifact and link it to the item the library already
 holds for one of that record's identifiers, or to one it mints from
 that record. Where the index holds nothing, the artifact SHALL remain
-an orphan.
+an orphan, and the run SHALL report it, naming the artifact, as an
+orphan the content index holds no record for.
+
+Every orphan the run reaches SHALL be reported by exactly one
+`library-adoption` event, whose kind says what became of it: recorded,
+held by an existing record, unreadable, unwritten, or `unindexed` when
+the content index holds nothing for its bytes. No orphan is left an
+orphan silently, and the number of orphans the run reports as left
+SHALL equal the number of its `library-adoption` events that did not
+record the artifact. The human line for an unindexed orphan names its
+path, with control characters written out, and says that it is still
+an orphan. An orphan is reported `unindexed` only when it was readable
+and no artifact record holds its bytes, since only then is the content
+index asked about it. Such an orphan is not a skip or a finding, and
+the run's exit status does not depend on it.
 
 An orphan whose content hash is already held in the history of an
 artifact record SHALL NOT be adopted, whatever the index holds for it,
@@ -1042,9 +1108,10 @@ promise.
 #### Scenario: What adoption leaves alone
 - **WHEN** `borax adopt` runs over a library holding an artifact the
   content index cannot answer for, and another that already has a record
-- **THEN** the first is still an orphan and is counted as one, the
-  second is byte-identical including its item link, and a second run of
-  the command writes no library state
+- **THEN** the first is still an orphan, is reported as one the content
+  index holds no record for, and is counted as one, the second is
+  byte-identical including its item link, and a second run of the
+  command writes no library state
 
 #### Scenario: A recorded artifact moved out of band is not adopted
 - **WHEN** a recorded artifact is moved within the library by a file
@@ -1065,5 +1132,109 @@ promise.
 #### Scenario: Adoption after the cache is cleared
 - **WHEN** `borax cache --clear` runs and then `borax adopt`
 - **THEN** nothing is adopted and the run reports every artifact as an
-  orphan, rather than reporting a failure
+  orphan, rather than reporting a failure; each orphan that is readable
+  and whose bytes no artifact record holds is reported by its own event
+  as one the content index holds no record for, and the run exits 0
+
+#### Scenario: Every orphan is accounted for
+- **WHEN** `borax adopt` runs over a library holding one orphan the
+  content index answers for, one whose bytes an existing artifact
+  record holds, and one the content index holds nothing for
+- **THEN** each of the three is reported by exactly one
+  `library-adoption` event — recorded, held and unindexed in turn — and
+  the totals count 1 adopted and 2 orphans left
+
+### Requirement: Library conditions are named where they are counted
+`borax status` and `borax validate` SHALL report each library condition
+they count as a `library-condition` event naming the object it is
+about, so that every such count can be traced to the objects behind it.
+
+There are three conditions, each carried as the `kind` of the event's
+`condition`:
+
+- `orphan`: an artifact no artifact record names. The event's `path` is
+  the artifact's library-relative, `/`-separated path.
+- `missing`: an artifact record whose last-known path holds no artifact
+  of this library, because no file is there or because the file there
+  lies in a subtree the library does not own. The event's `path` is
+  that last-known path exactly as the record holds it, its `id` is the
+  record's artifact identity, and its `record` is the library-relative,
+  `/`-separated path of the record's own file under `.borax/artifacts/`.
+  The record file is what tells two records apart when they carry one
+  identity, which validation tolerates and reports as a finding, so
+  every `missing` event names exactly one record file.
+- `unlinked`: an item no artifact record links to. The event's `path`
+  is the library-relative, `/`-separated path of its item file, and its
+  `id` is the item's identity as that file records it.
+
+`borax status` counts orphans and SHALL name orphans alone; `borax
+validate` counts all three and SHALL name all three. A command's count
+of a condition SHALL equal the number of that run's `library-condition`
+events of the same kind, and naming conditions SHALL NOT widen what the
+command counts: the objects named are exactly the objects counted.
+`borax adopt` and `borax reconcile` trace their own counts through their
+own per-object events and write no `library-condition` event.
+
+Every `library-condition` event of a run SHALL precede that run's
+totals event, which remains the last event before `run-finished`. In
+`borax validate` they follow the findings: the orphans first, then the
+missing records, then the unlinked items. The event is an addition and
+does not change the event schema version.
+
+The human rendering SHALL write one line per condition, naming its
+path and opening its clause with the word the totals line counts it
+under — `orphan`, `missing` or `unlinked` — followed by the record's or
+the item's identity where the condition carries one, and by the record
+file for a missing record. Every path on that line, the record file's
+included, SHALL have its control characters written out rather than
+sent to the terminal. The totals lines keep their wording.
+
+A condition SHALL NOT be a finding or a skip. `run-finished` counts
+nothing for it, no summary line is written for it, and no command's
+exit status depends on the conditions it reports: an orphan is work to
+do, a missing artifact is history the library deliberately keeps, and
+an unlinked item is an ordinary item for a work with no file. A caller
+that has to act on a condition detects it from the event stream — from
+the `library-condition` events or from the count on the totals event —
+and not from the exit status.
+
+#### Scenario: Validation names each condition it counts
+- **WHEN** `borax validate` runs over a library holding `new.pdf`, which
+  no artifact record names, an artifact record naming `gone.pdf` where
+  no file is, and an item file `items/milner1978.<uuid>.toml` that no
+  artifact record links to
+- **THEN** one `library-condition` event names `new.pdf` as `orphan`,
+  one names `gone.pdf` as `missing` with the record's identity and its
+  record file, one names the item file as `unlinked` with the item's
+  identity, and all
+  three precede the totals, which count 1 orphan, 1 missing and 1
+  unlinked
+
+#### Scenario: A condition does not fail a run
+- **WHEN** `borax validate` runs over the library of the previous
+  scenario, which holds no finding
+- **THEN** no `library-finding` event is written, `run-finished` counts
+  no finding, and the run exits 0
+
+#### Scenario: A record inside a nested library is missing, not an orphan
+- **WHEN** an artifact record names `nested/kept.pdf`, where a file
+  stands inside a nested library, and `borax validate` runs
+- **THEN** that record is named as `missing`, no orphan is named for the
+  file, and no finding is reported
+
+#### Scenario: Two records of one identity are both named missing
+- **WHEN** two artifact record files under `.borax/artifacts/` carry one
+  artifact identity, both name `gone.pdf`, where no file is, and
+  `borax validate` runs
+- **THEN** the shared identity is reported as a finding, two
+  `library-condition` events of kind `missing` are written, each naming
+  `gone.pdf` and that identity and each naming a different record
+  file, and the totals count 2 missing
+
+#### Scenario: A path cannot drive the terminal
+- **WHEN** `borax status` runs in human mode over an orphan whose file
+  name holds an escape character
+- **THEN** the orphan's line writes that character as `\x1b`, and the
+  `library-condition` event in `--json` output carries the path
+  unchanged
 

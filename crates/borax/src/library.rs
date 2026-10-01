@@ -36,7 +36,8 @@ use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
 use crate::event::{
-    Admission, Adoption, Diagnostic, Event, Extraction, Finding, Level, LibraryAnswer, Repair,
+    Admission, Adoption, Condition, Diagnostic, Event, Extraction, Finding, Level, LibraryAnswer,
+    Repair,
 };
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
@@ -1227,7 +1228,8 @@ pub struct Survey {
     /// Every artifact in the tree, sorted by path.
     pub artifacts: Vec<PathBuf>,
     /// The artifacts no record names, in the order [`Survey::artifacts`]
-    /// holds them.
+    /// holds them: the objects behind the `orphans` count, each named by
+    /// one of the events [`orphan_events`] gives.
     pub orphans: Vec<PathBuf>,
     /// The nested libraries the walk stopped at, library-relative and
     /// in path order.
@@ -1424,18 +1426,44 @@ fn record_findings(records: &ArtifactStore, items: &ItemStore) -> Vec<(PathBuf, 
 /// platform's separator written as `/`.
 pub fn extraction_event(survey: &Survey, artifact: &Path, extraction: Extraction) -> Event {
     Event::LibraryExtraction {
-        path: library_relative(&survey.root, artifact).unwrap_or_else(|| {
-            artifact
-                .display()
-                .to_string()
-                .replace(std::path::MAIN_SEPARATOR, "/")
-        }),
+        path: reported(&survey.root, artifact),
         extraction,
     }
 }
 
+/// The `library-condition` events naming each orphan of `survey`, in
+/// survey order, each named relative to `survey.root` as
+/// [`extraction_event`] names an artifact.
+///
+/// One event per entry of [`Survey::orphans`], so their number is the
+/// `orphans` count [`status_event`] reports.
+pub fn orphan_events(survey: &Survey) -> Vec<Event> {
+    survey
+        .orphans
+        .iter()
+        .map(|orphan| Event::LibraryCondition {
+            path: reported(&survey.root, orphan),
+            condition: Condition::Orphan,
+        })
+        .collect()
+}
+
+/// `path` as a run reports a file of the library rooted at `root`:
+/// library-relative and `/`-separated, or, for a path not under `root`,
+/// as `path` spells it with the platform's separator written as `/`.
+fn reported(root: &Path, path: &Path) -> String {
+    library_relative(root, path).unwrap_or_else(|| {
+        path.display()
+            .to_string()
+            .replace(std::path::MAIN_SEPARATOR, "/")
+    })
+}
+
 /// The event reporting `survey`, carrying `identifiable` as the count
 /// of artifacts an identifier could be extracted from.
+///
+/// Its `orphans` count is the number of events [`orphan_events`] gives
+/// for the same survey.
 ///
 /// `identifiable` is `None` when the run was not asked for it: the
 /// survey itself never opens a document, so the count comes from the
@@ -1456,10 +1484,11 @@ pub fn status_event(survey: &Survey, identifiable: Option<usize>) -> Event {
 /// What `borax validate` found about a library.
 ///
 /// The findings are what is wrong with the library's own records. The
-/// three counts are not findings and never become them: an orphan is
+/// conditions are not findings and never become them: an orphan is
 /// work to do, an artifact borax cannot find is history the library
 /// deliberately keeps, and an item nothing links to is an ordinary item
-/// for a work with no file.
+/// for a work with no file. A record or item can carry a finding and be
+/// a condition at once; the two reports are independent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Validation {
     /// The library the findings are about, as [`Survey::root`].
@@ -1468,14 +1497,41 @@ pub struct Validation {
     /// stores were read: the item store first, then the artifact
     /// records, each in path order.
     pub findings: Vec<(PathBuf, Finding)>,
-    /// Artifacts no record names.
-    pub orphans: usize,
-    /// Records whose artifact the library cannot find: their last-known
-    /// path holds no file, or holds one in a subtree the library does
-    /// not own, which it can no more see than an absent file.
-    pub missing: usize,
-    /// Items no artifact record links to.
-    pub unlinked: usize,
+    /// Every condition, each with the library-relative path it is
+    /// about: the orphans in survey order, then the missing records in
+    /// read order, then the unlinked items in read order.
+    ///
+    /// An orphan is an artifact no record names. A missing record is
+    /// one whose last-known path holds no file, or holds one in a
+    /// subtree the library does not own, which it can no more see than
+    /// an absent file; its path is the one it records. An unlinked
+    /// item is one no artifact record links to, named by its file.
+    pub conditions: Vec<(String, Condition)>,
+}
+
+impl Validation {
+    /// How many of [`Validation::conditions`] are orphans.
+    pub fn orphans(&self) -> usize {
+        self.count(|condition| matches!(condition, Condition::Orphan))
+    }
+
+    /// How many of [`Validation::conditions`] are missing records.
+    pub fn missing(&self) -> usize {
+        self.count(|condition| matches!(condition, Condition::Missing { .. }))
+    }
+
+    /// How many of [`Validation::conditions`] are unlinked items.
+    pub fn unlinked(&self) -> usize {
+        self.count(|condition| matches!(condition, Condition::Unlinked { .. }))
+    }
+
+    /// How many of [`Validation::conditions`] `kind` accepts.
+    fn count(&self, kind: impl Fn(&Condition) -> bool) -> usize {
+        self.conditions
+            .iter()
+            .filter(|(_, condition)| kind(condition))
+            .count()
+    }
 }
 
 /// Validate the library rooted at `root`.
@@ -1485,6 +1541,9 @@ pub struct Validation {
 /// library has no single consistent state at any moment, its writers
 /// being peers, so a file observed half-written is a finding about that
 /// file and about nothing else.
+///
+/// A record counts as missing when its path, resolved as [`missing`]
+/// resolves one, holds no file in a subtree the library owns.
 pub fn validate(root: &Path) -> Validation {
     let contents = contents(root);
     let survey = surveyed(root, &contents);
@@ -1492,44 +1551,72 @@ pub fn validate(root: &Path) -> Validation {
     let mut findings = item_findings(&contents.items);
     findings.extend(record_findings(&contents.records, &contents.items));
 
+    let exists = |path: &Path| !excludes(root, path) && path.is_file();
+    let orphaned = survey
+        .orphans
+        .iter()
+        .map(|orphan| (reported(root, orphan), Condition::Orphan));
+    let missing = contents
+        .records
+        .files()
+        .filter(|(_, record)| !exists(&relative_to(root, &record.path)))
+        .map(|(file, record)| {
+            let condition = Condition::Missing {
+                id: record.id.to_string(),
+                record: reported(root, file),
+            };
+            (record.path.clone(), condition)
+        });
+    let unlinked = contents
+        .items
+        .files()
+        .filter(|(_, item)| contents.records.by_item(&item.id).is_empty())
+        .map(|(file, item)| {
+            let condition = Condition::Unlinked {
+                id: item.id.to_string(),
+            };
+            (reported(root, file), condition)
+        });
+
     Validation {
+        conditions: orphaned.chain(missing).chain(unlinked).collect(),
         root: survey.root,
         findings,
-        orphans: survey.orphans.len(),
-        missing: missing(root, &contents.records, &|path| {
-            !excludes(root, path) && path.is_file()
-        })
-        .len(),
-        unlinked: contents
-            .items
-            .iter()
-            .filter(|item| contents.records.by_item(&item.id).is_empty())
-            .count(),
     }
 }
 
 /// The events reporting `validation`: one per finding in the order they
-/// were found, then the totals.
+/// were found, then one per condition in the order
+/// [`Validation::conditions`] holds them, then the totals.
 ///
-/// The totals come last so that a reader of the stream has the findings
-/// before the count of them, as every other run reports its files
-/// before its summary.
+/// The totals come last so that a reader of the stream has every
+/// finding and condition before the count of them, as every other run
+/// reports its files before its summary. Each condition count is the
+/// number of condition events of its kind.
 pub fn validation_events(validation: &Validation) -> Vec<Event> {
-    let mut events: Vec<Event> = validation
+    let findings = validation
         .findings
         .iter()
         .map(|(path, finding)| Event::LibraryFinding {
             path: path.clone(),
             finding: finding.clone(),
-        })
-        .collect();
+        });
+    let conditions =
+        validation
+            .conditions
+            .iter()
+            .map(|(path, condition)| Event::LibraryCondition {
+                path: path.clone(),
+                condition: condition.clone(),
+            });
+    let mut events: Vec<Event> = findings.chain(conditions).collect();
 
     events.push(Event::LibraryValidated {
         root: validation.root.clone(),
         findings: validation.findings.len(),
-        orphans: validation.orphans,
-        missing: validation.missing,
-        unlinked: validation.unlinked,
+        orphans: validation.orphans(),
+        missing: validation.missing(),
+        unlinked: validation.unlinked(),
     });
     events
 }
@@ -2446,9 +2533,8 @@ pub fn admission_event(path: &Path, admitted: &Result<Admitted, Unrecorded>) -> 
 pub struct Adoptions {
     /// The library adopted into, as [`Survey::root`].
     pub root: PathBuf,
-    /// Every orphan the run adopted or tried to adopt, library-relative,
-    /// with what became of it, in the order the walk found them. An
-    /// orphan the content index had no record for is not among them.
+    /// Every orphan the walk found, library-relative, each exactly once
+    /// with what became of it, in the order the walk found them.
     pub adoptions: Vec<(String, Adoption)>,
     /// How many orphans the library held before the run.
     pub orphans: usize,
@@ -2476,7 +2562,8 @@ impl Adoptions {
 /// and written at the name `key` renders for it. The store is re-read
 /// on every admission, so a second orphan of the work a first one
 /// minted an item for links to that item. Where `lookup` answers
-/// nothing, the orphan is left as it is and produces no adoption.
+/// nothing, the orphan is left as it is and reported
+/// [`Adoption::Unindexed`].
 ///
 /// An orphan whose hash is in the history of a record already in the
 /// store, or of one this run wrote for an earlier orphan, is left an
@@ -2488,6 +2575,9 @@ impl Adoptions {
 /// already names a path is not an orphan's, so it is left exactly as it
 /// is, and a second run over a library the first left alone finds
 /// nothing to write.
+///
+/// Every orphan gets exactly one adoption, so the orphans the run
+/// leaves are the adoptions other than [`Adoption::Recorded`].
 ///
 /// `run`, `timestamp` and `tool_version` stamp the one hash entry each
 /// new record carries. Never fails: an orphan that cannot be read is
@@ -2529,6 +2619,7 @@ pub fn adopt(
             continue;
         }
         let Some(record) = lookup(&hash) else {
+            adoptions.push((relative, Adoption::Unindexed));
             continue;
         };
 
@@ -2570,9 +2661,8 @@ pub fn adopt(
     }
 }
 
-/// The events reporting `adoptions`, apart: one per orphan it has
-/// something to say about, in the order it reached them, and the
-/// totals.
+/// The events reporting `adoptions`, apart: one per orphan, in the
+/// order it reached them, and the totals.
 ///
 /// Apart so that a caller can report what is about the run as a whole
 /// between the two, and still close with the totals.

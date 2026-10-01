@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 
 use borax::event::{
-    Attempt, Claim, ClaimOrigin, Counts, Diagnostic, Event, Extraction, Format, Level,
-    LibraryAnswer, SCHEMA, SkipReason, Summary, TableUsed, human_line, human_summary, json_line,
-    render,
+    Adoption, Attempt, Claim, ClaimOrigin, Condition, Counts, Diagnostic, Event, Extraction,
+    Format, Level, LibraryAnswer, SCHEMA, SkipReason, Summary, TableUsed, human_line,
+    human_summary, json_line, render,
 };
 use borax::pipeline::{FileOutcome, FileRecord, event_for};
 use borax_core::content::{ContentHash, hash_bytes};
@@ -144,6 +144,48 @@ fn run_finished() -> Event {
     }
 }
 
+/// Fixed UUID text for condition fixtures below, following
+/// `library_extraction`'s own fixed hashes: the value is never
+/// validated as a real UUID by `Condition`, which carries `id` and
+/// `record` as plain strings (design D10).
+const COND_UUID_MISSING: &str = "0190c3a2-1111-7000-8000-000000000001";
+const COND_UUID_UNLINKED: &str = "0190c3a3-2222-7000-8000-000000000002";
+
+fn library_condition(path: &str, condition: Condition) -> Event {
+    Event::LibraryCondition {
+        path: path.to_string(),
+        condition,
+    }
+}
+
+fn library_adoption(path: &str, adoption: Adoption) -> Event {
+    Event::LibraryAdoption {
+        path: path.to_string(),
+        adoption,
+    }
+}
+
+/// One instance of every [`Condition`] variant, paired with the `path`
+/// design D3 shows for it.
+fn all_conditions() -> Vec<(&'static str, Condition)> {
+    vec![
+        ("sub/new.pdf", Condition::Orphan),
+        (
+            "gone.pdf",
+            Condition::Missing {
+                id: COND_UUID_MISSING.to_string(),
+                record: format!(".borax/artifacts/{COND_UUID_MISSING}.toml"),
+            },
+        ),
+        (
+            "items/milner1978.unlinked.toml",
+            Condition::Unlinked {
+                id: COND_UUID_UNLINKED.to_string(),
+            },
+        ),
+    ]
+}
+
 /// Every `Event` variant, so coverage-oriented tests can iterate once.
 fn all_events() -> Vec<Event> {
     vec![
@@ -151,6 +193,21 @@ fn all_events() -> Vec<Event> {
         resolved(),
         planned(),
         renamed(),
+        library_condition("sub/new.pdf", Condition::Orphan),
+        library_condition(
+            "gone.pdf",
+            Condition::Missing {
+                id: COND_UUID_MISSING.to_string(),
+                record: format!(".borax/artifacts/{COND_UUID_MISSING}.toml"),
+            },
+        ),
+        library_condition(
+            "items/milner1978.unlinked.toml",
+            Condition::Unlinked {
+                id: COND_UUID_UNLINKED.to_string(),
+            },
+        ),
+        library_adoption("new.pdf", Adoption::Unindexed),
         skipped(SkipReason::NoIdentifier),
         skipped(SkipReason::Unresolvable {
             found: "doi:10.1000/xyz123".to_string(),
@@ -2151,4 +2208,300 @@ fn render_human_equals_human_line_for_every_library_extraction_kind() {
         let event = library_extraction("sub/a.pdf", extraction);
         assert_eq!(render(Format::Human, &event), human_line(&event));
     }
+}
+
+// ---------------------------------------------------------------------
+// Event::LibraryCondition and Adoption::Unindexed — the vocabulary,
+// task 1.1
+// ---------------------------------------------------------------------
+
+/// design D3: `json_line` of `Event::LibraryCondition` gives exactly
+/// the documented line for each kind, field for field and in the order
+/// design D3 shows: `missing` carries `id` before `record`, `unlinked`
+/// carries `id` alone after `kind`.
+#[test]
+fn json_line_of_library_condition_matches_design_d3_for_every_kind() {
+    let cases: Vec<(Event, String)> = vec![
+        (
+            library_condition("sub/new.pdf", Condition::Orphan),
+            r#"{"schema":3,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}"#
+                .to_string(),
+        ),
+        (
+            library_condition(
+                "gone.pdf",
+                Condition::Missing {
+                    id: COND_UUID_MISSING.to_string(),
+                    record: format!(".borax/artifacts/{COND_UUID_MISSING}.toml"),
+                },
+            ),
+            format!(
+                r#"{{"schema":3,"event":"library-condition","path":"gone.pdf","condition":{{"kind":"missing","id":"{COND_UUID_MISSING}","record":".borax/artifacts/{COND_UUID_MISSING}.toml"}}}}"#
+            ),
+        ),
+        (
+            library_condition(
+                "items/milner1978.unlinked.toml",
+                Condition::Unlinked {
+                    id: COND_UUID_UNLINKED.to_string(),
+                },
+            ),
+            format!(
+                r#"{{"schema":3,"event":"library-condition","path":"items/milner1978.unlinked.toml","condition":{{"kind":"unlinked","id":"{COND_UUID_UNLINKED}"}}}}"#
+            ),
+        ),
+    ];
+
+    for (event, expected) in cases {
+        assert_eq!(json_line(&event), expected, "got {event:?}");
+    }
+}
+
+/// design D6: `json_line` of `Event::LibraryAdoption` with
+/// `Adoption::Unindexed` is exactly the documented line.
+#[test]
+fn json_line_of_library_adoption_unindexed_matches_design_d6() {
+    let event = library_adoption("new.pdf", Adoption::Unindexed);
+
+    assert_eq!(
+        json_line(&event),
+        r#"{"schema":3,"event":"library-adoption","path":"new.pdf","adoption":{"kind":"unindexed"}}"#
+    );
+}
+
+/// Every `library-condition` line deserializes back to the event it was
+/// rendered from.
+#[test]
+fn json_line_of_library_condition_round_trips_for_every_kind() {
+    for (path, condition) in all_conditions() {
+        let event = library_condition(path, condition);
+        let line = json_line(&event);
+        let parsed: Event = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed, event);
+    }
+}
+
+/// The `library-adoption` line for `Adoption::Unindexed` deserializes
+/// back to the event it was rendered from.
+#[test]
+fn json_line_of_library_adoption_unindexed_round_trips() {
+    let event = library_adoption("new.pdf", Adoption::Unindexed);
+    let line = json_line(&event);
+    let parsed: Event = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed, event);
+}
+
+/// design D8: a `library-condition` event is neither a skip nor a
+/// finding, for every kind — `Counts::observe` leaves every counter at
+/// zero.
+#[test]
+fn counts_observe_of_library_condition_counts_nothing_for_every_kind() {
+    for (path, condition) in all_conditions() {
+        let mut counts = Counts::default();
+        counts.observe(&library_condition(path, condition.clone()));
+        assert_eq!(
+            counts,
+            Counts::default(),
+            "condition {condition:?} changed the totals"
+        );
+    }
+}
+
+/// design D8: the same holds for the new `unindexed` adoption kind, as
+/// it already does for every other `Adoption` variant.
+#[test]
+fn counts_observe_of_library_adoption_unindexed_counts_nothing() {
+    let mut counts = Counts::default();
+    counts.observe(&library_adoption("new.pdf", Adoption::Unindexed));
+    assert_eq!(counts, Counts::default(), "got {counts:?}");
+}
+
+// ---------------------------------------------------------------------
+// Event::LibraryCondition and Adoption::Unindexed — human rendering,
+// task 2.1
+// ---------------------------------------------------------------------
+
+/// design D7: the exact human line for every condition kind.
+#[test]
+fn human_line_of_library_condition_matches_design_d7_for_every_kind() {
+    let cases: Vec<(Event, String)> = vec![
+        (
+            library_condition("new.pdf", Condition::Orphan),
+            "new.pdf: orphan; no artifact record names it".to_string(),
+        ),
+        (
+            library_condition(
+                "gone.pdf",
+                Condition::Missing {
+                    id: COND_UUID_MISSING.to_string(),
+                    record: format!(".borax/artifacts/{COND_UUID_MISSING}.toml"),
+                },
+            ),
+            format!(
+                "gone.pdf: missing; artifact record {COND_UUID_MISSING} \
+                 (.borax/artifacts/{COND_UUID_MISSING}.toml) names this path \
+                 and the library has no artifact here"
+            ),
+        ),
+        (
+            library_condition(
+                "items/milner1978.unlinked.toml",
+                Condition::Unlinked {
+                    id: COND_UUID_UNLINKED.to_string(),
+                },
+            ),
+            format!(
+                "items/milner1978.unlinked.toml: unlinked; no artifact record \
+                 links item {COND_UUID_UNLINKED}"
+            ),
+        ),
+    ];
+
+    for (event, expected) in cases {
+        assert_eq!(human_line(&event).unwrap(), expected, "got {event:?}");
+    }
+}
+
+/// design D7: the exact human line for the new `unindexed` adoption
+/// kind — the same closing clause the existing `unreadable` and
+/// `unwritten` adoption lines use.
+#[test]
+fn human_line_of_library_adoption_unindexed_matches_design_d7() {
+    let event = library_adoption("new.pdf", Adoption::Unindexed);
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "new.pdf: the content index holds no record of its bytes, so it is still an orphan"
+    );
+}
+
+/// design D7: a control character in a condition's `path` is written as
+/// `\xNN` on the human line, for every kind, while `json_line` of the
+/// same event carries the path unchanged.
+#[test]
+fn human_line_of_library_condition_escapes_control_characters_in_the_path() {
+    let path = "\u{1b}[2Jpaper.pdf";
+    for (_, condition) in all_conditions() {
+        let event = library_condition(path, condition.clone());
+        let line = human_line(&event).unwrap();
+        assert!(
+            line.starts_with("\\x1b[2Jpaper.pdf:"),
+            "condition {condition:?} line {line:?}"
+        );
+
+        let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+        assert_eq!(value["path"], Value::from(path));
+    }
+}
+
+/// design D7: a missing record's `record` is escaped too, on the human
+/// line alone — `json_line` carries it unchanged.
+#[test]
+fn human_line_of_library_condition_escapes_control_characters_in_the_missing_record() {
+    let record = "\u{1b}[2J.toml";
+    let event = library_condition(
+        "gone.pdf",
+        Condition::Missing {
+            id: COND_UUID_MISSING.to_string(),
+            record: record.to_string(),
+        },
+    );
+
+    let line = human_line(&event).unwrap();
+    assert!(line.contains("(\\x1b[2J.toml)"), "got {line:?}");
+
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(value["condition"]["record"], Value::from(record));
+}
+
+/// design D7: the `LibraryAdoption` arm renders the path for every
+/// kind, so a control character in the path is escaped on all five —
+/// `recorded`, `held`, `unreadable`, `unwritten` and `unindexed` alike.
+#[test]
+fn human_line_of_library_adoption_escapes_control_characters_in_the_path_for_every_kind() {
+    let path = "\u{1b}[2Jpaper.pdf";
+    let adoptions = vec![
+        Adoption::Recorded {
+            id: COND_UUID_MISSING.to_string(),
+            item: COND_UUID_UNLINKED.to_string(),
+        },
+        Adoption::Held {
+            id: COND_UUID_MISSING.to_string(),
+        },
+        Adoption::Unreadable {
+            message: "could not read".to_string(),
+        },
+        Adoption::Unwritten {
+            message: "disk full".to_string(),
+        },
+        Adoption::Unindexed,
+    ];
+
+    for adoption in adoptions {
+        let event = library_adoption(path, adoption.clone());
+        let line = human_line(&event).unwrap();
+        assert!(
+            line.starts_with("\\x1b[2Jpaper.pdf:"),
+            "adoption {adoption:?} line {line:?}"
+        );
+
+        let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+        assert_eq!(value["path"], Value::from(path));
+    }
+}
+
+/// design D7: for a path with no control character, the existing
+/// `library-adoption` lines are unchanged byte for byte, one per
+/// existing kind.
+#[test]
+fn human_line_of_library_adoption_is_unchanged_for_a_path_with_no_control_character() {
+    let cases: Vec<(Adoption, &str)> = vec![
+        (
+            Adoption::Recorded {
+                id: "art-1".to_string(),
+                item: "item-1".to_string(),
+            },
+            "paper.pdf: adopted as artifact art-1 of item item-1",
+        ),
+        (
+            Adoption::Held {
+                id: "art-1".to_string(),
+            },
+            "paper.pdf: holds bytes artifact art-1 already records, so it was left \
+             an orphan; run borax reconcile if the file was moved",
+        ),
+        (
+            Adoption::Unreadable {
+                message: "truncated".to_string(),
+            },
+            "paper.pdf: could not be read (truncated), so it is still an orphan",
+        ),
+        (
+            Adoption::Unwritten {
+                message: "disk full".to_string(),
+            },
+            "paper.pdf: could not be recorded (disk full), so it is still an orphan",
+        ),
+    ];
+
+    for (adoption, expected) in cases {
+        let event = library_adoption("paper.pdf", adoption.clone());
+        assert_eq!(
+            human_line(&event).unwrap(),
+            expected,
+            "adoption {adoption:?}"
+        );
+    }
+}
+
+/// `render(Format::Human, e)` equals `human_line(e)` for every
+/// condition kind and for the new `unindexed` adoption kind.
+#[test]
+fn render_human_equals_human_line_for_every_library_condition_and_unindexed() {
+    for (path, condition) in all_conditions() {
+        let event = library_condition(path, condition);
+        assert_eq!(render(Format::Human, &event), human_line(&event));
+    }
+    let event = library_adoption("new.pdf", Adoption::Unindexed);
+    assert_eq!(render(Format::Human, &event), human_line(&event));
 }
