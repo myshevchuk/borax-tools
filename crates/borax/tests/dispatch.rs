@@ -15,8 +15,8 @@ use borax::config::{
     ValueKindName, resolve,
 };
 use borax::event::{
-    Admission, Adoption, Condition, Event, Extraction, Level, LibraryAnswer, Overridden, Repair,
-    SCHEMA, SkipReason, human_line,
+    Admission, Adoption, Attempt, Condition, Event, Extraction, Level, LibraryAnswer, Overridden,
+    Repair, SCHEMA, SkipReason, human_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -15506,7 +15506,14 @@ fn an_outage_then_not_found_on_retry_stops_offering_a_retry() {
             reason: SkipReason::Unresolvable { attempts, .. },
             ..
         }) => {
-            assert_eq!(attempts.len(), 1, "got {attempts:?}");
+            assert_eq!(
+                attempts,
+                &vec![Attempt {
+                    source: "crossref".to_string(),
+                    error: "not found".to_string(),
+                }],
+                "the skip carries the retry's attempt, not the outage's"
+            );
         }
         other => panic!("expected an unresolvable Skipped after the retry, got {other:?}"),
     }
@@ -15524,11 +15531,16 @@ fn an_outage_then_a_failed_supply_still_offers_a_retry() {
         hash,
         pdf_with_embedded_doi("10.1000/d11-failed-supply-retry-stays"),
     );
-    let crossref = fake_source(
+    // The file's own DOI meets an outage; the supplied one is held by
+    // nobody, which is conclusive about the candidate and nothing else.
+    let crossref = SequencedSource::new(
         SourceName::Crossref,
-        Err(SourceError::Unavailable {
-            message: "503".to_string(),
-        }),
+        vec![
+            Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+            Err(SourceError::NotFound),
+        ],
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
@@ -15603,7 +15615,7 @@ fn overriding_a_conflict_still_reports_resolved_before_renamed() {
         collection_root: None,
         state_root: None,
     };
-    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+    let mut asker = ScriptedAsker::new(vec![Answer::Override]);
 
     let events = events_for(
         &Command::rename(vec![path.clone()], false),
@@ -15613,6 +15625,12 @@ fn overriding_a_conflict_still_reports_resolved_before_renamed() {
     )
     .unwrap();
 
+    assert!(
+        asker.questions_asked()[0]
+            .choices
+            .contains(&Answer::Override),
+        "the conflict question offers an override"
+    );
     let resolved_index = events
         .iter()
         .position(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
@@ -15622,17 +15640,10 @@ fn overriding_a_conflict_still_reports_resolved_before_renamed() {
         .position(|event| matches!(event, Event::Renamed { path: p, .. } if *p == path))
         .unwrap_or_else(|| panic!("no Event::Renamed for the file: {events:?}"));
 
-    assert!(
-        resolved_index < renamed_index,
-        "resolved must come before renamed: got {events:?}"
-    );
-    assert!(
-        !events[resolved_index + 1..renamed_index].iter().any(|event| matches!(
-            event,
-            Event::Resolved { path: p, .. } | Event::Skipped { path: p, .. } | Event::Renamed { path: p, .. }
-            if *p == path
-        )),
-        "nothing about this file may appear between resolved and renamed: got {events:?}"
+    assert_eq!(
+        renamed_index,
+        resolved_index + 1,
+        "renamed must directly follow resolved: got {events:?}"
     );
 }
 

@@ -3368,23 +3368,20 @@ fn evidence_via_content_index_hit() -> Evidence {
     }
 }
 
-/// The prior evidence of a file extraction found no identifier in: the
-/// index was consulted and missed, extraction ran and failed, and
-/// everything after it never ran.
-fn prior_extraction_failed() -> Evidence {
-    Evidence {
-        library: Consultation::NotConsulted(Unattempted::NoLibrary),
-        content_index: IndexEvidence {
-            read: IndexRead::Miss,
-            write: IndexWrite::NotAttempted(Unattempted::ExtractionFailed),
-        },
-        extraction: ExtractionEvidence {
-            result: ExtractionStep::NotAttempted(Unattempted::ExtractionFailed),
-            titles: Titles::NotAttempted(Unattempted::ExtractionFailed),
-        },
-        lookup: LookupEvidence::NotAttempted(Unattempted::ExtractionFailed),
-        match_check: MatchCheck::NotAttempted(Unattempted::ExtractionFailed),
-    }
+/// The evidence `standing` reaches for the file at `path` with no
+/// service, no content-index entry and no library: for a file with no
+/// identifier, what a supplied identifier is resolved on top of.
+fn prior_of(path: &Path, documents: &FakeDocuments) -> Evidence {
+    standing(
+        path,
+        documents,
+        &[],
+        &ContentIndex::new(MemoryCache::new()),
+        &config(true),
+        None,
+        None,
+    )
+    .evidence
 }
 
 /// The prior evidence of a file the content index answered for.
@@ -3438,7 +3435,7 @@ fn resolve_supplied_on_a_file_with_no_identifier_fills_lookup_titles_and_match_c
         Ok(record_with_doi("10.1000/supplied-agrees")),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
-    let prior = prior_extraction_failed();
+    let prior = prior_of(path, &documents);
 
     let file = resolve_supplied(
         path,
@@ -3497,7 +3494,7 @@ fn resolve_supplied_reports_a_title_conflict_as_file_conflict() {
         )),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
-    let prior = prior_extraction_failed();
+    let prior = prior_of(path, &documents);
 
     let file = resolve_supplied(
         path,
@@ -3540,7 +3537,7 @@ fn resolve_supplied_with_a_retrys_origin_reports_the_extracted_tier() {
         Ok(record_with_doi("10.1000/retry-tier")),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
-    let prior = prior_extraction_failed();
+    let prior = prior_of(path, &documents);
 
     let file = resolve_supplied(
         path,
@@ -3660,7 +3657,7 @@ fn resolve_supplied_keeps_both_attempts_on_a_failure_then_a_success() {
         Ok(record_with_doi("10.1000/failure-then-success")),
     );
     let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
-    let prior = prior_extraction_failed();
+    let prior = prior_of(path, &documents);
 
     let file = resolve_supplied(
         path,
@@ -3690,7 +3687,7 @@ fn resolve_supplied_returns_the_attempts_when_no_service_holds_the_identifier() 
     let (crossref, _calls) = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
     let (openalex, _calls) = fake_source(SourceName::OpenAlex, Err(SourceError::NotFound));
     let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
-    let prior = prior_extraction_failed();
+    let prior = prior_of(path, &documents);
 
     let unresolved = resolve_supplied(
         path,
@@ -3732,7 +3729,7 @@ fn unheld_evidence_sets_the_lookup_from_the_unresolved_attempts_in_order() {
     );
     let (openalex, _calls) = fake_source(SourceName::OpenAlex, Err(SourceError::NotFound));
     let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
-    let prior = prior_extraction_failed();
+    let prior = prior_of(path, &documents);
     let unresolved = resolve_supplied(
         path,
         &identifier,
@@ -3788,7 +3785,7 @@ fn unheld_evidence_is_conclusive_only_when_every_attempt_is_not_found() {
     let identifier = Identifier::Doi(doi("10.1000/unheld-conclusive"));
     let (crossref, _calls) = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
     let sources: Vec<&dyn Source> = vec![&crossref];
-    let prior = prior_extraction_failed();
+    let prior = prior_of(path, &documents);
     let all_not_found = resolve_supplied(
         path,
         &identifier,
