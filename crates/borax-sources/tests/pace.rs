@@ -9,7 +9,7 @@ use borax_core::record::{EntryType, Record};
 use borax_sources::pace::{
     DEFAULT_CONCURRENCY, DEFAULT_MIN_INTERVAL, Paced, delay_before, map_bounded,
 };
-use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::source::{Fetched, Retrieval, Source, SourceError, SourceName};
 
 // --- constants ---
 
@@ -200,12 +200,21 @@ fn map_bounded_supports_a_non_copy_output_type() {
 /// A [`Source`] that answers instantly and counts its calls.
 struct InstantSource {
     calls: std::sync::atomic::AtomicUsize,
+    retrieval: Retrieval,
 }
 
 impl InstantSource {
     fn new() -> InstantSource {
         InstantSource {
             calls: std::sync::atomic::AtomicUsize::new(0),
+            retrieval: Retrieval::Network { stored: None },
+        }
+    }
+
+    fn with_retrieval(retrieval: Retrieval) -> InstantSource {
+        InstantSource {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            retrieval,
         }
     }
 
@@ -223,10 +232,13 @@ impl Source for InstantSource {
         true
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(Record::new(EntryType::Article))
+        Ok(Fetched {
+            record: Record::new(EntryType::Article),
+            retrieval: self.retrieval.clone(),
+        })
     }
 }
 
@@ -285,6 +297,18 @@ fn a_zero_interval_paces_nothing() {
     }
 
     assert!(started.elapsed() < Duration::from_millis(50));
+}
+
+#[test]
+fn paced_returns_the_wrapped_sources_fetched_unchanged() {
+    let paced = Paced::new(
+        InstantSource::with_retrieval(Retrieval::ServiceCache),
+        Duration::ZERO,
+    );
+
+    let fetched = paced.fetch(&an_identifier()).unwrap();
+
+    assert_eq!(fetched.retrieval, Retrieval::ServiceCache);
 }
 
 #[test]

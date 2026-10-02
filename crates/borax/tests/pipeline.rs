@@ -11,11 +11,17 @@ use std::time::Duration;
 use borax::event::{
     Attempt, Claim, ClaimOrigin, Counts, Event, Extraction, LibraryAnswer, SkipReason,
 };
+use borax::evidence::{
+    Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
+    IndexWrite, LookupEvidence, MatchCheck, Origin, RecordRetrieval, ServiceAttempt, Titles,
+    Unattempted,
+};
 use borax::library::{ArtifactStore, ItemStore, Stores};
 use borax::pipeline::{
-    Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, claims_of,
-    event_for, extraction, extraction_of, remember, resolve_batch, resolve_file, resolve_supplied,
-    standing, verdict_event,
+    Documents, FileOutcome, FileRead, FileRecord, Provenance, RealDocuments, ResolveConfig,
+    Standing, accept, event_for, extraction, extraction_of, from_file, remember, resolve_batch,
+    resolve_file, resolve_supplied, standing, title_check, titles_of, unheld_evidence,
+    verdict_event,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier};
@@ -26,8 +32,9 @@ use borax_core::record::{EntryType, Record};
 use borax_pdf::scan::FoundIdentifier;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier};
-use borax_sources::cache::{Cache, MemoryCache};
-use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
+use borax_sources::conflict::{Conflict, Insufficient};
+use borax_sources::source::{Fetched, Retrieval, Source, SourceError, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -284,9 +291,9 @@ impl Source for FakeSource {
         self.supports
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.response.clone()
+        self.response.clone().map(Fetched::network)
     }
 }
 
@@ -324,7 +331,7 @@ impl Source for PanicSource {
         )
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
         panic!("{} was asked to fetch in an offline run", self.name)
     }
 }
@@ -409,12 +416,12 @@ fn embedded_metadata_identifier_resolves_via_the_first_source_uncached() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(file_record.record, record_with_doi("10.1000/embedded"));
-    assert_eq!(file_record.source, Some(SourceName::Crossref));
+    assert_eq!(file_record.source(), Some(SourceName::Crossref));
     assert_eq!(
-        file_record.tier,
+        file_record.tier(),
         Some(Provenance::Extracted(Tier::EmbeddedMetadata))
     );
-    assert!(!file_record.cached);
+    assert!(!file_record.cached());
 }
 
 #[test]
@@ -434,7 +441,7 @@ fn text_layer_identifier_reports_the_text_layer_tier() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(
-        file_record.tier,
+        file_record.tier(),
         Some(Provenance::Extracted(Tier::TextLayer))
     );
 }
@@ -465,9 +472,9 @@ fn content_index_hit_is_returned_without_opening_the_file() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(file_record.record, indexed);
-    assert_eq!(file_record.source, None);
-    assert_eq!(file_record.tier, None);
-    assert!(file_record.cached);
+    assert_eq!(file_record.source(), None);
+    assert_eq!(file_record.tier(), None);
+    assert!(file_record.cached());
     assert_eq!(documents.open_calls(), 0);
 }
 
@@ -489,7 +496,7 @@ fn cache_false_bypasses_the_content_index() {
     assert_eq!(documents.open_calls(), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(file_record.record, record_with_doi("10.1000/live"));
-    assert!(!file_record.cached);
+    assert!(!file_record.cached());
 }
 
 // ---------------------------------------------------------------------
@@ -519,7 +526,7 @@ fn a_hash_failure_proceeds_to_open_and_extract_rather_than_skipping() {
     assert_eq!(documents.hash_calls(), 1);
     assert_eq!(documents.open_calls(), 1);
     assert_eq!(file_record.record, record_with_doi("10.1000/unhashable"));
-    assert!(!file_record.cached);
+    assert!(!file_record.cached());
 }
 
 // ---------------------------------------------------------------------
@@ -815,7 +822,7 @@ fn crossref_outage_falls_back_to_openalex() {
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
-    assert_eq!(file_record.source, Some(SourceName::OpenAlex));
+    assert_eq!(file_record.source(), Some(SourceName::OpenAlex));
     assert_eq!(file_record.record, record_with_doi("10.1000/outage"));
 }
 
@@ -1920,7 +1927,7 @@ fn a_content_match_at_the_incoming_path_is_not_a_duplicate_and_resolves_from_the
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, indexed);
-    assert!(file_record.cached, "the file's own record is not a query");
+    assert!(file_record.cached(), "the file's own record is not a query");
     assert_eq!(documents.open_calls(), 0);
 }
 
@@ -1995,11 +2002,11 @@ fn a_work_match_at_the_incoming_path_is_not_a_duplicate_after_a_changed_hash() {
 }
 
 // ---------------------------------------------------------------------
-// claims_of: a file's own titles, read on their own (design D2a, task 2)
+// titles_of: a file's own titles, read on their own (design D7, task 4)
 // ---------------------------------------------------------------------
 
 #[test]
-fn claims_of_reads_the_xmp_and_info_titles_of_a_file_never_resolved() {
+fn titles_of_reads_the_xmp_and_info_titles_of_a_file_never_resolved() {
     let path = Path::new("paper.pdf");
     let documents = FakeDocuments::new().with_file(
         path,
@@ -2009,11 +2016,11 @@ fn claims_of_reads_the_xmp_and_info_titles_of_a_file_never_resolved() {
             .with_xmp("<dc:title><rdf:Alt><rdf:li>The Xmp Title</rdf:li></rdf:Alt></dc:title>"),
     );
 
-    let claims = claims_of(path, &documents);
+    let titles = titles_of(path, &documents);
 
     assert_eq!(
-        claims,
-        vec![
+        titles,
+        Titles::Read(vec![
             Claim {
                 from: ClaimOrigin::Xmp,
                 title: "The Xmp Title".to_string(),
@@ -2022,15 +2029,31 @@ fn claims_of_reads_the_xmp_and_info_titles_of_a_file_never_resolved() {
                 from: ClaimOrigin::Info,
                 title: "The Info Title".to_string(),
             },
-        ]
+        ])
     );
+}
+
+/// A file with readable prose and no title claims none, distinct from
+/// a file that failed to open or was never attempted.
+#[test]
+fn titles_of_reads_empty_for_a_file_that_claims_no_title() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("claims-of-untitled"),
+        pdf_with_no_identifier(),
+    );
+
+    let titles = titles_of(path, &documents);
+
+    assert_eq!(titles, Titles::Read(Vec::new()));
 }
 
 /// A file the content index answered for was never opened at all, so a
 /// caller comparing a supplied record against it has to be able to read
 /// its titles independently of whatever the content index said.
 #[test]
-fn claims_of_reads_titles_for_a_file_the_content_index_would_have_answered_for() {
+fn titles_of_reads_titles_for_a_file_the_content_index_would_have_answered_for() {
     let path = Path::new("paper.pdf");
     let documents = FakeDocuments::new().with_file(
         path,
@@ -2039,19 +2062,19 @@ fn claims_of_reads_titles_for_a_file_the_content_index_would_have_answered_for()
             .with_title("A Title The Index Never Saw"),
     );
 
-    let claims = claims_of(path, &documents);
+    let titles = titles_of(path, &documents);
 
     assert_eq!(
-        claims,
-        vec![Claim {
+        titles,
+        Titles::Read(vec![Claim {
             from: ClaimOrigin::Info,
             title: "A Title The Index Never Saw".to_string(),
-        }]
+        }])
     );
 }
 
 #[test]
-fn claims_of_is_empty_for_a_file_that_cannot_be_opened() {
+fn titles_of_fails_for_a_file_that_cannot_be_opened() {
     let path = Path::new("paper.pdf");
     let documents = FakeDocuments::new().with_open_error(
         path,
@@ -2061,18 +2084,1375 @@ fn claims_of_is_empty_for_a_file_that_cannot_be_opened() {
         },
     );
 
-    let claims = claims_of(path, &documents);
+    let titles = titles_of(path, &documents);
 
-    assert_eq!(claims, Vec::new());
+    match titles {
+        Titles::Failed { message } => assert_eq!(message, "corrupt stream"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn titles_claims_is_empty_for_failed_and_not_attempted() {
+    assert_eq!(
+        Titles::Failed {
+            message: "x".to_string()
+        }
+        .claims(),
+        &[] as &[Claim]
+    );
+    assert_eq!(
+        Titles::NotAttempted(Unattempted::ContentIndexHit).claims(),
+        &[] as &[Claim]
+    );
 }
 
 // ---------------------------------------------------------------------
-// resolve_supplied: resolving an identifier somebody typed (design D2,
-// D2a, D3; task 2.3)
+// title_check: TitleCheck projected onto MatchCheck (design D8, task 5)
 // ---------------------------------------------------------------------
 
 #[test]
-fn resolve_supplied_reports_a_title_conflict_rather_than_refusing() {
+fn title_check_maps_agreed_from_titles_read() {
+    let record = record_with_doi_and_title("10.1000/tc-agreed", "On the Structure of Borax");
+    let titles = Titles::Read(vec![Claim {
+        from: ClaimOrigin::Info,
+        title: "On the Structure of Borax".to_string(),
+    }]);
+
+    assert_eq!(title_check(&titles, &record), MatchCheck::Agreed);
+}
+
+#[test]
+fn title_check_maps_conflict_from_titles_read() {
+    let record = record_with_doi_and_title("10.1000/tc-conflict", "A Completely Different Title");
+    let titles = Titles::Read(vec![Claim {
+        from: ClaimOrigin::Info,
+        title: "Some Other Title Entirely".to_string(),
+    }]);
+
+    match title_check(&titles, &record) {
+        MatchCheck::Conflict(conflict) => assert_eq!(conflict.field, "title"),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+}
+
+#[test]
+fn title_check_over_titles_failed_is_insufficient_no_titles() {
+    let record = record_with_doi_and_title("10.1000/tc-failed", "On the Structure of Borax");
+    let titles = Titles::Failed {
+        message: "corrupt stream".to_string(),
+    };
+
+    assert_eq!(
+        title_check(&titles, &record),
+        MatchCheck::Insufficient(Insufficient::NoTitles)
+    );
+}
+
+#[test]
+fn title_check_over_titles_not_attempted_is_not_attempted_with_the_same_reason() {
+    let record = record_with_doi_and_title("10.1000/tc-not-attempted", "On the Structure of Borax");
+    let titles = Titles::NotAttempted(Unattempted::ContentIndexHit);
+
+    assert_eq!(
+        title_check(&titles, &record),
+        MatchCheck::NotAttempted(Unattempted::ContentIndexHit)
+    );
+}
+
+// ---------------------------------------------------------------------
+// standing: Evidence on every verdict (design D2, D6, D9, task 6.1)
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_fresh_resolution_with_no_library_carries_the_whole_evidence() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-fresh"),
+        pdf_with_embedded_doi("10.1000/evidence-fresh"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/evidence-fresh")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let file = resolved_outcome(result.verdict);
+
+    assert_eq!(
+        file.evidence.library,
+        Consultation::NotConsulted(Unattempted::NoLibrary)
+    );
+    assert_eq!(file.evidence.content_index.read, IndexRead::Miss);
+    assert_eq!(
+        file.evidence.content_index.write,
+        IndexWrite::Attempted(CacheWrite::Written)
+    );
+    assert!(matches!(
+        file.evidence.extraction.result,
+        ExtractionStep::Ran(Extraction::Found { .. })
+    ));
+    assert!(matches!(file.evidence.extraction.titles, Titles::Read(_)));
+    match &file.evidence.lookup {
+        LookupEvidence::Attempted {
+            identifier,
+            origin,
+            attempts,
+        } => {
+            assert_eq!(identifier.to_string(), "doi:10.1000/evidence-fresh");
+            assert_eq!(origin, &Origin::Extracted(Tier::EmbeddedMetadata));
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(
+                attempts[0],
+                ServiceAttempt {
+                    service: SourceName::Crossref,
+                    outcome: Ok(Retrieval::Network { stored: None }),
+                }
+            );
+        }
+        other => panic!("expected Attempted, got {other:?}"),
+    }
+    assert_eq!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
+    );
+}
+
+#[test]
+fn standing_evidence_equals_the_resolved_files_evidence() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-invariant-resolved"),
+        pdf_with_embedded_doi("10.1000/evidence-invariant-resolved"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/evidence-invariant-resolved")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let file = match &result.verdict {
+        FileOutcome::Resolved(file) => file,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+
+    assert_eq!(result.evidence, file.evidence);
+}
+
+#[test]
+fn standing_evidence_equals_the_refused_candidates_evidence() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-invariant-refused"),
+        pdf_with_text_doi("10.1000/evidence-invariant-refused").with_title("Old Extracted Title"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1000/evidence-invariant-refused",
+            "A Completely Different Resolved Title",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let refused = result
+        .refused
+        .clone()
+        .unwrap_or_else(|| panic!("expected a refused candidate, got {:?}", result.verdict));
+
+    assert_eq!(result.evidence, refused.evidence);
+}
+
+#[test]
+fn standing_evidence_equals_the_work_duplicates_file_evidence() {
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let path = root.join("incoming.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("evidence-invariant-duplicate"),
+        pdf_with_embedded_doi("10.1000/evidence-invariant-duplicate"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/evidence-invariant-duplicate")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let item = item_with(root, "10.1000/evidence-invariant-duplicate");
+    record_at(
+        root,
+        "archived/Original.pdf",
+        hash_for("evidence-invariant-duplicate-original"),
+        Some(item),
+    );
+    let stores = Stores::read(root);
+    let exists = |_: &Path| true;
+    let account = stores.account(&exists);
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        Some(&account),
+        None,
+    );
+    let duplicated = result
+        .duplicated
+        .clone()
+        .unwrap_or_else(|| panic!("expected a work duplicate, got {:?}", result.verdict));
+
+    assert_eq!(result.evidence, duplicated.file.evidence);
+}
+
+#[test]
+fn a_failure_before_a_success_keeps_both_attempts_in_order() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-failure-before-success"),
+        pdf_with_embedded_doi("10.1000/evidence-failure-before-success"),
+    );
+    let crossref = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Err(SourceError::Unavailable {
+            message: "503".to_string(),
+        }),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let openalex = FakeSource {
+        name: SourceName::OpenAlex,
+        supports: true,
+        response: Ok(record_with_doi("10.1000/evidence-failure-before-success")),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let file = resolved_outcome(result.verdict);
+
+    match &file.evidence.lookup {
+        LookupEvidence::Attempted { attempts, .. } => {
+            assert_eq!(attempts[0].service, SourceName::Crossref);
+            assert!(attempts[0].outcome.is_err());
+            assert_eq!(attempts[1].service, SourceName::OpenAlex);
+            assert!(attempts[1].outcome.is_ok());
+        }
+        other => panic!("expected Attempted, got {other:?}"),
+    }
+    assert_eq!(file.source(), Some(SourceName::OpenAlex));
+    match event_for(path, &result.verdict) {
+        Event::Resolved { source, .. } => assert_eq!(source, "openalex".to_string()),
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn rate_limited_then_malformed_is_unresolvable_with_structured_attempts() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-rate-limited-malformed"),
+        pdf_with_embedded_doi("10.1000/evidence-rate-limited-malformed"),
+    );
+    let crossref = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Err(SourceError::RateLimited),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let openalex = FakeSource {
+        name: SourceName::OpenAlex,
+        supports: true,
+        response: Err(SourceError::Malformed {
+            message: "bad body".to_string(),
+        }),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        result.verdict,
+        FileOutcome::Skipped(SkipReason::Unresolvable { .. })
+    ));
+    assert!(!result.evidence.lookup.is_conclusive());
+    assert_eq!(
+        result.evidence.match_check,
+        MatchCheck::NotAttempted(Unattempted::NoRecord)
+    );
+    assert_eq!(
+        result.evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::NoRecord)
+    );
+}
+
+#[test]
+fn every_service_answering_not_found_is_conclusive() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-all-not-found"),
+        pdf_with_embedded_doi("10.1000/evidence-all-not-found"),
+    );
+    let (crossref, _calls) = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+
+    assert!(result.evidence.lookup.is_conclusive());
+}
+
+#[test]
+fn no_eligible_service_gives_an_attempted_lookup_with_no_attempts() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-no-eligible-service"),
+        pdf_with_text_arxiv("2401.12345"),
+    );
+    let crossref = FakeSource {
+        name: SourceName::Crossref,
+        supports: false,
+        response: Ok(record_with_doi("10.1000/unused")),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let openalex = FakeSource {
+        name: SourceName::OpenAlex,
+        supports: false,
+        response: Ok(record_with_doi("10.1000/unused")),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        result.verdict,
+        FileOutcome::Skipped(SkipReason::Unresolvable { .. })
+    ));
+    assert!(result.evidence.lookup.no_eligible_service());
+}
+
+#[test]
+fn a_response_cache_hit_is_told_apart_from_the_network_answer() {
+    let memory = MemoryCache::new();
+    let crossref = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Ok(record_with_doi("10.1000/evidence-response-cache")),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let cached = borax_sources::cache::Cached::new(crossref, memory);
+    let sources: Vec<&dyn Source> = vec![&cached];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let first_path = Path::new("first.pdf");
+    let first_documents = FakeDocuments::new().with_file(
+        first_path,
+        hash_for("evidence-response-cache-first"),
+        pdf_with_embedded_doi("10.1000/evidence-response-cache"),
+    );
+    let first = standing(
+        first_path,
+        &first_documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let first_file = resolved_outcome(first.verdict);
+    assert_eq!(
+        first_file.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
+    );
+    assert!(!first_file.cached());
+
+    let second_path = Path::new("second.pdf");
+    let second_documents = FakeDocuments::new().with_file(
+        second_path,
+        hash_for("evidence-response-cache-second"),
+        pdf_with_embedded_doi("10.1000/evidence-response-cache"),
+    );
+    let second = standing(
+        second_path,
+        &second_documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let second_file = resolved_outcome(second.verdict);
+    assert_eq!(
+        second_file.evidence.retrieval(),
+        Some(RecordRetrieval::ServiceCache {
+            service: SourceName::Crossref
+        })
+    );
+    assert!(!second_file.cached());
+}
+
+#[test]
+fn a_content_index_hit_marks_every_later_section_not_attempted() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("evidence-index-hit");
+    let documents = FakeDocuments::new().with_open_error(
+        path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    index.put(&hash, &record_with_doi("10.1000/evidence-index-hit"));
+    let sources: Vec<&dyn Source> = Vec::new();
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let file = resolved_outcome(result.verdict);
+
+    assert_eq!(file.evidence.content_index.read, IndexRead::Hit);
+    assert_eq!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::ContentIndex)
+    );
+    assert_eq!(
+        file.evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::ContentIndexHit)
+    );
+    assert_eq!(
+        file.evidence.extraction.titles,
+        Titles::NotAttempted(Unattempted::ContentIndexHit)
+    );
+    assert_eq!(
+        file.evidence.lookup,
+        LookupEvidence::NotAttempted(Unattempted::ContentIndexHit)
+    );
+    assert_eq!(
+        file.evidence.match_check,
+        MatchCheck::NotAttempted(Unattempted::ContentIndexHit)
+    );
+}
+
+#[test]
+fn bypassed_with_cache_false_still_writes_the_index() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("evidence-bypassed");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/evidence-bypassed"),
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    index.put(&hash, &record_with_doi("10.1000/stale"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/evidence-bypassed")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(false),
+        None,
+        None,
+    );
+    let file = resolved_outcome(result.verdict);
+
+    assert_eq!(file.evidence.content_index.read, IndexRead::Bypassed);
+    assert_eq!(
+        file.evidence.content_index.write,
+        IndexWrite::Attempted(CacheWrite::Written)
+    );
+}
+
+#[test]
+fn an_unhashable_file_reports_the_index_as_unavailable_under_both_cache_settings() {
+    for cache in [true, false] {
+        let path = Path::new("paper.pdf");
+        let documents = FakeDocuments::new().with_hash_error(
+            path,
+            ExtractionError::Unreadable {
+                message: "cannot hash".to_string(),
+            },
+            pdf_with_embedded_doi("10.1000/evidence-unhashable"),
+        );
+        let (crossref, _calls) = fake_source(
+            SourceName::Crossref,
+            Ok(record_with_doi("10.1000/evidence-unhashable")),
+        );
+        let sources: Vec<&dyn Source> = vec![&crossref];
+        let index = ContentIndex::new(MemoryCache::new());
+
+        let result = standing(
+            path,
+            &documents,
+            &sources,
+            &index,
+            &config(cache),
+            None,
+            None,
+        );
+        let file = resolved_outcome(result.verdict);
+
+        match &file.evidence.content_index.read {
+            IndexRead::Unavailable { message } => assert_eq!(message, "cannot hash"),
+            other => panic!("expected Unavailable, got {other:?} (cache={cache})"),
+        }
+        assert_eq!(
+            file.evidence.content_index.write,
+            IndexWrite::NotAttempted(Unattempted::Unhashable),
+            "cache={cache}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_content_index_write_is_evidence_not_a_failure() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-write-fails"),
+        pdf_with_embedded_doi("10.1000/evidence-write-fails"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/evidence-write-fails")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(WriteFailingCache);
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let file = resolved_outcome(result.verdict);
+
+    match &file.evidence.content_index.write {
+        IndexWrite::Attempted(CacheWrite::Failed { message }) => assert!(!message.is_empty()),
+        other => panic!("expected Attempted(Failed), got {other:?}"),
+    }
+    assert_eq!(file.record, record_with_doi("10.1000/evidence-write-fails"));
+}
+
+#[test]
+fn a_tracked_files_evidence_marks_every_later_section_library_answered() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let hash = hash_for("evidence-tracked");
+    let item = library_item(root, record_with_doi("10.1000/evidence-tracked"));
+    let stores = tracked_library(root, "paper.pdf", hash.clone(), &item);
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_text_layer());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+    let file = resolved_outcome(result.verdict);
+    let artifact = file_artifact_id(&stores, &path, &hash);
+
+    assert!(matches!(
+        file.evidence.library,
+        Consultation::Consulted(LibraryAnswer::Tracked { .. })
+    ));
+    assert_eq!(
+        file.evidence.content_index.read,
+        IndexRead::NotAttempted(Unattempted::LibraryAnswered)
+    );
+    assert_eq!(
+        file.evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::LibraryAnswered)
+    );
+    assert_eq!(
+        file.evidence.extraction.result,
+        ExtractionStep::NotAttempted(Unattempted::LibraryAnswered)
+    );
+    assert_eq!(
+        file.evidence.lookup,
+        LookupEvidence::NotAttempted(Unattempted::LibraryAnswered)
+    );
+    assert_eq!(
+        file.evidence.match_check,
+        MatchCheck::NotAttempted(Unattempted::LibraryAnswered)
+    );
+    assert_eq!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::Library {
+            artifact,
+            item: item.id.to_string(),
+        })
+    );
+}
+
+#[test]
+fn a_dangling_item_files_evidence_matches_an_untracked_files() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("mystery.pdf");
+    let hash = hash_for("evidence-dangling");
+    let dangling_item = ItemId::from_uuid(fresh_uuid());
+    record_at(
+        root,
+        "mystery.pdf",
+        hash.clone(),
+        Some(dangling_item.clone()),
+    );
+    let stores = Stores::read(root);
+    let documents = FakeDocuments::new().with_file(&path, hash, pdf_with_no_identifier());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+
+    assert!(matches!(
+        result.evidence.library,
+        Consultation::Consulted(LibraryAnswer::DanglingItem { .. })
+    ));
+    assert_eq!(
+        result.evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::LibraryAnswered)
+    );
+}
+
+#[test]
+fn a_file_outside_another_roots_library_is_not_consulted() {
+    let other_root = tempdir().unwrap();
+    let path = Path::new("/elsewhere/paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-outside-library"),
+        pdf_with_embedded_doi("10.1000/evidence-outside-library"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/evidence-outside-library")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let stores = Stores::read(other_root.path());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+
+    assert_eq!(
+        result.evidence.library,
+        Consultation::NotConsulted(Unattempted::OutsideLibrary)
+    );
+}
+
+#[test]
+fn extraction_failed_keeps_the_title_beside_no_identifier_in_the_evidence() {
+    for (pdf, expected) in [
+        (pdf_blank_with_title(), Extraction::NoTextLayer),
+        (pdf_prose_with_title(), Extraction::TextWithoutIdentifier),
+    ] {
+        let path = Path::new("paper.pdf");
+        let documents =
+            FakeDocuments::new().with_file(path, hash_for("evidence-extraction-failed"), pdf);
+        let sources: Vec<&dyn Source> = vec![];
+        let index = ContentIndex::new(MemoryCache::new());
+
+        let result = standing(
+            path,
+            &documents,
+            &sources,
+            &index,
+            &config(true),
+            None,
+            None,
+        );
+
+        assert!(matches!(
+            &result.evidence.extraction.result,
+            ExtractionStep::Ran(found) if *found == expected
+        ));
+        assert_eq!(
+            result.evidence.extraction.titles,
+            Titles::Read(vec![Claim {
+                from: ClaimOrigin::Info,
+                title: "A Title".to_string(),
+            }])
+        );
+        assert_eq!(
+            result.evidence.lookup,
+            LookupEvidence::NotAttempted(Unattempted::ExtractionFailed)
+        );
+        assert_eq!(
+            result.evidence.match_check,
+            MatchCheck::NotAttempted(Unattempted::ExtractionFailed)
+        );
+        assert_eq!(
+            result.evidence.content_index.write,
+            IndexWrite::NotAttempted(Unattempted::ExtractionFailed)
+        );
+        assert_eq!(
+            result.verdict,
+            FileOutcome::Skipped(SkipReason::NoIdentifier)
+        );
+    }
+}
+
+#[test]
+fn encrypted_and_unreadable_both_fail_the_titles() {
+    let path = Path::new("paper.pdf");
+
+    let encrypted_documents = FakeDocuments::new().with_open_error(
+        path,
+        hash_for("evidence-encrypted"),
+        ExtractionError::Encrypted,
+    );
+    let sources: Vec<&dyn Source> = vec![];
+    let index = ContentIndex::new(MemoryCache::new());
+    let encrypted = standing(
+        path,
+        &encrypted_documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    assert!(matches!(
+        encrypted.evidence.extraction.result,
+        ExtractionStep::Ran(Extraction::Encrypted)
+    ));
+    assert!(matches!(
+        encrypted.evidence.extraction.titles,
+        Titles::Failed { .. }
+    ));
+    assert!(matches!(
+        encrypted.verdict,
+        FileOutcome::Skipped(SkipReason::Unreadable { .. })
+    ));
+
+    let unreadable_documents = FakeDocuments::new().with_open_error(
+        path,
+        hash_for("evidence-unreadable"),
+        ExtractionError::Unreadable {
+            message: "corrupt stream".to_string(),
+        },
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    let unreadable = standing(
+        path,
+        &unreadable_documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    assert!(matches!(
+        unreadable.evidence.extraction.result,
+        ExtractionStep::Ran(Extraction::Unreadable { .. })
+    ));
+    assert!(matches!(
+        unreadable.evidence.extraction.titles,
+        Titles::Failed { .. }
+    ));
+    assert!(matches!(
+        unreadable.verdict,
+        FileOutcome::Skipped(SkipReason::Unreadable { .. })
+    ));
+}
+
+#[test]
+fn a_content_duplicate_evidence_is_not_attempted() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let _existing = write_file_for_test(root, "existing.pdf", b"shared bytes");
+    let incoming = root.join("incoming.pdf");
+    let hash = hash_bytes(b"shared bytes");
+    record_at(root, "existing.pdf", hash.clone(), None);
+    let stores = Stores::read(root);
+    let exists = |_: &Path| true;
+    let account = stores.account(&exists);
+    let documents = FakeDocuments::new().with_file(&incoming, hash, pdf_with_no_text_layer());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        &incoming,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        Some(&account),
+        Some(&stores),
+    );
+
+    assert_eq!(
+        result.evidence,
+        Evidence::not_attempted(Unattempted::ContentDuplicate)
+    );
+}
+
+#[test]
+fn unattempted_as_str_is_kebab_case_for_every_reason() {
+    let cases = [
+        (Unattempted::NoLibrary, "no-library"),
+        (Unattempted::OutsideLibrary, "outside-library"),
+        (Unattempted::ContentDuplicate, "content-duplicate"),
+        (Unattempted::LibraryAnswered, "library-answered"),
+        (Unattempted::ContentIndexHit, "content-index-hit"),
+        (Unattempted::ExtractionFailed, "extraction-failed"),
+        (Unattempted::NoRecord, "no-record"),
+        (Unattempted::Refused, "refused"),
+        (Unattempted::Unhashable, "unhashable"),
+        (Unattempted::AwaitingAcceptance, "awaiting-acceptance"),
+    ];
+    for (reason, expected) in cases {
+        assert_eq!(reason.as_str(), expected);
+    }
+}
+
+#[test]
+fn resolved_event_projections_match_schema_3_for_the_failure_before_success_case() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("evidence-schema3-failure"),
+        pdf_with_embedded_doi("10.1000/evidence-schema3-failure"),
+    );
+    let crossref = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Err(SourceError::Unavailable {
+            message: "503".to_string(),
+        }),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let openalex = FakeSource {
+        name: SourceName::OpenAlex,
+        supports: true,
+        response: Ok(record_with_doi("10.1000/evidence-schema3-failure")),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+
+    match event_for(path, &result.verdict) {
+        Event::Resolved {
+            source,
+            tier,
+            found,
+            claims,
+            cached,
+            library,
+            ..
+        } => {
+            assert_eq!(source, "openalex".to_string());
+            assert_eq!(tier.as_deref(), Some("embedded-metadata"));
+            assert_eq!(found, "doi:10.1000/evidence-schema3-failure".to_string());
+            assert_eq!(claims, Vec::new());
+            assert!(!cached);
+            assert_eq!(library, None);
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// The conflict candidate: evidence kept, never remembered (design D10,
+// task 7.1)
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_conflict_candidate_keeps_its_whole_evidence() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("conflict-candidate-evidence");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash.clone(),
+        pdf_with_text_doi("10.1000/conflict-candidate-evidence").with_title("Old Extracted Title"),
+    );
+    let memory = MemoryCache::new();
+    let crossref = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Ok(record_with_doi_and_title(
+            "10.1000/conflict-candidate-evidence",
+            "A Completely Different Resolved Title",
+        )),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let cached = borax_sources::cache::Cached::new(crossref, memory);
+    let sources: Vec<&dyn Source> = vec![&cached];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        result.verdict,
+        FileOutcome::Skipped(SkipReason::Conflict { .. })
+    ));
+    let skip_similarity = match &result.verdict {
+        FileOutcome::Skipped(SkipReason::Conflict { similarity, .. }) => *similarity,
+        other => panic!("expected Conflict, got {other:?}"),
+    };
+    let refused = result
+        .refused
+        .unwrap_or_else(|| panic!("expected a refused candidate"));
+
+    match &refused.evidence.lookup {
+        LookupEvidence::Attempted {
+            identifier,
+            origin,
+            attempts,
+        } => {
+            assert_eq!(
+                identifier.to_string(),
+                "doi:10.1000/conflict-candidate-evidence"
+            );
+            assert_eq!(origin, &Origin::Extracted(Tier::TextLayer));
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(
+                attempts[0],
+                ServiceAttempt {
+                    service: SourceName::Crossref,
+                    outcome: Ok(Retrieval::Network {
+                        stored: Some(CacheWrite::Written)
+                    }),
+                }
+            );
+        }
+        other => panic!("expected Attempted, got {other:?}"),
+    }
+    assert!(matches!(
+        refused.evidence.extraction.result,
+        ExtractionStep::Ran(Extraction::Found { .. })
+    ));
+    assert_eq!(
+        refused.evidence.extraction.titles,
+        Titles::Read(vec![Claim {
+            from: ClaimOrigin::Info,
+            title: "Old Extracted Title".to_string(),
+        }])
+    );
+    match &refused.evidence.match_check {
+        MatchCheck::Conflict(conflict) => assert_eq!(conflict.similarity, skip_similarity),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    assert_eq!(
+        refused.evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::Refused)
+    );
+    assert_eq!(
+        refused.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
+    );
+    assert_eq!(index.get(&hash), None);
+}
+
+#[test]
+fn a_refused_record_is_never_remembered_and_a_later_run_still_conflicts() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("conflict-not-remembered");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash.clone(),
+        pdf_with_text_doi("10.1000/conflict-not-remembered").with_title("Old Extracted Title"),
+    );
+    let memory = MemoryCache::new();
+    let crossref = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Ok(record_with_doi_and_title(
+            "10.1000/conflict-not-remembered",
+            "A Completely Different Resolved Title",
+        )),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let cached = borax_sources::cache::Cached::new(crossref, memory);
+    let sources: Vec<&dyn Source> = vec![&cached];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let first = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    assert!(matches!(
+        first.verdict,
+        FileOutcome::Skipped(SkipReason::Conflict { .. })
+    ));
+    assert_eq!(index.get(&hash), None);
+
+    let second = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    assert!(matches!(
+        second.verdict,
+        FileOutcome::Skipped(SkipReason::Conflict { .. })
+    ));
+    let refused = second
+        .refused
+        .unwrap_or_else(|| panic!("expected a refused candidate on the second run"));
+    match &refused.evidence.lookup {
+        LookupEvidence::Attempted { attempts, .. } => {
+            assert_eq!(attempts[0].outcome, Ok(Retrieval::ServiceCache));
+        }
+        other => panic!("expected Attempted, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_earlier_index_entry_survives_a_no_cache_conflict() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("conflict-survives-no-cache");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash.clone(),
+        pdf_with_text_doi("10.1000/conflict-survives-no-cache").with_title("Old Extracted Title"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1000/conflict-survives-no-cache",
+            "A Completely Different Resolved Title",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let earlier = record_with_doi("10.1000/earlier-entry");
+    index.put(&hash, &earlier);
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(false),
+        None,
+        None,
+    );
+
+    assert!(matches!(
+        result.verdict,
+        FileOutcome::Skipped(SkipReason::Conflict { .. })
+    ));
+    assert_eq!(index.get(&hash), Some(earlier));
+}
+
+#[test]
+fn a_conflict_after_a_failure_keeps_both_attempts_in_order() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("conflict-after-failure"),
+        pdf_with_text_doi("10.1000/conflict-after-failure").with_title("Old Extracted Title"),
+    );
+    let crossref = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Err(SourceError::Unavailable {
+            message: "503".to_string(),
+        }),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let openalex = FakeSource {
+        name: SourceName::OpenAlex,
+        supports: true,
+        response: Ok(record_with_doi_and_title(
+            "10.1000/conflict-after-failure",
+            "A Completely Different Resolved Title",
+        )),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let refused = result
+        .refused
+        .unwrap_or_else(|| panic!("expected a refused candidate"));
+
+    match &refused.evidence.lookup {
+        LookupEvidence::Attempted { attempts, .. } => {
+            assert_eq!(attempts.len(), 2);
+            assert_eq!(attempts[0].service, SourceName::Crossref);
+            assert!(attempts[0].outcome.is_err());
+            assert_eq!(attempts[1].service, SourceName::OpenAlex);
+            assert!(attempts[1].outcome.is_ok());
+        }
+        other => panic!("expected Attempted, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// resolve_supplied: resolving an identifier somebody typed (design D11,
+// task 8.1)
+// ---------------------------------------------------------------------
+
+/// The prior evidence of a file extraction found no identifier in: the
+/// index was consulted and missed, extraction ran and failed, and
+/// everything after it never ran.
+fn prior_extraction_failed() -> Evidence {
+    Evidence {
+        library: Consultation::NotConsulted(Unattempted::NoLibrary),
+        content_index: IndexEvidence {
+            read: IndexRead::Miss,
+            write: IndexWrite::NotAttempted(Unattempted::ExtractionFailed),
+        },
+        extraction: ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::ExtractionFailed),
+            titles: Titles::NotAttempted(Unattempted::ExtractionFailed),
+        },
+        lookup: LookupEvidence::NotAttempted(Unattempted::ExtractionFailed),
+        match_check: MatchCheck::NotAttempted(Unattempted::ExtractionFailed),
+    }
+}
+
+/// The prior evidence of a file the content index answered for.
+fn prior_content_index_hit() -> Evidence {
+    Evidence {
+        library: Consultation::NotConsulted(Unattempted::NoLibrary),
+        content_index: IndexEvidence {
+            read: IndexRead::Hit,
+            write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        extraction: ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+            titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        lookup: LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
+        match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
+    }
+}
+
+/// The prior evidence of a file the library tracks.
+fn prior_tracked(artifact: &str, item: &str) -> Evidence {
+    Evidence {
+        library: Consultation::Consulted(LibraryAnswer::Tracked {
+            artifact: artifact.to_string(),
+            item: item.to_string(),
+        }),
+        content_index: IndexEvidence {
+            read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+            write: IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
+        },
+        extraction: ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::LibraryAnswered),
+            titles: Titles::NotAttempted(Unattempted::LibraryAnswered),
+        },
+        lookup: LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
+        match_check: MatchCheck::NotAttempted(Unattempted::LibraryAnswered),
+    }
+}
+
+#[test]
+fn resolve_supplied_on_a_file_with_no_identifier_fills_lookup_titles_and_match_check() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("resolve-supplied-agrees"),
+        pdf_with_no_identifier().with_title("On the Structure of Borax"),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/supplied-agrees"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/supplied-agrees")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let prior = prior_extraction_failed();
+
+    let file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap();
+
+    match &file.evidence.lookup {
+        LookupEvidence::Attempted {
+            identifier: looked_up,
+            origin,
+            attempts,
+        } => {
+            assert_eq!(looked_up, &identifier);
+            assert_eq!(origin, &Origin::Operator);
+            assert_eq!(attempts.len(), 1);
+        }
+        other => panic!("expected Attempted, got {other:?}"),
+    }
+    assert_eq!(
+        file.evidence.extraction.titles,
+        Titles::Read(vec![Claim {
+            from: ClaimOrigin::Info,
+            title: "On the Structure of Borax".to_string(),
+        }])
+    );
+    assert_eq!(file.evidence.match_check, MatchCheck::Agreed);
+    assert_eq!(
+        file.evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::AwaitingAcceptance)
+    );
+    assert_eq!(file.evidence.library, prior.library);
+    assert_eq!(file.evidence.content_index.read, prior.content_index.read);
+    assert_eq!(file.evidence.extraction.result, prior.extraction.result);
+    assert_eq!(file.tier(), Some(Provenance::Supplied));
+}
+
+#[test]
+fn resolve_supplied_reports_a_title_conflict_as_file_conflict() {
     let path = Path::new("paper.pdf");
     let documents = FakeDocuments::new().with_file(
         path,
@@ -2088,44 +3468,185 @@ fn resolve_supplied_reports_a_title_conflict_rather_than_refusing() {
         )),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
+    let prior = prior_extraction_failed();
 
-    let supplied = resolve_supplied(path, &identifier, &documents, &sources).unwrap();
+    let file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap();
 
     assert_eq!(
-        supplied.file.record,
+        file.record,
         record_with_doi_and_title(
             "10.1000/supplied-conflict",
             "A Completely Different Title About Something Else",
         ),
         "a conflicting record is still handed back, not refused"
     );
-    let Some(SkipReason::Conflict { field, .. }) = supplied.conflict else {
+    let Some(SkipReason::Conflict { field, .. }) = file.conflict() else {
         panic!(
             "expected the disagreement reported as a conflict, got {:?}",
-            supplied.conflict
+            file.conflict()
         );
     };
     assert_eq!(field, "title");
 }
 
 #[test]
-fn resolve_supplied_reports_no_conflict_when_the_titles_agree() {
+fn resolve_supplied_with_a_retrys_origin_reports_the_extracted_tier() {
     let path = Path::new("paper.pdf");
     let documents = FakeDocuments::new().with_file(
         path,
-        hash_for("resolve-supplied-agrees"),
+        hash_for("resolve-supplied-retry-tier"),
         pdf_with_no_identifier().with_title("On the Structure of Borax"),
     );
-    let identifier = Identifier::Doi(doi("10.1000/supplied-agrees"));
+    let identifier = Identifier::Doi(doi("10.1000/retry-tier"));
     let (crossref, _calls) = fake_source(
         SourceName::Crossref,
-        Ok(record_with_doi("10.1000/supplied-agrees")),
+        Ok(record_with_doi("10.1000/retry-tier")),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
+    let prior = prior_extraction_failed();
 
-    let supplied = resolve_supplied(path, &identifier, &documents, &sources).unwrap();
+    let file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Extracted(Tier::TextLayer),
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap();
 
-    assert_eq!(supplied.conflict, None);
+    assert_eq!(file.tier(), Some(Provenance::Extracted(Tier::TextLayer)));
+}
+
+#[test]
+fn resolve_supplied_after_a_content_index_hit_re_reads_titles_and_keeps_the_read() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("resolve-supplied-after-hit"),
+        pdf_with_no_identifier().with_title("On the Structure of Borax"),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/after-hit"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/after-hit")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let prior = prior_content_index_hit();
+
+    let file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap();
+
+    assert_eq!(
+        file.evidence.extraction.titles,
+        Titles::Read(vec![Claim {
+            from: ClaimOrigin::Info,
+            title: "On the Structure of Borax".to_string(),
+        }])
+    );
+    assert_eq!(file.evidence.content_index.read, IndexRead::Hit);
+    assert_eq!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
+    );
+    assert!(!file.cached());
+    assert_eq!(file.tier(), Some(Provenance::Supplied));
+}
+
+#[test]
+fn resolve_supplied_on_a_tracked_file_keeps_the_library_answer() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("resolve-supplied-tracked"),
+        pdf_with_no_identifier(),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/supplied-tracked"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/supplied-tracked")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let prior = prior_tracked("artifact-id", "item-id");
+
+    let file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap();
+
+    assert_eq!(file.tier(), Some(Provenance::Supplied));
+    assert_eq!(
+        file.library(),
+        Some(&LibraryAnswer::Tracked {
+            artifact: "artifact-id".to_string(),
+            item: "item-id".to_string(),
+        })
+    );
+    assert!(!file.cached());
+    assert!(matches!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::Network { .. })
+    ));
+}
+
+#[test]
+fn resolve_supplied_keeps_both_attempts_on_a_failure_then_a_success() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("resolve-supplied-failure-then-success"),
+        pdf_with_no_identifier(),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/failure-then-success"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Err(SourceError::Unavailable {
+            message: "503".to_string(),
+        }),
+    );
+    let (openalex, _calls) = fake_source(
+        SourceName::OpenAlex,
+        Ok(record_with_doi("10.1000/failure-then-success")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let prior = prior_extraction_failed();
+
+    let file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap();
+
+    match &file.evidence.lookup {
+        LookupEvidence::Attempted { attempts, .. } => assert_eq!(attempts.len(), 2),
+        other => panic!("expected Attempted, got {other:?}"),
+    }
 }
 
 #[test]
@@ -2140,8 +3661,17 @@ fn resolve_supplied_returns_the_attempts_when_no_service_holds_the_identifier() 
     let (crossref, _calls) = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
     let (openalex, _calls) = fake_source(SourceName::OpenAlex, Err(SourceError::NotFound));
     let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let prior = prior_extraction_failed();
 
-    let unresolved = resolve_supplied(path, &identifier, &documents, &sources).unwrap_err();
+    let unresolved = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap_err();
 
     assert_eq!(
         unresolved.attempts,
@@ -2152,38 +3682,202 @@ fn resolve_supplied_returns_the_attempts_when_no_service_holds_the_identifier() 
     );
 }
 
-/// The doc comment states this explicitly: "nothing is written to the
-/// content index here". `resolve_supplied` is not handed one at all, so
-/// there is no seam through which it could write — this pins the
-/// signature itself as the guarantee, rather than a side effect a future
-/// change could quietly add back.
+// ---------------------------------------------------------------------
+// unheld_evidence: a lookup no service answered (design D11, task 8.1)
+// ---------------------------------------------------------------------
+
 #[test]
-fn resolve_supplied_takes_no_content_index_to_write_to() {
+fn unheld_evidence_sets_the_lookup_from_the_unresolved_attempts_in_order() {
     let path = Path::new("paper.pdf");
     let documents = FakeDocuments::new().with_file(
         path,
-        hash_for("resolve-supplied-no-index-seam"),
+        hash_for("unheld-evidence-order"),
         pdf_with_no_identifier(),
     );
-    let identifier = Identifier::Doi(doi("10.1000/no-index-seam"));
+    let identifier = Identifier::Doi(doi("10.1000/unheld-order"));
     let (crossref, _calls) = fake_source(
         SourceName::Crossref,
-        Ok(record_with_doi("10.1000/no-index-seam")),
+        Err(SourceError::Unavailable {
+            message: "503".to_string(),
+        }),
     );
-    let sources: Vec<&dyn Source> = vec![&crossref];
+    let (openalex, _calls) = fake_source(SourceName::OpenAlex, Err(SourceError::NotFound));
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let prior = prior_extraction_failed();
+    let unresolved = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Extracted(Tier::TextLayer),
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap_err();
 
-    // If this line compiles at all, it compiles without an index
-    // argument — the property under test.
-    let supplied = resolve_supplied(path, &identifier, &documents, &sources).unwrap();
+    let evidence = unheld_evidence(
+        &prior,
+        &identifier,
+        Origin::Extracted(Tier::TextLayer),
+        &unresolved,
+    );
 
+    match &evidence.lookup {
+        LookupEvidence::Attempted {
+            identifier: looked_up,
+            origin,
+            attempts,
+        } => {
+            assert_eq!(looked_up, &identifier);
+            assert_eq!(origin, &Origin::Extracted(Tier::TextLayer));
+            assert_eq!(attempts.len(), 2);
+            assert!(attempts[0].outcome.is_err());
+            assert!(attempts[1].outcome.is_err());
+        }
+        other => panic!("expected Attempted, got {other:?}"),
+    }
     assert_eq!(
-        supplied.file.record,
-        record_with_doi("10.1000/no-index-seam")
+        evidence.match_check,
+        MatchCheck::NotAttempted(Unattempted::NoRecord)
     );
+    assert_eq!(
+        evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::NoRecord)
+    );
+    assert_eq!(evidence.library, prior.library);
+    assert_eq!(evidence.content_index.read, prior.content_index.read);
+    assert_eq!(evidence.extraction, prior.extraction);
+}
+
+#[test]
+fn unheld_evidence_is_conclusive_only_when_every_attempt_is_not_found() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("unheld-evidence-conclusive"),
+        pdf_with_no_identifier(),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/unheld-conclusive"));
+    let (crossref, _calls) = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let prior = prior_extraction_failed();
+    let all_not_found = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap_err();
+
+    let evidence = unheld_evidence(&prior, &identifier, Origin::Operator, &all_not_found);
+    assert!(evidence.lookup.is_conclusive());
+
+    let (crossref_down, _calls) = fake_source(
+        SourceName::Crossref,
+        Err(SourceError::Unavailable {
+            message: "503".to_string(),
+        }),
+    );
+    let down_sources: Vec<&dyn Source> = vec![&crossref_down];
+    let inconclusive = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &down_sources,
+        &prior,
+    )
+    .unwrap_err();
+    let evidence = unheld_evidence(&prior, &identifier, Origin::Operator, &inconclusive);
+    assert!(!evidence.lookup.is_conclusive());
 }
 
 // ---------------------------------------------------------------------
-// remember: keeping an operator's accepted record (design D7, task 4.3)
+// accept: an operator accepting a candidate (design D10, D11, task 8.1)
+// ---------------------------------------------------------------------
+
+#[test]
+fn accept_over_a_conflict_overrides_it_and_awaits_the_move() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("accept-conflict"),
+        pdf_with_text_doi("10.1000/accept-conflict").with_title("Old Extracted Title"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1000/accept-conflict",
+            "A Completely Different Resolved Title",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let refused = result
+        .refused
+        .unwrap_or_else(|| panic!("expected a refused candidate, got {:?}", result.verdict));
+    let MatchCheck::Conflict(conflict) = refused.evidence.match_check.clone() else {
+        panic!(
+            "expected the fixture to produce a conflict, got {:?}",
+            refused.evidence.match_check
+        );
+    };
+
+    let accepted = accept(refused);
+
+    match &accepted.overrode {
+        Some(overridden) => {
+            assert_eq!(overridden.field, conflict.field);
+        }
+        None => panic!("expected overrode to be Some after accept"),
+    }
+    assert_eq!(
+        accepted.evidence.match_check,
+        MatchCheck::Conflict(conflict)
+    );
+    assert_eq!(
+        accepted.evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::AwaitingAcceptance)
+    );
+}
+
+#[test]
+fn accept_over_a_resolved_record_leaves_its_evidence_unchanged() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("accept-resolved"),
+        pdf_with_embedded_doi("10.1000/accept-resolved"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/accept-resolved")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
+    let file = resolved_outcome(outcome);
+    let before = file.evidence.clone();
+
+    let accepted = accept(file);
+
+    assert_eq!(accepted.overrode, None);
+    assert_eq!(accepted.evidence, before);
+}
+
+// ---------------------------------------------------------------------
+// remember: keeping an operator's accepted record (design D5, task 8.1)
 // ---------------------------------------------------------------------
 
 #[test]
@@ -2193,20 +3887,38 @@ fn remember_writes_a_record_a_later_resolve_then_answers_with() {
     let record = record_with_doi("10.1000/remembered-by-hand");
     assert_eq!(index.get(&hash), None, "nothing written yet");
 
-    remember(&index, Some(&hash), &record);
+    assert_eq!(
+        remember(&index, Some(&hash), &record),
+        IndexWrite::Attempted(CacheWrite::Written)
+    );
 
     assert_eq!(index.get(&hash), Some(record));
+}
+
+#[test]
+fn remember_over_a_write_failing_cache_reports_the_failure() {
+    let index = ContentIndex::new(WriteFailingCache);
+    let hash = hash_for("remembered-write-fails");
+    let record = record_with_doi("10.1000/remembered-write-fails");
+
+    match remember(&index, Some(&hash), &record) {
+        IndexWrite::Attempted(CacheWrite::Failed { message }) => assert!(!message.is_empty()),
+        other => panic!("expected Attempted(Failed), got {other:?}"),
+    }
 }
 
 /// A hash `resolve_file` never learned — the file could not be hashed —
 /// has nowhere to be written. `remember` is handed `None` rather than
 /// panicking or inventing a place to keep the record.
 #[test]
-fn remember_with_no_hash_does_not_panic() {
+fn remember_with_no_hash_is_not_attempted_as_unhashable() {
     let index = ContentIndex::new(MemoryCache::new());
     let record = record_with_doi("10.1000/no-hash-to-remember-under");
 
-    remember(&index, None, &record);
+    assert_eq!(
+        remember(&index, None, &record),
+        IndexWrite::NotAttempted(Unattempted::Unhashable)
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -2238,15 +3950,31 @@ impl CountingCache {
     }
 }
 
+/// A [`Cache`] whose every write fails, the shape of `WriteFailingCache`
+/// in `tests/dispatch.rs`.
+struct WriteFailingCache;
+
+impl Cache for WriteFailingCache {
+    fn get(&self, _key: &str) -> Option<Record> {
+        None
+    }
+
+    fn put(&self, _key: &str, _record: &Record) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+}
+
 impl Cache for CountingCache {
     fn get(&self, key: &str) -> Option<Record> {
         self.gets.fetch_add(1, Ordering::Relaxed);
         self.inner.get(key)
     }
 
-    fn put(&self, key: &str, record: &Record) {
+    fn put(&self, key: &str, record: &Record) -> CacheWrite {
         self.puts.fetch_add(1, Ordering::Relaxed);
-        self.inner.put(key, record);
+        self.inner.put(key, record)
     }
 }
 
@@ -2306,12 +4034,12 @@ fn a_tracked_file_resolves_from_its_item_with_no_extraction_no_source_and_no_ind
         match &result.verdict {
             FileOutcome::Resolved(file) => {
                 assert_eq!(file.record, item.record, "cache={cache}");
-                assert_eq!(file.tier, Some(Provenance::Library), "cache={cache}");
-                assert!(!file.cached, "cache={cache}");
-                assert_eq!(file.claims, Vec::new(), "cache={cache}");
-                assert_eq!(file.found, None, "cache={cache}");
+                assert_eq!(file.tier(), Some(Provenance::Library), "cache={cache}");
+                assert!(!file.cached(), "cache={cache}");
+                assert_eq!(file.claims(), &[] as &[Claim], "cache={cache}");
+                assert_eq!(file.found(), None, "cache={cache}");
                 assert_eq!(
-                    result.library,
+                    result.library().cloned(),
                     Some(LibraryAnswer::Tracked {
                         artifact: file_artifact_id(&stores, &path, &hash),
                         item: item.id.to_string(),
@@ -2493,7 +4221,7 @@ fn a_dangling_item_problem_falls_back_and_writes_the_content_index() {
     };
     match &result.verdict {
         FileOutcome::Resolved(file) => {
-            assert_eq!(result.library, Some(expected_problem.clone()));
+            assert_eq!(result.library().cloned(), Some(expected_problem.clone()));
             let _ = file;
         }
         other => panic!("expected Resolved for the fallback, got {other:?}"),
@@ -2553,7 +4281,7 @@ fn a_dangling_item_problem_on_a_file_with_no_identifier_carries_through_to_the_s
         artifact: record_id_at(root, "mystery.pdf"),
         item: dangling_item.to_string(),
     };
-    assert_eq!(result.library, Some(expected_problem.clone()));
+    assert_eq!(result.library().cloned(), Some(expected_problem.clone()));
     match verdict_event(&path, &result) {
         Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
         other => panic!("expected Event::Skipped, got {other:?}"),
@@ -2601,7 +4329,8 @@ fn a_content_duplicate_is_skipped_before_the_library_is_asked() {
         result.verdict
     );
     assert_eq!(
-        result.library, None,
+        result.library().cloned(),
+        None,
         "a content duplicate is decided before the library is ever asked"
     );
     assert_eq!(documents.open_calls(), 0);
@@ -2649,7 +4378,7 @@ fn passing_no_library_leaves_behaviour_and_events_unchanged() {
         None,
     );
 
-    assert_eq!(result.library, None);
+    assert_eq!(result.library().cloned(), None);
     match verdict_event(&path, &result) {
         Event::Resolved { library, .. } => assert_eq!(library, None),
         other => panic!("expected Event::Resolved, got {other:?}"),
@@ -2763,7 +4492,7 @@ fn a_dangling_item_problem_on_an_unresolvable_skip_carries_through() {
         artifact: record_id_at(root, "unresolvable.pdf"),
         item: dangling_item.to_string(),
     };
-    assert_eq!(result.library, Some(expected_problem.clone()));
+    assert_eq!(result.library().cloned(), Some(expected_problem.clone()));
     match verdict_event(&path, &result) {
         Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
         other => panic!("expected Event::Skipped, got {other:?}"),
@@ -2825,7 +4554,7 @@ fn a_dangling_item_problem_on_a_conflict_skip_carries_through() {
         artifact: record_id_at(root, "conflict.pdf"),
         item: dangling_item.to_string(),
     };
-    assert_eq!(result.library, Some(expected_problem.clone()));
+    assert_eq!(result.library().cloned(), Some(expected_problem.clone()));
     match verdict_event(&path, &result) {
         Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
         other => panic!("expected Event::Skipped, got {other:?}"),
@@ -2866,12 +4595,16 @@ fn assert_problem_propagates_through_a_successful_fallback(
 
     match &result.verdict {
         FileOutcome::Resolved(file) => {
-            assert_eq!(file.library, Some(expected.clone()), "on the FileRecord");
+            assert_eq!(
+                file.library().cloned(),
+                Some(expected.clone()),
+                "on the FileRecord"
+            );
         }
         other => panic!("expected a resolved fallback, got {other:?}"),
     }
     assert_eq!(
-        result.library,
+        result.library().cloned(),
         Some(expected.clone()),
         "on Standing::library"
     );
@@ -3092,10 +4825,10 @@ fn unhashable_propagates_through_standing_and_verdict_event() {
         artifacts: vec![artifact],
     };
     match &result.verdict {
-        FileOutcome::Resolved(file) => assert_eq!(file.library, Some(expected.clone())),
+        FileOutcome::Resolved(file) => assert_eq!(file.library().cloned(), Some(expected.clone())),
         other => panic!("expected a resolved fallback, got {other:?}"),
     }
-    assert_eq!(result.library, Some(expected.clone()));
+    assert_eq!(result.library().cloned(), Some(expected.clone()));
     match verdict_event(&path, &result) {
         Event::Resolved { library, .. } => assert_eq!(library, Some(expected)),
         other => panic!("expected Event::Resolved, got {other:?}"),
@@ -3202,6 +4935,203 @@ fn pdf_with_text_arxiv(value: &str) -> FakePdf {
 /// A PDF whose first page cannot be read at all.
 fn pdf_with_page_error(error: ExtractionError) -> FakePdf {
     FakePdf::new().with_pages(vec![Err(error)])
+}
+
+// ---------------------------------------------------------------------
+// from_file: extraction's result and the file's titles, independently
+// (design D7, task 4.1)
+// ---------------------------------------------------------------------
+
+#[test]
+fn from_file_over_a_blank_page_with_a_title_keeps_the_title_beside_no_text_layer() {
+    let path = Path::new("paper.pdf");
+    let documents =
+        FakeDocuments::new().with_file(path, hash_for("from-file-blank"), pdf_blank_with_title());
+
+    let read = from_file(path, &documents, &ExtractionConfig::default());
+
+    assert!(matches!(read.extracted, Err(ExtractionError::NoTextLayer)));
+    assert_eq!(
+        read.titles,
+        Titles::Read(vec![Claim {
+            from: ClaimOrigin::Info,
+            title: "A Title".to_string(),
+        }])
+    );
+}
+
+#[test]
+fn from_file_over_readable_prose_with_a_title_keeps_the_title_beside_no_identifier() {
+    let path = Path::new("paper.pdf");
+    let documents =
+        FakeDocuments::new().with_file(path, hash_for("from-file-prose"), pdf_prose_with_title());
+
+    let read = from_file(path, &documents, &ExtractionConfig::default());
+
+    assert!(matches!(
+        read.extracted,
+        Err(ExtractionError::NoIdentifierFound)
+    ));
+    assert_eq!(
+        read.titles,
+        Titles::Read(vec![Claim {
+            from: ClaimOrigin::Info,
+            title: "A Title".to_string(),
+        }])
+    );
+}
+
+#[test]
+fn from_file_over_prose_with_no_title_keeps_titles_read_empty() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("from-file-no-title"),
+        pdf_with_no_identifier(),
+    );
+
+    let read = from_file(path, &documents, &ExtractionConfig::default());
+
+    assert!(matches!(
+        read.extracted,
+        Err(ExtractionError::NoIdentifierFound)
+    ));
+    assert_eq!(read.titles, Titles::Read(Vec::new()));
+}
+
+#[test]
+fn from_file_over_an_open_error_of_encrypted_fails_the_titles_too() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_open_error(
+        path,
+        hash_for("from-file-encrypted"),
+        ExtractionError::Encrypted,
+    );
+
+    let read = from_file(path, &documents, &ExtractionConfig::default());
+
+    assert!(matches!(read.extracted, Err(ExtractionError::Encrypted)));
+    match read.titles {
+        Titles::Failed { message } => assert_eq!(message, "PDF is encrypted"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn from_file_over_an_open_error_of_unreadable_fails_the_titles_with_the_same_message() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_open_error(
+        path,
+        hash_for("from-file-unreadable-open"),
+        ExtractionError::Unreadable {
+            message: "corrupt stream".to_string(),
+        },
+    );
+
+    let read = from_file(path, &documents, &ExtractionConfig::default());
+
+    assert!(matches!(
+        read.extracted,
+        Err(ExtractionError::Unreadable { .. })
+    ));
+    match read.titles {
+        Titles::Failed { message } => assert_eq!(message, "corrupt stream"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn from_file_keeps_the_title_when_the_first_page_cannot_be_read() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("from-file-page-error"),
+        pdf_with_page_error(ExtractionError::Unreadable {
+            message: "malformed content stream".to_string(),
+        })
+        .with_title("A Title"),
+    );
+
+    let read = from_file(path, &documents, &ExtractionConfig::default());
+
+    assert!(matches!(
+        read.extracted,
+        Err(ExtractionError::Unreadable { .. })
+    ));
+    assert_eq!(
+        read.titles,
+        Titles::Read(vec![Claim {
+            from: ClaimOrigin::Info,
+            title: "A Title".to_string(),
+        }])
+    );
+}
+
+#[test]
+fn from_file_over_an_xmp_doi_with_both_an_xmp_and_an_info_title_reads_both_in_order() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("from-file-xmp-and-info"),
+        pdf_with_embedded_doi("10.1000/from-file-both")
+            .with_title("The Info Title")
+            .with_xmp(
+                "<prism:doi>10.1000/from-file-both</prism:doi><dc:title><rdf:Alt><rdf:li>The Xmp Title</rdf:li></rdf:Alt></dc:title>",
+            ),
+    );
+
+    let read = from_file(path, &documents, &ExtractionConfig::default());
+
+    match read.extracted {
+        Ok(Extracted { tier, .. }) => assert_eq!(tier, Tier::EmbeddedMetadata),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        read.titles,
+        Titles::Read(vec![
+            Claim {
+                from: ClaimOrigin::Xmp,
+                title: "The Xmp Title".to_string(),
+            },
+            Claim {
+                from: ClaimOrigin::Info,
+                title: "The Info Title".to_string(),
+            },
+        ])
+    );
+}
+
+#[test]
+fn from_file_over_real_documents_in_the_corpus() {
+    let documents = RealDocuments;
+
+    let no_identifier = from_file(
+        &corpus_fixture("no-identifier.pdf"),
+        &documents,
+        &ExtractionConfig::default(),
+    );
+    assert!(matches!(no_identifier.titles, Titles::Read(_)));
+
+    let encrypted = from_file(
+        &corpus_fixture("encrypted-user-password.pdf"),
+        &documents,
+        &ExtractionConfig::default(),
+    );
+    assert!(matches!(encrypted.titles, Titles::Failed { .. }));
+
+    let malformed = from_file(
+        &corpus_fixture("malformed-truncated.pdf"),
+        &documents,
+        &ExtractionConfig::default(),
+    );
+    assert!(matches!(malformed.titles, Titles::Failed { .. }));
+
+    let no_text_layer = from_file(
+        &corpus_fixture("no-text-layer.pdf"),
+        &documents,
+        &ExtractionConfig::default(),
+    );
+    assert!(matches!(no_text_layer.titles, Titles::Read(_)));
 }
 
 #[test]

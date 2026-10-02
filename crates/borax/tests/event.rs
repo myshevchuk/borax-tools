@@ -7,11 +7,65 @@ use borax::event::{
     Format, Level, LibraryAnswer, SCHEMA, SkipReason, Summary, TableUsed, human_line,
     human_summary, json_line, render,
 };
+use borax::evidence::{
+    Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
+    IndexWrite, LookupEvidence, MatchCheck, Origin, ServiceAttempt, Titles, Unattempted,
+};
 use borax::pipeline::{FileOutcome, FileRecord, event_for};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier};
 use borax_core::record::{BoraxExt, EntryType, Record, Source};
+use borax_pdf::tiered::Tier;
+use borax_sources::cache::CacheWrite;
+use borax_sources::source::{Retrieval, SourceName};
 use serde_json::Value;
+
+/// The evidence of a record reached through a lookup: `source()` and
+/// `tier()` name `service` and the extraction pass that read
+/// `identifier`, and `cached()` is `false`.
+fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) -> Evidence {
+    Evidence {
+        library: Consultation::NotConsulted(Unattempted::NoLibrary),
+        content_index: IndexEvidence {
+            read: IndexRead::Miss,
+            write: IndexWrite::Attempted(CacheWrite::Written),
+        },
+        extraction: ExtractionEvidence {
+            result: ExtractionStep::Ran(Extraction::Found {
+                identifier: identifier.to_string(),
+                tier: tier.as_str().to_string(),
+            }),
+            titles: Titles::Read(Vec::new()),
+        },
+        lookup: LookupEvidence::Attempted {
+            identifier,
+            origin: Origin::Extracted(tier),
+            attempts: vec![ServiceAttempt {
+                service,
+                outcome: Ok(Retrieval::Network { stored: None }),
+            }],
+        },
+        match_check: MatchCheck::Agreed,
+    }
+}
+
+/// The evidence of a record the content index answered for: `source()`
+/// and `tier()` are both `None`, and `cached()` is `true`.
+fn evidence_via_content_index_hit() -> Evidence {
+    Evidence {
+        library: Consultation::NotConsulted(Unattempted::NoLibrary),
+        content_index: IndexEvidence {
+            read: IndexRead::Hit,
+            write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        extraction: ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+            titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        lookup: LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
+        match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
+    }
+}
 
 // --- event constructors ---
 
@@ -1420,16 +1474,13 @@ fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
     let path = PathBuf::from("paper.pdf");
     let outcome = FileOutcome::Resolved(FileRecord {
         record,
-        source: Some(borax_sources::source::SourceName::Arxiv),
-        tier: Some(borax::pipeline::Provenance::Extracted(
-            borax_pdf::tiered::Tier::TextLayer,
-        )),
-        found: Some(Identifier::Arxiv(ArxivId::parse("2401.01234").unwrap())),
-        claims: Vec::new(),
-        cached: false,
         hash: Some(hash_bytes(b"paper")),
+        evidence: evidence_via_lookup(
+            SourceName::Arxiv,
+            Identifier::Arxiv(ArxivId::parse("2401.01234").unwrap()),
+            Tier::TextLayer,
+        ),
         overrode: None,
-        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1465,14 +1516,9 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
     let path = PathBuf::from("paper.pdf");
     let outcome = FileOutcome::Resolved(FileRecord {
         record,
-        source: None,
-        tier: None,
-        found: None,
-        claims: Vec::new(),
-        cached: true,
         hash: Some(hash_bytes(b"paper")),
+        evidence: evidence_via_content_index_hit(),
         overrode: None,
-        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1505,14 +1551,9 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
     let path = PathBuf::from("paper.pdf");
     let outcome = FileOutcome::Resolved(FileRecord {
         record,
-        source: None,
-        tier: None,
-        found: None,
-        claims: Vec::new(),
-        cached: true,
         hash: Some(hash_bytes(b"paper")),
+        evidence: evidence_via_content_index_hit(),
         overrode: None,
-        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1540,14 +1581,9 @@ fn a_record_whose_provenance_names_no_service_keeps_cache() {
     let path = PathBuf::from("paper.pdf");
     let outcome = FileOutcome::Resolved(FileRecord {
         record,
-        source: None,
-        tier: None,
-        found: None,
-        claims: Vec::new(),
-        cached: true,
         hash: Some(hash_bytes(b"paper")),
+        evidence: evidence_via_content_index_hit(),
         overrode: None,
-        library: None,
     });
 
     let event = event_for(&path, &outcome);

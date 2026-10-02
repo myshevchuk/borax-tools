@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use borax_core::identifier::{ArxivId, Doi, Identifier, Pmid};
 use borax_core::record::{EntryType, Record};
-use borax_sources::cache::{Cache, Cached, MemoryCache, key};
+use borax_sources::cache::{Cache, CacheWrite, Cached, MemoryCache, key};
 use borax_sources::dispatch::resolve;
-use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::source::{Fetched, Retrieval, Source, SourceError, SourceName};
 
 fn doi(value: &str) -> Identifier {
     Identifier::Doi(Doi::parse(value).unwrap())
@@ -57,9 +57,9 @@ impl Source for FakeSource {
         self.supports
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.response.clone()
+        self.response.clone().map(Fetched::network)
     }
 }
 
@@ -81,8 +81,25 @@ impl Cache for SharedCache<'_> {
         self.cache.get(key)
     }
 
-    fn put(&self, key: &str, record: &Record) {
-        self.cache.put(key, record);
+    fn put(&self, key: &str, record: &Record) -> CacheWrite {
+        self.cache.put(key, record)
+    }
+}
+
+/// A [`Cache`] whose `put` always reports [`CacheWrite::Failed`]
+/// without storing anything, so a test can exercise a store that never
+/// accepts a write.
+struct WriteFailingCache;
+
+impl Cache for WriteFailingCache {
+    fn get(&self, _key: &str) -> Option<Record> {
+        None
+    }
+
+    fn put(&self, _key: &str, _record: &Record) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
     }
 }
 
@@ -177,9 +194,17 @@ fn memory_cache_put_then_get_round_trips() {
     let cache = MemoryCache::new();
     let record = article_with_doi("10.1038/171737a0");
 
-    cache.put("k", &record);
+    let _ = cache.put("k", &record);
 
     assert_eq!(cache.get("k"), Some(record));
+}
+
+#[test]
+fn memory_cache_put_returns_written() {
+    let cache = MemoryCache::new();
+    let record = article_with_doi("10.1038/171737a0");
+
+    assert_eq!(cache.put("k", &record), CacheWrite::Written);
 }
 
 #[test]
@@ -188,8 +213,8 @@ fn memory_cache_put_twice_under_same_key_overwrites() {
     let first = article_with_doi("10.1038/171737a0");
     let second = article_with_doi("10.1021/jacs.4c01234");
 
-    cache.put("k", &first);
-    cache.put("k", &second);
+    let _ = cache.put("k", &first);
+    let _ = cache.put("k", &second);
 
     assert_eq!(cache.get("k"), Some(second));
     assert_eq!(cache.len(), 1);
@@ -198,8 +223,8 @@ fn memory_cache_put_twice_under_same_key_overwrites() {
 #[test]
 fn memory_cache_distinct_keys_accumulate() {
     let cache = MemoryCache::new();
-    cache.put("a", &article_with_doi("10.1038/171737a0"));
-    cache.put("b", &article_with_doi("10.1021/jacs.4c01234"));
+    let _ = cache.put("a", &article_with_doi("10.1038/171737a0"));
+    let _ = cache.put("b", &article_with_doi("10.1021/jacs.4c01234"));
 
     assert_eq!(cache.len(), 2);
 }
@@ -207,7 +232,7 @@ fn memory_cache_distinct_keys_accumulate() {
 #[test]
 fn memory_cache_get_for_absent_key_is_none() {
     let cache = MemoryCache::new();
-    cache.put("a", &article_with_doi("10.1038/171737a0"));
+    let _ = cache.put("a", &article_with_doi("10.1038/171737a0"));
 
     assert_eq!(cache.get("absent"), None);
 }
@@ -231,9 +256,61 @@ fn cached_fetch_miss_then_hit_calls_wrapped_source_once() {
     let first = cached.fetch(&id).unwrap();
     let second = cached.fetch(&id).unwrap();
 
-    assert_eq!(first, record);
-    assert_eq!(second, record);
+    assert_eq!(first.record, record);
+    assert_eq!(second.record, record);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn cached_fetch_miss_reports_a_network_retrieval_with_a_successful_write() {
+    let memory = MemoryCache::new();
+    let record = article_with_doi("10.1038/171737a0");
+    let fake = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Ok(record),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let cached = Cached::new(fake, SharedCache::new(&memory));
+    let id = doi_identifier();
+
+    let miss = cached.fetch(&id).unwrap();
+    let hit = cached.fetch(&id).unwrap();
+
+    assert_eq!(
+        miss.retrieval,
+        Retrieval::Network {
+            stored: Some(CacheWrite::Written)
+        }
+    );
+    assert_eq!(hit.retrieval, Retrieval::ServiceCache);
+}
+
+#[test]
+fn cached_fetch_over_a_write_failing_cache_reports_the_failed_write_and_asks_again() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let record = article_with_doi("10.1038/171737a0");
+    let fake = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Ok(record.clone()),
+        calls: calls.clone(),
+    };
+    let cached = Cached::new(fake, WriteFailingCache);
+    let id = doi_identifier();
+
+    let first = cached.fetch(&id).unwrap();
+    let second = cached.fetch(&id).unwrap();
+
+    assert!(matches!(
+        first.retrieval,
+        Retrieval::Network {
+            stored: Some(CacheWrite::Failed { .. })
+        }
+    ));
+    assert_eq!(second.record, record);
+    assert_eq!(second.retrieval, first.retrieval);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
 #[test]
@@ -370,4 +447,29 @@ fn cached_source_is_object_safe_and_resolves_through_dispatch() {
     let resolved = resolve(&sources, &doi_identifier()).unwrap();
 
     assert_eq!(resolved.source, SourceName::Crossref);
+}
+
+#[test]
+fn resolving_twice_through_cached_gives_service_cache_the_second_time() {
+    let memory = MemoryCache::new();
+    let fake = FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response: Ok(article_with_doi("10.1038/171737a0")),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let cached = Cached::new(fake, SharedCache::new(&memory));
+    let sources: Vec<&dyn Source> = vec![&cached];
+    let id = doi_identifier();
+
+    let first = resolve(&sources, &id).unwrap();
+    let second = resolve(&sources, &id).unwrap();
+
+    assert_eq!(
+        first.retrieval,
+        Retrieval::Network {
+            stored: Some(CacheWrite::Written)
+        }
+    );
+    assert_eq!(second.retrieval, Retrieval::ServiceCache);
 }

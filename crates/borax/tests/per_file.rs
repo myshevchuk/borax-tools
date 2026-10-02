@@ -34,7 +34,7 @@ use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_sources::cache::MemoryCache;
-use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::source::{Fetched, Source, SourceError, SourceName};
 use borax_sources::store::ContentIndex;
 
 // ---------------------------------------------------------------------
@@ -172,10 +172,11 @@ impl Source for KeyedSource {
         true
     }
 
-    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
         self.responses
             .get(&identifier.to_string())
             .cloned()
+            .map(Fetched::network)
             .ok_or(SourceError::NotFound)
     }
 }

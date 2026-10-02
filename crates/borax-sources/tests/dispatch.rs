@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
 use borax_core::record::{EntryType, Record};
 use borax_sources::dispatch::{Resolved, priority, resolve};
-use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::source::{Fetched, Retrieval, Source, SourceError, SourceName};
 
 fn doi_identifier() -> Identifier {
     Identifier::Doi(Doi::parse("10.1038/171737a0").unwrap())
@@ -66,9 +66,9 @@ impl Source for FakeSource {
         (self.supports)(identifier)
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.response.clone()
+        self.response.clone().map(Fetched::network)
     }
 }
 
@@ -122,6 +122,8 @@ fn resolve_succeeds_on_first_source_without_consulting_the_rest() {
         Ok(Resolved {
             record: article(),
             source: SourceName::Crossref,
+            retrieval: Retrieval::Network { stored: None },
+            failures: Vec::new(),
         })
     );
     assert_eq!(openalex.calls.load(Ordering::Relaxed), 0);
@@ -145,6 +147,13 @@ fn resolve_falls_back_to_openalex_when_crossref_is_unavailable() {
         Ok(Resolved {
             record: article(),
             source: SourceName::OpenAlex,
+            retrieval: Retrieval::Network { stored: None },
+            failures: vec![(
+                SourceName::Crossref,
+                SourceError::Unavailable {
+                    message: "503".to_string()
+                }
+            )],
         })
     );
 }
@@ -194,6 +203,57 @@ fn resolve_with_no_sources_is_not_conclusive() {
 
     assert!(unresolved.attempts.is_empty());
     assert!(!unresolved.is_conclusive());
+}
+
+#[test]
+fn resolve_rate_limited_then_malformed_is_unresolved_in_order() {
+    let crossref = FakeSource::always(SourceName::Crossref, Err(SourceError::RateLimited));
+    let openalex = FakeSource::always(
+        SourceName::OpenAlex,
+        Err(SourceError::Malformed {
+            message: "bad body".to_string(),
+        }),
+    );
+
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let unresolved = resolve(&sources, &doi_identifier()).unwrap_err();
+
+    assert_eq!(
+        unresolved.attempts,
+        vec![
+            (SourceName::Crossref, SourceError::RateLimited),
+            (
+                SourceName::OpenAlex,
+                SourceError::Malformed {
+                    message: "bad body".to_string()
+                }
+            ),
+        ]
+    );
+    assert!(!unresolved.is_conclusive());
+}
+
+#[test]
+fn resolve_skips_an_unsupported_source_in_both_failures_and_the_answer() {
+    let crossref = FakeSource::unsupported(SourceName::Crossref, Ok(article()));
+    let openalex = FakeSource::always(SourceName::OpenAlex, Ok(article()));
+
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let resolved = resolve(&sources, &doi_identifier()).unwrap();
+
+    assert_eq!(resolved.source, SourceName::OpenAlex);
+    assert!(resolved.failures.is_empty());
+}
+
+#[test]
+fn resolve_with_no_eligible_service_is_unresolved_with_no_attempts() {
+    let arxiv = FakeSource::unsupported(SourceName::Arxiv, Ok(article()));
+    let openalex = FakeSource::unsupported(SourceName::OpenAlex, Ok(article()));
+
+    let sources: Vec<&dyn Source> = vec![&arxiv, &openalex];
+    let unresolved = resolve(&sources, &arxiv_identifier()).unwrap_err();
+
+    assert!(unresolved.attempts.is_empty());
 }
 
 // --- resolve: filtering ---

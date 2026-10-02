@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use borax::event::{Counts, Event, SkipReason};
+use borax::evidence::Evidence;
+use borax::evidence::Unattempted;
 use borax::paths::route;
 use borax::pipeline::FileRecord;
 use borax::renaming::{
@@ -173,16 +175,9 @@ fn resolved(path: &str, record: Record, hash: Option<ContentHash>) -> (PathBuf, 
         PathBuf::from(path),
         FileRecord {
             record,
-            source: None,
-            found: None,
-
-            claims: Vec::new(),
-
-            tier: None,
-            cached: false,
             hash,
+            evidence: Evidence::not_attempted(Unattempted::ContentDuplicate),
             overrode: None,
-            library: None,
         },
     )
 }

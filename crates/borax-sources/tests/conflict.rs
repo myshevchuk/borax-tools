@@ -2,8 +2,8 @@
 
 use borax_core::record::{EntryType, Record};
 use borax_sources::conflict::{
-    Conflict, TITLE_AGREEMENT, check_title, comparison_tokens, is_title_evidence, title_similarity,
-    titles_agree,
+    Conflict, Insufficient, TITLE_AGREEMENT, TitleCheck, check_title, comparison_tokens,
+    is_title_evidence, title_similarity, titles_agree,
 };
 
 fn article_with_title(title: &str) -> Record {
@@ -243,68 +243,85 @@ fn a_long_disjoint_title_is_still_evidence() {
     ));
 }
 
-// ================= check_title: no conflict =================
+// ================= check_title: agreement and insufficient evidence =================
 
 #[test]
-fn check_title_none_when_there_are_no_candidates() {
-    assert_eq!(check_title(&[], &article_with_title("Some Title")), None);
+fn check_title_insufficient_no_titles_when_there_are_no_candidates() {
+    assert_eq!(
+        check_title(&[], &article_with_title("Some Title")),
+        TitleCheck::Insufficient(Insufficient::NoTitles)
+    );
 }
 
 #[test]
-fn check_title_none_when_the_candidate_is_empty() {
-    assert_eq!(check_title(&[""], &article_with_title("Some Title")), None);
+fn check_title_insufficient_no_evidence_when_the_candidate_is_empty() {
+    assert_eq!(
+        check_title(&[""], &article_with_title("Some Title")),
+        TitleCheck::Insufficient(Insufficient::NoEvidence)
+    );
 }
 
 #[test]
-fn check_title_none_when_the_candidate_is_only_whitespace() {
+fn check_title_insufficient_no_evidence_when_the_candidate_is_only_whitespace() {
     assert_eq!(
         check_title(&["   "], &article_with_title("Some Title")),
-        None
+        TitleCheck::Insufficient(Insufficient::NoEvidence)
     );
 }
 
 #[test]
-fn check_title_none_when_record_has_no_title() {
-    assert_eq!(check_title(&["Some Title"], &article_without_title()), None);
+fn check_title_insufficient_record_untitled_when_record_has_no_title() {
+    assert_eq!(
+        check_title(&["Some Title"], &article_without_title()),
+        TitleCheck::Insufficient(Insufficient::RecordUntitled)
+    );
 }
 
 #[test]
-fn check_title_none_when_normalized_forms_are_equal_though_raw_differ() {
+fn check_title_insufficient_record_untitled_even_with_candidates_when_it_has_no_content_words() {
+    assert_eq!(
+        check_title(&["Some Title"], &article_with_title("of the and")),
+        TitleCheck::Insufficient(Insufficient::RecordUntitled)
+    );
+}
+
+#[test]
+fn check_title_agreed_when_normalized_forms_are_equal_though_raw_differ() {
     assert_eq!(
         check_title(&["The Title."], &article_with_title("the title")),
-        None
+        TitleCheck::Agreed
     );
 }
 
 #[test]
-fn check_title_none_when_the_candidate_is_a_prefix_of_the_resolved_title() {
+fn check_title_agreed_when_the_candidate_is_a_prefix_of_the_resolved_title() {
     let resolved = article_with_title(
         "Molecular Structure of Nucleic Acids: A Structure for Deoxyribose Nucleic Acid",
     );
     assert_eq!(
         check_title(&["Molecular Structure of Nucleic Acids"], &resolved),
-        None
+        TitleCheck::Agreed
     );
 }
 
 #[test]
-fn check_title_none_when_the_resolved_title_is_a_prefix_of_the_candidate() {
+fn check_title_agreed_when_the_resolved_title_is_a_prefix_of_the_candidate() {
     let resolved = article_with_title("Molecular Structure of Nucleic Acids");
     assert_eq!(
         check_title(
             &["Molecular Structure of Nucleic Acids: A Structure for Deoxyribose Nucleic Acid"],
             &resolved
         ),
-        None
+        TitleCheck::Agreed
     );
 }
 
 // The regression this rewrite exists for.
 #[test]
-fn check_title_none_for_the_asc_paper() {
+fn check_title_agreed_for_the_asc_paper() {
     assert_eq!(
         check_title(&[ASC_EXTRACTED], &article_with_title(ASC_RESOLVED)),
-        None
+        TitleCheck::Agreed
     );
 }
 
@@ -312,31 +329,31 @@ fn check_title_none_for_the_asc_paper() {
 // dictionary carries the lossy real title. The junk one is discarded
 // and the real one agrees.
 #[test]
-fn check_title_none_when_a_junk_candidate_accompanies_an_agreeing_one() {
+fn check_title_agreed_when_a_junk_candidate_accompanies_an_agreeing_one() {
     assert_eq!(
         check_title(
             &["untitled", ASC_EXTRACTED],
             &article_with_title(ASC_RESOLVED)
         ),
-        None
+        TitleCheck::Agreed
     );
 }
 
 #[test]
-fn check_title_none_when_every_candidate_is_junk() {
+fn check_title_insufficient_no_evidence_when_every_candidate_is_junk() {
     assert_eq!(
         check_title(
             &["untitled", "PowerPoint-Pr\u{e4}sentation"],
             &article_with_title("Aerosols and Hydrocarbons in the Atmosphere")
         ),
-        None
+        TitleCheck::Insufficient(Insufficient::NoEvidence)
     );
 }
 
 // Any agreeing candidate clears the file, whichever order they arrive
 // in: one source of evidence agreeing is enough.
 #[test]
-fn check_title_none_when_one_of_two_real_candidates_agrees() {
+fn check_title_agreed_when_one_of_two_real_candidates_agrees() {
     let resolved = article_with_title("Aerosols and Hydrocarbons in the Atmosphere");
     assert_eq!(
         check_title(
@@ -346,7 +363,7 @@ fn check_title_none_when_one_of_two_real_candidates_agrees() {
             ],
             &resolved
         ),
-        None
+        TitleCheck::Agreed
     );
 }
 
@@ -355,7 +372,9 @@ fn check_title_none_when_one_of_two_real_candidates_agrees() {
 #[test]
 fn check_title_some_conflict_when_titles_genuinely_differ() {
     let resolved = article_with_title("A Completely Different Title");
-    let conflict = check_title(&["Some Other Title"], &resolved).unwrap();
+    let conflict = check_title(&["Some Other Title"], &resolved)
+        .conflict()
+        .unwrap();
 
     assert_eq!(conflict.field, "title");
     assert_eq!(conflict.extracted, "Some Other Title");
@@ -366,7 +385,9 @@ fn check_title_some_conflict_when_titles_genuinely_differ() {
 #[test]
 fn check_title_conflict_when_a_prefix_match_is_not_a_whole_token() {
     let resolved = article_with_title("Molecular Structures of Nucleic Acids");
-    let conflict = check_title(&["Molecular Structure"], &resolved).unwrap();
+    let conflict = check_title(&["Molecular Structure"], &resolved)
+        .conflict()
+        .unwrap();
 
     assert_eq!(conflict.extracted, "Molecular Structure");
     assert_eq!(conflict.resolved, "Molecular Structures of Nucleic Acids");
@@ -384,6 +405,7 @@ fn check_title_reports_the_closest_candidate() {
         ],
         &resolved,
     )
+    .conflict()
     .unwrap();
 
     assert_eq!(
@@ -395,9 +417,31 @@ fn check_title_reports_the_closest_candidate() {
 #[test]
 fn check_title_conflict_carries_the_raw_strings_not_the_normalized_ones() {
     let resolved = article_with_title("A Completely Different Title");
-    let conflict = check_title(&["  Some Other Title.  "], &resolved).unwrap();
+    let conflict = check_title(&["  Some Other Title.  "], &resolved)
+        .conflict()
+        .unwrap();
 
     assert_eq!(conflict.extracted, "  Some Other Title.  ");
+}
+
+#[test]
+fn title_check_conflict_gives_some_only_for_conflict() {
+    let resolved = article_with_title("A Completely Different Title");
+    assert!(
+        check_title(&["Some Other Title"], &resolved)
+            .conflict()
+            .is_some()
+    );
+    assert!(check_title(&[], &resolved).conflict().is_none());
+    assert_eq!(
+        check_title(&["A Completely Different Title"], &resolved),
+        TitleCheck::Agreed
+    );
+    assert!(
+        check_title(&["A Completely Different Title"], &resolved)
+            .conflict()
+            .is_none()
+    );
 }
 
 // ================= the Conflict value =================

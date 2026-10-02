@@ -8,7 +8,7 @@ use borax_sources::crossref::CrossrefClient;
 use borax_sources::dispatch::resolve;
 use borax_sources::http::{HttpRequest, HttpResponse, Politeness, Transport, TransportError};
 use borax_sources::openalex::OpenAlexClient;
-use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::source::{Retrieval, Source, SourceError, SourceName};
 
 const CROSSREF_ARTICLE: &str = include_str!("cassettes/crossref-article.json");
 const OPENALEX_ARTICLE: &str = include_str!("cassettes/openalex-article.json");
@@ -176,8 +176,12 @@ fn crossref_fetch_200_returns_record_and_sends_expected_request() {
     let transport = FakeTransport::ok(200, CROSSREF_ARTICLE);
     let client = CrossrefClient::new(&transport, Politeness::default());
 
-    let record = client.fetch(&doi_identifier()).unwrap();
-    assert_eq!(record.doi, Some(Doi::parse("10.1038/171737a0").unwrap()));
+    let fetched = client.fetch(&doi_identifier()).unwrap();
+    assert_eq!(
+        fetched.record.doi,
+        Some(Doi::parse("10.1038/171737a0").unwrap())
+    );
+    assert_eq!(fetched.retrieval, Retrieval::Network { stored: None });
 
     let seen = transport.seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
@@ -251,8 +255,12 @@ fn crossref_fetch_unsupported_identifier_sends_no_request() {
 fn openalex_fetch_200_returns_normalized_doi() {
     let transport = FakeTransport::ok(200, OPENALEX_ARTICLE);
     let client = OpenAlexClient::new(&transport, Politeness::default());
-    let record = client.fetch(&doi_identifier()).unwrap();
-    assert_eq!(record.doi, Some(Doi::parse("10.1038/171737a0").unwrap()));
+    let fetched = client.fetch(&doi_identifier()).unwrap();
+    assert_eq!(
+        fetched.record.doi,
+        Some(Doi::parse("10.1038/171737a0").unwrap())
+    );
+    assert_eq!(fetched.retrieval, Retrieval::Network { stored: None });
 }
 
 #[test]
@@ -272,11 +280,12 @@ fn openalex_fetch_unsupported_identifier_sends_no_request() {
 fn arxiv_fetch_200_returns_record_with_arxiv_id() {
     let transport = FakeTransport::ok(200, ARXIV_PREPRINT);
     let client = ArxivClient::new(&transport, Politeness::default());
-    let record = client.fetch(&arxiv_identifier()).unwrap();
+    let fetched = client.fetch(&arxiv_identifier()).unwrap();
     assert_eq!(
-        record.borax.arxiv.as_ref().map(ArxivId::id),
+        fetched.record.borax.arxiv.as_ref().map(ArxivId::id),
         Some("1706.03762")
     );
+    assert_eq!(fetched.retrieval, Retrieval::Network { stored: None });
 }
 
 #[test]

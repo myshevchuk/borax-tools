@@ -34,7 +34,7 @@ use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_sources::cache::MemoryCache;
-use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::source::{Fetched, Source, SourceError, SourceName};
 use borax_sources::store::ContentIndex;
 use serde_json::Value;
 use tempfile::tempdir;
@@ -194,8 +194,8 @@ impl Source for FakeSource {
         true
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
-        self.response.clone()
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
+        self.response.clone().map(Fetched::network)
     }
 }
 

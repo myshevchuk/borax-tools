@@ -34,8 +34,8 @@ use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source as
 use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
 use borax_core::template::RenderInput;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
-use borax_sources::cache::MemoryCache;
-use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::cache::{CacheWrite, MemoryCache};
+use borax_sources::source::{Fetched, Retrieval, Source, SourceError, SourceName};
 use borax_sources::store::ContentIndex;
 use tempfile::tempdir;
 
@@ -234,8 +234,8 @@ impl Source for FakeSource {
         true
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
-        self.response.clone()
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
+        self.response.clone().map(Fetched::network)
     }
 }
 
@@ -273,9 +273,9 @@ impl Source for KeyedSource {
         true
     }
 
-    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
         match self.answers.get(&identifier.to_string()) {
-            Some(record) => Ok(record.clone()),
+            Some(record) => Ok(Fetched::network(record.clone())),
             None => Err(SourceError::NotFound),
         }
     }
@@ -6001,10 +6001,8 @@ fn a_files_own_resolution_is_still_cited_after_a_failed_supply() {
 // standing
 // ---------------------------------------------------------------------
 
-/// A [`Cache`] whose every write is silently dropped, modelled on
-/// [`MemoryCache`] but never keeping what it is given — the shape
-/// [`Cache::put`]'s own contract allows ("failures are silent for the
-/// same reason").
+/// A [`Cache`] whose every write fails, modelled on [`MemoryCache`] but
+/// never keeping what it is given.
 struct WriteFailingCache;
 
 impl borax_sources::cache::Cache for WriteFailingCache {
@@ -6012,7 +6010,11 @@ impl borax_sources::cache::Cache for WriteFailingCache {
         None
     }
 
-    fn put(&self, _key: &str, _record: &Record) {}
+    fn put(&self, _key: &str, _record: &Record) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
 }
 
 #[test]
@@ -6558,7 +6560,7 @@ impl Source for PanicSource {
         )
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
         panic!("{} was asked to fetch in an offline run", self.name)
     }
 }
@@ -14932,7 +14934,7 @@ impl Source for FlakySource {
         true
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
         let left = self.fails.load(std::sync::atomic::Ordering::Relaxed);
         if left > 0 {
             self.fails
@@ -14941,7 +14943,43 @@ impl Source for FlakySource {
                 message: "503".to_string(),
             });
         }
-        Ok(self.then.clone())
+        Ok(Fetched::network(self.then.clone()))
+    }
+}
+
+/// A [`Source`] that answers from a fixed sequence of outcomes, one per
+/// call, and panics if asked more times than the sequence has answers —
+/// for a lookup whose services disagree across a retry.
+struct SequencedSource {
+    name: SourceName,
+    answers: std::sync::Mutex<std::collections::VecDeque<Result<Record, SourceError>>>,
+}
+
+impl SequencedSource {
+    fn new(name: SourceName, answers: Vec<Result<Record, SourceError>>) -> SequencedSource {
+        SequencedSource {
+            name,
+            answers: std::sync::Mutex::new(answers.into()),
+        }
+    }
+}
+
+impl Source for SequencedSource {
+    fn name(&self) -> SourceName {
+        self.name
+    }
+
+    fn supports(&self, _identifier: &Identifier) -> bool {
+        true
+    }
+
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
+        self.answers
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("{} has no more answers queued", self.name))
+            .map(Fetched::network)
     }
 }
 
@@ -15350,6 +15388,252 @@ fn interactive_retry_that_finds_a_conflict_keeps_the_dangling_item_problem() {
         }
         other => panic!("expected a conflict Skipped after the retry, got {other:?}"),
     }
+}
+
+/// design D11: a retry's record keeps the extraction pass as its
+/// origin. The driver no longer overwrites `tier` back to `supplied`.
+#[test]
+fn a_retry_after_an_outage_keeps_the_extraction_pass_as_tier_not_supplied() {
+    let path = PathBuf::from("/lib/retry-tier.pdf");
+    let hash = hash_for("d11-retry-tier");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash,
+        pdf_with_embedded_doi("10.1000/d11-retry-tier"),
+    );
+    let crossref = FlakySource::new(
+        SourceName::Crossref,
+        1,
+        record_by("Smith", 2024, "10.1000/d11-retry-tier"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+    {
+        Some(Event::Resolved { tier, .. }) => {
+            assert_eq!(tier.as_deref(), Some("embedded-metadata"));
+        }
+        other => panic!("expected Event::Resolved after the retry, got {other:?}"),
+    }
+}
+
+/// design D11: a retry replaces the file's own lookup. An outage
+/// followed by every service answering not found is conclusive, so the
+/// next question offers no retry, and the skip carries the retry's own
+/// attempts.
+#[test]
+fn an_outage_then_not_found_on_retry_stops_offering_a_retry() {
+    let path = PathBuf::from("/lib/retry-not-found.pdf");
+    let hash = hash_for("d11-retry-not-found");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash,
+        pdf_with_embedded_doi("10.1000/d11-retry-not-found"),
+    );
+    let crossref = SequencedSource::new(
+        SourceName::Crossref,
+        vec![
+            Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+            Err(SourceError::NotFound),
+        ],
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert!(
+        !questions[1].choices.contains(&Answer::Retry),
+        "a conclusive retry must not offer another: got {:?}",
+        questions[1].choices
+    );
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
+    {
+        Some(Event::Skipped {
+            reason: SkipReason::Unresolvable { attempts, .. },
+            ..
+        }) => {
+            assert_eq!(attempts.len(), 1, "got {attempts:?}");
+        }
+        other => panic!("expected an unresolvable Skipped after the retry, got {other:?}"),
+    }
+}
+
+/// design D11: a failed supply is a candidate that led nowhere. It does
+/// not replace the file's own lookup, so a retry is still offered
+/// afterwards.
+#[test]
+fn an_outage_then_a_failed_supply_still_offers_a_retry() {
+    let path = PathBuf::from("/lib/supply-fails-retry-stays.pdf");
+    let hash = hash_for("d11-failed-supply-retry-stays");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash,
+        pdf_with_embedded_doi("10.1000/d11-failed-supply-retry-stays"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Err(SourceError::Unavailable {
+            message: "503".to_string(),
+        }),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/d11-nobody-holds-this".to_string())]);
+
+    events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert_eq!(
+        questions[1].choices.first().copied(),
+        Some(Answer::Retry),
+        "a failed supply must not replace the file's own inconclusive \
+         lookup: got {:?}",
+        questions[1].choices
+    );
+}
+
+/// design D11: overriding a conflict still reports it before the move,
+/// with no event about this file between the two.
+#[test]
+fn overriding_a_conflict_still_reports_resolved_before_renamed() {
+    let path = PathBuf::from("/lib/override-order.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("d11-override-order"),
+        pdf_with_embedded_doi("10.1000/d11-override-order").with_title("Title the File Claims"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/d11-override-order",
+            "A Completely Different Resolved Title",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let resolved_index = events
+        .iter()
+        .position(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+        .unwrap_or_else(|| panic!("no Event::Resolved for the file: {events:?}"));
+    let renamed_index = events
+        .iter()
+        .position(|event| matches!(event, Event::Renamed { path: p, .. } if *p == path))
+        .unwrap_or_else(|| panic!("no Event::Renamed for the file: {events:?}"));
+
+    assert!(
+        resolved_index < renamed_index,
+        "resolved must come before renamed: got {events:?}"
+    );
+    assert!(
+        !events[resolved_index + 1..renamed_index].iter().any(|event| matches!(
+            event,
+            Event::Resolved { path: p, .. } | Event::Skipped { path: p, .. } | Event::Renamed { path: p, .. }
+            if *p == path
+        )),
+        "nothing about this file may appear between resolved and renamed: got {events:?}"
+    );
 }
 
 /// design D11: a supplied candidate for a file the library could not

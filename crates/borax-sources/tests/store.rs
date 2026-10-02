@@ -7,11 +7,27 @@ use std::path::{Path, PathBuf};
 use borax_core::content::hash_bytes;
 use borax_core::identifier::{ArxivId, Doi, Isbn, Pmid};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
-use borax_sources::cache::{Cache, MemoryCache};
+use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
 use borax_sources::store::{
     ContentIndex, FORMAT_VERSION, FileCache, cache_root, content_key, entry_path, hash_file,
     write_atomically,
 };
+
+/// A [`Cache`] whose `put` always reports [`CacheWrite::Failed`]
+/// without storing anything.
+struct WriteFailingCache;
+
+impl Cache for WriteFailingCache {
+    fn get(&self, _key: &str) -> Option<Record> {
+        None
+    }
+
+    fn put(&self, _key: &str, _record: &Record) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+}
 use tempfile::tempdir;
 
 fn doi(value: &str) -> Doi {
@@ -406,7 +422,7 @@ fn file_cache_round_trips_a_record_with_every_field_set() {
     let cache = FileCache::new(dir.path());
     let record = full_record();
 
-    cache.put("full", &record);
+    assert_eq!(cache.put("full", &record), CacheWrite::Written);
 
     assert_eq!(cache.get("full"), Some(record));
 }
@@ -435,7 +451,7 @@ fn file_cache_put_creates_the_root_directory() {
     let root = dir.path().join("cache");
     let cache = FileCache::new(&root);
 
-    cache.put("widget", &article_with_doi("10.1038/171737a0"));
+    let _ = cache.put("widget", &article_with_doi("10.1038/171737a0"));
 
     assert!(root.exists());
 }
@@ -447,8 +463,8 @@ fn file_cache_overwriting_a_key_yields_the_new_record() {
     let first = article_with_doi("10.1038/171737a0");
     let second = article_with_doi("10.1021/jacs.4c01234");
 
-    cache.put("widget", &first);
-    cache.put("widget", &second);
+    let _ = cache.put("widget", &first);
+    let _ = cache.put("widget", &second);
 
     assert_eq!(cache.get("widget"), Some(second));
 }
@@ -472,9 +488,40 @@ fn file_cache_put_with_an_invalid_key_is_a_silent_no_op() {
     let root = dir.path().join("cache");
     let cache = FileCache::new(&root);
 
-    cache.put("Invalid Key", &article_with_doi("10.1038/171737a0"));
+    let _ = cache.put("Invalid Key", &article_with_doi("10.1038/171737a0"));
 
     assert!(!root.exists());
+}
+
+#[test]
+fn file_cache_put_with_an_invalid_key_returns_failed_with_a_message() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("cache");
+    let cache = FileCache::new(&root);
+
+    let result = cache.put("Invalid Key", &article_with_doi("10.1038/171737a0"));
+
+    match result {
+        CacheWrite::Failed { message } => assert!(!message.is_empty()),
+        CacheWrite::Written => panic!("expected Failed, got Written"),
+    }
+    assert_eq!(cache.get("Invalid Key"), None);
+}
+
+#[test]
+fn file_cache_put_over_a_root_blocked_by_a_regular_file_returns_failed() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("cache");
+    std::fs::write(&root, b"not a directory").unwrap();
+    let cache = FileCache::new(&root);
+
+    let result = cache.put("widget", &article_with_doi("10.1038/171737a0"));
+
+    match result {
+        CacheWrite::Failed { message } => assert!(!message.is_empty()),
+        CacheWrite::Written => panic!("expected Failed, got Written"),
+    }
+    assert_eq!(cache.get("widget"), None);
 }
 
 #[test]
@@ -489,7 +536,7 @@ fn file_cache_get_with_an_invalid_key_is_a_miss() {
 fn file_cache_clear_removes_the_entries() {
     let dir = tempdir().unwrap();
     let cache = FileCache::new(dir.path());
-    cache.put("widget", &article_with_doi("10.1038/171737a0"));
+    let _ = cache.put("widget", &article_with_doi("10.1038/171737a0"));
 
     cache.clear().unwrap();
 
@@ -509,11 +556,11 @@ fn file_cache_clear_succeeds_on_an_already_absent_root() {
 fn file_cache_works_again_after_clear() {
     let dir = tempdir().unwrap();
     let cache = FileCache::new(dir.path());
-    cache.put("widget", &article_with_doi("10.1038/171737a0"));
+    let _ = cache.put("widget", &article_with_doi("10.1038/171737a0"));
     cache.clear().unwrap();
 
     let record = article_with_doi("10.1021/jacs.4c01234");
-    cache.put("widget", &record);
+    let _ = cache.put("widget", &record);
 
     assert_eq!(cache.get("widget"), Some(record));
 }
@@ -525,9 +572,30 @@ fn content_index_round_trips_a_record<C: Cache>(cache: C) {
     let hash = hash_bytes(b"borax content");
     let record = article_with_doi("10.1038/171737a0");
 
-    index.put(&hash, &record);
+    let _ = index.put(&hash, &record);
 
     assert_eq!(index.get(&hash), Some(record));
+}
+
+#[test]
+fn content_index_put_returns_written_over_memory_cache() {
+    let index = ContentIndex::new(MemoryCache::new());
+    let hash = hash_bytes(b"borax content");
+    let record = article_with_doi("10.1038/171737a0");
+
+    assert_eq!(index.put(&hash, &record), CacheWrite::Written);
+}
+
+#[test]
+fn content_index_put_returns_what_its_cache_returned() {
+    let index = ContentIndex::new(WriteFailingCache);
+    let hash = hash_bytes(b"borax content");
+    let record = article_with_doi("10.1038/171737a0");
+
+    match index.put(&hash, &record) {
+        CacheWrite::Failed { message } => assert_eq!(message, "write-failing cache"),
+        CacheWrite::Written => panic!("expected Failed, got Written"),
+    }
 }
 
 #[test]
@@ -571,7 +639,7 @@ fn renamed_file_with_identical_content_is_served_from_the_content_index() {
 
     let index = ContentIndex::new(MemoryCache::new());
     let record = article_with_doi("10.1038/171737a0");
-    index.put(&hash_file(&original).unwrap(), &record);
+    let _ = index.put(&hash_file(&original).unwrap(), &record);
 
     assert_eq!(index.get(&hash_file(&renamed).unwrap()), Some(record));
 }
@@ -585,7 +653,7 @@ fn entries_survive_a_fresh_file_cache_opened_on_the_same_root() {
     let record = article_with_doi("10.1038/171737a0");
 
     let first_run = ContentIndex::new(FileCache::new(dir.path()));
-    first_run.put(&hash, &record);
+    let _ = first_run.put(&hash, &record);
     drop(first_run);
 
     let second_run = ContentIndex::new(FileCache::new(dir.path()));

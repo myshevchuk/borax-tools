@@ -148,7 +148,7 @@ fn doi_identifier() -> Identifier {
 #[ignore = "hits the live Crossref API"]
 fn crossref_client_still_resolves_the_shared_doi_over_a_real_transport() {
     let client = CrossrefClient::new(transport(), politeness());
-    let record = client.fetch(&doi_identifier()).unwrap();
+    let record = client.fetch(&doi_identifier()).unwrap().record;
 
     assert_eq!(record.doi.unwrap().as_str(), DOI);
     assert!(record.title.unwrap().contains("Molecular Structure"));
@@ -158,7 +158,7 @@ fn crossref_client_still_resolves_the_shared_doi_over_a_real_transport() {
 #[ignore = "hits the live OpenAlex API"]
 fn openalex_client_still_resolves_the_shared_doi_over_a_real_transport() {
     let client = OpenAlexClient::new(transport(), politeness());
-    let record = client.fetch(&doi_identifier()).unwrap();
+    let record = client.fetch(&doi_identifier()).unwrap().record;
 
     assert_eq!(record.doi.unwrap().as_str(), DOI);
     assert!(record.title.is_some());
@@ -169,7 +169,7 @@ fn openalex_client_still_resolves_the_shared_doi_over_a_real_transport() {
 fn arxiv_client_still_resolves_the_shared_preprint_over_a_real_transport() {
     let client = ArxivClient::new(transport(), politeness());
     let identifier = Identifier::Arxiv(ArxivId::parse("1706.03762").unwrap());
-    let record = client.fetch(&identifier).unwrap();
+    let record = client.fetch(&identifier).unwrap().record;
 
     assert_eq!(record.borax.arxiv.unwrap().id(), "1706.03762");
     assert!(record.title.unwrap().contains("Attention"));
@@ -191,7 +191,7 @@ fn arxiv_client_still_resolves_the_shared_preprint_over_a_real_transport() {
 fn arxiv_client_keeps_the_archive_prefix_of_a_pre_2007_identifier() {
     let client = ArxivClient::new(transport(), politeness());
     let identifier = Identifier::Arxiv(ArxivId::parse("hep-th/9711200").unwrap());
-    let record = client.fetch(&identifier).unwrap();
+    let record = client.fetch(&identifier).unwrap().record;
 
     assert_eq!(record.borax.arxiv.unwrap().id(), "hep-th/9711200");
     assert!(record.title.is_some());
@@ -205,7 +205,7 @@ fn crossref_client_accepts_a_configured_mailto_in_the_polite_pool() {
         mailto: Some("borax-tools-test@example.invalid".to_string()),
     };
     let client = CrossrefClient::new(transport(), politeness);
-    let record = client.fetch(&doi_identifier()).unwrap();
+    let record = client.fetch(&doi_identifier()).unwrap().record;
 
     assert_eq!(record.doi.unwrap().as_str(), DOI);
 }
