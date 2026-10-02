@@ -91,7 +91,7 @@ The controlled cases from `report-extraction-per-file` are reused:
 
 ## 1. Store writes report their result
 
-- [ ] 1.1 Red, in `crates/borax-sources/tests/cache.rs` and
+- [x] 1.1 Red, in `crates/borax-sources/tests/cache.rs` and
       `crates/borax-sources/tests/store.rs`:
       - `MemoryCache::put` returns `CacheWrite::Written`, and the
         record reads back.
@@ -126,7 +126,7 @@ The controlled cases from `report-extraction-per-file` are reused:
 
 ## 2. How a service answered: `Fetched` and `Retrieval`
 
-- [ ] 2.1 Red:
+- [x] 2.1 Red:
       - `crates/borax-sources/tests/cache.rs`:
         - `Cached` over a `MemoryCache` returns `Retrieval::Network {
           stored: Some(CacheWrite::Written) }` on a miss. On a second
@@ -158,7 +158,7 @@ The controlled cases from `report-extraction-per-file` are reused:
 
 ## 3. Every attempt through dispatch
 
-- [ ] 3.1 Red, in `crates/borax-sources/tests/dispatch.rs`:
+- [x] 3.1 Red, in `crates/borax-sources/tests/dispatch.rs`:
       - When the first source answers, `Resolved` carries `source`, the
         source's `retrieval` and empty `failures`.
       - When Crossref is `Unavailable { message }` and OpenAlex answers,
@@ -182,7 +182,7 @@ The controlled cases from `report-extraction-per-file` are reused:
 
 ## 4. Extraction evidence and the three title states
 
-- [ ] 4.1 Red, in `crates/borax/tests/pipeline.rs`:
+- [x] 4.1 Red, in `crates/borax/tests/pipeline.rs`:
       - `from_file` over:
         - the blank page with a title: `extracted` is
           `Err(NoTextLayer)`, and `titles` is `Titles::Read` holding one
@@ -221,7 +221,7 @@ The controlled cases from `report-extraction-per-file` are reused:
 
 ## 5. What the title check concluded
 
-- [ ] 5.1 Red:
+- [x] 5.1 Red:
       - `crates/borax-sources/tests/conflict.rs`:
         - `check_title` gives `Agreed` for an agreeing title, and also
           for a placeholder next to an agreeing real title.
@@ -252,7 +252,7 @@ The controlled cases from `report-extraction-per-file` are reused:
 
 ## 6. Evidence on every verdict
 
-- [ ] 6.1 Red, in `crates/borax/tests/pipeline.rs`, through `standing`.
+- [x] 6.1 Red, in `crates/borax/tests/pipeline.rs`, through `standing`.
       Each case asserts the whole `Evidence` unless a line says
       otherwise.
       - **A fresh resolution**, with no library given:
@@ -359,7 +359,7 @@ The controlled cases from `report-extraction-per-file` are reused:
 These tests pin behaviour that already holds, so they may pass as soon
 as group 6 is green. Report that rather than weakening them.
 
-- [ ] 7.1 Red, in `crates/borax/tests/pipeline.rs`. The conflict file
+- [x] 7.1 Red, in `crates/borax/tests/pipeline.rs`. The conflict file
       has a text-layer DOI and an Info title that disagrees with
       Crossref's record. Its source is wrapped in `Cached` over a
       `MemoryCache`.
@@ -388,7 +388,7 @@ as group 6 is green. Report that rather than weakening them.
 
 ## 8. Operator lookups and the rename-time write
 
-- [ ] 8.1 Red, in `crates/borax/tests/pipeline.rs`:
+- [x] 8.1 Red, in `crates/borax/tests/pipeline.rs`:
       - `resolve_supplied` with `Origin::Operator` and the `standing`
         evidence of a prose file with no identifier gives `Ok(file)`
         where:
@@ -442,7 +442,7 @@ as group 6 is green. Report that rather than weakening them.
         - `Attempted(Failed { .. })` over a write-failing cache;
         - `NotAttempted(Unhashable)` with no hash, with nothing
           written.
-- [ ] 8.2 Red, in `crates/borax/tests/dispatch.rs`:
+- [x] 8.2 Red, in `crates/borax/tests/dispatch.rs`:
       - If no existing test asserts the `tier` of a record reached by
         retrying after an outage, add one asserting that it is the
         extraction pass, not `supplied`.
@@ -502,7 +502,7 @@ as group 6 is green. Report that rather than weakening them.
 
 ## 10. Documents and state
 
-- [ ] 10.1 Doc writer (`codex-docs`), an update job on `CHANGELOG.md`
+- [x] 10.1 Doc writer (`codex-docs`), an update job on `CHANGELOG.md`
       under Unreleased. Its sources are this proposal, its design and
       its spec deltas. The implementer does not write it, and the
       orchestrator checks the diff against those sources. It is one
@@ -528,7 +528,7 @@ as group 6 is green. Report that rather than weakening them.
         apart in `Evidence::extraction`, the stream still merges them,
         the regression guard still pins that, and change 9 restores
         them.
-- [ ] 10.3 `docs/manual.org` is not changed. The orchestrator confirms,
+- [x] 10.3 `docs/manual.org` is not changed. The orchestrator confirms,
       with the suite green, that these passages are still true:
       - the account of remembering an accepted answer, including its
         best-effort paragraph (lines 370–391);
@@ -541,8 +541,8 @@ as group 6 is green. Report that rather than weakening them.
 
 ## 11. Close
 
-- [ ] 11.1 `openspec validate expose-resolution-attempts --strict` and
+- [x] 11.1 `openspec validate expose-resolution-attempts --strict` and
       `python3 scripts/check-spec-deltas.py` pass.
-- [ ] 11.2 `cargo fmt --all --check`,
+- [x] 11.2 `cargo fmt --all --check`,
       `cargo clippy --workspace --all-targets -- -D warnings` and
       `cargo test --workspace` pass, as CI runs them.
