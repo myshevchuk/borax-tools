@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Resolution now retains per-file evidence internally: ordered service
+  attempts with structured outcomes, including failures before a
+  success; whether the response cache or the network answered; response
+  cache and content-index write results; the content index's read
+  status; distinct extraction results; titles retained through
+  extraction failure; the title check's conclusion; and why a step was
+  not taken. No command output, event, exit status, or event schema
+  version changes; the schema remains at version 3. In `borax-sources`,
+  `Source::fetch` now returns `Fetched`, `Cache::put` and
+  `ContentIndex::put` return `CacheWrite`, and `check_title` returns
+  `TitleCheck`. In `borax`, `FileRecord` and `Standing` now carry
+  `Evidence`; `FileRecord`'s former flat fields and `Standing`'s
+  `library` are available through methods, and `Standing`'s `found`
+  and `unresolved` are read from its evidence's lookup.
+  The `claims_of`, `disagreement`, and `from_index` functions and the
+  `Supplied` type have been removed without aliases.
+
 ## [0.8.0] - 2026-10-01
 
 ### Added
