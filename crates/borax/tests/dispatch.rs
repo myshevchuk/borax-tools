@@ -35,7 +35,7 @@ use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, Valu
 use borax_core::template::RenderInput;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_sources::cache::{CacheWrite, MemoryCache};
-use borax_sources::source::{Fetched, Retrieval, Source, SourceError, SourceName};
+use borax_sources::source::{Fetched, Source, SourceError, SourceName};
 use borax_sources::store::ContentIndex;
 use tempfile::tempdir;
 
@@ -4446,7 +4446,7 @@ fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
         ..BoraxExt::default()
     };
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &record);
+    let _ = index.put(&hash, &record);
     let sources: Vec<&dyn Source> = Vec::new();
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
@@ -5317,7 +5317,7 @@ fn skipping_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
     );
     let fixture = SupplyFixture::new(documents);
     let already_held = record_by("Roe", 2019, "10.1000/d7-already-held");
-    fixture.index.put(&hash, &already_held);
+    let _ = fixture.index.put(&hash, &already_held);
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/d7-wrong-candidate",
         record_by("Doe", 2023, "10.1000/d7-wrong-candidate"),
@@ -5818,7 +5818,7 @@ fn quitting_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
     );
     let fixture = SupplyFixture::new(documents);
     let already_held = record_by("Roe", 2019, "10.1000/d7-quit-already-held");
-    fixture.index.put(&hash, &already_held);
+    let _ = fixture.index.put(&hash, &already_held);
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/d7-quit-candidate",
         record_by("Doe", 2023, "10.1000/d7-quit-candidate"),
@@ -12008,12 +12008,12 @@ fn adopt_records_each_orphan_the_content_index_answers_for() {
 
     let index = ContentIndex::new(MemoryCache::new());
     let cached = record_by("Adopted", 2020, "10.1000/task-8.1");
-    index.put(&hash_bytes(b"task-8.1 first"), &cached);
-    index.put(
+    let _ = index.put(&hash_bytes(b"task-8.1 first"), &cached);
+    let _ = index.put(
         &hash_bytes(b"task-8.1 second"),
         &record_by("Held", 2019, "10.1000/task-8.1-held"),
     );
-    index.put(&hash_bytes(b"task-8.1 copy"), &cached);
+    let _ = index.put(&hash_bytes(b"task-8.1 copy"), &cached);
     let untouched = outside_the_stores(&root);
     let orphans_before = library::survey(&root).orphans.len();
 
@@ -12118,12 +12118,12 @@ fn adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent() {
     let record_bytes = fs::read(&record_file).unwrap();
 
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.2 known"),
         &record_by("Known", 2021, "10.1000/task-8.2-known"),
     );
     // What adopting the recorded artifact would take: a different work.
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.2 recorded"),
         &record_by("Other", 2022, "10.1000/task-8.2-other"),
     );
@@ -12226,11 +12226,11 @@ fn adopt_holds_an_orphan_whose_bytes_a_record_already_holds() {
     write_real_file(&root, "twin-b.pdf", b"task-8.2a twin");
 
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.2a moved"),
         &record_by("Other", 2022, "10.1000/task-8.2a-other"),
     );
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.2a twin"),
         &record_by("Twin", 2023, "10.1000/task-8.2a-twin"),
     );
@@ -12309,7 +12309,7 @@ fn adopt_every_orphan_is_accounted_for() {
     );
 
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-5.1 recorded"),
         &record_by("Recorded", 2020, "10.1000/task-5.1-recorded"),
     );
@@ -12394,11 +12394,11 @@ fn adopt_after_the_cache_is_cleared_adopts_nothing_and_succeeds() {
     write_real_file(&root, "two.pdf", b"task-8.4 two");
     let cache_dir = tempdir().unwrap();
     let index = ContentIndex::new(FileCache::new(cache_dir.path()));
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.4 one"),
         &record_by("One", 2020, "10.1000/task-8.4-one"),
     );
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.4 two"),
         &record_by("Two", 2020, "10.1000/task-8.4-two"),
     );
@@ -12501,7 +12501,7 @@ fn adopt_after_the_cache_is_cleared_still_tells_unindexed_held_and_unreadable_ap
 
     let cache_dir = tempdir().unwrap();
     let index = ContentIndex::new(FileCache::new(cache_dir.path()));
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-5.1b unindexed"),
         &record_by("Unindexed", 2020, "10.1000/task-5.1b-unindexed"),
     );
@@ -12601,7 +12601,7 @@ fn adopt_outside_any_library_is_refused_and_writes_nothing() {
     let root = dir.path().to_path_buf();
     write_real_file(&root, "unmarked.pdf", b"adopt unmarked");
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"adopt unmarked"),
         &record_by("Unmarked", 2020, "10.1000/adopt-unmarked"),
     );
@@ -14034,7 +14034,7 @@ fn resolve_reports_the_librarys_corrected_item_over_a_stale_index_entry() {
     let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &stale);
+    let _ = index.put(&hash, &stale);
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
@@ -14160,7 +14160,7 @@ fn resolve_reports_untracked_for_an_unrecorded_file_inside_a_library() {
     let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &cached_record);
+    let _ = index.put(&hash, &cached_record);
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {

@@ -18,10 +18,9 @@ use borax::evidence::{
 };
 use borax::library::{ArtifactStore, ItemStore, Stores};
 use borax::pipeline::{
-    Documents, FileOutcome, FileRead, FileRecord, Provenance, RealDocuments, ResolveConfig,
-    Standing, accept, event_for, extraction, extraction_of, from_file, remember, resolve_batch,
-    resolve_file, resolve_supplied, standing, title_check, titles_of, unheld_evidence,
-    verdict_event,
+    Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, accept,
+    event_for, extraction, extraction_of, from_file, remember, resolve_batch, resolve_file,
+    resolve_supplied, standing, title_check, titles_of, unheld_evidence, verdict_event,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier};
@@ -33,7 +32,7 @@ use borax_pdf::scan::FoundIdentifier;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier};
 use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
-use borax_sources::conflict::{Conflict, Insufficient};
+use borax_sources::conflict::Insufficient;
 use borax_sources::source::{Fetched, Retrieval, Source, SourceError, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 use tempfile::tempdir;
@@ -465,7 +464,7 @@ fn content_index_hit_is_returned_without_opening_the_file() {
     );
     let indexed = record_with_doi("10.1000/indexed");
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &indexed);
+    let _ = index.put(&hash, &indexed);
     let sources: Vec<&dyn Source> = Vec::new();
 
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
@@ -486,7 +485,7 @@ fn cache_false_bypasses_the_content_index() {
         FakeDocuments::new().with_file(path, hash.clone(), pdf_with_embedded_doi("10.1000/live"));
     let indexed = record_with_doi("10.1000/stale-index-entry");
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &indexed);
+    let _ = index.put(&hash, &indexed);
     let (crossref, calls) = fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/live")));
     let sources: Vec<&dyn Source> = vec![&crossref];
 
@@ -857,16 +856,13 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
     let record = record_with_doi("10.1000/xyz");
     let outcome = FileOutcome::Resolved(FileRecord {
         record: record.clone(),
-        source: Some(SourceName::Crossref),
-        found: None,
-
-        claims: Vec::new(),
-
-        tier: Some(Provenance::Extracted(Tier::EmbeddedMetadata)),
-        cached: false,
+        evidence: evidence_via_lookup(
+            SourceName::Crossref,
+            Identifier::Doi(Doi::parse("10.1000/xyz").unwrap()),
+            Tier::EmbeddedMetadata,
+        ),
         hash: Some(hash_for("paper")),
         overrode: None,
-        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -895,16 +891,9 @@ fn a_content_index_hit_reports_its_source_as_cache() {
     let path = PathBuf::from("paper.pdf");
     let outcome = FileOutcome::Resolved(FileRecord {
         record: record_with_doi("10.1000/cached-record"),
-        source: None,
-        found: None,
-
-        claims: Vec::new(),
-
-        tier: None,
-        cached: true,
+        evidence: evidence_via_content_index_hit(),
         hash: Some(hash_for("paper")),
         overrode: None,
-        library: None,
     });
 
     let event = event_for(&path, &outcome);
@@ -1598,16 +1587,13 @@ fn a_resolved_event_carries_the_whole_record() {
     let record = record_with_doi_and_title("10.1000/x", "A Title Worth Keeping");
     let outcome = FileOutcome::Resolved(FileRecord {
         record: record.clone(),
-        source: Some(SourceName::Crossref),
-        found: None,
-
-        claims: Vec::new(),
-
-        tier: Some(Provenance::Extracted(Tier::TextLayer)),
-        cached: false,
+        evidence: evidence_via_lookup(
+            SourceName::Crossref,
+            Identifier::Doi(Doi::parse("10.1000/x").unwrap()),
+            Tier::TextLayer,
+        ),
         hash: None,
         overrode: None,
-        library: None,
     });
 
     let Event::Resolved {
@@ -1630,16 +1616,13 @@ fn a_resolved_event_round_trips_its_record_through_json() {
         path,
         &FileOutcome::Resolved(FileRecord {
             record: record.clone(),
-            source: Some(SourceName::Crossref),
-            found: None,
-
-            claims: Vec::new(),
-
-            tier: Some(Provenance::Extracted(Tier::TextLayer)),
-            cached: false,
+            evidence: evidence_via_lookup(
+                SourceName::Crossref,
+                Identifier::Doi(Doi::parse("10.1000/x").unwrap()),
+                Tier::TextLayer,
+            ),
             hash: None,
             overrode: None,
-            library: None,
         }),
     );
 
@@ -1920,7 +1903,7 @@ fn a_content_match_at_the_incoming_path_is_not_a_duplicate_and_resolves_from_the
     let sources: Vec<&dyn Source> = vec![&panics];
     let index = ContentIndex::new(MemoryCache::new());
     let indexed = record_with_doi("10.1000/own");
-    index.put(&hash, &indexed);
+    let _ = index.put(&hash, &indexed);
     record_at(root, "archived/Smith2024.pdf", hash, None);
 
     let outcome = checked(&path, &documents, &sources, &index, root, true);
@@ -2376,7 +2359,7 @@ fn a_failure_before_a_success_keeps_both_attempts_in_order() {
         None,
         None,
     );
-    let file = resolved_outcome(result.verdict);
+    let file = resolved_outcome(result.verdict.clone());
 
     match &file.evidence.lookup {
         LookupEvidence::Attempted { attempts, .. } => {
@@ -2583,7 +2566,7 @@ fn a_content_index_hit_marks_every_later_section_not_attempted() {
         },
     );
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &record_with_doi("10.1000/evidence-index-hit"));
+    let _ = index.put(&hash, &record_with_doi("10.1000/evidence-index-hit"));
     let sources: Vec<&dyn Source> = Vec::new();
 
     let result = standing(
@@ -2630,7 +2613,7 @@ fn bypassed_with_cache_false_still_writes_the_index() {
         pdf_with_embedded_doi("10.1000/evidence-bypassed"),
     );
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &record_with_doi("10.1000/stale"));
+    let _ = index.put(&hash, &record_with_doi("10.1000/stale"));
     let (crossref, _calls) = fake_source(
         SourceName::Crossref,
         Ok(record_with_doi("10.1000/evidence-bypassed")),
@@ -2820,7 +2803,7 @@ fn a_dangling_item_files_evidence_matches_an_untracked_files() {
     ));
     assert_eq!(
         result.evidence.content_index.write,
-        IndexWrite::NotAttempted(Unattempted::LibraryAnswered)
+        IndexWrite::NotAttempted(Unattempted::ExtractionFailed)
     );
 }
 
@@ -3262,7 +3245,7 @@ fn an_earlier_index_entry_survives_a_no_cache_conflict() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let earlier = record_with_doi("10.1000/earlier-entry");
-    index.put(&hash, &earlier);
+    let _ = index.put(&hash, &earlier);
 
     let result = standing(
         path,
@@ -3338,6 +3321,52 @@ fn a_conflict_after_a_failure_keeps_both_attempts_in_order() {
 // resolve_supplied: resolving an identifier somebody typed (design D11,
 // task 8.1)
 // ---------------------------------------------------------------------
+
+/// The evidence of a record a service answered for after `tier` read
+/// `identifier`: `source()` is `service` and `cached()` is `false`.
+fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) -> Evidence {
+    Evidence {
+        library: Consultation::NotConsulted(Unattempted::NoLibrary),
+        content_index: IndexEvidence {
+            read: IndexRead::Miss,
+            write: IndexWrite::Attempted(CacheWrite::Written),
+        },
+        extraction: ExtractionEvidence {
+            result: ExtractionStep::Ran(Extraction::Found {
+                identifier: identifier.to_string(),
+                tier: tier.as_str().to_string(),
+            }),
+            titles: Titles::Read(Vec::new()),
+        },
+        lookup: LookupEvidence::Attempted {
+            identifier,
+            origin: Origin::Extracted(tier),
+            attempts: vec![ServiceAttempt {
+                service,
+                outcome: Ok(Retrieval::Network { stored: None }),
+            }],
+        },
+        match_check: MatchCheck::Agreed,
+    }
+}
+
+/// The evidence of a record the content index answered for: `source()`
+/// and `tier()` are both `None`, and `cached()` is `true`.
+fn evidence_via_content_index_hit() -> Evidence {
+    Evidence {
+        library: Consultation::NotConsulted(Unattempted::NoLibrary),
+        content_index: IndexEvidence {
+            read: IndexRead::Hit,
+            write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        extraction: ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+            titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        lookup: LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
+        match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
+    }
+}
 
 /// The prior evidence of a file extraction found no identifier in: the
 /// index was consulted and missed, extraction ran and failed, and
