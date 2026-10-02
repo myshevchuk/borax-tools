@@ -343,6 +343,37 @@ healthy states and a missing record never clears, so scripts read the
 stream; an opt-in failure flag is the deferred route. Schema 3 is
 kept.
 
+`expose-resolution-attempts` is implemented on top and opens Phase 3
+as its change 8. It is engine-only: no event, human line, count or
+exit status changes, and schema 3 is kept. `FileRecord` and `Standing`
+each carry an `Evidence` (`crates/borax/src/evidence.rs`) with one
+section per step: the library consultation, the content index's read
+(hit, miss, bypassed, unavailable with the hashing error, or not
+attempted) and write, extraction's result in the five-kind vocabulary
+beside the titles (read, failed, or not attempted), the lookup with
+its identifier, its origin (an extraction pass or the operator) and
+every service attempt in order with a structured outcome and, for the
+found one, whether the response cache or the network answered, and the
+title check (agreed, conflict, insufficient with its cause, or not
+attempted). Every step that did not run says why, from one
+`Unattempted` vocabulary. The schema-3 fields `source`, `tier`,
+`found`, `claims`, `cached` and `library` are methods derived from it,
+with `source`, `tier` and `cached` all read from `Evidence::retrieval`;
+`Standing::evidence` equals the evidence of the record its verdict is
+about, the refused candidate's included. `Source::fetch` returns
+`Fetched`, `dispatch::Resolved` keeps the failures before the
+answering source, and `Cache::put`, `ContentIndex::put` and
+`pipeline::remember` return their write's result, which never fails a
+run. The interactive driver keeps the file's own evidence apart from a
+candidate's: a retry replaces it, a supply never does. A record an
+operator reached, or accepted over its own conflict through
+`pipeline::accept`, records its content-index write as awaiting
+acceptance; the write itself is made at the move, and `remember`'s
+result is held beside the move's outcome and rendered nowhere yet.
+Change 9 renders this evidence as the schema-4 sections, chooses the
+event that carries the rename-time write, and makes the single bump
+from 3 to 4.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
@@ -430,11 +461,13 @@ kept.
   `NoIdentifierFound` as `no-identifier`, and `Encrypted` as
   `unreadable`, although the `extraction` requirement "Extraction
   failures are typed and non-fatal" requires the four modes to be told
-  apart. `status --identify` now reports them distinctly, so the
-  information exists; restoring it in `skipped` needs a schema bump,
-  and Phase 3 of the roadmap owns it. A regression guard in
-  `crates/borax/tests/pipeline.rs` pins the current collapse so it is
-  changed deliberately.
+  apart. `status --identify` reports them distinctly, and since
+  `expose-resolution-attempts` the engine holds the four modes apart
+  for every resolution too, in `Evidence::extraction`; only the stream
+  still merges them. Restoring them in `skipped` needs a schema bump,
+  and change 9 of the roadmap's Phase 3 owns it. A regression guard in
+  `crates/borax/tests/pipeline.rs` still pins the current collapse so
+  it is changed deliberately.
 
 - **A DOI keeps a closing Unicode bracket.** `Doi::parse`
   (`crates/borax-core/src/identifier.rs`, line 103) trims only ASCII

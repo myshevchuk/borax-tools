@@ -5,7 +5,7 @@ use borax_core::record::{DateParts, EntryType, Name, Record, Source};
 use serde_json::Value;
 
 use crate::http::{HttpRequest, Politeness, Transport};
-use crate::source::{ParseError, SourceError, SourceName, attribute};
+use crate::source::{Fetched, ParseError, SourceError, SourceName, attribute};
 
 /// Map an OpenAlex `type` to the record model.
 ///
@@ -273,12 +273,13 @@ impl<T: Transport> crate::source::Source for OpenAlexClient<T> {
     /// [`parse`].
     /// An unsupported identifier sends no request and reports
     /// [`SourceError::Unavailable`], as there.
-    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
         crate::http::fetch(
             &self.transport,
             self.request(identifier),
             SourceName::OpenAlex,
             parse,
         )
+        .map(Fetched::network)
     }
 }

@@ -11,6 +11,7 @@ pub mod cli;
 pub mod config;
 pub mod describe;
 pub mod event;
+pub mod evidence;
 pub mod library;
 pub mod paths;
 pub mod pipeline;

@@ -26,9 +26,8 @@ use borax_core::template::{Miss, Template, TemplateTable};
 use borax_core::time::utc_basic;
 use borax_pdf::tiered::ExtractionConfig;
 use borax_sources::arxiv::ArxivClient;
-use borax_sources::cache::{Cache, Cached, MemoryCache};
+use borax_sources::cache::{Cache, CacheWrite, Cached, MemoryCache};
 use borax_sources::crossref::CrossrefClient;
-use borax_sources::dispatch::Unresolved;
 use borax_sources::http::Politeness;
 use borax_sources::openalex::OpenAlexClient;
 use borax_sources::pace::Paced;
@@ -44,9 +43,10 @@ use crate::config::{
 };
 use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
-    Admission, Counts, Diagnostic, Event, Format, Level, LibraryAnswer, Overridden, SkipReason,
-    Summary, TableUsed, human_summary, render,
+    Admission, Counts, Diagnostic, Event, Format, Level, LibraryAnswer, SkipReason, Summary,
+    TableUsed, human_summary, render,
 };
+use crate::evidence::{IndexWrite, LookupEvidence};
 use crate::library::Account;
 use crate::pipeline::{
     Documents, Duplicated, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig,
@@ -1421,7 +1421,7 @@ fn rename_events<C: Cache>(
                     account.as_ref(),
                     snapshot,
                 );
-                consulted |= standing.library.is_some();
+                consulted |= standing.library().is_some();
                 let about = About {
                     path,
                     position: among(groups, (index, position)),
@@ -1587,13 +1587,19 @@ fn rename_events<C: Cache>(
                         // like every write to the response cache: an
                         // answer that could not be kept means the file
                         // is asked about again.
-                        if remember && matches!(event, Event::Renamed { .. }) {
-                            crate::pipeline::remember(
-                                adapters.index,
-                                file.hash.as_ref(),
-                                &file.record,
-                            );
-                        }
+                        //
+                        // What became of the write belongs to the move
+                        // and is kept beside it. Nothing renders it yet:
+                        // the event that will carry it is change 9's to
+                        // choose, so it is dropped here unreported.
+                        let _remembered: Option<IndexWrite> =
+                            (remember && matches!(event, Event::Renamed { .. })).then(|| {
+                                crate::pipeline::remember(
+                                    adapters.index,
+                                    file.hash.as_ref(),
+                                    &file.record,
+                                )
+                            });
                         (Some(file), event)
                     }
                 };
@@ -1740,11 +1746,12 @@ fn alone(
     planning: &mut Planning<'_>,
     lookups: &mut Lookups<'_>,
 ) -> Settled {
+    let library = standing.library().cloned();
     match standing.verdict {
         FileOutcome::Skipped(reason) => Settled::Skip {
             file: None,
             reason,
-            library: standing.library,
+            library,
         },
         FileOutcome::Resolved(file) => Settled::CarryOut {
             decision: planning.proposed(about.path, &file, lookups).decision,
@@ -1757,15 +1764,15 @@ fn alone(
     }
 }
 
-/// A record on offer for a file, and what stands against it.
+/// A record on offer for a file.
+///
+/// What stands against it is the record's own title check
+/// ([`FileRecord::conflict`]): shown, and never by itself a refusal, since
+/// an identifier a person stands behind is a stronger statement than the
+/// heuristic that would refuse it.
 #[derive(Clone)]
 struct Offer {
     file: FileRecord,
-    /// The disagreement between the record's title and the file's own,
-    /// where there is one. Shown, and never by itself a refusal: an
-    /// identifier a person stands behind is a stronger statement than
-    /// the heuristic that would refuse it.
-    conflict: Option<SkipReason>,
     /// Whether the content index already holds this record for the
     /// file, which decides whether accepting it writes one
     /// ([`Settled::CarryOut::remember`]).
@@ -1827,14 +1834,17 @@ fn asked<C: Cache>(
     // The verdict the run is holding for the file, which is what its
     // question is described from and what a skip reports.
     let mut held = crate::pipeline::verdict_event(about.path, &standing);
+    // `evidence` is the file's own: what its held verdict reports, and
+    // what decides whether asking the services again is offered. A
+    // retry is the file's own lookup and replaces it; a supplied
+    // identifier is a candidate's, whose evidence travels on the record
+    // it reached and never touches this.
     let Standing {
         verdict,
         hash,
-        found,
-        mut unresolved,
+        mut evidence,
         refused,
         duplicated,
-        library,
     } = standing;
     // The record the file's own passes put on offer: the one they
     // resolved, or the one the conflict check refused and an operator
@@ -1842,16 +1852,11 @@ fn asked<C: Cache>(
     let mut own = match (verdict, refused) {
         (FileOutcome::Resolved(file), _) => Some(Offer {
             file,
-            conflict: None,
             // Written to the content index as it resolved, or served
             // from it.
             kept: true,
         }),
-        (FileOutcome::Skipped(conflict), Some(file)) => Some(Offer {
-            file,
-            conflict: Some(conflict),
-            kept: false,
-        }),
+        (FileOutcome::Skipped(_), Some(file)) => Some(Offer { file, kept: false }),
         (FileOutcome::Skipped(_), None) => None,
     };
     // What is on offer now: the file's own record, or one a supplied
@@ -1912,7 +1917,7 @@ fn asked<C: Cache>(
             offer.as_ref(),
             decision,
             &held,
-            unresolved.as_ref(),
+            &evidence.lookup,
             hash.is_some(),
             about.passing_over,
             filing.is_some(),
@@ -1983,7 +1988,6 @@ fn asked<C: Cache>(
                 held = resolved_event(about.path, &filed.file);
                 own = Some(Offer {
                     file: filed.file,
-                    conflict: None,
                     kept: true,
                 });
                 offer = own.clone();
@@ -2034,23 +2038,19 @@ fn asked<C: Cache>(
                     // as it was.
                     continue;
                 };
+                // Resolved on top of the file's own evidence, so what
+                // the library said about the file stands whatever the
+                // operator makes of it.
                 match crate::pipeline::resolve_supplied(
                     about.path,
                     &identifier,
+                    crate::evidence::Origin::Operator,
                     adapters.documents,
                     adapters.sources,
+                    &evidence,
                 ) {
-                    Ok(supplied) => {
-                        offer = Some(Offer {
-                            // What the library said about the file
-                            // stands whatever the operator makes of it.
-                            file: FileRecord {
-                                library: library.clone(),
-                                ..supplied.file
-                            },
-                            conflict: supplied.conflict,
-                            kept: false,
-                        });
+                    Ok(file) => {
+                        offer = Some(Offer { file, kept: false });
                         candidate = true;
                         // The record itself is what the next question
                         // describes; there is nothing left to report.
@@ -2074,37 +2074,35 @@ fn asked<C: Cache>(
                 // Offered only where the services failed to answer, so
                 // there is an identifier of the file's own to ask them
                 // about again.
-                let Some((identifier, tier)) = found.clone() else {
+                let Some((identifier, tier)) = evidence
+                    .lookup
+                    .extracted()
+                    .map(|(identifier, tier)| (identifier.clone(), tier))
+                else {
                     continue;
                 };
+                // The identifier was the file's own; asking a second
+                // time does not make it the operator's.
+                let origin = crate::evidence::Origin::Extracted(tier);
                 match crate::pipeline::resolve_supplied(
                     about.path,
                     &identifier,
+                    origin,
                     adapters.documents,
                     adapters.sources,
+                    &evidence,
                 ) {
-                    Ok(supplied) => {
-                        let file = FileRecord {
-                            // The identifier was the file's own;
-                            // asking a second time does not make it
-                            // the operator's.
-                            tier: Some(Provenance::Extracted(tier)),
-                            library: library.clone(),
-                            ..supplied.file
-                        };
-                        held = match &supplied.conflict {
+                    Ok(file) => {
+                        held = match file.conflict() {
                             Some(conflict) => Event::Skipped {
                                 path: about.path.to_path_buf(),
-                                reason: conflict.clone(),
-                                library: library.clone(),
+                                reason: conflict,
+                                library: file.library().cloned(),
                             },
                             None => resolved_event(about.path, &file),
                         };
-                        own = Some(Offer {
-                            file,
-                            conflict: supplied.conflict,
-                            kept: false,
-                        });
+                        evidence = file.evidence.clone();
+                        own = Some(Offer { file, kept: false });
                         offer = own.clone();
                         candidate = false;
                         report.clear();
@@ -2124,9 +2122,14 @@ fn asked<C: Cache>(
                         held = Event::Skipped {
                             path: about.path.to_path_buf(),
                             reason: crate::pipeline::unresolvable(&unheld, &identifier, tier),
-                            library: library.clone(),
+                            library: evidence.library.answer().cloned(),
                         };
-                        unresolved = Some(unheld);
+                        evidence = crate::pipeline::unheld_evidence(
+                            &evidence,
+                            &identifier,
+                            origin,
+                            &unheld,
+                        );
                         own = None;
                         offer = None;
                         candidate = false;
@@ -2153,6 +2156,9 @@ fn asked<C: Cache>(
 /// and a file for which it would have been the only useful answer is
 /// not asked at all.
 ///
+/// `lookup` is the file's own lookup, which decides whether asking the
+/// services again leads the menu of a file no service answered for.
+///
 /// `filing` is whether the file is a second file of a work the library
 /// already holds and has not yet been filed as another artifact of it.
 /// That is the one question asked before anything about the move, since
@@ -2163,7 +2169,7 @@ fn situation(
     offer: Option<&Offer>,
     decision: Option<&PlannedRename>,
     held: &Event,
-    unresolved: Option<&Unresolved>,
+    lookup: &LookupEvidence,
     supply: bool,
     passing_over: bool,
     filing: bool,
@@ -2200,22 +2206,20 @@ fn situation(
             // An outage is no evidence about the file, so the two are
             // not presented alike: where the services merely failed to
             // answer, asking them again is what failed and it leads.
-            SkipReason::Unresolvable { .. } => {
-                match unresolved.is_none_or(Unresolved::is_conclusive) {
-                    true => Situation::Ask(vec![Answer::Supply, Answer::Skip, Answer::Quit]),
-                    false => Situation::Ask(vec![
-                        Answer::Retry,
-                        Answer::Supply,
-                        Answer::Skip,
-                        Answer::Quit,
-                    ]),
-                }
-            }
+            SkipReason::Unresolvable { .. } => match lookup.is_conclusive() {
+                true => Situation::Ask(vec![Answer::Supply, Answer::Skip, Answer::Quit]),
+                false => Situation::Ask(vec![
+                    Answer::Retry,
+                    Answer::Supply,
+                    Answer::Skip,
+                    Answer::Quit,
+                ]),
+            },
             _ => Situation::Report,
         };
     };
 
-    match (&offer.conflict, decision) {
+    match (offer.file.conflict(), decision) {
         // A conflict on a file nothing can be supplied for has only
         // the answer a batch run gives.
         (Some(_), _) if !supply => Situation::Report,
@@ -2279,28 +2283,12 @@ fn skipped(own: Option<Offer>, held: &Event) -> Settled {
     }
 }
 
-/// `offer`'s record as accepting it makes it: the conflict it was
-/// accepted over recorded on the record, in the vocabulary the skip
-/// would have used, and nothing recorded where the record
-/// cleared the check on its own.
+/// `offer`'s record as accepting it makes it ([`crate::pipeline::accept`]):
+/// the conflict it was accepted over recorded on the record, in the
+/// vocabulary the skip would have used, and nothing recorded where the
+/// record cleared the check on its own.
 fn accepted(offer: &Offer) -> FileRecord {
-    FileRecord {
-        overrode: match &offer.conflict {
-            Some(SkipReason::Conflict {
-                field,
-                extracted,
-                resolved,
-                similarity,
-            }) => Some(Overridden {
-                field: field.clone(),
-                extracted: extracted.clone(),
-                resolved: resolved.clone(),
-                similarity: *similarity,
-            }),
-            _ => None,
-        },
-        ..offer.file.clone()
-    }
+    crate::pipeline::accept(offer.file.clone())
 }
 
 /// The event a question's description renders.
@@ -2352,7 +2340,7 @@ fn proposed_move(proposal: Option<&Proposed>) -> Option<Proposal> {
 /// a move, as the question put again reports it.
 fn elsewhere(offer: Option<&Offer>, decision: Option<&PlannedRename>, width: usize) -> Vec<String> {
     let identifier = offer
-        .and_then(|offer| offer.file.found.as_ref())
+        .and_then(|offer| offer.file.found())
         .map(Identifier::to_string)
         .unwrap_or_default();
     // Rendered before the outcome that names it, so that the name
@@ -2812,7 +2800,7 @@ fn admissible(library: &Path, path: &Path) -> bool {
 /// identifier it was resolved by, or accepted its record over a
 /// conflict.
 fn reidentified(file: &FileRecord) -> bool {
-    file.tier == Some(Provenance::Supplied) || file.overrode.is_some()
+    file.tier() == Some(Provenance::Supplied) || file.overrode.is_some()
 }
 
 /// Resolve the file at `path` under `effective`, writing its verdict
@@ -3809,7 +3797,7 @@ impl Cache for ResponseCache {
         }
     }
 
-    fn put(&self, key: &str, record: &Record) {
+    fn put(&self, key: &str, record: &Record) -> CacheWrite {
         match self {
             ResponseCache::File(cache) => cache.put(key, record),
             ResponseCache::Memory(cache) => cache.put(key, record),

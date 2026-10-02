@@ -2,9 +2,10 @@
 //! the index that recognises a file by its contents.
 //!
 //! [`crate::cache`] defines what a cache is; this module is the one
-//! adapter that touches the filesystem. Every operation degrades to a
-//! miss rather than an error, so a cache directory that is unreadable,
-//! full, or half-written costs round-trips and never a run.
+//! adapter that touches the filesystem. A read degrades to a miss and
+//! a write to a reported [`CacheWrite::Failed`] rather than an error,
+//! so a cache directory that is unreadable, full, or half-written costs
+//! round-trips and never a run.
 
 use std::ffi::OsString;
 use std::fs;
@@ -15,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use borax_core::content::{ContentHash, Hasher};
 use borax_core::record::Record;
 
-use crate::cache::Cache;
+use crate::cache::{Cache, CacheWrite};
 
 /// The on-disk layout version, used as the last path segment of the
 /// default root.
@@ -124,7 +125,8 @@ pub fn content_key(hash: &ContentHash) -> String {
 ///
 /// The directory is created lazily, on the first successful write. A
 /// [`FileCache`] over a path that cannot be created is a cache that
-/// always misses.
+/// always misses, and whose every write reports
+/// [`CacheWrite::Failed`].
 #[derive(Debug, Clone)]
 pub struct FileCache {
     root: PathBuf,
@@ -174,16 +176,33 @@ impl Cache for FileCache {
     /// The entry is written to a temporary file in its destination
     /// directory and renamed over the final path, so a concurrent
     /// reader sees either the previous entry or the new one and never a
-    /// partial file. Every failure — an invalid key, a directory that
-    /// cannot be created, a full disk — leaves the cache as it was.
-    fn put(&self, key: &str, record: &Record) {
+    /// partial file.
+    ///
+    /// Returns [`CacheWrite::Written`] once the entry is in place.
+    /// Every failure — a key [`entry_path`] rejects, a record that does
+    /// not serialise, a directory that cannot be created, a full disk —
+    /// is [`CacheWrite::Failed`] with a message naming it, and leaves
+    /// the cache as it was.
+    fn put(&self, key: &str, record: &Record) -> CacheWrite {
         let Some(path) = entry_path(&self.root, key) else {
-            return;
+            return CacheWrite::Failed {
+                message: format!("invalid cache key {key:?}"),
+            };
         };
-        let Ok(json) = serde_json::to_vec(record) else {
-            return;
+        let json = match serde_json::to_vec(record) {
+            Ok(json) => json,
+            Err(error) => {
+                return CacheWrite::Failed {
+                    message: format!("cannot serialise record: {error}"),
+                };
+            }
         };
-        let _ = write_atomically(&path, &json);
+        match write_atomically(&path, &json) {
+            Ok(()) => CacheWrite::Written,
+            Err(error) => CacheWrite::Failed {
+                message: format!("cannot write {}: {error}", path.display()),
+            },
+        }
     }
 }
 
@@ -254,9 +273,10 @@ impl<C: Cache> ContentIndex<C> {
         self.cache.get(&content_key(hash))
     }
 
-    /// Index `record` as the answer for any file hashing to `hash`.
-    pub fn put(&self, hash: &ContentHash, record: &Record) {
-        self.cache.put(&content_key(hash), record);
+    /// Index `record` as the answer for any file hashing to `hash`, and
+    /// return what the underlying cache's write returned.
+    pub fn put(&self, hash: &ContentHash, record: &Record) -> CacheWrite {
+        self.cache.put(&content_key(hash), record)
     }
 }
 

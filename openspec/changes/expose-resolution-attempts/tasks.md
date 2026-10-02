@@ -109,7 +109,7 @@ The controlled cases from `report-extraction-per-file` are reused:
         (`CountingCache`) and `crates/borax/tests/dispatch.rs`
         (`WriteFailingCache`, which now returns `Failed`) return
         `CacheWrite`, and existing `put` statements gain `let _ =`.
-- [ ] 1.2 Green:
+- [x] 1.2 Green:
       - add `CacheWrite`, `#[must_use]`, to
         `crates/borax-sources/src/cache.rs`;
       - change `Cache::put`'s signature, and implement it for
@@ -147,7 +147,7 @@ The controlled cases from `report-extraction-per-file` are reused:
         - `crates/borax-sources/tests/{cache,dispatch,pace}.rs`;
         - `crates/borax/tests/{pipeline,dispatch,per_file,runlog,streaming}.rs`;
         - the `.record` reads in `clients.rs`, `live.rs` and `cache.rs`.
-- [ ] 2.2 Green:
+- [x] 2.2 Green:
       - add `Fetched`, `Fetched::network` and `Retrieval` to
         `source.rs`, and give `Source::fetch` its new return type;
       - adapt the three clients, `Paced` and `Cached`;
@@ -175,7 +175,7 @@ The controlled cases from `report-extraction-per-file` are reused:
       - In `crates/borax-sources/tests/cache.rs` (the `resolve` test
         near line 370), resolving twice through `Cached` gives
         `ServiceCache` the second time.
-- [ ] 3.2 Green: `Resolved { record, source, retrieval, failures }` in
+- [x] 3.2 Green: `Resolved { record, source, retrieval, failures }` in
       `dispatch.rs`, with the docstring saying the ordered attempts are
       `failures` followed by the answering source. `Unresolved` is
       unchanged.
@@ -211,7 +211,7 @@ The controlled cases from `report-extraction-per-file` are reused:
         - `no-text-layer.pdf` gives `Read`.
       - `pipeline::extraction` gives the same result as before for
         every case (the existing tests stay as they are).
-- [ ] 4.2 Green:
+- [x] 4.2 Green:
       - create `crates/borax/src/evidence.rs` with `Titles`,
         `Titles::claims`, `Unattempted` and `Unattempted::as_str`;
       - add `FileRead` and the new `from_file` to `pipeline.rs`;
@@ -241,7 +241,7 @@ The controlled cases from `report-extraction-per-file` are reused:
           `Insufficient(NoTitles)`.
         - `title_check(&Titles::NotAttempted(r), record)` is
           `MatchCheck::NotAttempted(r)`.
-- [ ] 5.2 Green:
+- [x] 5.2 Green:
       - add `TitleCheck`, `Insufficient` and the new `check_title`
         return type in `crates/borax-sources/src/conflict.rs`, with the
         three causes in D8's order and today's agreement and conflict
@@ -334,7 +334,7 @@ The controlled cases from `report-extraction-per-file` are reused:
         values the same inputs gave before this change.
       - Compile-only edits as the preamble lists, in `pipeline.rs`,
         `event.rs`, `bib.rs` and `renaming.rs`.
-- [ ] 6.2 Green:
+- [x] 6.2 Green:
       - complete `evidence.rs` as design D12 gives it, including
         `Evidence::retrieval` with design D2's precedence (a found
         attempt, then a library answer whose lookup was not attempted,
@@ -383,7 +383,7 @@ as group 6 is green. Report that rather than weakening them.
       - Crossref `Unavailable` with OpenAlex answering a conflicting
         record gives a `refused.evidence` that keeps both attempts in
         order.
-- [ ] 7.2 Green: whatever group 6 left undone for a refused record. No
+- [x] 7.2 Green: whatever group 6 left undone for a refused record. No
       `index.put` may be added on the conflict path.
 
 ## 8. Operator lookups and the rename-time write
@@ -468,7 +468,7 @@ as group 6 is green. Report that rather than weakening them.
         assertion as a new test. Do not edit the existing one.
       - `a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_next_time`
         stays green with its assertions untouched.
-- [ ] 8.3 Green:
+- [x] 8.3 Green:
       - give `resolve_supplied` its D11 signature, delete `Supplied`,
         and add `FileRecord::conflict`;
       - make `remember` return `IndexWrite`;
@@ -494,7 +494,7 @@ as group 6 is green. Report that rather than weakening them.
 
 ## 9. Output is unchanged
 
-- [ ] 9.1 Run `cargo test --workspace`. Diff `crates/*/tests` against
+- [x] 9.1 Run `cargo test --workspace`. Diff `crates/*/tests` against
       `main` and confirm that every changed line in an existing test is
       one of the compile-only kinds the preamble lists. List any that
       are not, and send them to the orchestrator rather than keeping
@@ -518,7 +518,7 @@ as group 6 is green. Report that rather than weakening them.
       - the `borax-sources` and `borax` library interfaces changed as
         design D12 lists, with `claims_of`, `disagreement`, `from_index`
         and `Supplied` removed.
-- [ ] 10.2 Record the built state in `openspec/STATE.md`:
+- [x] 10.2 Record the built state in `openspec/STATE.md`:
       - a paragraph under "What is built", after
         `list-untracked-missing-unlinked`, naming the evidence model
         (design D2), the reporting point for the rename-time write

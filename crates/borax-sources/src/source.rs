@@ -11,6 +11,8 @@ use std::fmt;
 use borax_core::identifier::Identifier;
 use borax_core::record::Record;
 
+use crate::cache::CacheWrite;
+
 /// Which service answered (or was asked).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SourceName {
@@ -219,6 +221,43 @@ pub trait Source: Sync {
     /// the arXiv API knows nothing about ISBNs.
     fn supports(&self, identifier: &Identifier) -> bool;
 
-    /// Fetch the record `identifier` names.
-    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError>;
+    /// Fetch the record `identifier` names, with how the service
+    /// answered.
+    ///
+    /// A client that sends the request itself returns
+    /// [`Retrieval::Network`] with `stored: None`; a wrapper that serves
+    /// answers from a response cache says whether it did, and a wrapper
+    /// that does neither passes its source's answer through unchanged.
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError>;
+}
+
+/// A record a [`Source`] returned, and how the service answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fetched {
+    /// The record the identifier names.
+    pub record: Record,
+    /// Whether the record came from a response cache or the network.
+    pub retrieval: Retrieval,
+}
+
+impl Fetched {
+    /// `record` as sent by the service, with no response cache in front.
+    pub fn network(record: Record) -> Fetched {
+        Fetched {
+            record,
+            retrieval: Retrieval::Network { stored: None },
+        }
+    }
+}
+
+/// How a service's answer reached the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retrieval {
+    /// Served from the response cache in front of the service. No
+    /// request was sent.
+    ServiceCache,
+    /// Sent by the service over the network. `stored` is the result of
+    /// writing the answer to the response cache in front of the
+    /// service, or `None` when no response cache is in front of it.
+    Network { stored: Option<CacheWrite> },
 }

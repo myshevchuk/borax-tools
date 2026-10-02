@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::http::{HttpRequest, Politeness, Transport};
 use crate::openalex::{split_display_name, ymd_date};
-use crate::source::{ParseError, SourceError, SourceName, attribute};
+use crate::source::{Fetched, ParseError, SourceError, SourceName, attribute};
 
 /// What the feed's first `entry` element said, before any of it is
 /// interpreted.
@@ -276,12 +276,13 @@ impl<T: Transport> crate::source::Source for ArxivClient<T> {
     /// feed at `200`, which [`parse`] turns into
     /// [`crate::source::ParseError::NotFound`] and this maps to
     /// [`SourceError::NotFound`].
-    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
         crate::http::fetch(
             &self.transport,
             self.request(identifier),
             SourceName::Arxiv,
             parse,
         )
+        .map(Fetched::network)
     }
 }

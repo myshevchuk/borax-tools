@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use borax_core::identifier::Identifier;
 use borax_core::record::Record;
 
-use crate::source::{Source, SourceError, SourceName};
+use crate::source::{Fetched, Retrieval, Source, SourceError, SourceName};
 
 /// The filename-safe key a source's answer about an identifier is
 /// stored under.
@@ -53,6 +53,22 @@ fn slug(value: &str) -> String {
         .collect()
 }
 
+/// What became of one write to a [`Cache`].
+///
+/// A failed write never fails a run: the store is a convenience, and
+/// losing an entry costs a round-trip later. The result is reported so
+/// the caller can keep it as evidence rather than lose it.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheWrite {
+    /// The record is stored and a later read under the same key finds
+    /// it.
+    Written,
+    /// The record could not be stored. `message` says why, and is never
+    /// empty. The store holds what it held before the write.
+    Failed { message: String },
+}
+
 /// A store of records that a source previously returned.
 ///
 /// Implementations are adapters over a directory; [`MemoryCache`] is
@@ -67,9 +83,11 @@ pub trait Cache: Sync {
     /// reported as a miss: a broken cache must never fail a run.
     fn get(&self, key: &str) -> Option<Record>;
 
-    /// Store `record` under `key`. Failures are silent for the same
-    /// reason.
-    fn put(&self, key: &str, record: &Record);
+    /// Store `record` under `key`, and say whether it was stored.
+    ///
+    /// A failure is returned as [`CacheWrite::Failed`], never raised:
+    /// for the same reason as a failed read, it must not fail a run.
+    fn put(&self, key: &str, record: &Record) -> CacheWrite;
 }
 
 /// A [`Cache`] held in memory for the life of the process.
@@ -103,9 +121,18 @@ impl Cache for MemoryCache {
         self.entries.lock().ok()?.get(key).cloned()
     }
 
-    fn put(&self, key: &str, record: &Record) {
-        if let Ok(mut entries) = self.entries.lock() {
-            entries.insert(key.to_string(), record.clone());
+    /// Store `record` under `key`. A lock poisoned by a thread that
+    /// panicked while holding it is [`CacheWrite::Failed`], and nothing
+    /// is stored.
+    fn put(&self, key: &str, record: &Record) -> CacheWrite {
+        match self.entries.lock() {
+            Ok(mut entries) => {
+                entries.insert(key.to_string(), record.clone());
+                CacheWrite::Written
+            }
+            Err(error) => CacheWrite::Failed {
+                message: format!("memory cache unavailable: {error}"),
+            },
         }
     }
 }
@@ -139,18 +166,31 @@ impl<S: Source, C: Cache> Source for Cached<S, C> {
         self.source.supports(identifier)
     }
 
-    /// A cache hit is returned without consulting the wrapped source.
-    /// On a miss the source is asked, and a successful answer is
-    /// stored; failures are never cached, so a service that was down
-    /// is asked again next time rather than remembered as broken.
-    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+    /// A cache hit is returned as [`Retrieval::ServiceCache`] without
+    /// consulting the wrapped source.
+    ///
+    /// On a miss the source is asked, and a successful answer is stored
+    /// and returned as [`Retrieval::Network`] whose `stored` is the
+    /// write's result. A failure is returned as the source gave it and
+    /// never cached, so a service that was down is asked again next
+    /// time rather than remembered as broken. A write that failed
+    /// leaves the next fetch to ask the source again.
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
         let key = key(self.source.name(), identifier);
         if let Some(record) = self.cache.get(&key) {
-            return Ok(record);
+            return Ok(Fetched {
+                record,
+                retrieval: Retrieval::ServiceCache,
+            });
         }
 
-        let record = self.source.fetch(identifier)?;
-        self.cache.put(&key, &record);
-        Ok(record)
+        let record = self.source.fetch(identifier)?.record;
+        let stored = self.cache.put(&key, &record);
+        Ok(Fetched {
+            record,
+            retrieval: Retrieval::Network {
+                stored: Some(stored),
+            },
+        })
     }
 }
