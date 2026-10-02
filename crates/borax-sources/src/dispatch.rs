@@ -3,13 +3,24 @@
 use borax_core::identifier::Identifier;
 use borax_core::record::Record;
 
-use crate::source::{Source, SourceError, SourceName};
+use crate::source::{Retrieval, Source, SourceError, SourceName};
 
-/// A record and the source that supplied it.
+/// A record, the source that supplied it, and every source asked before
+/// it.
+///
+/// The attempts made, in the order made, are `failures` followed by
+/// `source` answering with `retrieval`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolved {
+    /// The record `source` returned.
     pub record: Record,
+    /// The source that returned it.
     pub source: SourceName,
+    /// How `source` answered: from its response cache or the network.
+    pub retrieval: Retrieval,
+    /// Every source asked before `source`, each with how it failed, in
+    /// the order asked. Empty when the first source asked answered.
+    pub failures: Vec<(SourceName, SourceError)>,
 }
 
 /// Nobody could answer. `attempts` lists what each consulted source
@@ -68,8 +79,11 @@ pub fn priority(identifier: &Identifier) -> Vec<SourceName> {
 /// [`Source::supports`] accepts the identifier; sources not named by
 /// [`priority`] are never consulted, whatever `sources` contains. Any
 /// failure — not found, unavailable, rate limited, malformed — moves
-/// on to the next source, and every failure is recorded in
-/// [`Unresolved::attempts`].
+/// on to the next source. Every failure is recorded in order: in
+/// [`Resolved::failures`] when a later source answers, otherwise in
+/// [`Unresolved::attempts`]. A source the identifier cannot be asked of
+/// appears in neither, so an identifier no given source supports is
+/// `Unresolved` with no attempts.
 ///
 /// Deterministic: the same sources and identifier always produce the
 /// same result and the same attempt list.
@@ -82,10 +96,12 @@ pub fn resolve(sources: &[&dyn Source], identifier: &Identifier) -> Result<Resol
             .filter(|source| source.name() == name && source.supports(identifier));
         for source in consulted {
             match source.fetch(identifier) {
-                Ok(record) => {
+                Ok(fetched) => {
                     return Ok(Resolved {
-                        record,
+                        record: fetched.record,
                         source: name,
+                        retrieval: fetched.retrieval,
+                        failures: attempts,
                     });
                 }
                 Err(error) => attempts.push((name, error)),

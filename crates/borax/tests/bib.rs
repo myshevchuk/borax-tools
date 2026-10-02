@@ -9,6 +9,8 @@ use std::sync::OnceLock;
 use borax::bib::{BibConfig, BibFiles, citation_key, sidecar_path, write_bib};
 use borax::config::Config;
 use borax::event::{Event, SkipReason};
+use borax::evidence::Evidence;
+use borax::evidence::Unattempted;
 use borax::pipeline::FileRecord;
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge, sidecar};
 use borax_core::content::{ContentHash, hash_bytes};
@@ -172,16 +174,9 @@ fn resolved(path: &str, record: Record) -> (PathBuf, FileRecord) {
         PathBuf::from(path),
         FileRecord {
             record,
-            source: None,
-            found: None,
-
-            claims: Vec::new(),
-
-            tier: None,
-            cached: false,
             hash: None,
+            evidence: Evidence::not_attempted(Unattempted::ContentDuplicate),
             overrode: None,
-            library: None,
         },
     )
 }

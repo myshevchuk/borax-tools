@@ -38,6 +38,41 @@ pub struct Conflict {
     pub similarity: f64,
 }
 
+/// What [`check_title`] concluded about a file's titles and a record.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TitleCheck {
+    /// At least one title that counts as evidence names the record's
+    /// work.
+    Agreed,
+    /// Every title that counts as evidence names another work.
+    Conflict(Conflict),
+    /// Nothing could be judged, for the reason given.
+    Insufficient(Insufficient),
+}
+
+impl TitleCheck {
+    /// The conflict, when the check refused the record; `None` for
+    /// agreement and for too little evidence alike.
+    pub fn conflict(self) -> Option<Conflict> {
+        match self {
+            TitleCheck::Conflict(conflict) => Some(conflict),
+            TitleCheck::Agreed | TitleCheck::Insufficient(_) => None,
+        }
+    }
+}
+
+/// Why [`check_title`] had too little evidence to judge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Insufficient {
+    /// The record has no title, or its title has no content words.
+    RecordUntitled,
+    /// The file claims no title.
+    NoTitles,
+    /// The file claims titles, and none counts as evidence under
+    /// [`is_title_evidence`].
+    NoEvidence,
+}
+
 /// The similarity at or above which two titles are taken to name the
 /// same work.
 ///
@@ -221,21 +256,33 @@ pub fn is_title_evidence(candidate: &str, record: &Record) -> bool {
 /// each other. Each is judged by [`is_title_evidence`] and the rest
 /// discarded, then compared by [`titles_agree`].
 ///
-/// `None` — no conflict — when no candidate survives as evidence, when
-/// the record has no title, or when **any** surviving candidate agrees.
-/// One source of evidence agreeing is enough: a document whose XMP
-/// packet holds a producer's default and whose Info dictionary holds
-/// the real title has told the truth once, and once is what matters.
+/// [`TitleCheck::Insufficient`] when there is nothing to judge, with
+/// the first of these that holds:
 ///
-/// Otherwise `Some(Conflict)` describing the *closest* candidate,
-/// carrying the two titles **as they were given** — a person reading
-/// the run summary needs the real strings to judge what happened — and
-/// the similarity that fell short.
-pub fn check_title(candidates: &[&str], record: &Record) -> Option<Conflict> {
-    let resolved = record.title.as_deref()?;
+/// 1. [`Insufficient::RecordUntitled`]: the record has no title, or its
+///    title has no content words;
+/// 2. [`Insufficient::NoTitles`]: `candidates` is empty;
+/// 3. [`Insufficient::NoEvidence`]: no candidate survives as evidence.
+///
+/// [`TitleCheck::Agreed`] when **any** surviving candidate agrees. One
+/// source of evidence agreeing is enough: a document whose XMP packet
+/// holds a producer's default and whose Info dictionary holds the real
+/// title has told the truth once, and once is what matters.
+///
+/// Otherwise [`TitleCheck::Conflict`] describing the *closest*
+/// candidate, carrying the two titles **as they were given** — a person
+/// reading the run summary needs the real strings to judge what
+/// happened — and the similarity that fell short.
+pub fn check_title(candidates: &[&str], record: &Record) -> TitleCheck {
+    let Some(resolved) = record.title.as_deref() else {
+        return TitleCheck::Insufficient(Insufficient::RecordUntitled);
+    };
     let resolved_tokens = comparison_tokens(resolved);
     if resolved_tokens.is_empty() {
-        return None;
+        return TitleCheck::Insufficient(Insufficient::RecordUntitled);
+    }
+    if candidates.is_empty() {
+        return TitleCheck::Insufficient(Insufficient::NoTitles);
     }
 
     let mut closest: Option<(f64, &str)> = None;
@@ -246,7 +293,7 @@ pub fn check_title(candidates: &[&str], record: &Record) -> Option<Conflict> {
 
         let tokens = comparison_tokens(candidate);
         if titles_agree(&tokens, &resolved_tokens) {
-            return None;
+            return TitleCheck::Agreed;
         }
 
         let similarity = title_similarity(&tokens, &resolved_tokens);
@@ -255,8 +302,10 @@ pub fn check_title(candidates: &[&str], record: &Record) -> Option<Conflict> {
         }
     }
 
-    let (similarity, extracted) = closest?;
-    Some(Conflict {
+    let Some((similarity, extracted)) = closest else {
+        return TitleCheck::Insufficient(Insufficient::NoEvidence);
+    };
+    TitleCheck::Conflict(Conflict {
         field: "title",
         extracted: extracted.to_string(),
         resolved: resolved.to_string(),

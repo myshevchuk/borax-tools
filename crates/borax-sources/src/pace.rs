@@ -186,7 +186,8 @@ impl<S: crate::source::Source> crate::source::Source for Paced<S> {
         self.source.supports(identifier)
     }
 
-    /// Wait out the interval, then ask the wrapped source.
+    /// Wait out the interval, then ask the wrapped source, returning
+    /// its answer and retrieval unchanged.
     ///
     /// The wait happens before every request, hit or miss — a cache in
     /// front of this wrapper is what keeps answers borax already has
@@ -194,7 +195,7 @@ impl<S: crate::source::Source> crate::source::Source for Paced<S> {
     fn fetch(
         &self,
         identifier: &borax_core::identifier::Identifier,
-    ) -> Result<borax_core::record::Record, crate::source::SourceError> {
+    ) -> Result<crate::source::Fetched, crate::source::SourceError> {
         self.pause();
         self.source.fetch(identifier)
     }

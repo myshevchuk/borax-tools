@@ -22,14 +22,19 @@ use borax_pdf::scan::xmp_title;
 use borax_pdf::source::{ExtractionError, PdfSource};
 use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier, extract};
 use borax_sources::cache::Cache;
-use borax_sources::conflict::check_title;
-use borax_sources::dispatch::{Unresolved, resolve};
+use borax_sources::conflict::{TitleCheck, check_title};
+use borax_sources::dispatch::{Resolved, Unresolved, resolve};
 use borax_sources::pace::map_bounded;
 use borax_sources::source::{Source, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 
 use crate::event::{
     Attempt, Claim, ClaimOrigin, Counts, Event, Extraction, LibraryAnswer, Overridden, SkipReason,
+};
+use crate::evidence::{
+    Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
+    IndexWrite, LookupEvidence, MatchCheck, Origin, RecordRetrieval, ServiceAttempt, Titles,
+    Unattempted,
 };
 use crate::library::{Account, Consulted, Stores, WorkDuplicate};
 
@@ -60,41 +65,14 @@ pub trait Documents: Sync {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileRecord {
     pub record: Record,
-    /// Which service supplied it, or `None` when nothing was looked up
-    /// — the content index or the library answered — and the service
-    /// is known only from the record's own provenance, if at all.
-    pub source: Option<SourceName>,
-    /// Where the identifier came from, or `None` when nothing was
-    /// found or asked for because the content index answered.
-    ///
-    /// Named for the `resolved` event's `tier` field, which it is
-    /// rendered into and which it keeps in step: the four cases a
-    /// reader of the stream has to tell apart — a pass's own name,
-    /// `supplied`, `library`, and nothing — are the four this holds.
-    pub tier: Option<Provenance>,
-    /// The identifier the run looked up, or `None` when the content
-    /// index or the library answered and nothing was looked up at all.
-    ///
-    /// Kept beside the record because the record's own identifiers are
-    /// not evidence about the file: a lookup by arXiv identifier can
-    /// return a record carrying a DOI, and only the former was ever
-    /// seen in the file.
-    pub found: Option<Identifier>,
-    /// Every title the file claims for itself, in the order they were
-    /// read, and empty when the file was not opened.
-    pub claims: Vec<Claim>,
-    /// Whether the content index answered, making both extraction and
-    /// resolution unnecessary. `false` for a library answer, which is
-    /// not the content index.
-    ///
-    /// Narrower than "came from a cache": a response cache hit behind a
-    /// [`Source`] is invisible from here, so a record served by
-    /// [`borax_sources::cache::Cached`] still reports `false`.
-    pub cached: bool,
     /// The file's content hash, or `None` when it could not be
     /// computed. Carried because renaming needs it — the planner
     /// recognises an already-named file by content, not by path.
     pub hash: Option<ContentHash>,
+    /// What the resolution that reached `record` found out about the
+    /// file, step by step. The methods below derive every other fact
+    /// about the record's provenance from it.
+    pub evidence: Evidence,
     /// The conflict an operator accepted to reach this record, or
     /// `None` when the record cleared the conflict check on its own.
     ///
@@ -102,14 +80,107 @@ pub struct FileRecord {
     /// conflict it finds, so a record that reaches a caller from there
     /// has nothing to have overridden.
     pub overrode: Option<Overridden>,
+}
+
+impl FileRecord {
+    /// The service that supplied the record, or `None` when no service
+    /// did: the content index or the library answered.
+    ///
+    /// Read from [`Evidence::retrieval`], so a record a service served
+    /// from its response cache names that service.
+    pub fn source(&self) -> Option<SourceName> {
+        match self.evidence.retrieval()? {
+            RecordRetrieval::ServiceCache { service } | RecordRetrieval::Network { service } => {
+                Some(service)
+            }
+            RecordRetrieval::Library { .. } | RecordRetrieval::ContentIndex => None,
+        }
+    }
+
+    /// Where the identifier the record was reached by came from, or
+    /// `None` when the content index answered and nothing was looked
+    /// up.
+    ///
+    /// Read from [`Evidence::retrieval`]: a record a service supplied
+    /// gives the extraction pass that read the identifier, or
+    /// [`Provenance::Supplied`] for an operator's; a record the library
+    /// supplied gives [`Provenance::Library`]. What the library said
+    /// about the file makes no difference to a record a service
+    /// supplied.
+    pub fn tier(&self) -> Option<Provenance> {
+        match self.evidence.retrieval()? {
+            RecordRetrieval::ServiceCache { .. } | RecordRetrieval::Network { .. } => {
+                match &self.evidence.lookup {
+                    LookupEvidence::Attempted {
+                        origin: Origin::Extracted(tier),
+                        ..
+                    } => Some(Provenance::Extracted(*tier)),
+                    LookupEvidence::Attempted {
+                        origin: Origin::Operator,
+                        ..
+                    } => Some(Provenance::Supplied),
+                    LookupEvidence::NotAttempted(_) => None,
+                }
+            }
+            RecordRetrieval::Library { .. } => Some(Provenance::Library),
+            RecordRetrieval::ContentIndex => None,
+        }
+    }
+
+    /// The identifier the run looked up, or `None` when nothing was
+    /// looked up because the content index or the library answered.
+    ///
+    /// Kept apart from the record because the record's own identifiers
+    /// are not evidence about the file: a lookup by arXiv identifier can
+    /// return a record carrying a DOI, and only the former was ever
+    /// seen in the file.
+    pub fn found(&self) -> Option<&Identifier> {
+        match &self.evidence.lookup {
+            LookupEvidence::Attempted { identifier, .. } => Some(identifier),
+            LookupEvidence::NotAttempted(_) => None,
+        }
+    }
+
+    /// Every title the file claims for itself, in the order they were
+    /// read, and none when the file was not opened or could not be.
+    pub fn claims(&self) -> &[Claim] {
+        self.evidence.extraction.titles.claims()
+    }
+
+    /// Whether the content index answered, making both extraction and
+    /// resolution unnecessary. `false` for a library answer and for a
+    /// service's response cache, neither of which is the content index.
+    pub fn cached(&self) -> bool {
+        self.evidence.retrieval() == Some(RecordRetrieval::ContentIndex)
+    }
+
     /// What the run's library said about the file, or `None` when it
-    /// was not asked. [`LibraryAnswer::Tracked`] with `tier`
+    /// was not asked.
+    ///
+    /// [`LibraryAnswer::Tracked`] with [`FileRecord::tier`]
     /// [`Provenance::Library`] is a record the library supplied; with
-    /// any other `tier`, the library answered and the record was
-    /// reached some other way, as when an operator re-identified the
-    /// file. A problem answer is a record reached by the passes the
-    /// library could not spare.
-    pub library: Option<LibraryAnswer>,
+    /// any other tier, the library answered and the record was reached
+    /// some other way, as when an operator re-identified the file. A
+    /// problem answer is a record reached by the passes the library
+    /// could not spare.
+    pub fn library(&self) -> Option<&LibraryAnswer> {
+        self.evidence.library.answer()
+    }
+
+    /// The disagreement between the record's title and the file's own,
+    /// as the [`SkipReason::Conflict`] a batch run skips on, or `None`
+    /// when the title check did not conclude a conflict.
+    pub fn conflict(&self) -> Option<SkipReason> {
+        match &self.evidence.match_check {
+            MatchCheck::Conflict(conflict) => Some(SkipReason::Conflict {
+                field: conflict.field.to_string(),
+                extracted: conflict.extracted.clone(),
+                resolved: conflict.resolved.clone(),
+                similarity: conflict.similarity,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Where the identifier a record was reached by came from.
@@ -147,7 +218,7 @@ impl Provenance {
 
 /// What a run decided about one file.
 ///
-// One of these is produced per file and moved once, so the 352 bytes
+// One of these is produced per file and moved once, so the bytes
 // clippy objects to are moved once per file too. Boxing would put an
 // allocation on the successful path — the common one — to shrink a
 // value nothing keeps.
@@ -169,91 +240,130 @@ pub struct ResolveConfig {
     pub cache: bool,
 }
 
-/// The content-index pass: the record the index holds for a file
-/// whose content hash is `hash`.
+/// The content-index pass: the record the index holds for a file, and
+/// what reading the index came to.
+///
+/// `hash` is the file's content hash, or the message of the error that
+/// kept it from being computed. In order:
+///
+/// - a file with no hash gives no record and [`IndexRead::Unavailable`]
+///   with that message, whatever [`ResolveConfig::cache`] says;
+/// - [`ResolveConfig::cache`] `false` — the `--no-cache` bypass — gives
+///   no record and [`IndexRead::Bypassed`], and the index is not read;
+/// - otherwise the index is read: [`IndexRead::Hit`] with its record,
+///   or [`IndexRead::Miss`].
 ///
 /// A hit means the file need not be opened at all, since a record is
-/// served for its content under any name. `None` when the index holds
-/// nothing for the hash, when the file could not be hashed, and when
-/// [`ResolveConfig::cache`] is `false` — the `--no-cache` bypass — in
-/// which case the index is not read at all.
-pub fn from_index<C: Cache>(
-    hash: Option<&ContentHash>,
+/// served for its content under any name.
+pub fn index_read<C: Cache>(
+    hash: Result<&ContentHash, &str>,
     index: &ContentIndex<C>,
     config: &ResolveConfig,
-) -> Option<Record> {
-    match config.cache {
-        true => index.get(hash?),
-        false => None,
+) -> (Option<Record>, IndexRead) {
+    let hash = match hash {
+        Ok(hash) => hash,
+        Err(message) => {
+            return (
+                None,
+                IndexRead::Unavailable {
+                    message: message.to_string(),
+                },
+            );
+        }
+    };
+    if !config.cache {
+        return (None, IndexRead::Bypassed);
+    }
+    match index.get(hash) {
+        Some(record) => (Some(record), IndexRead::Hit),
+        None => (None, IndexRead::Miss),
     }
 }
 
-/// The record a content-index hit stands for.
+/// The record a content-index hit stands for, with `library` as what
+/// the library said before the index was read.
 ///
-/// Nothing was read and nothing was looked up, which is what every
-/// `None` here says; `cached` is what tells a reader that the index
-/// answered rather than a service.
-pub fn indexed_record(record: Record, hash: Option<ContentHash>) -> FileRecord {
+/// Nothing was read from the file and nothing was looked up, so every
+/// later step is not attempted because the index answered.
+fn indexed_record(record: Record, hash: Option<ContentHash>, library: Consultation) -> FileRecord {
+    let reason = Unattempted::ContentIndexHit;
     FileRecord {
         record,
-        source: None,
-        tier: None,
-        found: None,
-        claims: Vec::new(),
-        cached: true,
         hash,
+        evidence: Evidence {
+            library,
+            content_index: IndexEvidence {
+                read: IndexRead::Hit,
+                write: IndexWrite::NotAttempted(reason),
+            },
+            ..Evidence::not_attempted(reason)
+        },
         // A record served from the index was accepted by whatever run
         // put it there, not by this one.
         overrode: None,
-        library: None,
     }
 }
 
-/// The record the library supplies for a file it tracks: its item's.
+/// The record the library supplies for a file it tracks: its item's,
+/// with `answer` as the library's answer.
 ///
-/// Nothing was read from the file and nothing was looked up, so there
-/// is no source, no identifier found and no claim; `tier` is
-/// [`Provenance::Library`], and `cached` is `false` because the
-/// content index did not answer.
+/// Nothing was read from the file and nothing was looked up, so every
+/// later step, the content index included, is not attempted because
+/// the library answered.
 fn library_record(record: Record, hash: Option<ContentHash>, answer: LibraryAnswer) -> FileRecord {
     FileRecord {
         record,
-        source: None,
-        tier: Some(Provenance::Library),
-        found: None,
-        claims: Vec::new(),
-        cached: false,
         hash,
+        evidence: Evidence {
+            library: Consultation::Consulted(answer),
+            ..Evidence::not_attempted(Unattempted::LibraryAnswered)
+        },
         // A library item is past the point of a conflict check: it was
         // admitted, adopted or corrected, and nothing was overridden
         // here to reach it.
         overrode: None,
-        library: Some(answer),
     }
+}
+
+/// What the second pass read from one file: the extractor's result and
+/// the titles the file claims, each kept whatever became of the other.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileRead {
+    /// The identifier the tiered extractor found, or why it found none.
+    pub extracted: Result<Extracted, ExtractionError>,
+    /// The titles the file's own metadata claims: [`Titles::Read`]
+    /// whenever the file opened, and [`Titles::Failed`] when it did not.
+    pub titles: Titles,
 }
 
 /// The second pass: what the file at `path` says about itself.
 ///
-/// The identifier the tiered extractor found, and every title the
-/// document's own metadata claims. See [`claims_of`] for the titles on
-/// their own.
+/// The file is opened once. When it opens, its titles are read before
+/// the identifier is looked for, and are kept as [`Titles::Read`]
+/// whatever extraction then returns — including a page that cannot be
+/// read — so a file with no identifier still has claims, and an
+/// operator supplying one for it has something to compare the record
+/// against. When it does not open, `extracted` is the open error and
+/// `titles` is [`Titles::Failed`] with that error's message.
 ///
-/// The titles are read before the identifier is looked for, so that
-/// finding none is a failure of this pass alone: a file with no
-/// identifier still has claims, and an operator supplying one for it
-/// has something to compare the record against.
-pub fn from_file(
-    path: &Path,
-    documents: &dyn Documents,
-    config: &ExtractionConfig,
-) -> Result<(Extracted, Vec<Claim>), ExtractionError> {
-    let pdf = documents.open(path)?;
-    let claims = claimed_titles(pdf.as_ref());
-    Ok((extract(pdf.as_ref(), config)?, claims))
+/// See [`titles_of`] for the titles on their own.
+pub fn from_file(path: &Path, documents: &dyn Documents, config: &ExtractionConfig) -> FileRead {
+    match documents.open(path) {
+        Ok(pdf) => FileRead {
+            titles: Titles::Read(claimed_titles(pdf.as_ref())),
+            extracted: extract(pdf.as_ref(), config),
+        },
+        Err(error) => FileRead {
+            titles: Titles::Failed {
+                message: message_of(&error),
+            },
+            extracted: Err(error),
+        },
+    }
 }
 
 /// What extraction made of the file at `path`, in the reported
-/// vocabulary: [`from_file`]'s answer with the claims dropped, passed
+/// vocabulary: [`from_file`]'s result with the titles dropped, passed
 /// through [`extraction_of`].
 ///
 /// Opens `path` and no other file, runs the passes resolution runs
@@ -262,7 +372,7 @@ pub fn from_file(
 /// cannot be opened, or yields no identifier, is a result like any
 /// other.
 pub fn extraction(path: &Path, documents: &dyn Documents, config: &ExtractionConfig) -> Extraction {
-    extraction_of(&from_file(path, documents, config).map(|(extracted, _)| extracted))
+    extraction_of(&from_file(path, documents, config).extracted)
 }
 
 /// `result` in the reported vocabulary, one variant for each outcome
@@ -297,24 +407,32 @@ pub fn extraction_of(result: &Result<Extracted, ExtractionError>) -> Extraction 
 pub fn from_sources(
     sources: &[&dyn Source],
     identifier: &Identifier,
-) -> Result<borax_sources::dispatch::Resolved, Unresolved> {
+) -> Result<Resolved, Unresolved> {
     resolve(sources, identifier)
 }
 
-/// The fourth pass: what the file's own titles say against `record`.
+/// The fourth pass: what the file's own `titles` say against `record`.
 ///
-/// `None` is agreement, or nothing to disagree with. A disagreement is
-/// the [`SkipReason::Conflict`] a batch run skips on, built here so
-/// that a caller reporting one and a caller acting on one describe it
-/// the same way.
-pub fn disagreement(claims: &[Claim], record: &Record) -> Option<SkipReason> {
-    let claimed: Vec<&str> = claims.iter().map(|claim| claim.title.as_str()).collect();
-    check_title(&claimed, record).map(|conflict| SkipReason::Conflict {
-        field: conflict.field.to_string(),
-        extracted: conflict.extracted,
-        resolved: conflict.resolved,
-        similarity: conflict.similarity,
-    })
+/// [`borax_sources::conflict::check_title`] over the titles read, with
+/// its conclusion carried over unchanged. Titles that could not be read
+/// are no titles, and so
+/// [`borax_sources::conflict::Insufficient::NoTitles`]; titles that were
+/// not attempted make the check not attempted for the same reason.
+pub fn title_check(titles: &Titles, record: &Record) -> MatchCheck {
+    if let Titles::NotAttempted(reason) = titles {
+        return MatchCheck::NotAttempted(*reason);
+    }
+
+    let claimed: Vec<&str> = titles
+        .claims()
+        .iter()
+        .map(|claim| claim.title.as_str())
+        .collect();
+    match check_title(&claimed, record) {
+        TitleCheck::Agreed => MatchCheck::Agreed,
+        TitleCheck::Conflict(conflict) => MatchCheck::Conflict(conflict),
+        TitleCheck::Insufficient(insufficient) => MatchCheck::Insufficient(insufficient),
+    }
 }
 
 /// Resolve one file, asking no library.
@@ -329,25 +447,26 @@ pub fn disagreement(claims: &[Claim], record: &Record) -> Option<SkipReason> {
 ///    A library that cannot answer for the file says why, and the
 ///    passes below run as for a file it does not track. This function
 ///    passes no library, so it starts at the content index.
-/// 2. **Content index**: the file's hash is looked up, and a hit is
-///    returned without opening the file at all. Skipped entirely when
-///    [`ResolveConfig::cache`] is `false`, and treated as a miss when
-///    the file cannot be hashed — a hash failure is not yet a reason to
-///    give up, since opening the file reports a better one.
+/// 2. **Content index**: the file's hash is looked up ([`index_read`]),
+///    and a hit is returned without opening the file at all. Skipped
+///    entirely when [`ResolveConfig::cache`] is `false`, and treated as
+///    a miss when the file cannot be hashed — a hash failure is not yet
+///    a reason to give up, since opening the file reports a better one.
 /// 3. **Extraction**: [`borax_pdf::tiered::extract`] over the opened
 ///    file.
 /// 4. **Resolution**: [`borax_sources::dispatch::resolve`] over
 ///    `sources`, which are consulted in priority order for the
 ///    identifier's type.
-/// 5. **Conflict check**: the file's own title, when it has one, is
-///    compared against the resolved record's
-///    ([`borax_sources::conflict::check_title`]). A disagreement is a
-///    skip, not a result: a record for the wrong work is worse than no
-///    record.
+/// 5. **Conflict check**: the file's own titles, when it has any, are
+///    compared against the resolved record's ([`title_check`]). A
+///    disagreement is a skip, not a result: a record for the wrong work
+///    is worse than no record.
 ///
 /// A successful resolution by the last three passes is written to the
 /// content index under the file's hash, so a later run recognises the
-/// file under any name.
+/// file under any name. A record the conflict check refused is never
+/// written, and what the index held for the hash is left as it was. A
+/// write that fails is kept as evidence and changes nothing else.
 /// The write happens even when [`ResolveConfig::cache`] is `false`:
 /// the bypass forces a live answer, and the point of forcing one is
 /// usually that the stored answer was wrong, so the fresh record
@@ -385,14 +504,15 @@ pub fn resolve_file<C: Cache>(
 ///
 /// [`resolve_file`]'s working, kept rather than dropped. A batch run
 /// wants the verdict and nothing else; a run with an operator at it
-/// needs three more things, each for one decision it has to make:
+/// needs more, each for one decision it has to make:
 ///
 /// - the hash, because a file nobody knows the hash of cannot be
 ///   renamed and so is not asked about;
 /// - the record the conflict check refused, because the operator may
 ///   accept it;
-/// - what the services said, because an outage is worth trying again
-///   and a confirmed absence is not.
+/// - the evidence, because an outage is worth trying again and a
+///   confirmed absence is not
+///   ([`crate::evidence::LookupEvidence::is_conclusive`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Standing {
     /// What a run that asked nobody would report for the file.
@@ -400,18 +520,11 @@ pub struct Standing {
     /// The file's content hash, or `None` when it could not be
     /// computed.
     pub hash: Option<ContentHash>,
-    /// The identifier an extraction pass found and the pass that found
-    /// it. `None` when the content index answered, when the file could
-    /// not be read, or when it named no identifier — in none of which
-    /// is there anything to look up again.
-    pub found: Option<(Identifier, Tier)>,
-    /// What each service answered, where none of them held the
-    /// identifier. `Some` exactly when `verdict` is
-    /// [`SkipReason::Unresolvable`], and carried whole because whether
-    /// the answer was conclusive
-    /// ([`borax_sources::dispatch::Unresolved::is_conclusive`]) is not
-    /// recoverable from the skip reason.
-    pub unresolved: Option<Unresolved>,
+    /// The evidence for `verdict`, with every step that ran before it.
+    /// Equal to the evidence of the record the verdict is about, where
+    /// there is one: the resolved record, the refused one, or the one a
+    /// work duplicate resolved to.
+    pub evidence: Evidence,
     /// The record the conflict check refused, with the claims it
     /// disagrees with. `Some` exactly when `verdict` is
     /// [`SkipReason::Conflict`], since that is the one verdict holding
@@ -424,12 +537,6 @@ pub struct Standing {
     /// so admits it under this record, as another artifact of that
     /// work.
     pub duplicated: Option<Duplicated>,
-    /// What the run's library said about the file, or `None` when it
-    /// was not asked: no library was given, the file lies outside it,
-    /// or the verdict was reached before it was asked. Kept here as
-    /// well as on a resolved verdict's [`FileRecord`], because a skip
-    /// has no record to carry it and still reports it.
-    pub library: Option<LibraryAnswer>,
 }
 
 /// A work the library already holds a file for, and the record an
@@ -445,17 +552,37 @@ pub struct Duplicated {
 }
 
 impl Standing {
-    /// A verdict reached with nothing left over: the passes that would
-    /// have produced the rest never ran.
-    fn of(verdict: FileOutcome, hash: Option<ContentHash>) -> Standing {
+    /// What the run's library said about the file, or `None` when it
+    /// was not asked: no library was given, the file lies outside it,
+    /// or the verdict was reached before it was asked. A skip reports
+    /// it as a resolved record does.
+    pub fn library(&self) -> Option<&LibraryAnswer> {
+        self.evidence.library.answer()
+    }
+
+    /// The standing of `file` once the library's work check has had
+    /// its say: the file's verdict, with `file`'s evidence as its own.
+    fn of(path: &Path, file: FileRecord, account: Option<&Account<'_>>) -> Standing {
+        let hash = file.hash.clone();
+        let evidence = file.evidence.clone();
+        let (verdict, duplicated) = admissible(path, file, account);
         Standing {
             verdict,
             hash,
-            found: None,
-            unresolved: None,
+            evidence,
+            refused: None,
+            duplicated,
+        }
+    }
+
+    /// A skip reached with no record, carrying `evidence`.
+    fn skipped(reason: SkipReason, hash: Option<ContentHash>, evidence: Evidence) -> Standing {
+        Standing {
+            verdict: FileOutcome::Skipped(reason),
+            hash,
+            evidence,
             refused: None,
             duplicated: None,
-            library: None,
         }
     }
 }
@@ -516,12 +643,16 @@ fn duplicate(reason: DuplicateReason, existing: &Path) -> SkipReason {
 /// `library` is the run's library as read, asked about the file after
 /// the content check and before the content index. A record it answers
 /// with goes through the work check as any other does. `None` asks no
-/// library, and so does a file outside the one given; either leaves
-/// [`Standing::library`] and every record's `library` at `None`.
+/// library, and so does a file outside the one given; the evidence
+/// says which.
 ///
 /// The file is hashed once, whether or not the index is consulted and
 /// whether or not a duplicate check or the library wants it: the hash
 /// identifies the file for every later decision about it.
+///
+/// Every verdict carries the evidence of the steps that ran before it,
+/// and says of each step that did not run why it did not
+/// ([`Standing::evidence`]).
 pub fn standing<C: Cache>(
     path: &Path,
     documents: &dyn Documents,
@@ -531,121 +662,156 @@ pub fn standing<C: Cache>(
     account: Option<&Account<'_>>,
     library: Option<&Stores>,
 ) -> Standing {
-    let hash = documents.hash(path).ok();
+    let hashed = documents.hash(path);
+    let hash = hashed.as_ref().ok().cloned();
     if let Some(duplicate) =
         account.and_then(|account| content_duplicate(path, hash.as_ref(), account))
     {
-        return Standing::of(FileOutcome::Skipped(duplicate), hash);
+        return Standing::skipped(
+            duplicate,
+            hash,
+            Evidence::not_attempted(Unattempted::ContentDuplicate),
+        );
     }
 
-    let consulted = library.and_then(|stores| stores.consult(path, hash.as_ref()));
-    let answer = consulted.as_ref().map(|consulted| consulted.answer.clone());
-    let mut standing = match consulted {
-        Some(Consulted {
+    let consulted = match library {
+        None => Err(Unattempted::NoLibrary),
+        Some(stores) => stores
+            .consult(path, hash.as_ref())
+            .ok_or(Unattempted::OutsideLibrary),
+    };
+    match consulted {
+        Ok(Consulted {
             answer,
             item: Some(item),
-        }) => {
-            let file = library_record(item.record, hash.clone(), answer);
-            let (verdict, duplicated) = admissible(path, file, account);
-            Standing {
-                duplicated,
-                ..Standing::of(verdict, hash)
-            }
-        }
-        _ => beyond_library(
+        }) => Standing::of(path, library_record(item.record, hash, answer), account),
+        Ok(Consulted { answer, item: None }) => beyond_library(
             path,
-            hash,
+            hashed.as_ref().map_err(message_of),
             documents,
             sources,
             index,
             config,
             account,
-            answer.as_ref(),
+            Consultation::Consulted(answer),
         ),
-    };
-    standing.library = answer;
-    standing
+        Err(reason) => beyond_library(
+            path,
+            hashed.as_ref().map_err(message_of),
+            documents,
+            sources,
+            index,
+            config,
+            account,
+            Consultation::NotConsulted(reason),
+        ),
+    }
 }
 
-/// The passes after the library, for a file whose hash is `hash` and
-/// which the library did not answer for: `answer` is what it said
-/// instead, carried onto every record reached here.
+/// The passes after the library, for a file whose hash is `hashed` —
+/// or the message of the error that kept it from being computed — and
+/// which the library did not answer for: `library` is what it said
+/// instead, or why it was not asked, carried onto the evidence of
+/// every verdict reached here.
 #[allow(clippy::too_many_arguments)]
 fn beyond_library<C: Cache>(
     path: &Path,
-    hash: Option<ContentHash>,
+    hashed: Result<&ContentHash, String>,
     documents: &dyn Documents,
     sources: &[&dyn Source],
     index: &ContentIndex<C>,
     config: &ResolveConfig,
     account: Option<&Account<'_>>,
-    answer: Option<&LibraryAnswer>,
+    library: Consultation,
 ) -> Standing {
-    if let Some(record) = from_index(hash.as_ref(), index, config) {
-        let file = FileRecord {
-            library: answer.cloned(),
-            ..indexed_record(record, hash.clone())
-        };
-        let (verdict, duplicated) = admissible(path, file, account);
-        return Standing {
-            duplicated,
-            ..Standing::of(verdict, hash)
-        };
+    let hash = hashed.as_ref().ok().map(|hash| (*hash).clone());
+    let (indexed, read) = index_read(
+        hashed.as_ref().map(|hash| *hash).map_err(String::as_str),
+        index,
+        config,
+    );
+    if let Some(record) = indexed {
+        return Standing::of(path, indexed_record(record, hash, library), account);
     }
 
-    let (extracted, claims) = match from_file(path, documents, &config.extraction) {
-        Ok(found) => found,
-        Err(error) => return Standing::of(FileOutcome::Skipped(skipped_for(&error)), hash),
+    let FileRead { extracted, titles } = from_file(path, documents, &config.extraction);
+    let extraction = ExtractionEvidence {
+        result: ExtractionStep::Ran(extraction_of(&extracted)),
+        titles,
     };
-    let Extracted { identifier, tier } = extracted;
+    let Extracted { identifier, tier } = match extracted {
+        Ok(extracted) => extracted,
+        Err(error) => {
+            let reason = Unattempted::ExtractionFailed;
+            let evidence = Evidence {
+                library,
+                content_index: IndexEvidence {
+                    read,
+                    write: IndexWrite::NotAttempted(reason),
+                },
+                extraction,
+                lookup: LookupEvidence::NotAttempted(reason),
+                match_check: MatchCheck::NotAttempted(reason),
+            };
+            return Standing::skipped(skipped_for(&error), hash, evidence);
+        }
+    };
     let looked_up = Identifier::from(identifier);
-    let found = Some((looked_up.clone(), tier));
+    let origin = Origin::Extracted(tier);
 
     let resolved = match from_sources(sources, &looked_up) {
         Ok(resolved) => resolved,
         Err(unresolved) => {
-            let verdict = FileOutcome::Skipped(unresolvable(&unresolved, &looked_up, tier));
-            return Standing {
-                found,
-                unresolved: Some(unresolved),
-                ..Standing::of(verdict, hash)
+            let reason = Unattempted::NoRecord;
+            let evidence = Evidence {
+                library,
+                content_index: IndexEvidence {
+                    read,
+                    write: IndexWrite::NotAttempted(reason),
+                },
+                extraction,
+                lookup: unheld_lookup(&looked_up, origin, &unresolved),
+                match_check: MatchCheck::NotAttempted(reason),
             };
+            let reason = unresolvable(&unresolved, &looked_up, tier);
+            return Standing::skipped(reason, hash, evidence);
         }
     };
 
+    let match_check = title_check(&extraction.titles, &resolved.record);
+    let refused = matches!(match_check, MatchCheck::Conflict(_));
+    // A refused record is never written under the file's hash: a later
+    // run checks the file again rather than being answered for it.
+    let write = match (refused, hash.as_ref()) {
+        (true, _) => IndexWrite::NotAttempted(Unattempted::Refused),
+        (false, Some(hash)) => IndexWrite::Attempted(index.put(hash, &resolved.record)),
+        (false, None) => IndexWrite::NotAttempted(Unattempted::Unhashable),
+    };
     let file = FileRecord {
-        record: resolved.record,
-        source: Some(resolved.source),
-        tier: Some(Provenance::Extracted(tier)),
-        found: Some(looked_up),
-        claims,
-        cached: false,
         hash: hash.clone(),
-        // Nothing has been overridden: either the conflict check is
-        // about to pass, or this record is refused below and whoever
-        // accepts it records what they accepted it over.
+        evidence: Evidence {
+            library,
+            content_index: IndexEvidence { read, write },
+            extraction,
+            lookup: found_lookup(looked_up, origin, &resolved),
+            match_check,
+        },
+        record: resolved.record,
+        // Nothing has been overridden: either the conflict check has
+        // passed, or this record is refused below and whoever accepts
+        // it records what they accepted it over.
         overrode: None,
-        library: answer.cloned(),
     };
 
-    if let Some(conflict) = disagreement(&file.claims, &file.record) {
+    if let Some(conflict) = file.conflict() {
+        let evidence = file.evidence.clone();
         return Standing {
-            found,
             refused: Some(file),
-            ..Standing::of(FileOutcome::Skipped(conflict), hash)
+            ..Standing::skipped(conflict, hash, evidence)
         };
     }
 
-    if let Some(hash) = hash.as_ref() {
-        index.put(hash, &file.record);
-    }
-
-    let (verdict, duplicated) = admissible(path, file, account);
-    Standing {
-        found,
-        duplicated,
-        ..Standing::of(verdict, hash)
-    }
+    Standing::of(path, file, account)
 }
 
 /// `file` as the verdict it is, unless the library already holds
@@ -677,94 +843,210 @@ fn admissible(
 ///
 /// Available without resolving anything, which is what a caller needs
 /// when it is about to compare a record it was handed against the file
-/// it is for: a file the content index answered for was never opened,
-/// and one no identifier was found in was opened but never asked about
-/// its titles.
+/// it is for: a file the content index answered for was never opened.
 ///
-/// An unreadable file claims nothing, which is the same answer as a
-/// file carrying no titles: neither is evidence against a record.
-pub fn claims_of(path: &Path, documents: &dyn Documents) -> Vec<Claim> {
+/// [`Titles::Read`] with every title the file claims, possibly none,
+/// when it opens; [`Titles::Failed`] with the open error's message when
+/// it does not. Never [`Titles::NotAttempted`].
+pub fn titles_of(path: &Path, documents: &dyn Documents) -> Titles {
     match documents.open(path) {
-        Ok(pdf) => claimed_titles(pdf.as_ref()),
-        Err(_) => Vec::new(),
+        Ok(pdf) => Titles::Read(claimed_titles(pdf.as_ref())),
+        Err(error) => Titles::Failed {
+            message: message_of(&error),
+        },
     }
 }
 
 /// Resolve `identifier` for the file at `path`, as a run resolves one
-/// it found itself.
+/// it found itself, on top of the file's existing evidence `prior`.
 ///
 /// The same services in the same order, and the same title check
-/// against the file's own claims — but the check is reported rather
-/// than enforced: an identifier a person supplied is a stronger
-/// statement than the heuristic that would refuse it, and what the
-/// caller does about a disagreement is the caller's to decide.
+/// against the file's own titles, read now — but the check is reported
+/// ([`FileRecord::conflict`]) rather than enforced: an identifier a
+/// person supplied is a stronger statement than the heuristic that
+/// would refuse it, and what the caller does about a disagreement is
+/// the caller's to decide.
+///
+/// `origin` is where `identifier` came from: [`Origin::Operator`] for
+/// one the operator supplied, and the file's own extraction pass for a
+/// lookup of its own identifier asked again.
+///
+/// The record's evidence is `prior` with four sections replaced: the
+/// lookup, with every attempt; the titles, read now; the title check
+/// over them; and the content-index write, which waits for acceptance
+/// ([`Unattempted::AwaitingAcceptance`]). What the library said, what
+/// the index read came to and what extraction found stay as `prior`
+/// has them.
 ///
 /// Nothing is written to the content index here. A record reached this
 /// way is a candidate until somebody accepts it, and [`remember`] is
 /// what keeps one that was accepted.
 ///
-/// No library is asked, so the record's `library` is `None`; a caller
-/// that asked one about the file sets it to what that library said.
+/// Fails with what every service answered when none holds the
+/// identifier; [`unheld_evidence`] gives that lookup its evidence.
 pub fn resolve_supplied(
     path: &Path,
     identifier: &Identifier,
+    origin: Origin,
     documents: &dyn Documents,
     sources: &[&dyn Source],
-) -> Result<Supplied, Unresolved> {
+    prior: &Evidence,
+) -> Result<FileRecord, Unresolved> {
     let resolved = from_sources(sources, identifier)?;
     // Read now rather than carried in: a file the content index
     // answered for was never opened, and one no identifier was found in
     // was never asked about its titles, so the comparison has nothing
-    // to work from until it is wanted (design D2a).
-    let claims = claims_of(path, documents);
-    let conflict = disagreement(&claims, &resolved.record);
+    // to work from until it is wanted.
+    let titles = titles_of(path, documents);
+    let match_check = title_check(&titles, &resolved.record);
 
-    Ok(Supplied {
-        file: FileRecord {
-            record: resolved.record,
-            source: Some(resolved.source),
-            tier: Some(Provenance::Supplied),
-            found: Some(identifier.clone()),
-            claims,
-            cached: false,
-            // Taken here because a rename needs it: the planner
-            // recognises an already-named file by content, and a record
-            // the operator then accepts is remembered under it.
-            hash: documents.hash(path).ok(),
-            // Nothing has been overridden yet. Accepting this record
-            // over `conflict` is the caller's decision, and the caller
-            // records it.
-            overrode: None,
-            library: None,
+    Ok(FileRecord {
+        // Taken here because a rename needs it: the planner recognises
+        // an already-named file by content, and a record the operator
+        // then accepts is remembered under it.
+        hash: documents.hash(path).ok(),
+        evidence: Evidence {
+            library: prior.library.clone(),
+            content_index: IndexEvidence {
+                read: prior.content_index.read.clone(),
+                write: IndexWrite::NotAttempted(Unattempted::AwaitingAcceptance),
+            },
+            extraction: ExtractionEvidence {
+                result: prior.extraction.result.clone(),
+                titles,
+            },
+            lookup: found_lookup(identifier.clone(), origin, &resolved),
+            match_check,
         },
-        conflict,
+        record: resolved.record,
+        // Nothing has been overridden yet. Accepting this record over a
+        // conflict is the caller's decision, and [`accept`] records it.
+        overrode: None,
     })
 }
 
-/// A record resolved from an identifier somebody supplied, and what the
-/// file has to say about it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Supplied {
-    pub file: FileRecord,
-    /// The disagreement between the record's title and the file's own,
-    /// where there is one. Reported, never enforced.
-    pub conflict: Option<SkipReason>,
+/// The evidence of a lookup of `identifier`, which came from `origin`,
+/// that no service answered: `prior` with the lookup set to
+/// `unresolved`'s attempts, in order, and the title check and the
+/// content-index write not attempted because there is no record
+/// ([`Unattempted::NoRecord`]). Every other section is `prior`'s.
+pub fn unheld_evidence(
+    prior: &Evidence,
+    identifier: &Identifier,
+    origin: Origin,
+    unresolved: &Unresolved,
+) -> Evidence {
+    let reason = Unattempted::NoRecord;
+    Evidence {
+        library: prior.library.clone(),
+        content_index: IndexEvidence {
+            read: prior.content_index.read.clone(),
+            write: IndexWrite::NotAttempted(reason),
+        },
+        extraction: prior.extraction.clone(),
+        lookup: unheld_lookup(identifier, origin, unresolved),
+        match_check: MatchCheck::NotAttempted(reason),
+    }
+}
+
+/// `file` as an operator's accepting it makes it.
+///
+/// `overrode` is the conflict the title check concluded, in the
+/// vocabulary the skip would have used, or `None` when it concluded
+/// none. A content-index write held back because the record was
+/// refused ([`Unattempted::Refused`]) now waits for the move instead
+/// ([`Unattempted::AwaitingAcceptance`]). Nothing else changes: the
+/// record, its hash, and the title check's conclusion stay as they
+/// were.
+pub fn accept(file: FileRecord) -> FileRecord {
+    let overrode = match &file.evidence.match_check {
+        MatchCheck::Conflict(conflict) => Some(Overridden {
+            field: conflict.field.to_string(),
+            extracted: conflict.extracted.clone(),
+            resolved: conflict.resolved.clone(),
+            similarity: conflict.similarity,
+        }),
+        _ => None,
+    };
+    let mut accepted = FileRecord { overrode, ..file };
+    let write = &mut accepted.evidence.content_index.write;
+    if *write == IndexWrite::NotAttempted(Unattempted::Refused) {
+        *write = IndexWrite::NotAttempted(Unattempted::AwaitingAcceptance);
+    }
+    accepted
 }
 
 /// Keep `record` as what the file at `hash` is, so that no later run
-/// asks about it again.
+/// asks about it again, and say what became of the write.
+///
+/// [`IndexWrite::Attempted`] with the store's result, or
+/// [`IndexWrite::NotAttempted`] with [`Unattempted::Unhashable`] when
+/// the file has no hash to be remembered under.
 ///
 /// Best-effort, as every write to the response cache is: an entry that
 /// cannot be written leaves the file to be asked about next time,
-/// which is the safe way to lose an answer and is never reported as a
-/// failure of the rename it followed.
-pub fn remember<C: Cache>(index: &ContentIndex<C>, hash: Option<&ContentHash>, record: &Record) {
-    // A file whose hash could not be computed has nowhere to be
-    // remembered under. It cannot be renamed in an applying run either,
-    // so this is not a case the operator can reach with a decision
-    // worth keeping.
-    if let Some(hash) = hash {
-        index.put(hash, record);
+/// which is the safe way to lose an answer, and a failed write is
+/// never a failure of the rename it followed.
+pub fn remember<C: Cache>(
+    index: &ContentIndex<C>,
+    hash: Option<&ContentHash>,
+    record: &Record,
+) -> IndexWrite {
+    match hash {
+        Some(hash) => IndexWrite::Attempted(index.put(hash, record)),
+        None => IndexWrite::NotAttempted(Unattempted::Unhashable),
+    }
+}
+
+/// The lookup of `identifier`, which came from `origin`, that reached
+/// `resolved`: every service that failed first, then the one that
+/// answered.
+fn found_lookup(identifier: Identifier, origin: Origin, resolved: &Resolved) -> LookupEvidence {
+    let failed = resolved
+        .failures
+        .iter()
+        .map(|(service, error)| ServiceAttempt {
+            service: *service,
+            outcome: Err(error.clone()),
+        });
+    let found = ServiceAttempt {
+        service: resolved.source,
+        outcome: Ok(resolved.retrieval.clone()),
+    };
+    LookupEvidence::Attempted {
+        identifier,
+        origin,
+        attempts: failed.chain([found]).collect(),
+    }
+}
+
+/// The lookup of `identifier`, which came from `origin`, that no
+/// service answered: `unresolved`'s attempts, in order.
+fn unheld_lookup(
+    identifier: &Identifier,
+    origin: Origin,
+    unresolved: &Unresolved,
+) -> LookupEvidence {
+    LookupEvidence::Attempted {
+        identifier: identifier.clone(),
+        origin,
+        attempts: unresolved
+            .attempts
+            .iter()
+            .map(|(service, error)| ServiceAttempt {
+                service: *service,
+                outcome: Err(error.clone()),
+            })
+            .collect(),
+    }
+}
+
+/// The text a reader is given for `error`: an unreadable file's own
+/// message, and the error's description otherwise.
+fn message_of(error: &ExtractionError) -> String {
+    match error {
+        ExtractionError::Unreadable { message } => message.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -878,7 +1160,7 @@ pub fn attempts_of(unresolved: &Unresolved) -> Vec<Attempt> {
 /// `library` for a record the library supplied, and `cache` for one the
 /// content index did.
 fn sources_of(file: &FileRecord) -> String {
-    if let Some(source) = file.source {
+    if let Some(source) = file.source() {
         return source.as_str().to_string();
     }
 
@@ -905,7 +1187,7 @@ fn sources_of(file: &FileRecord) -> String {
         .map(|(_, name)| *name)
         .collect();
 
-    match (named.is_empty(), file.tier) {
+    match (named.is_empty(), file.tier()) {
         (false, _) => named.join(", "),
         (true, Some(Provenance::Library)) => "library".to_string(),
         (true, _) => "cache".to_string(),
@@ -937,7 +1219,7 @@ pub fn verdict_event(path: &Path, standing: &Standing) -> Event {
         FileOutcome::Skipped(reason) => Event::Skipped {
             path: path.to_path_buf(),
             reason: reason.clone(),
-            library: standing.library.clone(),
+            library: standing.library().cloned(),
         },
     }
 }
@@ -956,14 +1238,13 @@ pub fn resolved_event(path: &Path, file: &FileRecord) -> Event {
         record: Box::new(file.record.clone()),
         source: sources_of(file),
         found: file
-            .found
-            .as_ref()
+            .found()
             .map_or_else(|| identifier_of(&file.record), Identifier::to_string),
-        claims: file.claims.clone(),
-        tier: file.tier.map(|whence| whence.as_str().to_string()),
+        claims: file.claims().to_vec(),
+        tier: file.tier().map(|whence| whence.as_str().to_string()),
         overrode: file.overrode.clone(),
-        cached: file.cached,
-        library: file.library.clone(),
+        cached: file.cached(),
+        library: file.library().cloned(),
     }
 }
 
@@ -1066,9 +1347,9 @@ impl Documents for RealDocuments {
     /// held in memory whole.
     ///
     /// A file that cannot be read reports
-    /// [`ExtractionError::Unreadable`] carrying the I/O error, which is
-    /// what [`resolve_file`] treats as a content-index miss rather than
-    /// as a verdict.
+    /// [`ExtractionError::Unreadable`] carrying the I/O error, which
+    /// [`resolve_file`] records as the content index being unavailable
+    /// and goes on to open the file, rather than taking it as a verdict.
     fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
         hash_file(path).map_err(|error| ExtractionError::Unreadable {
             message: error.to_string(),

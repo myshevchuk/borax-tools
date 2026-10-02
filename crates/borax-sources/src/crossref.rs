@@ -5,7 +5,7 @@ use borax_core::record::{DateParts, EntryType, Name, Record, Source};
 use serde_json::Value;
 
 use crate::http::{HttpRequest, Politeness, Transport};
-use crate::source::{ParseError, SourceError, SourceName, attribute};
+use crate::source::{Fetched, ParseError, SourceError, SourceName, attribute};
 
 /// Map a Crossref `type` to the record model.
 ///
@@ -224,18 +224,21 @@ impl<T: Transport> crate::source::Source for CrossrefClient<T> {
     /// Perform the request, read the status with
     /// [`crate::http::classify`], and parse the body with [`parse`].
     /// A transport failure is [`SourceError::Unavailable`]; a body that
-    /// will not parse is [`SourceError::Malformed`].
+    /// will not parse is [`SourceError::Malformed`]. A record is
+    /// returned as [`Fetched::network`]: the client has no response
+    /// cache of its own.
     ///
     /// An identifier this source does not support sends no request and
     /// reports [`SourceError::Unavailable`]: the question was never
     /// asked, so the answer is unknown — reporting `NotFound` would
     /// claim knowledge the source never had.
-    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
         crate::http::fetch(
             &self.transport,
             self.request(identifier),
             SourceName::Crossref,
             parse,
         )
+        .map(Fetched::network)
     }
 }

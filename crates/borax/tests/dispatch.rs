@@ -15,8 +15,8 @@ use borax::config::{
     ValueKindName, resolve,
 };
 use borax::event::{
-    Admission, Adoption, Condition, Event, Extraction, Level, LibraryAnswer, Overridden, Repair,
-    SCHEMA, SkipReason, human_line,
+    Admission, Adoption, Attempt, Condition, Event, Extraction, Level, LibraryAnswer, Overridden,
+    Repair, SCHEMA, SkipReason, human_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -34,8 +34,8 @@ use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source as
 use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
 use borax_core::template::RenderInput;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
-use borax_sources::cache::MemoryCache;
-use borax_sources::source::{Source, SourceError, SourceName};
+use borax_sources::cache::{CacheWrite, MemoryCache};
+use borax_sources::source::{Fetched, Source, SourceError, SourceName};
 use borax_sources::store::ContentIndex;
 use tempfile::tempdir;
 
@@ -234,8 +234,8 @@ impl Source for FakeSource {
         true
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
-        self.response.clone()
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
+        self.response.clone().map(Fetched::network)
     }
 }
 
@@ -273,9 +273,9 @@ impl Source for KeyedSource {
         true
     }
 
-    fn fetch(&self, identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
         match self.answers.get(&identifier.to_string()) {
-            Some(record) => Ok(record.clone()),
+            Some(record) => Ok(Fetched::network(record.clone())),
             None => Err(SourceError::NotFound),
         }
     }
@@ -4446,7 +4446,7 @@ fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
         ..BoraxExt::default()
     };
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &record);
+    let _ = index.put(&hash, &record);
     let sources: Vec<&dyn Source> = Vec::new();
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
@@ -5317,7 +5317,7 @@ fn skipping_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
     );
     let fixture = SupplyFixture::new(documents);
     let already_held = record_by("Roe", 2019, "10.1000/d7-already-held");
-    fixture.index.put(&hash, &already_held);
+    let _ = fixture.index.put(&hash, &already_held);
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/d7-wrong-candidate",
         record_by("Doe", 2023, "10.1000/d7-wrong-candidate"),
@@ -5818,7 +5818,7 @@ fn quitting_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
     );
     let fixture = SupplyFixture::new(documents);
     let already_held = record_by("Roe", 2019, "10.1000/d7-quit-already-held");
-    fixture.index.put(&hash, &already_held);
+    let _ = fixture.index.put(&hash, &already_held);
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/d7-quit-candidate",
         record_by("Doe", 2023, "10.1000/d7-quit-candidate"),
@@ -6001,10 +6001,8 @@ fn a_files_own_resolution_is_still_cited_after_a_failed_supply() {
 // standing
 // ---------------------------------------------------------------------
 
-/// A [`Cache`] whose every write is silently dropped, modelled on
-/// [`MemoryCache`] but never keeping what it is given — the shape
-/// [`Cache::put`]'s own contract allows ("failures are silent for the
-/// same reason").
+/// A [`Cache`] whose every write fails, modelled on [`MemoryCache`] but
+/// never keeping what it is given.
 struct WriteFailingCache;
 
 impl borax_sources::cache::Cache for WriteFailingCache {
@@ -6012,7 +6010,11 @@ impl borax_sources::cache::Cache for WriteFailingCache {
         None
     }
 
-    fn put(&self, _key: &str, _record: &Record) {}
+    fn put(&self, _key: &str, _record: &Record) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
 }
 
 #[test]
@@ -6558,7 +6560,7 @@ impl Source for PanicSource {
         )
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
         panic!("{} was asked to fetch in an offline run", self.name)
     }
 }
@@ -12006,12 +12008,12 @@ fn adopt_records_each_orphan_the_content_index_answers_for() {
 
     let index = ContentIndex::new(MemoryCache::new());
     let cached = record_by("Adopted", 2020, "10.1000/task-8.1");
-    index.put(&hash_bytes(b"task-8.1 first"), &cached);
-    index.put(
+    let _ = index.put(&hash_bytes(b"task-8.1 first"), &cached);
+    let _ = index.put(
         &hash_bytes(b"task-8.1 second"),
         &record_by("Held", 2019, "10.1000/task-8.1-held"),
     );
-    index.put(&hash_bytes(b"task-8.1 copy"), &cached);
+    let _ = index.put(&hash_bytes(b"task-8.1 copy"), &cached);
     let untouched = outside_the_stores(&root);
     let orphans_before = library::survey(&root).orphans.len();
 
@@ -12116,12 +12118,12 @@ fn adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent() {
     let record_bytes = fs::read(&record_file).unwrap();
 
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.2 known"),
         &record_by("Known", 2021, "10.1000/task-8.2-known"),
     );
     // What adopting the recorded artifact would take: a different work.
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.2 recorded"),
         &record_by("Other", 2022, "10.1000/task-8.2-other"),
     );
@@ -12224,11 +12226,11 @@ fn adopt_holds_an_orphan_whose_bytes_a_record_already_holds() {
     write_real_file(&root, "twin-b.pdf", b"task-8.2a twin");
 
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.2a moved"),
         &record_by("Other", 2022, "10.1000/task-8.2a-other"),
     );
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.2a twin"),
         &record_by("Twin", 2023, "10.1000/task-8.2a-twin"),
     );
@@ -12307,7 +12309,7 @@ fn adopt_every_orphan_is_accounted_for() {
     );
 
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-5.1 recorded"),
         &record_by("Recorded", 2020, "10.1000/task-5.1-recorded"),
     );
@@ -12392,11 +12394,11 @@ fn adopt_after_the_cache_is_cleared_adopts_nothing_and_succeeds() {
     write_real_file(&root, "two.pdf", b"task-8.4 two");
     let cache_dir = tempdir().unwrap();
     let index = ContentIndex::new(FileCache::new(cache_dir.path()));
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.4 one"),
         &record_by("One", 2020, "10.1000/task-8.4-one"),
     );
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-8.4 two"),
         &record_by("Two", 2020, "10.1000/task-8.4-two"),
     );
@@ -12499,7 +12501,7 @@ fn adopt_after_the_cache_is_cleared_still_tells_unindexed_held_and_unreadable_ap
 
     let cache_dir = tempdir().unwrap();
     let index = ContentIndex::new(FileCache::new(cache_dir.path()));
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"task-5.1b unindexed"),
         &record_by("Unindexed", 2020, "10.1000/task-5.1b-unindexed"),
     );
@@ -12599,7 +12601,7 @@ fn adopt_outside_any_library_is_refused_and_writes_nothing() {
     let root = dir.path().to_path_buf();
     write_real_file(&root, "unmarked.pdf", b"adopt unmarked");
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(
+    let _ = index.put(
         &hash_bytes(b"adopt unmarked"),
         &record_by("Unmarked", 2020, "10.1000/adopt-unmarked"),
     );
@@ -14032,7 +14034,7 @@ fn resolve_reports_the_librarys_corrected_item_over_a_stale_index_entry() {
     let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &stale);
+    let _ = index.put(&hash, &stale);
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
@@ -14158,7 +14160,7 @@ fn resolve_reports_untracked_for_an_unrecorded_file_inside_a_library() {
     let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
-    index.put(&hash, &cached_record);
+    let _ = index.put(&hash, &cached_record);
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
@@ -14932,7 +14934,7 @@ impl Source for FlakySource {
         true
     }
 
-    fn fetch(&self, _identifier: &Identifier) -> Result<Record, SourceError> {
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
         let left = self.fails.load(std::sync::atomic::Ordering::Relaxed);
         if left > 0 {
             self.fails
@@ -14941,7 +14943,43 @@ impl Source for FlakySource {
                 message: "503".to_string(),
             });
         }
-        Ok(self.then.clone())
+        Ok(Fetched::network(self.then.clone()))
+    }
+}
+
+/// A [`Source`] that answers from a fixed sequence of outcomes, one per
+/// call, and panics if asked more times than the sequence has answers —
+/// for a lookup whose services disagree across a retry.
+struct SequencedSource {
+    name: SourceName,
+    answers: std::sync::Mutex<std::collections::VecDeque<Result<Record, SourceError>>>,
+}
+
+impl SequencedSource {
+    fn new(name: SourceName, answers: Vec<Result<Record, SourceError>>) -> SequencedSource {
+        SequencedSource {
+            name,
+            answers: std::sync::Mutex::new(answers.into()),
+        }
+    }
+}
+
+impl Source for SequencedSource {
+    fn name(&self) -> SourceName {
+        self.name
+    }
+
+    fn supports(&self, _identifier: &Identifier) -> bool {
+        true
+    }
+
+    fn fetch(&self, _identifier: &Identifier) -> Result<Fetched, SourceError> {
+        self.answers
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("{} has no more answers queued", self.name))
+            .map(Fetched::network)
     }
 }
 
@@ -15350,6 +15388,263 @@ fn interactive_retry_that_finds_a_conflict_keeps_the_dangling_item_problem() {
         }
         other => panic!("expected a conflict Skipped after the retry, got {other:?}"),
     }
+}
+
+/// design D11: a retry's record keeps the extraction pass as its
+/// origin. The driver no longer overwrites `tier` back to `supplied`.
+#[test]
+fn a_retry_after_an_outage_keeps_the_extraction_pass_as_tier_not_supplied() {
+    let path = PathBuf::from("/lib/retry-tier.pdf");
+    let hash = hash_for("d11-retry-tier");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash,
+        pdf_with_embedded_doi("10.1000/d11-retry-tier"),
+    );
+    let crossref = FlakySource::new(
+        SourceName::Crossref,
+        1,
+        record_by("Smith", 2024, "10.1000/d11-retry-tier"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+    {
+        Some(Event::Resolved { tier, .. }) => {
+            assert_eq!(tier.as_deref(), Some("embedded-metadata"));
+        }
+        other => panic!("expected Event::Resolved after the retry, got {other:?}"),
+    }
+}
+
+/// design D11: a retry replaces the file's own lookup. An outage
+/// followed by every service answering not found is conclusive, so the
+/// next question offers no retry, and the skip carries the retry's own
+/// attempts.
+#[test]
+fn an_outage_then_not_found_on_retry_stops_offering_a_retry() {
+    let path = PathBuf::from("/lib/retry-not-found.pdf");
+    let hash = hash_for("d11-retry-not-found");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash,
+        pdf_with_embedded_doi("10.1000/d11-retry-not-found"),
+    );
+    let crossref = SequencedSource::new(
+        SourceName::Crossref,
+        vec![
+            Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+            Err(SourceError::NotFound),
+        ],
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert!(
+        !questions[1].choices.contains(&Answer::Retry),
+        "a conclusive retry must not offer another: got {:?}",
+        questions[1].choices
+    );
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
+    {
+        Some(Event::Skipped {
+            reason: SkipReason::Unresolvable { attempts, .. },
+            ..
+        }) => {
+            assert_eq!(
+                attempts,
+                &vec![Attempt {
+                    source: "crossref".to_string(),
+                    error: "not found".to_string(),
+                }],
+                "the skip carries the retry's attempt, not the outage's"
+            );
+        }
+        other => panic!("expected an unresolvable Skipped after the retry, got {other:?}"),
+    }
+}
+
+/// design D11: a failed supply is a candidate that led nowhere. It does
+/// not replace the file's own lookup, so a retry is still offered
+/// afterwards.
+#[test]
+fn an_outage_then_a_failed_supply_still_offers_a_retry() {
+    let path = PathBuf::from("/lib/supply-fails-retry-stays.pdf");
+    let hash = hash_for("d11-failed-supply-retry-stays");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash,
+        pdf_with_embedded_doi("10.1000/d11-failed-supply-retry-stays"),
+    );
+    // The file's own DOI meets an outage; the supplied one is held by
+    // nobody, which is conclusive about the candidate and nothing else.
+    let crossref = SequencedSource::new(
+        SourceName::Crossref,
+        vec![
+            Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+            Err(SourceError::NotFound),
+        ],
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/d11-nobody-holds-this".to_string())]);
+
+    events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert_eq!(
+        questions[1].choices.first().copied(),
+        Some(Answer::Retry),
+        "a failed supply must not replace the file's own inconclusive \
+         lookup: got {:?}",
+        questions[1].choices
+    );
+}
+
+/// design D11: overriding a conflict still reports it before the move,
+/// with no event about this file between the two.
+#[test]
+fn overriding_a_conflict_still_reports_resolved_before_renamed() {
+    let path = PathBuf::from("/lib/override-order.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("d11-override-order"),
+        pdf_with_embedded_doi("10.1000/d11-override-order").with_title("Title the File Claims"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/d11-override-order",
+            "A Completely Different Resolved Title",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Override]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        asker.questions_asked()[0]
+            .choices
+            .contains(&Answer::Override),
+        "the conflict question offers an override"
+    );
+    let resolved_index = events
+        .iter()
+        .position(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+        .unwrap_or_else(|| panic!("no Event::Resolved for the file: {events:?}"));
+    let renamed_index = events
+        .iter()
+        .position(|event| matches!(event, Event::Renamed { path: p, .. } if *p == path))
+        .unwrap_or_else(|| panic!("no Event::Renamed for the file: {events:?}"));
+
+    assert_eq!(
+        renamed_index,
+        resolved_index + 1,
+        "renamed must directly follow resolved: got {events:?}"
+    );
 }
 
 /// design D11: a supplied candidate for a file the library could not
