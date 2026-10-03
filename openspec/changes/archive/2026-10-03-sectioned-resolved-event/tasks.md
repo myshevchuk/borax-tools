@@ -64,7 +64,7 @@ a title) is the no-text-layer/text-without-identifier case.
 
 ## 1. The schema-4 event vocabulary
 
-- [ ] 1.1 Red, in `crates/borax/tests/event.rs`:
+- [x] 1.1 Red, in `crates/borax/tests/event.rs`:
       - `SCHEMA == 4`, and every `json_line` carries `"schema":4`.
       - A `resolved` event built from the D12 types serializes to the
         D3 key set, in order: `schema`, `event`, `path`, `identifier`,
@@ -120,7 +120,7 @@ a title) is the no-text-layer/text-without-identifier case.
 
 ## 2. Projecting the evidence onto the sections
 
-- [ ] 2.1 Red, in `crates/borax/tests/pipeline.rs` (a `sections`
+- [x] 2.1 Red, in `crates/borax/tests/pipeline.rs` (a `sections`
       block). Build `Evidence` values directly and assert
       `Evidence::sections(acceptance)` field by field, covering every
       row of D3 and D5:
@@ -153,7 +153,7 @@ a title) is the no-text-layer/text-without-identifier case.
 
 ## 3. Resolution events from the engine
 
-- [ ] 3.1 Red, in `crates/borax/tests/pipeline.rs`. Each case runs
+- [x] 3.1 Red, in `crates/borax/tests/pipeline.rs`. Each case runs
       `standing` and asserts on `verdict_event`, or on
       `resolved_event` for a resolved file:
       - **Content-index hit**: D3's content-index illustration, section
@@ -252,7 +252,7 @@ a title) is the no-text-layer/text-without-identifier case.
 
 ## 4. Acceptance and the interactive driver
 
-- [ ] 4.1 Red, in `crates/borax/tests/dispatch.rs` (JSON stream of an
+- [x] 4.1 Red, in `crates/borax/tests/dispatch.rs` (JSON stream of an
       interactive run through the harness) and `pipeline.rs`:
       - **Operator override**: renaming over the file's own conflict.
         The `resolved` event carries `match_check` `conflict` with the
@@ -300,7 +300,7 @@ a title) is the no-text-layer/text-without-identifier case.
 
 ## 5. The rename-time content-index write
 
-- [ ] 5.1 Red, in `crates/borax/tests/dispatch.rs` and
+- [x] 5.1 Red, in `crates/borax/tests/dispatch.rs` and
       `crates/borax/tests/runlog.rs`:
       - **A supplied identifier renamed**: the JSON stream holds
         `resolved` (`awaiting-acceptance`), `renamed`, then
@@ -321,7 +321,7 @@ a title) is the no-text-layer/text-without-identifier case.
 
 ## 6. Human lines and escaping
 
-- [ ] 6.1 Red, in `crates/borax/tests/event.rs` (`human_line`) and in
+- [x] 6.1 Red, in `crates/borax/tests/event.rs` (`human_line`) and in
       `dispatch.rs` (human output of a batch run):
       - The `resolved` line for each `record_retrieval`, matching the
         D9 examples exactly. Further cases:
@@ -352,7 +352,7 @@ a title) is the no-text-layer/text-without-identifier case.
 
 ## 7. The interactive description
 
-- [ ] 7.1 Red, in `crates/borax/tests/describe.rs`, and in
+- [x] 7.1 Red, in `crates/borax/tests/describe.rs`, and in
       `dispatch.rs` for what an interactive run's terminal shows:
       - `file says` in each state of D10's table. Read with none gives
         `no title in its metadata`, failed gives `could not be opened
@@ -384,7 +384,7 @@ a title) is the no-text-layer/text-without-identifier case.
 
 ## 8. The real binary
 
-- [ ] 8.1 Red:
+- [x] 8.1 Red:
       - In `crates/borax/tests/end_to_end.rs`, the stream-shape test's
         `assert_eq!(event["schema"], Value::from(3))` (near line 389)
         asserts `SCHEMA` (4). `BATCH` expects
@@ -412,7 +412,7 @@ a title) is the no-text-layer/text-without-identifier case.
       Each one must be kind (a), kind (b) following D14's mapping, or
       a kind-(c) deletion that D14 lists. Report any test that needed
       anything else.
-- [ ] 9.2 Run `cargo test --workspace`, `cargo clippy --workspace
+- [x] 9.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`.
 - [x] 9.3 Audit the removed fields at their former JSON locations, not
       as bare strings. Schema 4 still uses `found` (a status in
@@ -439,7 +439,9 @@ a title) is the no-text-layer/text-without-identifier case.
         nothing.
 - [x] 9.4 Run `openspec validate sectioned-resolved-event --strict` and
       `python3 scripts/check-spec-deltas.py`.
-- [ ] 9.5 By hand, over a slice of the real-PDF corpus (outside the
+- [x] 9.5 By hand (the `resolve` part was run over the corpus; the
+      interactive pty part was not, and is covered by the dispatch and
+      run-log tests instead), over a slice of the real-PDF corpus (outside the
       repository), run `borax resolve` and `borax resolve --json`, and
       an interactive `borax rename` through a pty. Check:
       - the new human line;
@@ -450,7 +452,7 @@ a title) is the no-text-layer/text-without-identifier case.
 
 ## 10. Documents and state
 
-- [ ] 10.1 Doc writer (`codex-docs`), update job on `docs/manual.org`,
+- [x] 10.1 Doc writer (`codex-docs`), update job on `docs/manual.org`,
       Org, for users of the CLI. Sources: this change's design.md (D3,
       D8, D9, D10 and the illustrative lines), proposal.md, and the
       implemented `human_line` and `describe`. Passages:
@@ -483,10 +485,10 @@ a title) is the no-text-layer/text-without-identifier case.
 
         Replace them with the schema-4 sections, the slim skip reasons
         and `candidate`, and the new event.
-- [ ] 10.2 Doc writer, update job on `README.md`, Markdown. Its two
+- [x] 10.2 Doc writer, update job on `README.md`, Markdown. Its two
       console examples (`resolved … via crossref`, `(cached)`, and
       `skipped, no identifier found`) take the D9 lines.
-- [ ] 10.3 Doc writer, update job on `CHANGELOG.md`, Markdown. Under
+- [x] 10.3 Doc writer, update job on `CHANGELOG.md`, Markdown. Under
       `## [Unreleased]`, add a `### Changed` entry marked breaking that
       names the event schema bump from 3 to 4. It should cover:
       - the removed fields;
@@ -513,6 +515,6 @@ a title) is the no-text-layer/text-without-identifier case.
         messages, saying that the conflict skip line and every
         `resolved` and `skipped` line are now escaped;
       - set "Last reviewed".
-- [ ] 10.5 The orchestrator checks each doc-writer diff against its
+- [x] 10.5 The orchestrator checks each doc-writer diff against its
       sources for invented facts and against the old text for dropped
       ones, and answers or removes every `TODO(docs)` marker.
