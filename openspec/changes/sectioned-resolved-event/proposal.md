@@ -109,8 +109,10 @@ fields are modified here rather than contradicted.
   content index, the response cache, or the network. The `(cached)` and
   `(from the library)` suffixes go (design D9).
 - **Escaping.** Resolution skip lines name the four extraction
-  failures. Every value that the `resolved` and `skipped` lines take
-  from a record, a file, a library store or a service is escaped.
+  failures. On every `resolved`, `skipped` and `content-index-write`
+  line, everything after the leading `<path>: ` is escaped, which
+  covers every value taken from a record, a file's contents, a library
+  store or a service. The path itself is printed as before.
   `STATE.md`'s defect about unescaped titles is narrowed to what is
   left: adoption's two messages (design D9).
 - **The interactive description.** It reads the sections. In place of

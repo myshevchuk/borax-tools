@@ -193,7 +193,7 @@ name from `Unattempted::as_str`:
 |---|---|---|
 | `schema` | `4` | every event |
 | `event` | `resolved`, `skipped`, `content-index-write`, … | every event |
-| `path` | the file as the run names it | every event |
+| `path` | the file as the run names it | `resolved`, `skipped` and `content-index-write`, the events this change reshapes or adds; every other event keeps its own fields unchanged |
 | `identifier` | the record's preferred identifier (`doi:…`, `arXiv:…`, `pmid:…`, `isbn:…`), or `""` if it carries none | `resolved` |
 | `record` | the full CSL-JSON record, provenance in `record.borax.provenance` | `resolved` |
 | `reason` | `{"kind": K}`, plus `message` when K is `unreadable`, and `reason` and `existing_path` when K is `duplicate`, as in schema 3 (D4) | `skipped` |
@@ -965,55 +965,121 @@ red batch, under three rules:
 (b) is a deliberate expectation rewrite following the mapping. Kind (c)
 is a deletion or replacement.
 
+The list comes from a sweep of `crates/*/tests/*.rs` at `4eeba3f` for
+these patterns:
+
+- Rust names: `SCHEMA`, `Event::Resolved {`, `Event::Skipped {`,
+  `SkipReason::NoIdentifier`, `Attempt {`, `Overridden`, `Provenance`,
+  `overrode`, `event_for`, `unresolvable(` and `attempts_of`;
+- method calls: `.tier()`, `.found()`, `.claims()`, `.cached()` and
+  `.source()`;
+- schema literals: `"schema":3`, `"schema": 3` and `Value::from(3)`;
+- JSON keys: `"found"`, `"cached"`, `"tier"`, `"claims"`, `"overrode"`,
+  `"source"` and `["library"]`;
+- human strings: `no-identifier`, `(cached)`, `(from the library)`,
+  `nothing read` and `no identifier found`;
+- `library: None` and `library: Some`.
+
+Counts are occurrences per file. Hits that are not about the stream
+are left out and named under the table.
+
+| File | Hits |
+|---|---|
+| `crates/borax/tests/event.rs` | `SCHEMA` 2, `"schema":3` 6, `"schema": 3` 1, `Value::from(3)` 4, `Event::Resolved {` 13, `Event::Skipped {` 7, `SkipReason::NoIdentifier` 16, `Attempt {` 7, `event_for` 5, `overrode` 14, `"found"` 4, `"cached"` 3, `"tier"` 5, `"claims"` 3, `"overrode"` 2, `"source"` 5, `["library"]` 6, `no-identifier` 2, `(cached)` 3, `(from the library)` 4, `no identifier found` 8, `library: None` 10, `library: Some` 3 |
+| `crates/borax/tests/pipeline.rs` | `Event::Resolved {` 19, `Event::Skipped {` 7, `SkipReason::NoIdentifier` 10, `Attempt {` 6, `Provenance` 8, `.tier()` 8, `.found()` 1, `.claims()` 3, `.cached()` 10, `.source()` 4, `event_for` 11, `unresolvable(` 1, `overrode` 8, `no-identifier` 4, `(cached)` 1, `library: None` 5 |
+| `crates/borax/tests/dispatch.rs` | `SCHEMA` 2, `Event::Resolved {` 36, `Event::Skipped {` 42, `SkipReason::NoIdentifier` 6, `Attempt {` 1, `Overridden` 2, `overrode` 8, `["library"]` 4, `no-identifier` 2, `(cached)` 5, `(from the library)` 2, `no identifier found` 3, `library: None` 2, `library: Some` 1, plus about 110 `library:` pattern fields |
+| `crates/borax/tests/describe.rs` | `Event::Resolved {` 7, `Event::Skipped {` 5, `SkipReason::NoIdentifier` 2, `Attempt {` 3, `Overridden` 2, `overrode` 6, `nothing read` 3, `library: None` 6, `library: Some` 3 |
+| `crates/borax/tests/renaming.rs` | `Event::Resolved {` 3 (lines ~1202, ~1216, ~1269), `Event::Skipped {` 10, `SkipReason::NoIdentifier` 1, `overrode` 4, `library: None` 13 |
+| `crates/borax/tests/per_file.rs` | `Event::Resolved {` 3 (a literal at ~264; patterns at ~327, ~343), `Event::Skipped {` 4, `SkipReason::NoIdentifier` 3, `overrode` 1, `no-identifier` 2, `library: None` 3 |
+| `crates/borax/tests/bib.rs` | `Event::Skipped {` 7, `overrode` 1, `library: None` 4 |
+| `crates/borax/tests/end_to_end.rs` | `Value::from(3)` 1 (~389), `"found"` 2, `"cached"` 1, `"tier"` 4, `"source"` 2, `no-identifier` 6 |
+| `crates/borax/tests/binary.rs` | `"tier"` 1, `["library"]` 1 (~471–478) |
+
+Not about the stream, and left alone:
+
+- the `"found"` and `"tier"` assertions on `library-extraction` events,
+  which this change does not touch: `event.rs` ~2031–2033 and
+  `end_to_end.rs` ~1226–1236;
+- `Provenance` in `crates/borax-core/tests/record.rs`, which is a
+  comment about record provenance;
+- `.source()` in `crates/borax-core/tests/tables.rs` and `template.rs`
+  (a template's source text) and in
+  `crates/borax-sources/tests/pace.rs` (`Paced::source`);
+- `found:` locals in `crates/borax/tests/library.rs`;
+- the hits the first draft attributed to `runlog.rs` (`STATE_DIR`) and
+  `run.rs` (a comment). Neither file needs an edit.
+
+The kinds of edit per file:
+
 - `crates/borax/tests/event.rs`:
   - (a) `Event::Resolved` and `Event::Skipped` literals, `Attempt` and
     `Overridden` imports and literals, `event_for` calls (to
     `resolved_event`), and the round-trip fixture list;
-  - (b) the `SCHEMA` and `"schema":3` literals, including the
-    `library-condition` and `library-adoption` JSON strings near lines
-    2263–2304; the `human_line` exact strings for `resolved` and
-    `skipped`; the JSON shape assertions on `found`, `cached`, `tier`,
-    `claims`, `overrode`, `source`, `library` and the skip reasons;
+  - (b):
+    - the `SCHEMA`, `Value::from(3)` and `"schema":3` literals,
+      including the `library-condition` and `library-adoption` JSON
+      strings near lines 2263–2304;
+    - the `human_line` exact strings for `resolved` and `skipped`;
+    - the JSON shape assertions on `found`, `cached`, `tier`, `claims`,
+      `overrode`, `source`, `library` and the skip reasons (near lines
+      392–425 and 600–660);
   - (c) delete `a_resolved_line_with_no_library_key_deserializes_with_library_none`
-    and `a_skipped_line_with_no_library_key_deserializes_with_library_none`,
-    because schema 4 does not read schema-3 lines (pre-1.0 rule).
+    and `a_skipped_line_with_no_library_key_deserializes_with_library_none`
+    (near line 1795), because schema 4 does not read schema-3 lines
+    (pre-1.0 rule).
 - `crates/borax/tests/pipeline.rs`:
   - (a) `overrode` becomes `overridden`; `.tier()`, `.cached()`,
-    `.source()`, `.found()` and `.claims()` become evidence reads;
-    `event_for` becomes `verdict_event` or `resolved_event`;
-    `file.conflict()` patterns change;
-  - (b) `SkipReason::NoIdentifier`, `Unresolvable {..}` and
-    `Conflict {..}` outcomes;
+    `.source()`, `.found()`, `.claims()` and `Provenance` become
+    evidence reads; `event_for` becomes `verdict_event` or
+    `resolved_event`; `file.conflict()` patterns change (near line
+    3517); `Attempt` becomes `ServiceAnswer`;
+  - (b) `SkipReason::NoIdentifier`, `Unresolvable {..}` (including the
+    one `unresolvable(` call) and `Conflict {..}` outcomes, and
+    `no-identifier` strings;
   - (c) the three `resolve_file_still_skips_…` regression-guard tests
     (near line 5376) are replaced by tests asserting `NoTextLayer`,
     `TextWithoutIdentifier` and `Encrypted`. Their comment block goes
     with them.
 - `crates/borax/tests/dispatch.rs`:
-  - (a) the `Event::Skipped { …, library }` patterns (about 110 uses of
-    `library:`) and the `Event::Resolved` destructuring;
-  - (b) human output containing `(cached)`, `via` or `no identifier
-    found`; JSON `tier`, `cached` and `library`; the `SCHEMA` and
-    "schema 3" checks near lines 13857–14021; `no-identifier`.
+  - (a) the `Event::Skipped { …, library }` patterns and the
+    `Event::Resolved` destructuring; `Attempt` and `Overridden`;
+    `overrode`;
+  - (b) human output containing `(cached)`, `(from the library)`, `via`
+    or `no identifier found`; JSON `tier`, `cached` and `library`; the
+    `SCHEMA` and "schema 3" checks near lines 13857–14021;
+    `no-identifier` and `SkipReason::NoIdentifier`.
 - `crates/borax/tests/describe.rs`:
-  - (a) `Event` literals, `Attempt`, `Overridden`;
-  - (b) the expected description lines for `file says`, the failed
-    verdicts and the `record` line.
-- `crates/borax/tests/end_to_end.rs`:
-  - (b) `BATCH`'s `Skipped("no-identifier")` for `no-identifier.pdf`
+  - (a) `Event` literals, `Attempt`, `Overridden`, `overrode`,
+    `library:`;
+  - (b) the expected description lines for `file says` (the three
+    `nothing read`), the failed verdicts (including the two
+    `SkipReason::NoIdentifier`), and the `record` line.
+- `crates/borax/tests/renaming.rs`:
+  - (a) the three `Event::Resolved` literals near lines 1202, 1216 and
+    1269 take `sections`; the `Event::Skipped` literals drop
+    `library`; `FileRecord` literals take `overridden`;
+  - (b) the one `SkipReason::NoIdentifier`.
+- `crates/borax/tests/per_file.rs`:
+  - (a) the `Event::Resolved` literal near line 264 takes `sections`;
+    the patterns near 327 and 343 are unaffected by `{ .. }`;
+    `Event::Skipped` literals drop `library`; the `FileRecord` literal
+    takes `overridden`;
+  - (b) the three `SkipReason::NoIdentifier` and two `no-identifier`.
+- `crates/borax/tests/bib.rs`: (a) `Event::Skipped` literals drop
+  `library`, and the `FileRecord` literal takes `overridden`.
+- `crates/borax/tests/end_to_end.rs`: (b)
+  - `assert_eq!(event["schema"], Value::from(3))` near line 389 becomes
+    `SCHEMA` (4);
+  - `BATCH`'s `Skipped("no-identifier")` for `no-identifier.pdf`
     becomes `text-without-identifier` (the same file's
-    `library-extraction` result at line ~1243). The entry for
-    `doi-past-page-range.pdf` follows that fixture's `status
-    --identify` result. `encrypted-user-password.pdf` becomes
-    `encrypted`. The JSON `tier`, `source`, `found` and `cached`
+    `library-extraction` result near line 1243);
+  - the entry for `doi-past-page-range.pdf` follows that fixture's
+    `status --identify` result;
+  - `encrypted-user-password.pdf` becomes `encrypted`;
+  - the `resolved` event's JSON `tier`, `source`, `found` and `cached`
     assertions near lines 450–457 and 1161 also change.
 - `crates/borax/tests/binary.rs`: (b) `resolved["tier"] == "library"`
-  and `resolved["library"]["kind"]` (near line 471).
-- `crates/borax/tests/renaming.rs`, `bib.rs` and `per_file.rs`: (a)
-  `FileRecord` literals, and `Event::Skipped` literals drop `library`;
-  (b) any `NoIdentifier`.
-- `crates/borax/tests/library.rs`, `runlog.rs` and `run.rs`: (a) or (b)
-  where they read the removed fields. The `found:` hits in
-  `library.rs` are local variables and need nothing.
+  and `resolved["library"]["kind"]` (near lines 471–478).
 
 Nothing in `crates/borax-sources/tests/` changes. That crate's types
 are untouched.

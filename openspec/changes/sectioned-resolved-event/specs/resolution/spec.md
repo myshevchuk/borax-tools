@@ -19,10 +19,15 @@ the kebab-case name of why it was not taken: `no-library`,
 taken SHALL NOT be left out, and SHALL NOT be reported as a step that
 ran and found nothing.
 
-The event schema version SHALL be 4. The schema-3 fields `found`,
-`cached`, `source`, `tier`, `claims` and `overrode` SHALL NOT be
-emitted on any event, under those names or any other, and no event SHALL
-carry a schema-3 rendering of a fact beside its schema-4 one. A
+The event schema version SHALL be 4. A `resolved` event SHALL NOT carry
+the schema-3 top-level fields `found`, `cached`, `source`, `tier`,
+`claims` or `overrode`, and the `reason` of a resolution `skipped` event
+SHALL NOT carry the schema-3 reason fields `found`, `tier`, `attempts`,
+`field`, `extracted`, `resolved` or `similarity`, whether under those
+names or under other names at those places. A name schema 4 uses inside
+a section — `found` as a status, `tier` in extraction's result, `claims`
+in the titles — is schema 4's own and is not one of these. No event
+SHALL carry a schema-3 rendering of a fact beside its schema-4 one. A
 `resolved` event keeps `path`, `identifier`, the record's preferred
 identifier, and `record`, the whole record.
 
@@ -36,9 +41,12 @@ identifier, and `record`, the whole record.
   kind `content-index`; and `acceptance` `automatic`
 
 #### Scenario: No schema-3 field survives
-- **WHEN** any run emits a `resolved` event or a `skipped` event
-- **THEN** the event carries none of the keys `found`, `cached`,
-  `source`, `tier`, `claims` or `overrode`
+- **WHEN** any run emits a `resolved` event or a resolution `skipped`
+  event
+- **THEN** the `resolved` event carries none of the keys `found`,
+  `cached`, `source`, `tier`, `claims` or `overrode` at its top level,
+  and the `skipped` event's `reason` carries none of the keys `found`,
+  `tier`, `attempts`, `field`, `extracted`, `resolved` or `similarity`
 
 #### Scenario: A resolution skip carries every section
 - **WHEN** a file is skipped because no service holds its identifier
@@ -346,10 +354,13 @@ followed by, for each kind:
 - `conflict`: `<field> disagrees <N>% (file says <extracted>, record
   says <resolved>)`.
 
-Every value the human rendering of a `resolved` or `skipped` event, or
-of a `content-index-write` event, takes from a record, a file, a library
-store or a service SHALL be escaped as the interactive description
-escapes it, so that a control character is shown rather than acted on.
+In the human rendering of a `resolved`, `skipped` or
+`content-index-write` event, the text after the leading `<path>: ` SHALL
+be escaped as the interactive description escapes it, so that a control
+character in any value that text takes from a record, a file's contents,
+a library store or a service is shown rather than acted on. The leading
+path SHALL be printed as every other human line prints it; escaping file
+names is outside this requirement.
 A `content-index-write` event SHALL render no line when its write was
 made, and a line saying the content index could not keep the answer,
 with the store's message, when it failed.

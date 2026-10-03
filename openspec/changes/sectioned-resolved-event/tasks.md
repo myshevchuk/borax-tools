@@ -229,7 +229,10 @@ a title) is the no-text-layer/text-without-identifier case.
         `resolve_file_skips_prose_as_text_without_identifier` and
         `resolve_file_skips_an_encrypted_file_as_encrypted`.
       - Kind (a) across `pipeline.rs`, `renaming.rs`, `bib.rs` and
-        `per_file.rs`, as the preamble lists.
+        `per_file.rs`, as the preamble lists. That includes the
+        `Event::Resolved` literals in `renaming.rs` (near lines 1202,
+        1216 and 1269) and `per_file.rs` (near line 264), which take
+        `sections`. Design D14's table lists every site per file.
 - [ ] 3.2 Green, in `crates/borax/src/pipeline.rs`:
       - `skipped_for` maps each failure to its own kind (D4 table, no
         wildcard arm);
@@ -382,7 +385,9 @@ a title) is the no-text-layer/text-without-identifier case.
 ## 8. The real binary
 
 - [ ] 8.1 Red:
-      - In `crates/borax/tests/end_to_end.rs`, `BATCH` expects
+      - In `crates/borax/tests/end_to_end.rs`, the stream-shape test's
+        `assert_eq!(event["schema"], Value::from(3))` (near line 389)
+        asserts `SCHEMA` (4). `BATCH` expects
         `text-without-identifier` for `no-identifier.pdf` and
         `encrypted` for `encrypted-user-password.pdf`. For
         `doi-past-page-range.pdf`, run `borax status --identify` on the
@@ -394,8 +399,10 @@ a title) is the no-text-layer/text-without-identifier case.
       - In `crates/borax/tests/binary.rs`, the library-answer test
         (near line 471) asserts `record_retrieval.kind == "library"`
         and `library.answer.kind == "tracked"`.
-      - A test runs `borax resolve --json` over the fixtures and checks
-        every `resolved` and `skipped` line against the D3 key set.
+      - A test runs `borax resolve --json` and `borax rename --apply
+        --json` over the fixtures. It checks every `resolved` and
+        `skipped` line against the D3 key set, and makes the
+        removed-field assertions task 9.3 names.
 - [ ] 8.2 Green: nothing beyond groups 1–7 is expected. If something is,
       the fix goes in the group that owns it, and the report says so.
 
@@ -407,10 +414,28 @@ a title) is the no-text-layer/text-without-identifier case.
       anything else.
 - [ ] 9.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`.
-- [ ] 9.3 Search `crates/` for the strings `"found"`, `"cached"`,
-      `"tier"`, `"claims"`, `"overrode"`, `no-identifier` and
-      `schema":3`. No hit may remain in source. In tests, the only
-      hits allowed are those asserting absence.
+- [ ] 9.3 Audit the removed fields at their former JSON locations, not
+      as bare strings. Schema 4 still uses `found` (a status in
+      `extraction.result` and an attempt outcome), `tier` (in
+      `extraction.result`) and `claims` (in `extraction.titles`), and
+      the unchanged `library-extraction` tests assert `found` and
+      `tier`. A repository-wide string ban therefore cannot pass. The
+      audit is:
+      - a test that runs `borax resolve --json` and `borax rename
+        --apply --json` over the fixtures (task 8.1) and asserts that
+        no `resolved` event has a top-level `found`, `cached`,
+        `source`, `tier`, `claims` or `overrode` key, and that no
+        resolution `skipped` event's `reason` object has a `found`,
+        `tier`, `attempts`, `field`, `extracted`, `resolved` or
+        `similarity` key;
+      - a whole-word search of `crates/borax/src/` for `Attempt`,
+        `Overridden`, `Provenance`, `event_for` and `NoIdentifier`, and
+        a search for `"no-identifier"`, which must find nothing
+        (`rg -w`, so `ServiceAttempt`, `Unattempted` and `attempts` do
+        not match);
+      - a search of `crates/*/tests/` for `"schema":3`, `"schema": 3`
+        and `Value::from(3)` used as a schema version, which must find
+        nothing.
 - [ ] 9.4 Run `openspec validate sectioned-resolved-event --strict` and
       `python3 scripts/check-spec-deltas.py`.
 - [ ] 9.5 By hand, over a slice of the real-PDF corpus (outside the
