@@ -19,7 +19,7 @@ use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier};
 use borax_core::record::{DateParts, EntryType, Name, Record};
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
-use borax_sources::cache::MemoryCache;
+use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
 use borax_sources::source::{Fetched, Source, SourceError, SourceName};
 use borax_sources::store::ContentIndex;
 use tempfile::tempdir;
@@ -190,8 +190,13 @@ impl BibFiles for FakeBibFiles {
 /// [`Question`] it was asked, and panics with a clear message if asked
 /// for more answers than it was given, following the shape of the one
 /// in `tests/dispatch.rs`.
+///
+/// `texts`, when scripted via [`ScriptedAsker::with_texts`], answers
+/// [`Asker::text`] the same way; a double built with `new` alone still
+/// panics on a text prompt, so a test that puts none keeps proving it.
 struct ScriptedAsker {
     answers: std::vec::IntoIter<Answer>,
+    texts: std::vec::IntoIter<Option<String>>,
     asked: RefCell<Vec<Question>>,
 }
 
@@ -199,8 +204,15 @@ impl ScriptedAsker {
     fn new(answers: Vec<Answer>) -> ScriptedAsker {
         ScriptedAsker {
             answers: answers.into_iter(),
+            texts: Vec::new().into_iter(),
             asked: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Script what [`Asker::text`] returns, in order.
+    fn with_texts(mut self, texts: Vec<Option<String>>) -> ScriptedAsker {
+        self.texts = texts.into_iter();
+        self
     }
 
     fn questions_asked(&self) -> Vec<Question> {
@@ -220,10 +232,10 @@ impl Asker for ScriptedAsker {
         })
     }
 
-    /// This change puts no text prompt; a double that is asked for one
-    /// fails the test rather than inventing an answer.
     fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
-        panic!("asked for text, which no question here puts: {prompt:?}")
+        self.texts
+            .next()
+            .unwrap_or_else(|| panic!("asked for text, which was not scripted: {prompt:?}"))
     }
 }
 
@@ -657,6 +669,214 @@ fn run_log_contains_exactly_the_json_stdout_stream_including_framing_events() {
     assert_eq!(
         log_text, stdout_text,
         "the run log must contain exactly the --json stream"
+    );
+}
+
+// ---------------------------------------------------------------------
+// sectioned-resolved-event, review gate: the run log for
+// `content-index-write` (spec scenario "A supplied identifier
+// remembered", task 5.1) — the same event through the real logging
+// sink, not only through `events_for`.
+// ---------------------------------------------------------------------
+
+/// A PDF whose text layer and metadata hold no identifier at all, so an
+/// interactive run has to ask the operator to supply one.
+fn pdf_with_no_identifier() -> FakePdf {
+    FakePdf {
+        info: InfoMetadata::default(),
+        xmp: None,
+    }
+}
+
+/// An applying, `--json` interactive rename where the operator supplies
+/// the identifier and the move is made: the run log holds `resolved`,
+/// `renamed` and `content-index-write` exactly once each, in that
+/// order, and equals stdout line for line — the same invariant
+/// `run_log_contains_exactly_the_json_stdout_stream_including_framing_events`
+/// pins for a batch run, now for the path design D8 adds a new event
+/// to.
+#[test]
+fn run_log_contains_resolved_renamed_and_content_index_write_in_order() {
+    let dir = tempdir().unwrap();
+    let path = PathBuf::from("/lib/paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_of("supplied-remembered"),
+        pdf_with_no_identifier(),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/supplied-remembered")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/supplied-remembered".to_string())]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![path.clone()], true), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    assert!(
+        err.is_empty(),
+        "a clean run must not warn: {:?}",
+        String::from_utf8_lossy(&err)
+    );
+    assert_eq!(
+        filesystem.renames().len(),
+        1,
+        "the file must be moved: got {:?}",
+        filesystem.renames()
+    );
+    let stdout_text = String::from_utf8(out).unwrap();
+
+    let runs = dir.path().join(ACCOUNTING_DIR).join(RUNS_DIR);
+    let names = run_log_names(&runs);
+    assert_eq!(names.len(), 1, "got {names:?}");
+    let log_text = std::fs::read_to_string(runs.join(&names[0])).unwrap();
+
+    assert_eq!(
+        log_text, stdout_text,
+        "the run log must contain exactly the --json stream"
+    );
+
+    let tags: Vec<String> = log_text
+        .lines()
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("line is not JSON: {line:?} ({error})"));
+            value["event"].as_str().unwrap_or_default().to_string()
+        })
+        .filter(|tag| matches!(tag.as_str(), "resolved" | "renamed" | "content-index-write"))
+        .collect();
+
+    assert_eq!(
+        tags,
+        vec!["resolved", "renamed", "content-index-write"],
+        "got {log_text:?}"
+    );
+
+    let write = log_text
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|value| value["event"] == "content-index-write")
+        .unwrap_or_else(|| panic!("no content-index-write event: {log_text:?}"));
+    assert_eq!(write["write"], serde_json::json!({"status": "written"}));
+}
+
+/// The same scenario with a content index whose write fails: the move
+/// still stands, and `content-index-write` reports `failed` with the
+/// message rather than being skipped — a failed cache write is
+/// evidence, not a failure (design D8).
+struct WriteFailingCache;
+
+impl Cache for WriteFailingCache {
+    fn get(&self, _key: &str) -> Option<Record> {
+        None
+    }
+
+    fn put(&self, _key: &str, _record: &Record) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+}
+
+#[test]
+fn run_log_reports_a_failed_content_index_write_without_failing_the_rename() {
+    let dir = tempdir().unwrap();
+    let path = PathBuf::from("/lib/paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_of("supplied-write-fails"),
+        pdf_with_no_identifier(),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/supplied-write-fails")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(WriteFailingCache);
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles;
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(dir.path().to_path_buf()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/supplied-write-fails".to_string())]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![path.clone()], true), true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    assert_eq!(
+        filesystem.renames().len(),
+        1,
+        "the rename must stand even though the index write failed"
+    );
+    let stdout_text = String::from_utf8(out).unwrap();
+
+    let runs = dir.path().join(ACCOUNTING_DIR).join(RUNS_DIR);
+    let names = run_log_names(&runs);
+    assert_eq!(names.len(), 1, "got {names:?}");
+    let log_text = std::fs::read_to_string(runs.join(&names[0])).unwrap();
+
+    assert_eq!(
+        log_text, stdout_text,
+        "the run log must contain exactly the --json stream"
+    );
+
+    let write = log_text
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|value| value["event"] == "content-index-write")
+        .unwrap_or_else(|| panic!("no content-index-write event: {log_text:?}"));
+    assert_eq!(
+        write["write"],
+        serde_json::json!({"status": "failed", "message": "write-failing cache"})
     );
 }
 

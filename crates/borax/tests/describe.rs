@@ -1641,3 +1641,195 @@ fn a_library_problem_on_a_skipped_event_follows_the_reasons_lines() {
         "got {lines:#?}"
     );
 }
+
+// ---------------------------------------------------------------------
+// sectioned-resolved-event, review gate: exact description lines for
+// three of D10's table rows the suite did not yet pin by full equality.
+// ---------------------------------------------------------------------
+
+/// design D10: a blank scan whose metadata still claims a title shows
+/// the no-text-layer identifier line, then `file says` with the title
+/// retained — the titles state is independent of extraction's own
+/// result (D3), so a failed verdict still has to show what the file's
+/// own metadata said.
+#[test]
+fn a_titled_blank_scan_shows_the_no_text_layer_line_and_the_retained_title() {
+    let event = Event::Skipped {
+        path: PathBuf::from("scan.pdf"),
+        reason: SkipReason::NoTextLayer,
+        sections: Some(Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Miss,
+                write: WriteStep::NotAttempted {
+                    reason: "extraction-failed".to_string(),
+                },
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::NoTextLayer,
+                titles: TitlesStep::Read {
+                    claims: vec![Claim {
+                        from: ClaimOrigin::Info,
+                        title: "A Title".to_string(),
+                    }],
+                },
+            },
+            lookup: LookupStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+            acceptance: Acceptance::NotApplicable,
+        })),
+        candidate: None,
+    };
+
+    let lines = describe(
+        &event,
+        "scan.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert_eq!(
+        lines,
+        vec![
+            rule(1, 1, DEFAULT_WIDTH),
+            label_line("file", "scan.pdf"),
+            label_line("identifier", "none found; the pages read hold no text"),
+            label_line("file says", "A Title (document info)"),
+        ],
+        "got {lines:#?}"
+    );
+}
+
+/// design D10: an encrypted file names the encrypted identifier line,
+/// then `file says` with the open failure — the file could not be
+/// opened at all, so its titles are `Failed`, not `Read` or
+/// `NotAttempted`.
+#[test]
+fn an_encrypted_file_shows_the_encrypted_line_and_could_not_be_opened() {
+    let event = Event::Skipped {
+        path: PathBuf::from("locked.pdf"),
+        reason: SkipReason::Encrypted,
+        sections: Some(Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Miss,
+                write: WriteStep::NotAttempted {
+                    reason: "extraction-failed".to_string(),
+                },
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::Encrypted,
+                titles: TitlesStep::Failed {
+                    message: "PDF is encrypted".to_string(),
+                },
+            },
+            lookup: LookupStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+            acceptance: Acceptance::NotApplicable,
+        })),
+        candidate: None,
+    };
+
+    let lines = describe(
+        &event,
+        "locked.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert_eq!(
+        lines,
+        vec![
+            rule(1, 1, DEFAULT_WIDTH),
+            label_line("file", "locked.pdf"),
+            label_line("identifier", "none read; the file is encrypted"),
+            label_line("file says", "could not be opened (PDF is encrypted)"),
+        ],
+        "got {lines:#?}"
+    );
+}
+
+/// design D10: an identifier no configured service could be asked about
+/// shows the identifier whole, then `no record` naming that no source
+/// was asked — the `no-eligible-service` lookup state, told apart from
+/// an attempted lookup every service answered.
+#[test]
+fn a_no_eligible_service_lookup_shows_no_source_was_asked() {
+    let event = Event::Skipped {
+        path: PathBuf::from("preprint.pdf"),
+        reason: SkipReason::Unresolvable,
+        sections: Some(Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Miss,
+                write: WriteStep::NotAttempted {
+                    reason: "no-record".to_string(),
+                },
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::Found {
+                    identifier: "arXiv:2401.12345".to_string(),
+                    tier: "text-layer".to_string(),
+                },
+                titles: TitlesStep::Read { claims: Vec::new() },
+            },
+            lookup: LookupStep::NoEligibleService {
+                identifier: "arXiv:2401.12345".to_string(),
+                origin: IdentifierOrigin::Extracted,
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: "no-record".to_string(),
+            },
+            acceptance: Acceptance::NotApplicable,
+        })),
+        candidate: None,
+    };
+
+    let lines = describe(
+        &event,
+        "preprint.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert_eq!(
+        lines,
+        vec![
+            rule(1, 1, DEFAULT_WIDTH),
+            label_line("file", "preprint.pdf"),
+            label_line("identifier", "arXiv:2401.12345, from the text layer"),
+            label_line("no record", "no source was asked"),
+            label_line("file says", "no title in its metadata"),
+        ],
+        "got {lines:#?}"
+    );
+}
