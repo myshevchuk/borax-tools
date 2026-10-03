@@ -16,25 +16,25 @@ use std::path::{Path, PathBuf};
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
 use borax_core::library::DuplicateReason;
-use borax_core::record::{Record, Source as FieldSource};
+use borax_core::record::Record;
 use borax_pdf::pure::PurePdf;
 use borax_pdf::scan::xmp_title;
 use borax_pdf::source::{ExtractionError, PdfSource};
-use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier, extract};
+use borax_pdf::tiered::{Extracted, ExtractionConfig, extract};
 use borax_sources::cache::Cache;
-use borax_sources::conflict::{TitleCheck, check_title};
+use borax_sources::conflict::{Conflict, TitleCheck, check_title};
 use borax_sources::dispatch::{Resolved, Unresolved, resolve};
 use borax_sources::pace::map_bounded;
-use borax_sources::source::{Source, SourceName};
+use borax_sources::source::Source;
 use borax_sources::store::{ContentIndex, hash_file};
 
 use crate::event::{
-    Attempt, Claim, ClaimOrigin, Counts, Event, Extraction, LibraryAnswer, Overridden, SkipReason,
+    Acceptance, Claim, ClaimOrigin, Counts, Event, Extraction, LibraryAnswer, ServiceAnswer,
+    SkipReason,
 };
 use crate::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
-    IndexWrite, LookupEvidence, MatchCheck, Origin, RecordRetrieval, ServiceAttempt, Titles,
-    Unattempted,
+    IndexWrite, LookupEvidence, MatchCheck, Origin, ServiceAttempt, Titles, Unattempted,
 };
 use crate::library::{Account, Consulted, Stores, WorkDuplicate};
 
@@ -70,148 +70,48 @@ pub struct FileRecord {
     /// recognises an already-named file by content, not by path.
     pub hash: Option<ContentHash>,
     /// What the resolution that reached `record` found out about the
-    /// file, step by step. The methods below derive every other fact
-    /// about the record's provenance from it.
+    /// file, step by step.
     pub evidence: Evidence,
-    /// The conflict an operator accepted to reach this record, or
-    /// `None` when the record cleared the conflict check on its own.
+    /// Whether an operator accepted `record` over the conflict its
+    /// title check concluded, which `evidence.match_check` still holds.
     ///
-    /// Only an interactive run can set it: the batch path skips every
-    /// conflict it finds, so a record that reaches a caller from there
-    /// has nothing to have overridden.
-    pub overrode: Option<Overridden>,
+    /// Only an interactive run can set it ([`accept`]): the batch path
+    /// skips every conflict it finds, so a record that reaches a caller
+    /// from there has nothing to have overridden.
+    pub overridden: bool,
 }
 
 impl FileRecord {
-    /// The service that supplied the record, or `None` when no service
-    /// did: the content index or the library answered.
-    ///
-    /// Read from [`Evidence::retrieval`], so a record a service served
-    /// from its response cache names that service.
-    pub fn source(&self) -> Option<SourceName> {
-        match self.evidence.retrieval()? {
-            RecordRetrieval::ServiceCache { service } | RecordRetrieval::Network { service } => {
-                Some(service)
-            }
-            RecordRetrieval::Library { .. } | RecordRetrieval::ContentIndex => None,
-        }
-    }
-
-    /// Where the identifier the record was reached by came from, or
-    /// `None` when the content index answered and nothing was looked
-    /// up.
-    ///
-    /// Read from [`Evidence::retrieval`]: a record a service supplied
-    /// gives the extraction pass that read the identifier, or
-    /// [`Provenance::Supplied`] for an operator's; a record the library
-    /// supplied gives [`Provenance::Library`]. What the library said
-    /// about the file makes no difference to a record a service
-    /// supplied.
-    pub fn tier(&self) -> Option<Provenance> {
-        match self.evidence.retrieval()? {
-            RecordRetrieval::ServiceCache { .. } | RecordRetrieval::Network { .. } => {
-                match &self.evidence.lookup {
-                    LookupEvidence::Attempted {
-                        origin: Origin::Extracted(tier),
-                        ..
-                    } => Some(Provenance::Extracted(*tier)),
-                    LookupEvidence::Attempted {
-                        origin: Origin::Operator,
-                        ..
-                    } => Some(Provenance::Supplied),
-                    LookupEvidence::NotAttempted(_) => None,
-                }
-            }
-            RecordRetrieval::Library { .. } => Some(Provenance::Library),
-            RecordRetrieval::ContentIndex => None,
-        }
-    }
-
-    /// The identifier the run looked up, or `None` when nothing was
-    /// looked up because the content index or the library answered.
-    ///
-    /// Kept apart from the record because the record's own identifiers
-    /// are not evidence about the file: a lookup by arXiv identifier can
-    /// return a record carrying a DOI, and only the former was ever
-    /// seen in the file.
-    pub fn found(&self) -> Option<&Identifier> {
-        match &self.evidence.lookup {
-            LookupEvidence::Attempted { identifier, .. } => Some(identifier),
-            LookupEvidence::NotAttempted(_) => None,
-        }
-    }
-
-    /// Every title the file claims for itself, in the order they were
-    /// read, and none when the file was not opened or could not be.
-    pub fn claims(&self) -> &[Claim] {
-        self.evidence.extraction.titles.claims()
-    }
-
-    /// Whether the content index answered, making both extraction and
-    /// resolution unnecessary. `false` for a library answer and for a
-    /// service's response cache, neither of which is the content index.
-    pub fn cached(&self) -> bool {
-        self.evidence.retrieval() == Some(RecordRetrieval::ContentIndex)
-    }
-
     /// What the run's library said about the file, or `None` when it
     /// was not asked.
     ///
-    /// [`LibraryAnswer::Tracked`] with [`FileRecord::tier`]
-    /// [`Provenance::Library`] is a record the library supplied; with
-    /// any other tier, the library answered and the record was reached
-    /// some other way, as when an operator re-identified the file. A
+    /// [`LibraryAnswer::Tracked`] with a lookup not attempted because
+    /// the library answered is a record the library supplied; with a
+    /// lookup, the library answered and the record was reached some
+    /// other way, as when an operator re-identified the file. A
     /// problem answer is a record reached by the passes the library
     /// could not spare.
     pub fn library(&self) -> Option<&LibraryAnswer> {
         self.evidence.library.answer()
     }
 
-    /// The disagreement between the record's title and the file's own,
-    /// as the [`SkipReason::Conflict`] a batch run skips on, or `None`
-    /// when the title check did not conclude a conflict.
-    pub fn conflict(&self) -> Option<SkipReason> {
+    /// The conflict the title check concluded between the record and
+    /// the file's own titles, or `None` when it concluded none. Still
+    /// reported for a record an operator accepted over it.
+    pub fn conflict(&self) -> Option<&Conflict> {
         match &self.evidence.match_check {
-            MatchCheck::Conflict(conflict) => Some(SkipReason::Conflict {
-                field: conflict.field.to_string(),
-                extracted: conflict.extracted.clone(),
-                resolved: conflict.resolved.clone(),
-                similarity: conflict.similarity,
-            }),
+            MatchCheck::Conflict(conflict) => Some(conflict),
             _ => None,
         }
     }
-}
 
-/// Where the identifier a record was reached by came from.
-///
-/// Not a [`Tier`] variant, and no variant is added to that enum: every
-/// `Tier` names a pass over a file, and borax-pdf knows nothing about
-/// operators. A supplied identifier came from no pass at all, so the
-/// distinction is drawn here, where the operator exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Provenance {
-    /// An extraction pass over the file found it.
-    Extracted(Tier),
-    /// The operator typed it.
-    Supplied,
-    /// The file's library item supplied the whole record, so no
-    /// identifier was looked for.
-    Library,
-}
-
-impl Provenance {
-    /// The word the `resolved` event's `tier` field carries for it: the
-    /// pass's own name, `supplied`, or `library`.
-    ///
-    /// A bare `supplied` rather than "supplied by hand": the other
-    /// values in that field name where the identifier was read, and
-    /// this one names that it was not read.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Provenance::Extracted(tier) => tier.as_str(),
-            Provenance::Supplied => "supplied",
-            Provenance::Library => "library",
+    /// Whether the record was used as it stands or over an overridden
+    /// conflict: [`Acceptance::Overridden`] when [`FileRecord::overridden`]
+    /// is set, and [`Acceptance::Automatic`] otherwise.
+    pub fn acceptance(&self) -> Acceptance {
+        match self.overridden {
+            true => Acceptance::Overridden,
+            false => Acceptance::Automatic,
         }
     }
 }
@@ -300,7 +200,7 @@ fn indexed_record(record: Record, hash: Option<ContentHash>, library: Consultati
         },
         // A record served from the index was accepted by whatever run
         // put it there, not by this one.
-        overrode: None,
+        overridden: false,
     }
 }
 
@@ -321,7 +221,7 @@ fn library_record(record: Record, hash: Option<ContentHash>, answer: LibraryAnsw
         // A library item is past the point of a conflict check: it was
         // admitted, adopted or corrected, and nothing was overridden
         // here to reach it.
-        overrode: None,
+        overridden: false,
     }
 }
 
@@ -473,14 +373,14 @@ pub fn title_check(titles: &Titles, record: &Record) -> MatchCheck {
 /// replaces it. A run that must leave the cache untouched clears it
 /// instead.
 ///
-/// Extraction failures map onto skip reasons as follows:
-/// [`ExtractionError::Unreadable`] and [`ExtractionError::Encrypted`]
-/// both become [`SkipReason::Unreadable`] carrying the error's own
-/// message, which keeps an encrypted file distinguishable from a
-/// corrupt one; [`ExtractionError::NoTextLayer`] and
-/// [`ExtractionError::NoIdentifierFound`] both become
-/// [`SkipReason::NoIdentifier`], since to a user both mean the file
-/// said nothing about what it is.
+/// Each extraction failure is a skip of its own kind:
+/// [`ExtractionError::NoTextLayer`] is [`SkipReason::NoTextLayer`],
+/// [`ExtractionError::NoIdentifierFound`] is
+/// [`SkipReason::TextWithoutIdentifier`], [`ExtractionError::Encrypted`]
+/// is [`SkipReason::Encrypted`], and [`ExtractionError::Unreadable`] is
+/// [`SkipReason::Unreadable`] carrying the reader's message. A lookup
+/// no service answered is [`SkipReason::Unresolvable`], and a record the
+/// title check refused is [`SkipReason::Conflict`].
 ///
 /// Never panics and never propagates an error: every failure is a
 /// [`FileOutcome::Skipped`] carrying the reason, because one unreadable
@@ -773,8 +673,7 @@ fn beyond_library<C: Cache>(
                 lookup: unheld_lookup(&looked_up, origin, &unresolved),
                 match_check: MatchCheck::NotAttempted(reason),
             };
-            let reason = unresolvable(&unresolved, &looked_up, tier);
-            return Standing::skipped(reason, hash, evidence);
+            return Standing::skipped(SkipReason::Unresolvable, hash, evidence);
         }
     };
 
@@ -799,15 +698,15 @@ fn beyond_library<C: Cache>(
         record: resolved.record,
         // Nothing has been overridden: either the conflict check has
         // passed, or this record is refused below and whoever accepts
-        // it records what they accepted it over.
-        overrode: None,
+        // it records that it did.
+        overridden: false,
     };
 
-    if let Some(conflict) = file.conflict() {
+    if file.conflict().is_some() {
         let evidence = file.evidence.clone();
         return Standing {
             refused: Some(file),
-            ..Standing::skipped(conflict, hash, evidence)
+            ..Standing::skipped(SkipReason::Conflict, hash, evidence)
         };
     }
 
@@ -921,7 +820,7 @@ pub fn resolve_supplied(
         record: resolved.record,
         // Nothing has been overridden yet. Accepting this record over a
         // conflict is the caller's decision, and [`accept`] records it.
-        overrode: None,
+        overridden: false,
     })
 }
 
@@ -951,24 +850,16 @@ pub fn unheld_evidence(
 
 /// `file` as an operator's accepting it makes it.
 ///
-/// `overrode` is the conflict the title check concluded, in the
-/// vocabulary the skip would have used, or `None` when it concluded
-/// none. A content-index write held back because the record was
+/// [`FileRecord::overridden`] is set when the title check concluded a
+/// conflict, which stays in the evidence as it was. A content-index
+/// write held back because the record was
 /// refused ([`Unattempted::Refused`]) now waits for the move instead
 /// ([`Unattempted::AwaitingAcceptance`]). Nothing else changes: the
 /// record, its hash, and the title check's conclusion stay as they
 /// were.
 pub fn accept(file: FileRecord) -> FileRecord {
-    let overrode = match &file.evidence.match_check {
-        MatchCheck::Conflict(conflict) => Some(Overridden {
-            field: conflict.field.to_string(),
-            extracted: conflict.extracted.clone(),
-            resolved: conflict.resolved.clone(),
-            similarity: conflict.similarity,
-        }),
-        _ => None,
-    };
-    let mut accepted = FileRecord { overrode, ..file };
+    let overridden = file.conflict().is_some();
+    let mut accepted = FileRecord { overridden, ..file };
     let write = &mut accepted.evidence.content_index.write;
     if *write == IndexWrite::NotAttempted(Unattempted::Refused) {
         *write = IndexWrite::NotAttempted(Unattempted::AwaitingAcceptance);
@@ -1100,131 +991,84 @@ fn claimed_titles(pdf: &dyn PdfSource) -> Vec<Claim> {
     .collect()
 }
 
-/// The skip an extraction failure reports.
+/// The skip an extraction failure reports: each failure its own kind,
+/// an unreadable file keeping the reader's message.
 fn skipped_for(error: &ExtractionError) -> SkipReason {
     match error {
+        ExtractionError::NoTextLayer => SkipReason::NoTextLayer,
+        ExtractionError::NoIdentifierFound => SkipReason::TextWithoutIdentifier,
+        ExtractionError::Encrypted => SkipReason::Encrypted,
         ExtractionError::Unreadable { message } => SkipReason::Unreadable {
             message: message.clone(),
         },
-        ExtractionError::Encrypted => SkipReason::Unreadable {
-            message: error.to_string(),
-        },
-        ExtractionError::NoTextLayer | ExtractionError::NoIdentifierFound => {
-            SkipReason::NoIdentifier
-        }
     }
 }
 
-/// The skip a failed resolution reports, naming the identifier that
-/// was looked up and keeping the attempts in the order the sources
-/// were asked.
-pub fn unresolvable(unresolved: &Unresolved, found: &Identifier, tier: Tier) -> SkipReason {
-    SkipReason::Unresolvable {
-        found: found.to_string(),
-        tier: Some(tier.as_str().to_string()),
-        attempts: attempts_of(unresolved),
-    }
-}
-
-/// What each service answered, as a reader of the stream is told it:
-/// one entry per source, in the order they were asked.
+/// What each service answered about an identifier none of them held,
+/// one answer per service in the order they were asked.
 ///
-/// Separate from [`unresolvable`] because a caller that is showing a
-/// failed lookup rather than reporting it has no skip to build — an
+/// For a caller showing a failed lookup rather than reporting it: an
 /// identifier the operator supplied and nobody held is a candidate's
-/// outcome and not the file's verdict.
-pub fn attempts_of(unresolved: &Unresolved) -> Vec<Attempt> {
+/// outcome and not the file's verdict, so it reaches no event.
+pub fn attempts_of(unresolved: &Unresolved) -> Vec<ServiceAnswer> {
     unresolved
         .attempts
         .iter()
-        .map(|(source, error)| Attempt {
-            source: source.to_string(),
-            error: error.to_string(),
+        .map(|(service, error)| {
+            ServiceAttempt {
+                service: *service,
+                outcome: Err(error.clone()),
+            }
+            .answer()
         })
         .collect()
 }
 
-/// The services that supplied `file`'s record, as the event names them.
-///
-/// The service the resolver used, where the run looked one up. Where
-/// the content index answered instead, the sources the record's own
-/// per-field provenance names, other than extraction itself: a record
-/// is the work of whoever's fields it carries, and the index is only
-/// where it was kept. They are named in one fixed order — Crossref,
-/// OpenAlex, arXiv, DataCite, PubMed, then a sidecar — rather than in
-/// [`borax_sources::dispatch::priority`]'s, which differs by identifier
-/// type and omits services a record can still carry a field from.
-///
-/// A record whose provenance names no such source reports where it was
-/// kept instead, since nothing else is known about where it came from:
-/// `library` for a record the library supplied, and `cache` for one the
-/// content index did.
-fn sources_of(file: &FileRecord) -> String {
-    if let Some(source) = file.source() {
-        return source.as_str().to_string();
-    }
-
-    // The order a record's makers are named in, fixed rather than
-    // taken from the resolver's priority, which differs by identifier
-    // type and leaves out services a record can carry a field from.
-    const ORDER: [(FieldSource, &str); 6] = [
-        (FieldSource::Crossref, "crossref"),
-        (FieldSource::OpenAlex, "openalex"),
-        (FieldSource::Arxiv, "arxiv"),
-        (FieldSource::DataCite, "datacite"),
-        (FieldSource::PubMed, "pubmed"),
-        (FieldSource::Sidecar, "sidecar"),
-    ];
-    let named: Vec<&str> = ORDER
-        .iter()
-        .filter(|(source, _)| {
-            file.record
-                .borax
-                .provenance
-                .values()
-                .any(|had| had == source)
-        })
-        .map(|(_, name)| *name)
-        .collect();
-
-    match (named.is_empty(), file.tier()) {
-        (false, _) => named.join(", "),
-        (true, Some(Provenance::Library)) => "library".to_string(),
-        (true, _) => "cache".to_string(),
-    }
-}
-
-/// The event that reports `outcome` for `path`.
-///
-/// A resolved file whose source is unknown — the content index
-/// answered — reports its source as `cache`. A skip carries no library
-/// answer, having no record to carry one; [`verdict_event`] is the one
-/// that reports a skip's.
-pub fn event_for(path: &Path, outcome: &FileOutcome) -> Event {
-    match outcome {
-        FileOutcome::Resolved(file) => resolved_event(path, file),
-        FileOutcome::Skipped(reason) => Event::Skipped {
-            path: path.to_path_buf(),
-            reason: reason.clone(),
-            library: None,
-        },
-    }
-}
-
-/// The event reporting `standing`'s verdict for `path`, carrying its
-/// library answer on a `skipped` event as on a `resolved` one.
+/// The event reporting `standing`'s verdict for `path`: the resolved
+/// record's [`resolved_event`], or the skip's [`resolution_skip`]
+/// carrying the standing's evidence and, on a conflict, the refused
+/// record.
 pub fn verdict_event(path: &Path, standing: &Standing) -> Event {
     match &standing.verdict {
         FileOutcome::Resolved(file) => resolved_event(path, file),
-        FileOutcome::Skipped(reason) => Event::Skipped {
-            path: path.to_path_buf(),
-            reason: reason.clone(),
-            library: standing.library().cloned(),
-        },
+        FileOutcome::Skipped(reason) => resolution_skip(
+            path,
+            reason.clone(),
+            &standing.evidence,
+            standing.refused.as_ref().map(|file| &file.record),
+        ),
     }
 }
 
-/// The event that reports `file` as `path`'s resolution.
+/// The `skipped` event reporting `reason` as `path`'s resolution
+/// verdict, with `evidence`'s sections and acceptance
+/// [`Acceptance::NotApplicable`].
+///
+/// `reason` is meant to be a resolution verdict
+/// ([`SkipReason::is_resolution_verdict`]); for any other the event
+/// carries no sections, as every skip made after a file resolved
+/// carries none. `candidate` is the record the title check refused, and
+/// is carried only when `reason` is [`SkipReason::Conflict`].
+pub fn resolution_skip(
+    path: &Path,
+    reason: SkipReason,
+    evidence: &Evidence,
+    candidate: Option<&Record>,
+) -> Event {
+    Event::Skipped {
+        path: path.to_path_buf(),
+        sections: reason
+            .is_resolution_verdict()
+            .then(|| Box::new(evidence.sections(Acceptance::NotApplicable))),
+        candidate: candidate
+            .filter(|_| reason == SkipReason::Conflict)
+            .map(|record| Box::new(record.clone())),
+        reason,
+    }
+}
+
+/// The event that reports `file` as `path`'s resolution, with its
+/// evidence's sections and [`FileRecord::acceptance`].
 ///
 /// Public because the description an interactive run shows is a
 /// rendering of this event and of nothing else: the operator at the
@@ -1236,15 +1080,7 @@ pub fn resolved_event(path: &Path, file: &FileRecord) -> Event {
         path: path.to_path_buf(),
         identifier: identifier_of(&file.record),
         record: Box::new(file.record.clone()),
-        source: sources_of(file),
-        found: file
-            .found()
-            .map_or_else(|| identifier_of(&file.record), Identifier::to_string),
-        claims: file.claims().to_vec(),
-        tier: file.tier().map(|whence| whence.as_str().to_string()),
-        overrode: file.overrode.clone(),
-        cached: file.cached(),
-        library: file.library().cloned(),
+        sections: Box::new(file.evidence.sections(file.acceptance())),
     }
 }
 

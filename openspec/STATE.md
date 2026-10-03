@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-01, at 0.8.0.
+Last reviewed: 2026-10-03, at 0.8.0.
 
 ## What is built
 
@@ -369,10 +369,42 @@ candidate's: a retry replaces it, a supply never does. A record an
 operator reached, or accepted over its own conflict through
 `pipeline::accept`, records its content-index write as awaiting
 acceptance; the write itself is made at the move, and `remember`'s
-result is held beside the move's outcome and rendered nowhere yet.
-Change 9 renders this evidence as the schema-4 sections, chooses the
-event that carries the rename-time write, and makes the single bump
-from 3 to 4.
+result is held beside the move's outcome. `sectioned-resolved-event`
+renders all of it.
+
+`sectioned-resolved-event` is implemented on top, as Phase 3's change
+9 with change 3 folded in, and makes the single bump: the event
+schema version is 4. `resolved` no longer carries `found`, `cached`,
+`source`, `tier`, `claims` or `overrode`. It and every `skipped` event
+that is a resolution verdict carry seven sections in pipeline order —
+`library`, `content_index`, `extraction`, `lookup`,
+`record_retrieval`, `match_check`, `acceptance` — which
+`Evidence::sections` projects from the engine's evidence onto
+event-side serde types in `event.rs`; the engine types stay
+unserialised, so the round-trip test keeps holding. A step not taken
+is `{"status":"not-attempted","reason":R}` with `R` from
+`Unattempted::as_str`, which gained `cache-bypassed` for a network
+answer no response cache stood in front of. The verdict skips are the
+four extraction failures (`no-text-layer`, `text-without-identifier`,
+`encrypted`, `unreadable`), `unresolvable`, `conflict`, and
+`duplicate` of either reason (`SkipReason::is_resolution_verdict`);
+their reasons are slim dispatch keys, apart from `unreadable`'s
+message and `duplicate`'s two fields, and a conflict skip carries the
+refused record as `candidate`. Every other skip carries `path` and
+`reason` alone. A record an operator reached and then moved is
+followed, after `renamed` and any `library-admission`, by a
+`content-index-write` event reporting the write `remember` made, which
+counts toward nothing; it cannot ride on `renamed`, which is logged
+before the move. The human `resolve` line names the work and where the
+record was retrieved (`… to "<title>" (<authors>, <year>) via
+<services>, from <where>`), and everything after `<path>: ` on a
+`resolved`, `skipped` or `content-index-write` line is escaped once, in
+`human_line`. The interactive description reads the sections: it
+states the titles' state where it used to say `nothing read`, and it
+shows the file's titles on a verdict whose extraction or lookup
+failed. One value is interim: a record an operator supplied with no
+conflict reports `acceptance` `automatic`, and change 10 replaces that
+with its own value before 0.9.0 ships.
 
 ## Not built yet
 
@@ -433,21 +465,21 @@ from 3 to 4.
 
 ## Known defects
 
-- **Human output other than the description passes metadata through
-  unescaped.** A file's title reaches the terminal verbatim in the
-  metadata-conflict skip line, which prints the file's title and the
-  record's. A title is written by whoever made the PDF, so an escape
-  sequence in one is acted on by the terminal rather than shown.
+- **Adoption's `unreadable` and `unwritten` messages reach the terminal
+  unescaped.** The `library-adoption` human line escapes its path, but
+  `Adoption::Unreadable` and `Adoption::Unwritten` print the
+  filesystem's message as it came, so a control character in one is
+  acted on by the terminal rather than shown.
 
-  `show-record-before-asking` closed this for the description, where a
-  redrawn question could have taken an answer meant for another file;
-  the skip line asks for no answer, which is why it is a defect rather
-  than the same defect. Closing it properly means escaping every value
-  a rendering takes from a record or a file, in one place, rather than
-  in each line that happens to print one. The `library-extraction`,
-  `library-condition` and `library-adoption` path lines escape what
-  they print, but adoption's `unreadable` and `unwritten` messages
-  still do not.
+  This is what is left of the defect "Human output other than the
+  description passes metadata through unescaped".
+  `show-record-before-asking` closed it for the description, and
+  `sectioned-resolved-event` closed it for every `resolved`, `skipped`
+  and `content-index-write` line, the metadata-conflict skip line among
+  them, by escaping the whole clause after `<path>: ` in one place,
+  `human_line`. The `library-extraction` and `library-condition` lines
+  already escaped what they print. Closing the remainder is a small
+  restoration of its own.
 
 - **`adopt` and `reconcile` report after the pass, not as they go.**
   `run::adopt_events` and `run::reconcile_events` collect every
@@ -455,19 +487,6 @@ from 3 to 4.
   contrary to the `cli` requirement "A run reports as it goes".
   Restoring it means passing a sink into `library::adopt` and
   `library::reconcile`; it is a restoration and needs no proposal.
-
-- **Resolution skip reasons merge distinct extraction failures.**
-  `pipeline::skipped_for` reports both `NoTextLayer` and
-  `NoIdentifierFound` as `no-identifier`, and `Encrypted` as
-  `unreadable`, although the `extraction` requirement "Extraction
-  failures are typed and non-fatal" requires the four modes to be told
-  apart. `status --identify` reports them distinctly, and since
-  `expose-resolution-attempts` the engine holds the four modes apart
-  for every resolution too, in `Evidence::extraction`; only the stream
-  still merges them. Restoring them in `skipped` needs a schema bump,
-  and change 9 of the roadmap's Phase 3 owns it. A regression guard in
-  `crates/borax/tests/pipeline.rs` still pins the current collapse so
-  it is changed deliberately.
 
 - **A DOI keeps a closing Unicode bracket.** `Doi::parse`
   (`crates/borax-core/src/identifier.rs`, line 103) trims only ASCII

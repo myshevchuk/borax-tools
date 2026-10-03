@@ -105,7 +105,7 @@ a title) is the no-text-layer/text-without-identifier case.
         the old reasons are rewritten by D14's mapping.
       - Kind (c): delete the two `…_with_no_library_key_deserializes_…`
         tests.
-- [ ] 1.2 Green, in `crates/borax/src/event.rs`:
+- [x] 1.2 Green, in `crates/borax/src/event.rs`:
       - set `SCHEMA = 4`;
       - add the D12 section types and `Event::ContentIndexWrite`;
       - reshape `Event::Resolved` and `Event::Skipped`;
@@ -146,7 +146,7 @@ a title) is the no-text-layer/text-without-identifier case.
       - `Unattempted::CacheBypassed.as_str() == "cache-bypassed"`, and
         every reason string in the output equals some
         `Unattempted::as_str()`.
-- [ ] 2.2 Green: in `evidence.rs`, add `Unattempted::CacheBypassed` and
+- [x] 2.2 Green: in `evidence.rs`, add `Unattempted::CacheBypassed` and
       `Evidence::sections`, with matches that have no wildcard arms.
       Update the module docstring: the evidence is still not serialized
       itself, and `sections` is its projection.
@@ -233,7 +233,7 @@ a title) is the no-text-layer/text-without-identifier case.
         `Event::Resolved` literals in `renaming.rs` (near lines 1202,
         1216 and 1269) and `per_file.rs` (near line 264), which take
         `sections`. Design D14's table lists every site per file.
-- [ ] 3.2 Green, in `crates/borax/src/pipeline.rs`:
+- [x] 3.2 Green, in `crates/borax/src/pipeline.rs`:
       - `skipped_for` maps each failure to its own kind (D4 table, no
         wildcard arm);
       - add `resolution_skip`;
@@ -290,7 +290,7 @@ a title) is the no-text-layer/text-without-identifier case.
       - Kind (b): the `tier`, `cached`, `library` and `no-identifier`
         assertions in `dispatch.rs`, and the `SCHEMA` / "schema 3"
         checks near lines 13857–14021.
-- [ ] 4.2 Green, in `crates/borax/src/run.rs`:
+- [x] 4.2 Green, in `crates/borax/src/run.rs`:
       - `Settled::Skip` carries the held verdict's sections and
         candidate (D11);
       - `situation` matches the four extraction kinds;
@@ -314,7 +314,7 @@ a title) is the no-text-layer/text-without-identifier case.
         status is what it is with a working index.
       - **No event**: none on a batch `--apply` run, a declined move, a
         skip, a quit, or a supplied record kept under `Keep this name`.
-- [ ] 5.2 Green: in `run.rs`, replace `let _remembered` with an emit of
+- [x] 5.2 Green: in `run.rs`, replace `let _remembered` with an emit of
       `Event::ContentIndexWrite` from `remember`'s `IndexWrite` (D8).
       An `IndexWrite::NotAttempted` emits nothing. Update the comment
       there, which says the event is change 9's to choose.
@@ -343,7 +343,7 @@ a title) is the no-text-layer/text-without-identifier case.
       - Kind (b): the exact-string `human_line` tests for `resolved`
         (`via …`, `(cached)`, `(from the library)`) and for the old
         skip reasons, and the human output assertions in `dispatch.rs`.
-- [ ] 6.2 Green, in `event.rs`:
+- [x] 6.2 Green, in `event.rs`:
       - rewrite the `resolved` arm of `human_line`, and
         `skipped_because`, which now takes the sections;
       - move `sources_of` to `services_of`;
@@ -378,7 +378,7 @@ a title) is the no-text-layer/text-without-identifier case.
       - Kind (b): the expected `nothing read` lines and the failed
         verdict lines. Kind (a): the `Event`, `Attempt` and
         `Overridden` literals.
-- [ ] 7.2 Green, in `describe.rs`: render from the sections;
+- [x] 7.2 Green, in `describe.rs`: render from the sections;
       `Candidate::Unheld` takes `&[ServiceAnswer]`; update `describe`'s
       docstring list of lines.
 
@@ -403,18 +403,18 @@ a title) is the no-text-layer/text-without-identifier case.
         --json` over the fixtures. It checks every `resolved` and
         `skipped` line against the D3 key set, and makes the
         removed-field assertions task 9.3 names.
-- [ ] 8.2 Green: nothing beyond groups 1–7 is expected. If something is,
+- [x] 8.2 Green: nothing beyond groups 1–7 is expected. If something is,
       the fix goes in the group that owns it, and the report says so.
 
 ## 9. Audit and verification
 
-- [ ] 9.1 Audit every edit to a pre-existing test against the preamble.
+- [x] 9.1 Audit every edit to a pre-existing test against the preamble.
       Each one must be kind (a), kind (b) following D14's mapping, or
       a kind-(c) deletion that D14 lists. Report any test that needed
       anything else.
 - [ ] 9.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`.
-- [ ] 9.3 Audit the removed fields at their former JSON locations, not
+- [x] 9.3 Audit the removed fields at their former JSON locations, not
       as bare strings. Schema 4 still uses `found` (a status in
       `extraction.result` and an attempt outcome), `tier` (in
       `extraction.result`) and `claims` (in `extraction.titles`), and
@@ -429,14 +429,15 @@ a title) is the no-text-layer/text-without-identifier case.
         `tier`, `attempts`, `field`, `extracted`, `resolved` or
         `similarity` key;
       - a whole-word search of `crates/borax/src/` for `Attempt`,
-        `Overridden`, `Provenance`, `event_for` and `NoIdentifier`, and
-        a search for `"no-identifier"`, which must find nothing
-        (`rg -w`, so `ServiceAttempt`, `Unattempted` and `attempts` do
-        not match);
+        `Provenance`, `event_for` and `NoIdentifier`, a search for the
+        removed `Overridden` struct (any `Overridden` not written as
+        `Acceptance::Overridden`, which D12 adds), and a search for
+        `"no-identifier"`, which must find nothing (`rg -w`, so
+        `ServiceAttempt`, `Unattempted` and `attempts` do not match);
       - a search of `crates/*/tests/` for `"schema":3`, `"schema": 3`
         and `Value::from(3)` used as a schema version, which must find
         nothing.
-- [ ] 9.4 Run `openspec validate sectioned-resolved-event --strict` and
+- [x] 9.4 Run `openspec validate sectioned-resolved-event --strict` and
       `python3 scripts/check-spec-deltas.py`.
 - [ ] 9.5 By hand, over a slice of the real-PDF corpus (outside the
       repository), run `borax resolve` and `borax resolve --json`, and
@@ -500,7 +501,7 @@ a title) is the no-text-layer/text-without-identifier case.
       The existing Unreleased entry says "the schema remains at version
       3" about change 8. That entry stays as a statement about change 8,
       and the new entry says the schema is now 4.
-- [ ] 10.4 Implementer, `openspec/STATE.md`:
+- [x] 10.4 Implementer, `openspec/STATE.md`:
       - add a paragraph for this change after the change-8 paragraph,
         and replace that paragraph's last sentence, which says change 9
         renders the evidence;
