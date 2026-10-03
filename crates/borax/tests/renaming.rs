@@ -6,7 +6,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use borax::event::{Counts, Event, SkipReason};
+use borax::event::{
+    Acceptance, ContentIndexSection, Counts, Event, ExtractionResultStep, ExtractionSection,
+    IndexReadStep, LibraryStep, LookupStep, MatchCheckStep, RetrievedFrom, Sections, SkipReason,
+    TitlesStep, WriteStep,
+};
 use borax::evidence::Evidence;
 use borax::evidence::Unattempted;
 use borax::paths::route;
@@ -168,6 +172,41 @@ fn hash_of(seed: &str) -> ContentHash {
     hash_bytes(seed.as_bytes())
 }
 
+/// Every section as a content-index hit reports them, for a literal
+/// `Event::Resolved` fixture that does not care which section produced
+/// the record (design D14's shape-only edit for a schema-3 `Resolved`
+/// literal).
+fn sections_via_content_index() -> Sections {
+    let not_attempted = || "content-index-hit".to_string();
+    Sections {
+        library: LibraryStep::NotAttempted {
+            reason: "no-library".to_string(),
+        },
+        content_index: ContentIndexSection {
+            read: IndexReadStep::Hit,
+            write: WriteStep::NotAttempted {
+                reason: not_attempted(),
+            },
+        },
+        extraction: ExtractionSection {
+            result: ExtractionResultStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            titles: TitlesStep::NotAttempted {
+                reason: not_attempted(),
+            },
+        },
+        lookup: LookupStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        record_retrieval: Some(RetrievedFrom::ContentIndex),
+        match_check: MatchCheckStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        acceptance: Acceptance::Automatic,
+    }
+}
+
 /// A resolved file at `path`, carrying `record` and `hash`, with the
 /// provenance fields renaming does not look at.
 fn resolved(path: &str, record: Record, hash: Option<ContentHash>) -> (PathBuf, FileRecord) {
@@ -177,7 +216,7 @@ fn resolved(path: &str, record: Record, hash: Option<ContentHash>) -> (PathBuf, 
             record,
             hash,
             evidence: Evidence::not_attempted(Unattempted::ContentDuplicate),
-            overrode: None,
+            overridden: false,
         },
     )
 }
@@ -1104,7 +1143,8 @@ fn a_failing_rename_is_skipped_with_the_error_message_and_the_batch_continues() 
                 reason: SkipReason::RenameFailed {
                     message: "permission denied".to_string(),
                 },
-                library: None,
+                sections: None,
+                candidate: None,
             },
             Event::Renamed {
                 path: PathBuf::from("/lib/b.pdf"),
@@ -1155,7 +1195,8 @@ fn target_taken_reports_the_same_way_in_preview_and_applying() {
         reason: SkipReason::TargetTaken {
             target: PathBuf::from("/lib/Smith2024.pdf"),
         },
-        library: None,
+        sections: None,
+        candidate: None,
     }];
     assert_eq!(preview, expected);
     assert_eq!(applying, expected);
@@ -1173,7 +1214,8 @@ fn unnameable_reports_the_same_way_in_preview_and_applying() {
     let expected = vec![Event::Skipped {
         path: PathBuf::from("/lib/mystery.pdf"),
         reason: SkipReason::Unnameable,
-        library: None,
+        sections: None,
+        candidate: None,
     }];
     assert_eq!(preview, expected);
     assert_eq!(applying, expected);
@@ -1203,29 +1245,13 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
             path: PathBuf::from("a.pdf"),
             identifier: "doi:10.1000/a".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
-            source: "crossref".to_string(),
-            found: "doi:10.1000/a".to_string(),
-
-            claims: Vec::new(),
-
-            tier: None,
-            cached: false,
-            overrode: None,
-            library: None,
+            sections: Box::new(sections_via_content_index()),
         },
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
             identifier: "doi:10.1000/b".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
-            source: "crossref".to_string(),
-            found: "doi:10.1000/b".to_string(),
-
-            claims: Vec::new(),
-
-            tier: None,
-            cached: false,
-            overrode: None,
-            library: None,
+            sections: Box::new(sections_via_content_index()),
         },
         Event::Renamed {
             path: PathBuf::from("a.pdf"),
@@ -1234,8 +1260,9 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
         },
         Event::Skipped {
             path: PathBuf::from("c.pdf"),
-            reason: SkipReason::NoIdentifier,
-            library: None,
+            reason: SkipReason::Unciteable,
+            sections: None,
+            candidate: None,
         },
         Event::AlreadyNamed {
             path: PathBuf::from("d.pdf"),
@@ -1243,7 +1270,8 @@ fn counts_for_totals_resolved_renamed_and_skipped_events() {
         Event::Skipped {
             path: PathBuf::from("e.pdf"),
             reason: SkipReason::Unnameable,
-            library: None,
+            sections: None,
+            candidate: None,
         },
     ];
 
@@ -1270,15 +1298,7 @@ fn a_preview_runs_counts_report_zero_renamed_however_many_moves_were_planned() {
             path: PathBuf::from("a.pdf"),
             identifier: "doi:10.1000/a".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
-            source: "crossref".to_string(),
-            found: "doi:10.1000/a".to_string(),
-
-            claims: Vec::new(),
-
-            tier: None,
-            cached: false,
-            overrode: None,
-            library: None,
+            sections: Box::new(sections_via_content_index()),
         },
         Event::Planned {
             path: PathBuf::from("a.pdf"),
@@ -1486,7 +1506,8 @@ fn carry_out_of_an_applying_rename_with_no_hash_skips_it_unrecordable_and_moves_
             reason: SkipReason::Unrecordable {
                 message: "the file's content hash is unknown".to_string(),
             },
-            library: None,
+            sections: None,
+            candidate: None,
         }
     );
     assert!(
@@ -1539,7 +1560,8 @@ fn a_batch_continues_past_an_unrecordable_file_to_rename_the_rest() {
                 reason: SkipReason::Unrecordable {
                     message: "the file's content hash is unknown".to_string(),
                 },
-                library: None,
+                sections: None,
+                candidate: None,
             },
             Event::Renamed {
                 path: PathBuf::from("/lib/b.pdf"),
@@ -1591,12 +1613,14 @@ fn several_unrecordable_files_in_one_batch_are_each_skipped_independently() {
             Event::Skipped {
                 path: PathBuf::from("/lib/a.pdf"),
                 reason: unrecordable.clone(),
-                library: None,
+                sections: None,
+                candidate: None,
             },
             Event::Skipped {
                 path: PathBuf::from("/lib/b.pdf"),
                 reason: unrecordable,
-                library: None,
+                sections: None,
+                candidate: None,
             },
         ]
     );
@@ -1767,7 +1791,8 @@ fn a_known_hash_that_then_fails_to_move_reports_the_filesystem_failure() {
             reason: SkipReason::RenameFailed {
                 message: "permission denied".to_string(),
             },
-            library: None,
+            sections: None,
+            candidate: None,
         }
     );
 }

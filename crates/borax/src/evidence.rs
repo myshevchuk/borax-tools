@@ -7,9 +7,10 @@
 //! that ran and found nothing.
 //!
 //! [`Evidence`] is held by [`crate::pipeline::FileRecord`] and
-//! [`crate::pipeline::Standing`], and the fields the schema-3 events
-//! carry are derived from it. None of these types is serialised: they
-//! describe the engine, not the stream.
+//! [`crate::pipeline::Standing`]. None of these types is serialised:
+//! they describe the engine, not the stream. What a resolution event
+//! carries is [`Evidence::sections`], the evidence projected onto the
+//! stream's own types in [`crate::event`].
 
 use borax_core::identifier::Identifier;
 use borax_pdf::tiered::Tier;
@@ -17,7 +18,11 @@ use borax_sources::cache::CacheWrite;
 use borax_sources::conflict::{Conflict, Insufficient};
 use borax_sources::source::{Retrieval, SourceError, SourceName};
 
-use crate::event::{Claim, Extraction, LibraryAnswer};
+use crate::event::{
+    Acceptance, Claim, ContentIndexSection, Extraction, ExtractionResultStep, ExtractionSection,
+    FetchedFrom, IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep, LookupStep,
+    MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, TitlesStep, WriteStep,
+};
 
 /// Everything a resolution retained about one file, one section per
 /// step, in the order the steps run.
@@ -53,6 +58,135 @@ impl Evidence {
             },
             lookup: LookupEvidence::NotAttempted(reason),
             match_check: MatchCheck::NotAttempted(reason),
+        }
+    }
+
+    /// This evidence as a resolution event carries it, with
+    /// `acceptance` as given.
+    ///
+    /// Every section maps one to one, and every step that did not run
+    /// is not attempted with its reason's [`Unattempted::as_str`] name.
+    /// `record_retrieval` is [`Evidence::retrieval`]. A lookup attempted
+    /// with no attempts is no eligible service, and the origin carries
+    /// no tier, since `extraction`'s result states the pass. A found
+    /// attempt answered over the network with no response cache in
+    /// front of the service reports its `stored` write not attempted
+    /// for [`Unattempted::CacheBypassed`]; one answered from the
+    /// response cache reports none.
+    pub fn sections(&self, acceptance: Acceptance) -> Sections {
+        Sections {
+            library: match &self.library {
+                Consultation::Consulted(answer) => LibraryStep::Consulted {
+                    answer: answer.clone(),
+                },
+                Consultation::NotConsulted(reason) => LibraryStep::NotAttempted {
+                    reason: reason.as_str().to_string(),
+                },
+            },
+            content_index: ContentIndexSection {
+                read: match &self.content_index.read {
+                    IndexRead::Hit => IndexReadStep::Hit,
+                    IndexRead::Miss => IndexReadStep::Miss,
+                    IndexRead::Bypassed => IndexReadStep::Bypassed,
+                    IndexRead::Unavailable { message } => IndexReadStep::Unavailable {
+                        message: message.clone(),
+                    },
+                    IndexRead::NotAttempted(reason) => IndexReadStep::NotAttempted {
+                        reason: reason.as_str().to_string(),
+                    },
+                },
+                write: match &self.content_index.write {
+                    IndexWrite::Attempted(write) => write_step(write),
+                    IndexWrite::NotAttempted(reason) => not_written(*reason),
+                },
+            },
+            extraction: ExtractionSection {
+                result: match &self.extraction.result {
+                    ExtractionStep::Ran(extraction) => match extraction {
+                        Extraction::Found { identifier, tier } => ExtractionResultStep::Found {
+                            identifier: identifier.clone(),
+                            tier: tier.clone(),
+                        },
+                        Extraction::NoTextLayer => ExtractionResultStep::NoTextLayer,
+                        Extraction::TextWithoutIdentifier => {
+                            ExtractionResultStep::TextWithoutIdentifier
+                        }
+                        Extraction::Encrypted => ExtractionResultStep::Encrypted,
+                        Extraction::Unreadable { message } => ExtractionResultStep::Unreadable {
+                            message: message.clone(),
+                        },
+                    },
+                    ExtractionStep::NotAttempted(reason) => ExtractionResultStep::NotAttempted {
+                        reason: reason.as_str().to_string(),
+                    },
+                },
+                titles: match &self.extraction.titles {
+                    Titles::Read(claims) => TitlesStep::Read {
+                        claims: claims.clone(),
+                    },
+                    Titles::Failed { message } => TitlesStep::Failed {
+                        message: message.clone(),
+                    },
+                    Titles::NotAttempted(reason) => TitlesStep::NotAttempted {
+                        reason: reason.as_str().to_string(),
+                    },
+                },
+            },
+            lookup: match &self.lookup {
+                LookupEvidence::Attempted {
+                    identifier,
+                    origin,
+                    attempts,
+                } if attempts.is_empty() => LookupStep::NoEligibleService {
+                    identifier: identifier.to_string(),
+                    origin: origin.identifier_origin(),
+                },
+                LookupEvidence::Attempted {
+                    identifier,
+                    origin,
+                    attempts,
+                } => LookupStep::Attempted {
+                    identifier: identifier.to_string(),
+                    origin: origin.identifier_origin(),
+                    attempts: attempts.iter().map(ServiceAttempt::answer).collect(),
+                },
+                LookupEvidence::NotAttempted(reason) => LookupStep::NotAttempted {
+                    reason: reason.as_str().to_string(),
+                },
+            },
+            record_retrieval: self.retrieval().map(|retrieval| match retrieval {
+                RecordRetrieval::Library { artifact, item } => {
+                    RetrievedFrom::Library { artifact, item }
+                }
+                RecordRetrieval::ContentIndex => RetrievedFrom::ContentIndex,
+                RecordRetrieval::ServiceCache { service } => RetrievedFrom::ServiceCache {
+                    service: service.as_str().to_string(),
+                },
+                RecordRetrieval::Network { service } => RetrievedFrom::Network {
+                    service: service.as_str().to_string(),
+                },
+            }),
+            match_check: match &self.match_check {
+                MatchCheck::Agreed => MatchCheckStep::Agreed,
+                MatchCheck::Conflict(conflict) => MatchCheckStep::Conflict {
+                    field: conflict.field.to_string(),
+                    extracted: conflict.extracted.clone(),
+                    resolved: conflict.resolved.clone(),
+                    similarity: conflict.similarity,
+                },
+                MatchCheck::Insufficient(insufficient) => MatchCheckStep::InsufficientEvidence {
+                    reason: match insufficient {
+                        Insufficient::RecordUntitled => "record-untitled",
+                        Insufficient::NoTitles => "no-titles",
+                        Insufficient::NoEvidence => "no-evidence",
+                    }
+                    .to_string(),
+                },
+                MatchCheck::NotAttempted(reason) => MatchCheckStep::NotAttempted {
+                    reason: reason.as_str().to_string(),
+                },
+            },
+            acceptance,
         }
     }
 
@@ -272,6 +406,17 @@ pub enum Origin {
     Operator,
 }
 
+impl Origin {
+    /// The origin as a resolution event reports it, without the pass,
+    /// which the event's extraction result states.
+    pub(crate) fn identifier_origin(self) -> IdentifierOrigin {
+        match self {
+            Origin::Extracted(_) => IdentifierOrigin::Extracted,
+            Origin::Operator => IdentifierOrigin::Operator,
+        }
+    }
+}
+
 /// One service asked about an identifier, and what it answered.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceAttempt {
@@ -280,6 +425,53 @@ pub struct ServiceAttempt {
     /// How it answered: found, with how the answer reached the run, or
     /// the way it failed.
     pub outcome: Result<Retrieval, SourceError>,
+}
+
+impl ServiceAttempt {
+    /// This attempt as a resolution event reports it.
+    pub(crate) fn answer(&self) -> ServiceAnswer {
+        ServiceAnswer {
+            service: self.service.as_str().to_string(),
+            outcome: match &self.outcome {
+                Ok(Retrieval::ServiceCache) => ServiceOutcome::Found {
+                    retrieval: FetchedFrom::ServiceCache,
+                    stored: None,
+                },
+                Ok(Retrieval::Network { stored }) => ServiceOutcome::Found {
+                    retrieval: FetchedFrom::Network,
+                    stored: Some(match stored {
+                        Some(write) => write_step(write),
+                        None => not_written(Unattempted::CacheBypassed),
+                    }),
+                },
+                Err(SourceError::NotFound) => ServiceOutcome::NotFound,
+                Err(SourceError::Unavailable { message }) => ServiceOutcome::Unavailable {
+                    message: message.clone(),
+                },
+                Err(SourceError::RateLimited) => ServiceOutcome::RateLimited,
+                Err(SourceError::Malformed { message }) => ServiceOutcome::Malformed {
+                    message: message.clone(),
+                },
+            },
+        }
+    }
+}
+
+/// `write` as the stream reports a write that was made.
+pub(crate) fn write_step(write: &CacheWrite) -> WriteStep {
+    match write {
+        CacheWrite::Written => WriteStep::Written,
+        CacheWrite::Failed { message } => WriteStep::Failed {
+            message: message.clone(),
+        },
+    }
+}
+
+/// A write not made, for `reason`.
+fn not_written(reason: Unattempted) -> WriteStep {
+    WriteStep::NotAttempted {
+        reason: reason.as_str().to_string(),
+    }
 }
 
 /// Where the record a resolution reached was retrieved from.
@@ -336,6 +528,11 @@ pub enum Unattempted {
     /// The record waits for an operator to accept it, and is written
     /// when the file is moved.
     AwaitingAcceptance,
+    /// No response cache stood in front of the service that answered,
+    /// so its answer was not stored. Only [`Evidence::sections`] gives
+    /// this reason, for a network answer's `stored` write; no section
+    /// of the evidence itself holds it.
+    CacheBypassed,
 }
 
 impl Unattempted {
@@ -352,6 +549,7 @@ impl Unattempted {
             Unattempted::Refused => "refused",
             Unattempted::Unhashable => "unhashable",
             Unattempted::AwaitingAcceptance => "awaiting-acceptance",
+            Unattempted::CacheBypassed => "cache-bypassed",
         }
     }
 }

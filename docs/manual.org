@@ -11,6 +11,8 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-09-30 Wed 02:39] -- library-first resolution
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-01 Thu 21:16] -- borax status and JSONL schema
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-01 Thu 22:19] -- library conditions and adoption
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-03 Sat 13:19] -- sectioned resolution events
+#+AI_PASS: fact-check claude-opus-5-5 [2026-10-03 Sat] -- model line and example file name restored; content-duplicate shape and unreachable prompt line corrected after review
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -144,12 +146,30 @@ how to install it, and a handful of examples.
    a batch at all.
 
    Inside a library, ~resolve~ asks the library before the content
-   index. A tracked file reports
-   ~<path>: resolved <identifier> via <source> (from the library)~. If
-   the library cannot answer, borax appends ~; the library could not
-   answer: <what>~ to the ordinary resolution or skip line after the
-   fallback. ~--no-cache~ still asks the library because the library is
-   authoritative state, not a cache.
+   index. Every successful resolution reads
+   ~<path>: resolved <identifier>[ to "<title>" (<authors>, <year>)][ via <services>], from <where>~.
+   The title, authors, and year appear only when the record holds them.
+   Authors are family names: one name, two joined by ~and~, or the first
+   followed by ~et al.~ for three or more. ~via~ names Crossref,
+   OpenAlex, arXiv, DataCite, PubMed, and a sidecar in that order,
+   leaving out any the record does not name.
+   ~<where>~ is ~the library~, ~the content index~, ~the response
+   cache~, or ~the network~. A tracked file therefore ends with ~from
+   the library~. If the library cannot answer, borax appends ~; the
+   library could not answer: <what>~ to the ordinary resolution or skip
+   line after the fallback. ~--no-cache~ still asks the library because
+   the library is authoritative state, not a cache.
+
+   A resolution skip reads ~<path>: skipped, <clause>~. Extraction
+   failures say ~no identifier found; the pages read hold no text~, ~no
+   identifier found in its metadata or the pages read~, ~encrypted, so
+   no identifier could be read~, or ~unreadable (<message>)~. A failed
+   lookup names the identifier and every service answer, or says ~no
+   configured service could be asked about <identifier>~. A conflict
+   names the field, similarity, file value, and record value. Borax
+   escapes control characters in everything after the path-and-colon
+   prefix on these lines and on successful resolution lines; it prints
+   the path as before.
 
    It is the one command that resolves files concurrently, so it takes
    ~--concurrency~.
@@ -237,7 +257,7 @@ how to install it, and a handful of examples.
                   Soloshonok
       issued      2023
       in          Ukrainica Bioorganica Acta 18(1), 10–21
-      file says   nothing read
+      file says   no title in its metadata
       new name    lyutenko2023_ApplicationsChiralSulfinyl.pdf
       ? What should happen to this file?
       > Rename
@@ -255,8 +275,9 @@ how to install it, and a handful of examples.
     identifier without an origin clause because nothing was looked up.
     ~record~ names the service or services that supplied the record. It
     adds ~from an earlier run~ when the content index answered, and
-    ~from the library~ when an item's provenance names services. If the
-    item names no service, it reads ~the library~.
+    ~from the library~ when an item's provenance names services. If a
+    content-index record names no service, it reads ~an earlier run~. If
+    a library item names no service, it reads ~the library~.
 
     When the library could not answer, a ~library~ line states the
     problem. It follows ~record~ for a resolved file and follows the
@@ -284,10 +305,11 @@ how to install it, and a handful of examples.
     ~file says~ lists every title found in the file's XMP or document
     information, one per line — including one borax judged a producer's
     leftover rather than a title, since you are better placed to say
-    which is the work's. It reads ~nothing read~ when there was nothing
-    to read: the file carries no title of its own, or the content index
-    or library answered and the file was never opened. ~new name~ is the
-    name the file would take.
+    which is the work's. An opened file with no title reads ~no title in
+    its metadata~. A file that could not be opened reads ~could not be
+    opened (<message>)~. When borax did not open the file, the line reads
+    ~not read; an earlier run answered~ or ~not read; the library
+    answered~. ~new name~ is the name the file would take.
 
     The target includes a collision suffix when one is needed. A
     separate line below ~new name~ then names the rendered name that was
@@ -300,10 +322,11 @@ how to install it, and a handful of examples.
     Choose ~Skip~ to leave the file in place. If borax proposed a move
     from a record it accepted on its own, the skip reason is ~declined~.
     A file borax could not settle keeps that reason instead, such as ~no
-    identifier found~ or a title conflict. The proposed name remains
-    free, so if the next file produces the same name, borax offers that
-    name without a suffix. A name is claimed only after you accept its
-    move.
+    identifier found; the pages read hold no text~, ~encrypted, so no
+    identifier could be read~, or a title conflict. The proposed name
+    remains free, so if the next file produces the same name, borax
+    offers that name without a suffix. A name is claimed only after you
+    accept its move.
 
     The choices depend on what borax knows. The first choice is what
     Enter selects:
@@ -316,6 +339,7 @@ how to install it, and a handful of examples.
     | Services could not give a usable answer          | Try the services again; Supply an identifier; Skip; Quit     |
     | A conflicting record produces a move             | Skip; Rename anyway, to =<name>=; Supply an identifier; Quit |
     | A conflicting record produces no move            | Skip; Supply an identifier; Quit                             |
+    | The file is encrypted, but its hash is known     | Supply an identifier; Skip; Quit                             |
     | The file is unreadable, but its hash is known    | Supply an identifier; Skip; Quit                             |
     | The file is already named under ~--no-skip-named~ | Keep this name; Supply an identifier; Quit                   |
 
@@ -324,13 +348,19 @@ how to install it, and a handful of examples.
     the default. ~Rename anyway, to <name>~ names the target explicitly,
     so pressing Enter never overrides the conflict.
 
-    A file with no identifier shows ~identifier  none found in the
-    file~. If an identifier did not resolve, ~no record~ lists what each
-    service answered. ~Try the services again~ appears only when the
-    services were unavailable, rate-limited, or returned unusable data.
-    It does not appear when every service confirmed that it did not hold
-    the identifier. An unreadable file shows the error on an ~unreadable~
-    line.
+    A file with no identifier shows either ~identifier  none found; the
+    pages read hold no text~ or ~identifier  none found in its metadata
+    or the pages read~. An encrypted file shows ~identifier  none read;
+    the file is encrypted~. An unreadable file shows the error on an
+    ~unreadable~ line. Each failed verdict other than a title conflict
+    also shows the file's title state on ~file says~.
+
+    If an identifier did not resolve, ~no record~ lists what each
+    service answered. When no configured service supports it, the line
+    reads ~no source was asked~. ~Try the services again~ appears only
+    when the services were unavailable, rate-limited, or returned
+    unusable data. It does not appear when every service confirmed that
+    it did not hold the identifier.
 
     *Supplying an identifier.* Choose ~Supply an identifier~ when you
     know what the file is but borax did not find the right identifier.
@@ -368,10 +398,11 @@ how to install it, and a handful of examples.
     must provide the identifier yourself.
 
     *Remembering your answer.* After you rename a file from a supplied
-    identifier or by accepting a title conflict, borax stores the record
-    under the file's content hash in the content index. A later
-    interactive or batch run can use that record without extraction, a
-    service lookup, a conflict check, or another question.
+    identifier, from a lookup you asked borax to retry, or by accepting a
+    title conflict, borax stores the record under the file's content hash
+    in the content index. A later interactive or batch run can use that
+    record without extraction, a service lookup, a conflict check, or
+    another question.
 
     Inside a library, the applying rename also links the artifact record
     to the item for the accepted record. Supplying a different identifier
@@ -384,6 +415,18 @@ how to install it, and a handful of examples.
     an identifier and then skipping stores no candidate record and
     produces no sidecar or master-bibliography entry for that candidate.
     A record the content index already held for the file remains there.
+
+    The verdict's ~content_index.write~ first reads ~not-attempted~ with
+    reason ~awaiting-acceptance~. When borax makes the write, its JSONL
+    stream emits a ~content-index-write~ event after ~renamed~ and any
+    ~library-admission~ event. The event names the file at its path after
+    the move and reports ~written~ or ~failed~ with a message. A file
+    with no hash produces no such event.
+
+    A successful write prints nothing in human output. A failed write
+    prints ~<path>: the content index could not keep this answer
+    (<message>)~. The event changes no count, and a failed write never
+    makes the rename fail.
 
     This memory is best-effort. If the content index cannot be written,
     or borax falls back to an in-memory cache, a later run asks again.
@@ -1448,43 +1491,30 @@ how to install it, and a handful of examples.
   skipped, not renamed.
 
   The JSONL stream records the result of each decision, not the question
-  that led to it. A ~resolved~ event's ~found~ field is the identifier
-  borax looked up, while ~identifier~ remains the identifier under which
-  the record is filed. Its ~claims~ field lists every title read from
-  the file, in order, with ~from~ set to ~xmp~ or ~info~. The list is
-  empty when the content index or library answered without opening the
-  file.
+  that led to it. Every event now carries ~"schema":4~. A ~resolved~
+  event keeps ~path~, ~identifier~, and the full CSL-JSON ~record~. The
+  identifier is the record's preferred identifier; the identifier borax
+  looked up is in ~lookup~. The removed ~found~, ~cached~, ~source~,
+  ~tier~, ~claims~, and ~overrode~ fields have no aliases.
 
-  ~resolved.source~ names the services that supplied the record. When
-  the content index answers, borax reads those services from the
-  record's per-field provenance in this order: Crossref, OpenAlex,
-  arXiv, DataCite, PubMed, then a sidecar. It reports ~cache~ only when
-  that provenance names none of them; ~cached~ separately records that
-  the content index answered. A library answer uses the same provenance
-  order and reports ~library~ as its source when the item names no
-  service. It always reports ~cached: false~.
+  Seven sections follow the record in pipeline order: ~library~,
+  ~content_index~, ~extraction~, ~lookup~, ~record_retrieval~,
+  ~match_check~, and ~acceptance~. A step that did not run is always
+  ~{"status":"not-attempted","reason":"<reason>"}~. The reasons are
+  ~no-library~, ~outside-library~, ~content-duplicate~,
+  ~library-answered~, ~content-index-hit~, ~extraction-failed~,
+  ~no-record~, ~refused~, ~unhashable~, ~awaiting-acceptance~, and
+  ~cache-bypassed~.
 
-  ~resolved.tier~ names the extraction pass that found the identifier.
-  It is ~supplied~ when you entered the identifier and ~null~ when the
-  content index answered. It is ~library~ when the library item supplied
-  the record; ~found~ is then the record's own identifier. A supplied
-  re-identification of a tracked file keeps ~tier: supplied~ because the
-  operator, not the library, supplied that answer. ~resolved.overrode~
-  records a title conflict you accepted. It contains ~field~,
-  ~extracted~, ~resolved~, and ~similarity~, the same values carried by
-  a skipped conflict, and is ~null~ when you overrode nothing.
-
-  Every ~resolved~ and ~skipped~ event has a ~library~ field. It is
-  ~null~ when no library was asked: there is no run library, the file is
-  outside it or in an excluded subtree, or resolution ended first with
-  a content duplicate. It is also ~null~ on a skip that is not the
-  file's resolution verdict, such as ~target-taken~, ~declined~, or
-  ~stranding~, because the earlier ~resolved~ event already carries the
-  answer.
-
-  Otherwise ~library~ is an object tagged by ~kind~. ~tracked~ carries
-  the artifact and item identities, and ~untracked~ carries no further
-  evidence. The other kinds explain why the library could not answer:
+  ~library~ is ~consulted~ with its former kind-tagged answer nested
+  under ~answer~, or ~not-attempted~ with reason ~no-library~,
+  ~outside-library~, or ~content-duplicate~. ~no-library~ means the run
+  has no library; ~outside-library~ also covers a file in an excluded
+  subtree. A non-resolution skip such as ~target-taken~, ~declined~, or
+  ~stranding~ has no ~library~ section because it carries only ~path~ and
+  ~reason~. In a consulted answer, ~tracked~ carries the artifact and
+  item identities, and ~untracked~ carries no further evidence. The
+  other answer kinds explain why the library could not answer:
 
   - ~unrecognised-content~ :: Records name the path, but none holds the
     file's bytes. It carries those artifact identities.
@@ -1505,12 +1535,58 @@ how to install it, and a handful of examples.
     artifact store could not be read completely. It carries whether the
     store was listed and how many record files were unreadable.
 
-  An ~unresolvable~ skip reason contains ~found~, the identifier that
-  was looked up, ~tier~, the extraction pass that read it, and
-  ~attempts~, the answers from the services.
-  The corresponding human-readable line names the identifier too, for
+  ~content_index~ has separate ~read~ and ~write~ steps. A read is ~hit~,
+  ~miss~, ~bypassed~, ~unavailable~ with a message, or
+  ~not-attempted~. A write is ~written~, ~failed~ with a message, or
+  ~not-attempted~.
+
+  ~extraction.result~ is ~found~ with an ~identifier~ and an
+  ~embedded-metadata~ or ~text-layer~ tier; ~no-text-layer~,
+  ~text-without-identifier~, ~encrypted~, ~unreadable~ with a message;
+  or ~not-attempted~. ~extraction.titles~ is ~read~ with ordered ~claims~
+  from ~xmp~ or ~info~, ~failed~ with a message, or ~not-attempted~. A
+  ~read~ claim list may be empty; unlike the former flat list, that state
+  means borax opened the file and found no title in its metadata.
+
+  ~lookup~ is ~attempted~ with the identifier, its ~extracted~ or
+  ~operator~ origin, and every service attempt in order. It is
+  ~no-eligible-service~ when no configured service supports the
+  identifier, or ~not-attempted~ when no lookup ran. Each attempt has a
+  service and a structured outcome: ~found~, ~not-found~, ~unavailable~,
+  ~rate-limited~, or ~malformed~. A found outcome says whether the
+  response cache or network supplied it. A network outcome also reports
+  whether the response-cache write was made, failed, or bypassed.
+  Failed attempts before a success remain in the array.
+
+  ~record_retrieval~ says where the record came from: ~library~ with the
+  artifact and item, ~content-index~, ~service-cache~ with the service,
+  or ~network~ with the service. It is ~null~ when no record was reached.
+  The service that supplied each record field remains in
+  ~record.borax.provenance~. ~match_check~ is ~agreed~, ~conflict~ with
+  both values and their similarity, ~insufficient-evidence~, or
+  ~not-attempted~. ~acceptance~ is ~automatic~, ~overridden~, or
+  ~not-applicable~.
+
+  Resolution-verdict ~skipped~ events carry the same seven sections.
+  Their reason kind is ~no-text-layer~, ~text-without-identifier~,
+  ~encrypted~, ~unreadable~, ~unresolvable~, ~conflict~, or ~duplicate~.
+  Only ~unreadable~ keeps a message in its reason; duplicate reasons keep
+  ~reason~ and ~existing_path~. An ~unresolvable~ reason is only
+  ~{"kind":"unresolvable"}~: its identifier and attempts are in
+  ~lookup~. The corresponding human-readable line names them, for
   example ~no source had a record for doi:... (crossref: not found;
-  openalex: not found)~.
+  openalex: not found)~. A conflict skip also carries the refused record
+  as ~candidate~. A content duplicate's ~library~, ~content_index~,
+  ~extraction~, ~lookup~ and ~match_check~ steps are not-attempted with
+  reason ~content-duplicate~, its ~record_retrieval~ is ~null~, and its
+  ~acceptance~ is ~not-applicable~. Work duplicates carry the record's
+  evidence.
+
+  A ~content-index-write~ event reports the rename-time write for a
+  record you supplied, retried, or accepted over a conflict. It follows
+  ~renamed~ and any ~library-admission~, carries the path after the move,
+  and has a ~write~ status of ~written~ or ~failed~ with a message. It
+  changes no count and cannot make the rename fail.
 
   ~run-started~ includes the Boolean ~interactive~; an
   interactive run also reports ~applying: true~. A declined proposal is
@@ -1520,10 +1596,10 @@ how to install it, and a handful of examples.
   and the counts include ~named~. An interactive run waits until you
   settle a file before it emits that file's outcome, so a supplied
   identifier does not produce a second verdict. Questions are not
-  events. The new ~library~ field and the ~library~ values for ~tier~ and
-  ~source~ are additions. The event schema version remains 3.
+  events. Resolution and skip evidence use the schema-4 sections above.
 
-  Schema 3 adds the library events. ~status --identify~ emits one
+  Schema 4 keeps the library events unchanged in shape.
+  ~status --identify~ emits one
   ~library-extraction~ event for each surveyed artifact as its
   extraction finishes, in survey order. Its ~path~ is library-relative
   and ~/~ separated. Its ~extraction~ object is tagged by ~kind~:
@@ -1533,7 +1609,7 @@ how to install it, and a handful of examples.
   ~unreadable~, which carries ~message~.
 
   #+begin_src json
-    {"schema":3,"event":"library-extraction","path":"sub/a.pdf","extraction":{"kind":"found","identifier":"doi:10.1234/x","tier":"text-layer"}}
+    {"schema":4,"event":"library-extraction","path":"sub/a.pdf","extraction":{"kind":"found","identifier":"doi:10.1234/x","tier":"text-layer"}}
   #+end_src
 
   JSON fields keep their raw values, with any required escaping supplied
@@ -1554,9 +1630,9 @@ how to install it, and a handful of examples.
   separator.
 
   #+begin_src json
-    {"schema":3,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}
-    {"schema":3,"event":"library-condition","path":"gone.pdf","condition":{"kind":"missing","id":"0190c3a2-…","record":".borax/artifacts/0190c3a2-….toml"}}
-    {"schema":3,"event":"library-condition","path":"items/milner1978.0190c3a3-….toml","condition":{"kind":"unlinked","id":"0190c3a3-…"}}
+    {"schema":4,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}
+    {"schema":4,"event":"library-condition","path":"gone.pdf","condition":{"kind":"missing","id":"0190c3a2-…","record":".borax/artifacts/0190c3a2-….toml"}}
+    {"schema":4,"event":"library-condition","path":"items/milner1978.0190c3a3-….toml","condition":{"kind":"unlinked","id":"0190c3a3-…"}}
   #+end_src
 
   Conditions do not change a command's exit status. A script that needs
@@ -1603,7 +1679,7 @@ how to install it, and a handful of examples.
 
    #+begin_example
      {
-       "schema": 3,
+       "schema": 4,
        "event": "renamed",
        "path": "/papers/reviewed-final.pdf",
        "target": "/papers/smith2024_AwesomePaperBorax.pdf",

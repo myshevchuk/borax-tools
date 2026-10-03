@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use borax_core::content::ContentHash;
 use borax_core::library::DuplicateReason;
-use borax_core::record::Record;
+use borax_core::record::{Record, Source as FieldSource};
 use serde::{Deserialize, Serialize};
 
 use crate::describe::escaped;
@@ -26,7 +26,7 @@ use crate::describe::escaped;
 /// Consumers pin it: within a major version of borax the shape of an
 /// event with a given `event` tag does not change, and a new schema
 /// version is how a breaking change announces itself.
-pub const SCHEMA: u32 = 3;
+pub const SCHEMA: u32 = 4;
 
 /// Something that happened to a file, or to the run as a whole.
 ///
@@ -58,60 +58,30 @@ pub enum Event {
     /// is which line to add to their file, and that is one line however
     /// many documents wanted it.
     LookupMissed { table: String, input: String },
-    /// A file's identifier was found and a record fetched for it.
+    /// A file's resolution: the record it reached, and what every step
+    /// of reaching it found out.
     Resolved {
         path: PathBuf,
+        /// The record's preferred identifier ([`Record`]'s DOI, else its
+        /// arXiv id, PMID or ISBN) in the form the stream writes one
+        /// (`doi:…`, `arXiv:…`), or empty when the record carries none.
+        /// What was looked up, which can differ, is in the `lookup`
+        /// section.
         identifier: String,
         /// The whole canonical record, so a consumer of the JSON stream
         /// has what the run resolved rather than only what it looked up.
         /// `borax resolve` exists to emit records; an identifier alone
         /// would send a caller back to the network for what borax
-        /// already held.
+        /// already held. Who wrote each field is in
+        /// `record.borax.provenance`.
         ///
         /// Boxed because events accumulate in a `Vec` for the whole
         /// run, where every event pays the size of the largest variant.
         record: Box<Record>,
-        /// The services that supplied the record. Where nothing was
-        /// looked up, these are the services the record's own
-        /// provenance names, or `cache` for a content-index answer and
-        /// `library` for a library answer whose provenance names none.
-        source: String,
-        /// The identifier the run looked up, in the form the stream
-        /// writes one — `doi:…`, `arXiv:…`. Not always `identifier`,
-        /// which is what the record is filed under: a file resolved
-        /// from an arXiv identifier may come back with a DOI, and only
-        /// what was looked up is evidence about the file.
-        found: String,
-        /// Every title the file claims for itself, in the order they
-        /// were read. Empty when the file was not opened, which is
-        /// what a content-index answer and a library answer both mean.
-        claims: Vec<Claim>,
-        /// Which extraction pass supplied the identifier, `supplied`
-        /// when the operator named it, `library` when the file's
-        /// library item did, or `None` when none of them did — a
-        /// content-index answer.
-        tier: Option<String>,
-        /// The conflict the operator accepted to reach this record, or
-        /// `None` when nothing was overridden. A record that cleared
-        /// the conflict check on its own and one accepted despite it
-        /// are the same record; only this says which happened.
-        overrode: Option<Overridden>,
-        /// Whether the content index answered, so the file was neither
-        /// opened nor looked up. A response cache hit behind a source
-        /// is not visible here and reports `false`, and so does an
-        /// answer from the file's library item.
-        cached: bool,
-        /// What the run's library said about the file, or `None` when
-        /// it was not asked: the run has no library, the file lies
-        /// outside it or in a subtree it excludes, or the resolution
-        /// ended before the library was asked.
-        ///
-        /// Says what the library answered, not where the record came
-        /// from, which is `tier`'s to say: a file the library tracks
-        /// and the operator then re-identified reports
-        /// [`LibraryAnswer::Tracked`] beside `tier: "supplied"`.
-        #[serde(default)]
-        library: Option<LibraryAnswer>,
+        /// The resolution's evidence, one section per step, written as
+        /// seven keys beside `record`.
+        #[serde(flatten)]
+        sections: Box<Sections>,
     },
     /// A rename that would happen. Emitted by a preview run only; an
     /// applying run emits [`Event::Renamed`] instead, so no file is
@@ -136,13 +106,18 @@ pub enum Event {
     Skipped {
         path: PathBuf,
         reason: SkipReason,
-        /// What the run's library said about the file, where this skip
-        /// is the file's resolution verdict and the library was asked.
-        /// `None` on every other skip — one made after the file
-        /// resolved, whose `resolved` event already carries the answer —
-        /// and wherever [`Event::Resolved`]'s `library` would be `None`.
-        #[serde(default)]
-        library: Option<LibraryAnswer>,
+        /// The resolution's evidence, written as seven keys beside
+        /// `reason`: `Some` exactly when the skip is the file's
+        /// resolution verdict ([`SkipReason::is_resolution_verdict`]),
+        /// and absent from the line otherwise. Its absence is how a
+        /// consumer tells a skip made after the file resolved.
+        #[serde(flatten)]
+        sections: Option<Box<Sections>>,
+        /// The record the title check refused: `Some` exactly when
+        /// `reason` is [`SkipReason::Conflict`], and absent from the line
+        /// otherwise. `record_retrieval` says where it came from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate: Option<Box<Record>>,
     },
     /// A file that already carries the name its record implies, or
     /// whose target is held by a byte-identical file.
@@ -255,6 +230,22 @@ pub enum Event {
         path: PathBuf,
         admission: Admission,
     },
+    /// What became of writing a record an operator reached — supplied,
+    /// asked for again, or accepted over a conflict — to the content
+    /// index, once its file was moved.
+    ///
+    /// Follows the file's [`Event::Renamed`] and any
+    /// [`Event::LibraryAdmission`], and is emitted for no other file:
+    /// the resolution's own `content_index.write` reads
+    /// `awaiting-acceptance` for exactly these. `write` is
+    /// [`WriteStep::Written`] or [`WriteStep::Failed`]; a failure is
+    /// evidence and never a failure of the rename. Counts toward no
+    /// total.
+    ContentIndexWrite {
+        /// The file, at the path it holds after the move.
+        path: PathBuf,
+        write: WriteStep,
+    },
     /// What validating a library amounted to: how many findings were
     /// reported, and the three counts that are not findings.
     ///
@@ -345,46 +336,38 @@ pub enum Event {
 /// Every variant is a decision borax made deliberately; nothing here is
 /// a crash. Serialized with a `kind` tag, nested under the event's
 /// `reason` field.
+///
+/// The first six variants and [`SkipReason::Duplicate`] are resolution
+/// verdicts ([`SkipReason::is_resolution_verdict`]): the facts behind
+/// them are in the event's sections, so the reason names the cause and
+/// carries no detail beyond an unreadable file's message and a
+/// duplicate's two fields. Every other variant is a skip made after the
+/// file resolved, and carries what it needs itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum SkipReason {
-    /// Neither extraction pass found an identifier in the file.
-    NoIdentifier,
-    /// An identifier was found but no source holds it. `attempts`
-    /// records what each source said, in the order they were asked.
-    ///
-    /// `found` is the identifier that was looked up, in the form the
-    /// stream writes one, and `tier` the pass that read it. Carried
-    /// because they are the part of this skip worth acting on: a
-    /// reader deciding what to do about the file, at the terminal or
-    /// over the log, needs to know which identifier nobody held — and
-    /// one read from the text layer is likelier to be a reference's
-    /// than one read from the file's own metadata.
-    Unresolvable {
-        found: String,
-        tier: Option<String>,
-        attempts: Vec<Attempt>,
-    },
-    /// The file's own metadata disagrees with the resolved record, so
-    /// the record is probably about a different work.
-    ///
-    /// `similarity` is how close the two were, from 0.0 to 1.0, and is
-    /// always below the threshold that would have cleared them. It is
-    /// reported so the skip can be judged: a value near the threshold
-    /// says the identifier is probably right and the metadata merely
-    /// differs, while one near zero says the file and the record are
-    /// about different works.
-    Conflict {
-        field: String,
-        extracted: String,
-        resolved: String,
-        similarity: f64,
-    },
+    /// Extraction found no identifier, and no page it read held text.
+    NoTextLayer,
+    /// Extraction found no identifier in the file's metadata or in the
+    /// text its pages held.
+    TextWithoutIdentifier,
+    /// The file cannot be read without a password.
+    Encrypted,
+    /// The file could not be opened or parsed as a PDF, with `message`
+    /// as the reader gave it.
+    Unreadable { message: String },
+    /// An identifier was looked up and no service supplied a record for
+    /// it, or no configured service could be asked about it. The
+    /// `lookup` section says which, and what each service answered.
+    Unresolvable,
+    /// The file's own titles name a different work from the record its
+    /// identifier reached, so the record was refused. The `match_check`
+    /// section holds the two titles and how alike they were, and the
+    /// event's `candidate` holds the refused record.
+    Conflict,
     /// The name the template produced is taken, and the collision
     /// policy is to skip.
     TargetTaken { target: PathBuf },
-    /// The file could not be read as a PDF at all.
-    Unreadable { message: String },
     /// The record resolved, but the template rendered an empty name
     /// from it — the record is too sparse to name a file.
     Unnameable,
@@ -406,8 +389,10 @@ pub enum SkipReason {
     /// moved, and a line that could not say which file it was about
     /// would be a move the log cannot account for afterwards.
     Unrecordable { message: String },
-    /// The library already holds this file, by content or by work.
-    /// `existing_path` is where the artifact record says the file it
+    /// The library already holds this file, by content or by work: a
+    /// resolution verdict, whose sections are not attempted for a
+    /// content duplicate and are the evidence of the record the file
+    /// resolved to for a work duplicate. `existing_path` is where the artifact record says the file it
     /// duplicates sits, as a full path rather than the
     /// library-relative one the record stores, so the report names
     /// somewhere the reader can go and look.
@@ -431,6 +416,33 @@ pub enum SkipReason {
     /// bytes and lets the move proceed under either setting; re-running
     /// without the gate is not named, because it does not always work.
     Stranding { id: String },
+}
+
+impl SkipReason {
+    /// Whether this skip is a file's resolution verdict, and so carries
+    /// the resolution's sections: the four extraction failures,
+    /// [`SkipReason::Unresolvable`], [`SkipReason::Conflict`] and
+    /// [`SkipReason::Duplicate`] of either reason.
+    pub fn is_resolution_verdict(&self) -> bool {
+        match self {
+            SkipReason::NoTextLayer
+            | SkipReason::TextWithoutIdentifier
+            | SkipReason::Encrypted
+            | SkipReason::Unreadable { .. }
+            | SkipReason::Unresolvable
+            | SkipReason::Conflict
+            | SkipReason::Duplicate { .. } => true,
+            SkipReason::TargetTaken { .. }
+            | SkipReason::Unnameable
+            | SkipReason::Declined
+            | SkipReason::RenameFailed { .. }
+            | SkipReason::BibWriteFailed { .. }
+            | SkipReason::Unciteable
+            | SkipReason::SidecarTaken { .. }
+            | SkipReason::Unrecordable { .. }
+            | SkipReason::Stranding { .. } => false,
+        }
+    }
 }
 
 /// Something wrong with a library's own records.
@@ -733,25 +745,327 @@ pub enum ClaimOrigin {
     Info,
 }
 
-/// A conflict an operator accepted, reported on the record they
-/// accepted it for.
+/// What every step of a file's resolution found out, as a resolution
+/// event carries it: one key per step, in the order the steps run.
 ///
-/// The fields are the ones [`SkipReason::Conflict`] carries, and carry
-/// them unchanged: a reader of the run log sees what was overridden in
-/// the vocabulary the skip would have used.
+/// A step that did not run is never left out. It is
+/// `{"status":"not-attempted","reason":R}` wherever it sits, with `R`
+/// one of [`crate::evidence::Unattempted`]'s names.
+///
+/// Built from the engine's evidence by
+/// [`crate::evidence::Evidence::sections`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Overridden {
-    pub field: String,
-    pub extracted: String,
-    pub resolved: String,
-    pub similarity: f64,
+pub struct Sections {
+    /// What the run's library said about the file, or why it was not
+    /// asked.
+    pub library: LibraryStep,
+    /// What reading the content index came to, and what became of
+    /// writing the record reached to it.
+    pub content_index: ContentIndexSection,
+    /// What extraction found, and the titles the file claims.
+    pub extraction: ExtractionSection,
+    /// The identifier looked up and every service asked about it.
+    pub lookup: LookupStep,
+    /// Where the record the verdict is about was retrieved from, or
+    /// `null` when the verdict reached no record. On a conflict skip
+    /// this is the refused candidate's.
+    pub record_retrieval: Option<RetrievedFrom>,
+    /// What the title check concluded about the record reached.
+    pub match_check: MatchCheckStep,
+    /// Whether the record was used, and whether an operator overrode
+    /// the title check to use it.
+    pub acceptance: Acceptance,
 }
 
-/// One source's answer during resolution.
+/// What a run's library said about a file. Serialized with a `status`
+/// tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Attempt {
-    pub source: String,
-    pub error: String,
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum LibraryStep {
+    /// The library was asked, and gave `answer`.
+    Consulted { answer: LibraryAnswer },
+    /// The library was not asked: `no-library`, `outside-library` or
+    /// `content-duplicate`.
+    NotAttempted { reason: String },
+}
+
+impl LibraryStep {
+    /// The library's answer, or `None` when it was not asked.
+    pub fn answer(&self) -> Option<&LibraryAnswer> {
+        match self {
+            LibraryStep::Consulted { answer } => Some(answer),
+            LibraryStep::NotAttempted { .. } => None,
+        }
+    }
+}
+
+/// The content index's two steps for a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentIndexSection {
+    /// Reading the index by the file's hash.
+    pub read: IndexReadStep,
+    /// Writing the record reached under the file's hash.
+    pub write: WriteStep,
+}
+
+/// What reading the content index came to. Serialized with a `status`
+/// tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum IndexReadStep {
+    /// The index held a record for the file's hash.
+    Hit,
+    /// The index held none.
+    Miss,
+    /// The run turned the cache off, so the index was not read.
+    Bypassed,
+    /// The file could not be hashed, with `message` as the hashing
+    /// error. Reported whether or not the cache was turned off.
+    Unavailable { message: String },
+    /// The index was not read, because a content duplicate or the
+    /// library settled the file first.
+    NotAttempted { reason: String },
+}
+
+/// What a write to a store came to. Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum WriteStep {
+    /// The write was made.
+    Written,
+    /// The write failed, with `message` as the store gave it. Never a
+    /// failure of anything else.
+    Failed { message: String },
+    /// No write was made, for the earliest reason in pipeline order.
+    NotAttempted { reason: String },
+}
+
+/// Extraction's two steps for a file, independent of each other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtractionSection {
+    /// What the extraction passes found.
+    pub result: ExtractionResultStep,
+    /// The titles the file's own metadata claims.
+    pub titles: TitlesStep,
+}
+
+/// What extraction found in a file, in [`Extraction`]'s vocabulary.
+/// Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum ExtractionResultStep {
+    /// A pass found `identifier` (`doi:…`, `arXiv:…`); `tier` names the
+    /// pass (`embedded-metadata` or `text-layer`).
+    Found { identifier: String, tier: String },
+    /// No identifier, and no page read held text.
+    NoTextLayer,
+    /// No identifier in the metadata or in the text the pages held.
+    TextWithoutIdentifier,
+    /// The file needs a password.
+    Encrypted,
+    /// The file could not be opened or parsed, with the reader's
+    /// `message`.
+    Unreadable { message: String },
+    /// Extraction did not run, because something earlier answered.
+    NotAttempted { reason: String },
+}
+
+/// The titles a file claims, in exactly one of three states.
+/// Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum TitlesStep {
+    /// The file was opened, and `claims` are every title it claims, in
+    /// the order read: empty when it claims none.
+    Read { claims: Vec<Claim> },
+    /// The file could not be opened, with the open error's `message`.
+    Failed { message: String },
+    /// The file was not opened.
+    NotAttempted { reason: String },
+}
+
+/// The lookup made for a file, or why none was. Serialized with a
+/// `status` tag.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum LookupStep {
+    /// `identifier`, which came from `origin`, was looked up, and
+    /// `attempts` are the services asked, in order: never empty, and a
+    /// found attempt is always the last.
+    Attempted {
+        identifier: String,
+        origin: IdentifierOrigin,
+        attempts: Vec<ServiceAnswer>,
+    },
+    /// `identifier`, which came from `origin`, was to be looked up, and
+    /// no configured service supports its kind.
+    NoEligibleService {
+        identifier: String,
+        origin: IdentifierOrigin,
+    },
+    /// Nothing was looked up.
+    NotAttempted { reason: String },
+}
+
+/// Where an identifier that was looked up came from.
+///
+/// For [`IdentifierOrigin::Extracted`], the pass that read it is the
+/// `extraction` section's `tier`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IdentifierOrigin {
+    /// The file's own, read by extraction, including when an operator
+    /// asked for the lookup to be made again.
+    Extracted,
+    /// An operator supplied it.
+    Operator,
+}
+
+/// One service asked about an identifier, and how it answered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceAnswer {
+    /// The service, by its lowercase name (`crossref`, `openalex`, …).
+    pub service: String,
+    pub outcome: ServiceOutcome,
+}
+
+impl ServiceAnswer {
+    /// The answer as a person reads it: `<service>: <what it said>`, in
+    /// the wording of [`borax_sources::source::SourceError`]'s messages
+    /// for a failure (`not found`, `unavailable: …`, `rate limited`,
+    /// `malformed response: …`) and `found` for a success.
+    pub(crate) fn said(&self) -> String {
+        let what = match &self.outcome {
+            ServiceOutcome::Found { .. } => "found".to_string(),
+            ServiceOutcome::NotFound => "not found".to_string(),
+            ServiceOutcome::Unavailable { message } => format!("unavailable: {message}"),
+            ServiceOutcome::RateLimited => "rate limited".to_string(),
+            ServiceOutcome::Malformed { message } => format!("malformed response: {message}"),
+        };
+        format!("{}: {what}", self.service)
+    }
+}
+
+/// How a service answered. Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum ServiceOutcome {
+    /// The service supplied the record, from `retrieval`. `stored` is
+    /// what became of keeping a network answer in the response cache:
+    /// present exactly when `retrieval` is [`FetchedFrom::Network`],
+    /// and absent from the line otherwise.
+    Found {
+        retrieval: FetchedFrom,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stored: Option<WriteStep>,
+    },
+    /// The service does not hold the identifier.
+    NotFound,
+    /// The service could not be reached, or answered with a server
+    /// error, as `message` says.
+    Unavailable { message: String },
+    /// The service asked the run to slow down.
+    RateLimited,
+    /// The service answered with something that is not a record, as
+    /// `message` says.
+    Malformed { message: String },
+}
+
+/// How a found answer reached the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FetchedFrom {
+    /// The service's response cache; no request was sent.
+    ServiceCache,
+    /// The service, over the network.
+    Network,
+}
+
+/// Where the record a verdict is about was retrieved from. Serialized
+/// with a `kind` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RetrievedFrom {
+    /// The file's library item, through the artifact record `artifact`.
+    Library { artifact: String, item: String },
+    /// The content index, under the file's hash.
+    ContentIndex,
+    /// `service`'s response cache.
+    ServiceCache { service: String },
+    /// `service`, over the network.
+    Network { service: String },
+}
+
+/// What the title check concluded. Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum MatchCheckStep {
+    /// A title the file claims names the record's work.
+    Agreed,
+    /// The file's titles name another work: `field` is the field
+    /// compared, `extracted` the file's value, `resolved` the
+    /// record's, and `similarity` how alike they were, from 0.0 to 1.0
+    /// and below the threshold that clears them. Reported on a conflict
+    /// skip and on a record an operator accepted over it alike.
+    Conflict {
+        field: String,
+        extracted: String,
+        resolved: String,
+        similarity: f64,
+    },
+    /// Too little to judge: `record-untitled`, `no-titles` or
+    /// `no-evidence`.
+    InsufficientEvidence { reason: String },
+    /// The check was not made.
+    NotAttempted { reason: String },
+}
+
+/// Whether a verdict's record was used. Serialized with a `status` tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum Acceptance {
+    /// The verdict is a skip, whose record, if it reports one, was not
+    /// used.
+    NotApplicable,
+    /// A record was used, and no title-check conflict was overridden to
+    /// use it.
+    Automatic,
+    /// An operator accepted the record over the conflict `match_check`
+    /// holds.
+    Overridden,
+}
+
+/// The services that supplied `record`, as the human line and the
+/// interactive description name them.
+///
+/// The service `retrieval` names, where a service's response cache or
+/// the network answered. Otherwise every service `record`'s per-field
+/// provenance names other than extraction, in one fixed order —
+/// Crossref, OpenAlex, arXiv, DataCite, PubMed, then `sidecar` — and
+/// none when it names none of them. A store is never named as though it
+/// were a service.
+pub(crate) fn services_of<'a>(
+    record: &Record,
+    retrieval: Option<&'a RetrievedFrom>,
+) -> Vec<&'a str> {
+    if let Some(RetrievedFrom::ServiceCache { service } | RetrievedFrom::Network { service }) =
+        retrieval
+    {
+        return vec![service.as_str()];
+    }
+    const ORDER: [(FieldSource, &str); 6] = [
+        (FieldSource::Crossref, "crossref"),
+        (FieldSource::OpenAlex, "openalex"),
+        (FieldSource::Arxiv, "arxiv"),
+        (FieldSource::DataCite, "datacite"),
+        (FieldSource::PubMed, "pubmed"),
+        (FieldSource::Sidecar, "sidecar"),
+    ];
+    ORDER
+        .iter()
+        .filter(|(source, _)| record.borax.provenance.values().any(|had| had == source))
+        .map(|(_, name)| *name)
+        .collect()
 }
 
 /// One external table a run read, identified well enough to explain a
@@ -892,20 +1206,16 @@ pub fn human_line(event: &Event) -> Option<String> {
         Event::Resolved {
             path,
             identifier,
-            source,
-            cached,
-            tier,
-            library,
-            ..
+            record,
+            sections,
         } => Some(format!(
-            "{}: resolved {identifier} via {source}{}{}",
+            "{}: {}",
             path.display(),
-            match (*cached, tier.as_deref()) {
-                (true, _) => " (cached)",
-                (false, Some("library")) => " (from the library)",
-                (false, _) => "",
-            },
-            unanswered(library.as_ref())
+            escaped(&format!(
+                "{}{}",
+                resolved_as(identifier, record, sections),
+                unanswered(sections.library.answer())
+            ))
         )),
         Event::Planned { path, target } => Some(format!(
             "{}: would rename to {}",
@@ -920,12 +1230,20 @@ pub fn human_line(event: &Event) -> Option<String> {
         Event::Skipped {
             path,
             reason,
-            library,
+            sections,
+            ..
         } => Some(format!(
-            "{}: skipped, {}{}",
+            "{}: skipped, {}",
             path.display(),
-            skipped_because(reason),
-            unanswered(library.as_ref())
+            escaped(&format!(
+                "{}{}",
+                skipped_because(reason, sections.as_deref()),
+                unanswered(
+                    sections
+                        .as_deref()
+                        .and_then(|sections| sections.library.answer())
+                )
+            ))
         )),
         Event::AlreadyNamed { path } => Some(format!("{}: already named", path.display())),
         Event::BibEntry { path, key, outcome } => Some(format!(
@@ -1024,6 +1342,16 @@ pub fn human_line(event: &Event) -> Option<String> {
         Event::LibraryAdoption { path, adoption } => {
             Some(format!("{}: {}", escaped(path), what_was_adopted(adoption)))
         }
+        Event::ContentIndexWrite { path, write } => match write {
+            WriteStep::Failed { message } => Some(format!(
+                "{}: {}",
+                path.display(),
+                escaped(&format!(
+                    "the content index could not keep this answer ({message})"
+                ))
+            )),
+            WriteStep::Written | WriteStep::NotAttempted { .. } => None,
+        },
         Event::LibraryAdopted {
             root,
             adopted,
@@ -1117,33 +1445,55 @@ pub fn human_summary(summary: Summary, counts: &Counts, hidden: usize) -> Option
     (!said.is_empty()).then(|| said.join(", "))
 }
 
-/// The clause following `skipped,` in a human line.
-fn skipped_because(reason: &SkipReason) -> String {
+/// The clause following `skipped,` in a human line, unescaped.
+///
+/// A resolution verdict's clause is read from `sections` where its
+/// reason names no detail: the identifier and the services' answers for
+/// [`SkipReason::Unresolvable`], the two titles for
+/// [`SkipReason::Conflict`]. The four extraction failures are worded as
+/// `status --identify` words them, so a skip and a survey say the same
+/// thing about the same file.
+fn skipped_because(reason: &SkipReason, sections: Option<&Sections>) -> String {
     match reason {
-        SkipReason::NoIdentifier => "no identifier found".to_string(),
-        SkipReason::Unresolvable {
-            found, attempts, ..
-        } => {
-            let said: Vec<String> = attempts
-                .iter()
-                .map(|attempt| format!("{}: {}", attempt.source, attempt.error))
-                .collect();
-            match said.is_empty() {
-                true => format!("no source had a record for {found}"),
-                false => format!("no source had a record for {found} ({})", said.join("; ")),
-            }
-        }
-        SkipReason::Conflict {
-            field,
-            extracted,
-            resolved,
-            similarity,
-        } => format!(
-            "{field} disagrees {}% (file says {extracted}, record says {resolved})",
-            (similarity * 100.0).round()
-        ),
-        SkipReason::TargetTaken { target } => format!("{} is taken", target.display()),
+        SkipReason::NoTextLayer => what_was_extracted(&Extraction::NoTextLayer),
+        SkipReason::TextWithoutIdentifier => what_was_extracted(&Extraction::TextWithoutIdentifier),
+        SkipReason::Encrypted => what_was_extracted(&Extraction::Encrypted),
         SkipReason::Unreadable { message } => format!("unreadable ({message})"),
+        SkipReason::Unresolvable => match sections.map(|sections| &sections.lookup) {
+            Some(LookupStep::Attempted {
+                identifier,
+                attempts,
+                ..
+            }) => {
+                let said: Vec<String> = attempts.iter().map(ServiceAnswer::said).collect();
+                match said.is_empty() {
+                    true => format!("no source had a record for {identifier}"),
+                    false => format!(
+                        "no source had a record for {identifier} ({})",
+                        said.join("; ")
+                    ),
+                }
+            }
+            Some(LookupStep::NoEligibleService { identifier, .. }) => {
+                format!("no configured service could be asked about {identifier}")
+            }
+            Some(LookupStep::NotAttempted { .. }) | None => {
+                "no source had a record for its identifier".to_string()
+            }
+        },
+        SkipReason::Conflict => match sections.map(|sections| &sections.match_check) {
+            Some(MatchCheckStep::Conflict {
+                field,
+                extracted,
+                resolved,
+                similarity,
+            }) => format!(
+                "{field} disagrees {}% (file says {extracted}, record says {resolved})",
+                (similarity * 100.0).round()
+            ),
+            _ => "the file's own title names another work".to_string(),
+        },
+        SkipReason::TargetTaken { target } => format!("{} is taken", target.display()),
         SkipReason::Unnameable => "the record renders an empty name".to_string(),
         SkipReason::Declined => "declined".to_string(),
         SkipReason::RenameFailed { message } => format!("rename failed ({message})"),
@@ -1173,6 +1523,59 @@ fn skipped_because(reason: &SkipReason) -> String {
              moving it would strand the record; borax reconcile --rehash records them"
         ),
     }
+}
+
+/// The clause following a `resolved` line's path, unescaped and
+/// without its library problem: the identifier, the work the record
+/// describes, the services that supplied it and where it was retrieved
+/// from, each left out where there is nothing to say.
+fn resolved_as(identifier: &str, record: &Record, sections: &Sections) -> String {
+    let mut clause = format!("resolved {identifier}");
+    if let Some(work) = work_of(record) {
+        clause.push_str(&format!(" to {work}"));
+    }
+    let services = services_of(record, sections.record_retrieval.as_ref());
+    if !services.is_empty() {
+        clause.push_str(&format!(" via {}", services.join(", ")));
+    }
+    if let Some(retrieval) = &sections.record_retrieval {
+        clause.push_str(&format!(
+            ", from {}",
+            match retrieval {
+                RetrievedFrom::Library { .. } => "the library",
+                RetrievedFrom::ContentIndex => "the content index",
+                RetrievedFrom::ServiceCache { .. } => "the response cache",
+                RetrievedFrom::Network { .. } => "the network",
+            }
+        ));
+    }
+    clause
+}
+
+/// The work `record` describes, as `"<title>" (<authors>, <year>)`,
+/// leaving out a title that is absent or blank and whichever of the
+/// authors and the year the record lacks, or `None` when it has none of
+/// the three.
+///
+/// Authors are named by family name: one as `Smith`, two as `Smith and
+/// Jones`, and three or more as `Smith et al.`
+fn work_of(record: &Record) -> Option<String> {
+    let title = record
+        .title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .map(|title| format!("\"{title}\""));
+    let authors = match record.authors.as_slice() {
+        [] => None,
+        [one] => Some(one.family.clone()),
+        [first, second] => Some(format!("{} and {}", first.family, second.family)),
+        [first, ..] => Some(format!("{} et al.", first.family)),
+    };
+    let year = record.issued.as_ref().map(|issued| issued.year.to_string());
+    let credit: Vec<String> = authors.into_iter().chain(year).collect();
+    let credit = (!credit.is_empty()).then(|| format!("({})", credit.join(", ")));
+    let work: Vec<String> = title.into_iter().chain(credit).collect();
+    (!work.is_empty()).then(|| work.join(" "))
 }
 
 /// The clause a resolution's human line ends with when its library

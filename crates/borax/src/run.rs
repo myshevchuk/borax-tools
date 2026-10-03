@@ -43,14 +43,14 @@ use crate::config::{
 };
 use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
-    Admission, Counts, Diagnostic, Event, Format, Level, LibraryAnswer, SkipReason, Summary,
-    TableUsed, human_summary, render,
+    Admission, Counts, Diagnostic, Event, Format, Level, Sections, SkipReason, Summary, TableUsed,
+    human_summary, render,
 };
-use crate::evidence::{IndexWrite, LookupEvidence};
+use crate::evidence::{IndexWrite, LookupEvidence, Origin as LookupOrigin};
 use crate::library::Account;
 use crate::pipeline::{
-    Documents, Duplicated, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig,
-    Standing, resolve_batch, resolved_event,
+    Documents, Duplicated, FileOutcome, FileRecord, RealDocuments, ResolveConfig, Standing,
+    resolution_skip, resolve_batch, resolved_event,
 };
 use crate::renaming::{
     Applying, Filesystem, Namespace, PlannedRename, Planning, Proposed, RealFilesystem,
@@ -1486,7 +1486,8 @@ fn rename_events<C: Cache>(
                     Settled::Skip {
                         file,
                         reason,
-                        library,
+                        sections,
+                        candidate,
                     } => {
                         sink.release();
                         if let Some(file) = &file {
@@ -1495,7 +1496,8 @@ fn rename_events<C: Cache>(
                         let event = Event::Skipped {
                             path: path.clone(),
                             reason,
-                            library,
+                            sections,
+                            candidate,
                         };
                         sink.emit(event.clone());
                         (file, event)
@@ -1588,18 +1590,26 @@ fn rename_events<C: Cache>(
                         // answer that could not be kept means the file
                         // is asked about again.
                         //
-                        // What became of the write belongs to the move
-                        // and is kept beside it. Nothing renders it yet:
-                        // the event that will carry it is change 9's to
-                        // choose, so it is dropped here unreported.
-                        let _remembered: Option<IndexWrite> =
-                            (remember && matches!(event, Event::Renamed { .. })).then(|| {
-                                crate::pipeline::remember(
-                                    adapters.index,
-                                    file.hash.as_ref(),
-                                    &file.record,
-                                )
+                        // What became of the write is reported after the
+                        // move's own events, under the path the file now
+                        // holds: the `renamed` event was logged before
+                        // the move, when the write had not happened, so
+                        // it cannot carry the result. A file with no
+                        // hash has nothing to be remembered under, and
+                        // so nothing to report.
+                        if remember
+                            && let Event::Renamed { target, .. } = &event
+                            && let IndexWrite::Attempted(write) = crate::pipeline::remember(
+                                adapters.index,
+                                file.hash.as_ref(),
+                                &file.record,
+                            )
+                        {
+                            sink.emit(Event::ContentIndexWrite {
+                                path: target.clone(),
+                                write: crate::evidence::write_step(&write),
                             });
+                        }
                         (Some(file), event)
                     }
                 };
@@ -1714,13 +1724,17 @@ enum Settled {
     /// and was not moved has one to be cited from, and a file nothing
     /// identified has none.
     ///
-    /// `library` is what the run's library said about the file where the
-    /// skip is its resolution verdict, and `None` for a skip of a file
-    /// that resolved, whose record already carries the answer.
+    /// `sections` and `candidate` are the held verdict's where the skip
+    /// is the file's resolution verdict, replayed exactly as
+    /// [`crate::pipeline::verdict_event`] or
+    /// [`crate::pipeline::resolution_skip`] built them, and `None` for a
+    /// skip of a file that resolved, whose `resolved` event already
+    /// carries its evidence.
     Skip {
         file: Option<FileRecord>,
         reason: SkipReason,
-        library: Option<LibraryAnswer>,
+        sections: Option<Box<Sections>>,
+        candidate: Option<Box<Record>>,
     },
     /// End the run at this file, saying nothing about it.
     Stop,
@@ -1746,13 +1760,10 @@ fn alone(
     planning: &mut Planning<'_>,
     lookups: &mut Lookups<'_>,
 ) -> Settled {
-    let library = standing.library().cloned();
     match standing.verdict {
-        FileOutcome::Skipped(reason) => Settled::Skip {
-            file: None,
-            reason,
-            library,
-        },
+        FileOutcome::Skipped(_) => {
+            skipped(None, &crate::pipeline::verdict_event(about.path, &standing))
+        }
         FileOutcome::Resolved(file) => Settled::CarryOut {
             decision: planning.proposed(about.path, &file, lookups).decision,
             file,
@@ -2094,11 +2105,12 @@ fn asked<C: Cache>(
                 ) {
                     Ok(file) => {
                         held = match file.conflict() {
-                            Some(conflict) => Event::Skipped {
-                                path: about.path.to_path_buf(),
-                                reason: conflict,
-                                library: file.library().cloned(),
-                            },
+                            Some(_) => resolution_skip(
+                                about.path,
+                                SkipReason::Conflict,
+                                &file.evidence,
+                                Some(&file.record),
+                            ),
                             None => resolved_event(about.path, &file),
                         };
                         evidence = file.evidence.clone();
@@ -2119,17 +2131,14 @@ fn asked<C: Cache>(
                         // A retry is the file's own resolution rather
                         // than a candidate, so what it came to is the
                         // verdict the run now holds for it.
-                        held = Event::Skipped {
-                            path: about.path.to_path_buf(),
-                            reason: crate::pipeline::unresolvable(&unheld, &identifier, tier),
-                            library: evidence.library.answer().cloned(),
-                        };
                         evidence = crate::pipeline::unheld_evidence(
                             &evidence,
                             &identifier,
                             origin,
                             &unheld,
                         );
+                        held =
+                            resolution_skip(about.path, SkipReason::Unresolvable, &evidence, None);
                         own = None;
                         offer = None;
                         candidate = false;
@@ -2200,13 +2209,16 @@ fn situation(
             return Situation::Report;
         };
         return match reason {
-            SkipReason::NoIdentifier | SkipReason::Unreadable { .. } => {
+            SkipReason::NoTextLayer
+            | SkipReason::TextWithoutIdentifier
+            | SkipReason::Encrypted
+            | SkipReason::Unreadable { .. } => {
                 Situation::Ask(vec![Answer::Supply, Answer::Skip, Answer::Quit])
             }
             // An outage is no evidence about the file, so the two are
             // not presented alike: where the services merely failed to
             // answer, asking them again is what failed and it leads.
-            SkipReason::Unresolvable { .. } => match lookup.is_conclusive() {
+            SkipReason::Unresolvable => match lookup.is_conclusive() {
                 true => Situation::Ask(vec![Answer::Supply, Answer::Skip, Answer::Quit]),
                 false => Situation::Ask(vec![
                     Answer::Retry,
@@ -2260,7 +2272,9 @@ fn situation(
 ///
 /// The reason borax had, where it had one: an operator's skip leaves
 /// the file exactly as a batch run would have left it, and for exactly
-/// that reason. A file that resolved had no reason of its own, and
+/// that reason, so the held `skipped` verdict is reported again with
+/// its sections and candidate. A file that resolved had no reason of
+/// its own, and
 /// what was declined is the move that was on offer — so it is
 /// `declined`, and its record still stands and is still cited.
 ///
@@ -2269,24 +2283,28 @@ fn situation(
 fn skipped(own: Option<Offer>, held: &Event) -> Settled {
     match held {
         Event::Skipped {
-            reason, library, ..
+            reason,
+            sections,
+            candidate,
+            ..
         } => Settled::Skip {
             file: None,
             reason: reason.clone(),
-            library: library.clone(),
+            sections: sections.clone(),
+            candidate: candidate.clone(),
         },
         _ => Settled::Skip {
             file: own.map(|on| on.file),
             reason: SkipReason::Declined,
-            library: None,
+            sections: None,
+            candidate: None,
         },
     }
 }
 
 /// `offer`'s record as accepting it makes it ([`crate::pipeline::accept`]):
-/// the conflict it was accepted over recorded on the record, in the
-/// vocabulary the skip would have used, and nothing recorded where the
-/// record cleared the check on its own.
+/// marked as overridden where its title check concluded a conflict, and
+/// unchanged where the record cleared the check on its own.
 fn accepted(offer: &Offer) -> FileRecord {
     crate::pipeline::accept(offer.file.clone())
 }
@@ -2339,10 +2357,10 @@ fn proposed_move(proposal: Option<&Proposed>) -> Option<Proposal> {
 /// What became of a candidate whose record leads somewhere other than
 /// a move, as the question put again reports it.
 fn elsewhere(offer: Option<&Offer>, decision: Option<&PlannedRename>, width: usize) -> Vec<String> {
-    let identifier = offer
-        .and_then(|offer| offer.file.found())
-        .map(Identifier::to_string)
-        .unwrap_or_default();
+    let identifier = match offer.map(|offer| &offer.file.evidence.lookup) {
+        Some(LookupEvidence::Attempted { identifier, .. }) => identifier.to_string(),
+        _ => String::new(),
+    };
     // Rendered before the outcome that names it, so that the name
     // outlives the value borrowing it. Named relative to the file's
     // own directory, as every other name a question shows is.
@@ -2667,7 +2685,8 @@ fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Set
         Some(id) => Settled::Skip {
             file: Some(file),
             reason: SkipReason::Stranding { id },
-            library: None,
+            sections: None,
+            candidate: None,
         },
         None => Settled::CarryOut {
             file,
@@ -2800,7 +2819,14 @@ fn admissible(library: &Path, path: &Path) -> bool {
 /// identifier it was resolved by, or accepted its record over a
 /// conflict.
 fn reidentified(file: &FileRecord) -> bool {
-    file.tier() == Some(Provenance::Supplied) || file.overrode.is_some()
+    let by_operator = matches!(
+        file.evidence.lookup,
+        LookupEvidence::Attempted {
+            origin: LookupOrigin::Operator,
+            ..
+        }
+    );
+    by_operator || file.overridden
 }
 
 /// Resolve the file at `path` under `effective`, writing its verdict

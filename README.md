@@ -40,7 +40,7 @@ authors     Nataliya V. Lyutenko, Alexander E. Sorochinsky, Vadim A.
             Soloshonok
 issued      2023
 in          Ukrainica Bioorganica Acta 18(1), 10–21
-file says   nothing read
+file says   no title in its metadata
 new name    lyutenko2023_ApplicationsChiralSulfinyl.pdf
 ? What should happen to this file?
 > Rename
@@ -59,9 +59,9 @@ again. To preview the whole plan without moving anything, use `--batch`:
 
 ```console
 $ borax rename --batch papers/
-papers/1-s2.0-S0009261421001234.pdf: resolved 10.1021/jacs.4c01234 via crossref
+papers/1-s2.0-S0009261421001234.pdf: resolved doi:10.1021/jacs.4c01234 to "An Awesome Paper on Borax" (Smith, 2024) via crossref, from the network
 papers/1-s2.0-S0009261421001234.pdf: would rename to papers/smith2024_AwesomePaperBorax.pdf
-papers/scan003.pdf: skipped, no identifier found
+papers/scan003.pdf: skipped, no identifier found; the pages read hold no text
 1 resolved, 0 renamed, 1 skipped
 ```
 
@@ -69,9 +69,9 @@ Apply the renames and merge each record into a master bibliography:
 
 ```console
 $ borax rename --apply --bib library.bib papers/
-papers/1-s2.0-S0009261421001234.pdf: resolved 10.1021/jacs.4c01234 via crossref (cached)
+papers/1-s2.0-S0009261421001234.pdf: resolved doi:10.1021/jacs.4c01234 to "An Awesome Paper on Borax" (Smith, 2024) via crossref, from the content index
 papers/1-s2.0-S0009261421001234.pdf: renamed to papers/smith2024_AwesomePaperBorax.pdf
-papers/scan003.pdf: skipped, no identifier found
+papers/scan003.pdf: skipped, no identifier found; the pages read hold no text
 papers/smith2024_AwesomePaperBorax.pdf: bibliography entry smith2024 added
 1 resolved, 1 renamed, 1 skipped
 ```

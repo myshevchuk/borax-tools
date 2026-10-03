@@ -542,13 +542,14 @@ it already had.
   and the operator supplies the DOI of its published version and then
   answers rename
 - **THEN** the file is renamed from the published record, and the run
-  log records a `resolved` event with tier `supplied` and a `renamed`
-  event for it
+  log records a `resolved` event whose `lookup` names the operator as
+  the identifier's origin and a `renamed` event for it
 
 #### Scenario: Skipping an unidentified file
 - **WHEN** the operator skips a file with no identifier
-- **THEN** it keeps its name and is reported skipped with reason
-  `no-identifier`
+- **THEN** it keeps its name and is reported skipped with the reason
+  its extraction gave: `text-without-identifier` where its pages hold
+  text, or `no-text-layer` where they hold none
 
 #### Scenario: A reference's DOI caught
 - **WHEN** a proposal comes from a DOI that belongs to a paper the file
@@ -626,8 +627,9 @@ would be in a batch run, whatever candidates were shown along the way.
 ### Requirement: An interactive question says whether the library answered
 The description an interactive run shows before a question SHALL say when the file's record is its library item's, and SHALL state what the library could not answer for when it could not.
 
-Where the file's `resolved` event reports `library` as its `tier`, the
-description SHALL name the record's own identifier without claiming
+Where the file's `resolved` event reports `library` as its
+`record_retrieval`, the description SHALL name the record's own
+identifier without claiming
 where it was found, since nothing was looked up; SHALL name on its
 `record` line the services the item's provenance records followed by
 `from the library`, or the library alone where the provenance names no
@@ -642,8 +644,8 @@ states it — after the `record` line for a resolved file, and after the
 reason for a file that was skipped.
 
 The description SHALL remain a rendering of the file's resolution
-event: it shows what that event's `library` and `tier` carry, and
-nothing the event does not. What the questions offer and what their
+event: it shows what that event's `library` and `record_retrieval`
+carry, and nothing the event does not. What the questions offer and what their
 answers do SHALL NOT change: a file the library answered for is asked
 about its move as any resolved file is, and one already named is passed
 over under `rename.skip-named` as any already-named file is.
@@ -675,4 +677,49 @@ over under `rename.skip-named` as any already-named file is.
   tracked file that already carries the name its item's record implies
 - **THEN** nothing is shown or asked about it, and its `resolved` and
   `already-named` events are in the run log
+
+### Requirement: An interactive description says whether the file's titles were read
+The description an interactive run shows before a question SHALL state which state the file's titles are in: the titles read, each with where it was read; that the file was read and claims no title; that the file could not be opened, with the reason; or that the file was not read, with why.
+
+The description of a file skipped because extraction found no identifier
+in it, or because no service held its identifier, SHALL show the file's
+titles in the same way, since they are what an operator supplying an
+identifier has to go on, and they are carried by the file's `skipped`
+event.
+
+The description of a file extraction found no identifier in SHALL say
+which way extraction failed: the pages read held no text, or held text
+and no identifier. An encrypted file SHALL be described as encrypted,
+not as unreadable.
+
+The description SHALL remain a rendering of the file's resolution event,
+as the requirement "An interactive question shows what the answer rests
+on" states: each of these is read from the event's `extraction`
+section, and none is worked out anew.
+
+#### Scenario: A titled blank scan
+- **WHEN** an interactive run offers to supply an identifier for a PDF
+  whose single page is blank and whose document information carries the
+  title `A Title`
+- **THEN** the description says no text was found on the pages read,
+  and shows `A Title` as the title the file claims, read from the
+  document information
+
+#### Scenario: A file that claims no title
+- **WHEN** an interactive run asks about a file that was opened, claims
+  no title, and resolved from its DOI
+- **THEN** the description says the file claims no title in its
+  metadata, rather than that nothing was read
+
+#### Scenario: A record from an earlier run
+- **WHEN** an interactive run asks about a file the content index
+  answered for
+- **THEN** the description says the file's titles were not read because
+  an earlier run answered
+
+#### Scenario: An encrypted file
+- **WHEN** an interactive run offers to supply an identifier for a PDF
+  encrypted under a user password
+- **THEN** the description says the file is encrypted, and that its
+  titles could not be read, with the reason
 

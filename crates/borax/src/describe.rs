@@ -15,7 +15,11 @@ use std::path::Path;
 
 use borax_core::record::{DateParts, EntryType, Name, Record};
 
-use crate::event::{Attempt, Claim, ClaimOrigin, Event, LibraryAnswer, SkipReason, why_unanswered};
+use crate::event::{
+    Acceptance, Claim, ClaimOrigin, Event, ExtractionResultStep, IdentifierOrigin, LibraryAnswer,
+    LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, SkipReason, TitlesStep,
+    services_of, why_unanswered,
+};
 
 /// The move a description is about: where the file would go, and the
 /// name the template rendered before a collision moved it aside.
@@ -64,21 +68,34 @@ const NAMED_AUTHORS: usize = 3;
 /// make — a file the run could not identify has nothing to be
 /// renamed to.
 ///
-/// `resolved` is the file's [`Event::Resolved`]; any other event has no
-/// description and yields no lines.
+/// `resolved` is the file's [`Event::Resolved`], or the `skipped` event
+/// of a verdict that identified nothing; any other event has no
+/// description and yields no lines. Everything shown is read from the
+/// event's own fields and sections.
 ///
 /// `name` is what the file is called on the `file` line. The description
 /// prints it and does not work it out: what to call a file is the run's
 /// to settle, and the run is the one that knows where it was started.
 ///
-/// The lines, in order, leaving out every field the record does not
-/// hold: a rule carrying `position`; `name`; the identifier
-/// the run looked up and where it was found; the services that
-/// supplied the record; why the library could not answer for the file,
-/// where it could not; its type, title, authors, date of issue and
-/// container; the titles the file claims for itself with where each was
-/// read; and the name the file would take, with a line saying which
-/// rendered name was taken when a suffix moved it aside.
+/// The lines of a resolution, in order, leaving out every field the
+/// record does not hold: a rule carrying `position`; `name`; the
+/// identifier the run looked up and where it came from (the extraction
+/// pass, or `supplied`), or the record's own identifier where nothing
+/// was looked up; the services that supplied the record, and whether it
+/// came from an earlier run or the library; why the library could not
+/// answer for the file, where it could not; the record's type, title,
+/// authors, date of issue and container; what the file's own titles
+/// say — each title with where it was read, or that it claims none,
+/// could not be opened, or was not read and why; the conflict an
+/// operator accepted the record over, where they did; and the name the
+/// file would take, with a line saying which rendered name was taken
+/// when a suffix moved it aside.
+///
+/// The lines of a skip, after `name`: why the verdict got no further
+/// (the extraction failure, the lookup and what each service answered,
+/// or the two titles of a conflict), what the file's own titles say
+/// wherever the verdict is not a conflict, and then why the library
+/// could not answer, where it could not.
 ///
 /// The rule fills `width`; values wrap within it, under a hanging
 /// indent as wide as the label column. The identifier is the exception
@@ -100,52 +117,45 @@ pub fn describe(
     description.field("file", name);
 
     let Event::Resolved {
+        identifier,
         record,
-        source,
-        found,
-        claims,
-        tier,
-        overrode,
-        cached,
-        library,
+        sections,
         ..
     } = resolved
     else {
         if let Event::Skipped {
-            reason, library, ..
+            reason, sections, ..
         } = resolved
         {
-            failure(&mut description, reason);
-            unanswered(&mut description, library.as_ref());
+            failure(&mut description, reason, sections.as_deref());
+            unanswered(
+                &mut description,
+                sections
+                    .as_deref()
+                    .and_then(|sections| sections.library.answer()),
+            );
             return description.lines;
         }
         return Vec::new();
     };
-    if !found.is_empty() {
-        // Whole, however long it runs. An identifier folded across two
-        // lines cannot be read back or copied out, and it is the one
-        // value in the description a person takes away with them.
-        //
-        // The clause saying where it was found is written only where
-        // the run found it. A content-index answer looked nothing up:
-        // the index keeps records rather than the identifiers they
-        // were reached by, so a record reached last time by an arXiv
-        // identifier and carrying a DOI has nothing to say about where
-        // the DOI came from, and saying "from an earlier run" would
-        // say something false about it.
-        description.whole(
-            "identifier",
-            &match whence(tier.as_deref()) {
-                Some(whence) => format!("{found}, {whence}"),
-                None => found.clone(),
-            },
-        );
+    // Whole, however long it runs. An identifier folded across two
+    // lines cannot be read back or copied out, and it is the one value
+    // in the description a person takes away with them.
+    //
+    // Where nothing was looked up, the record's own identifier is named
+    // with no clause. A content-index answer looked nothing up: the
+    // index keeps records rather than the identifiers they were reached
+    // by, so a record reached last time by an arXiv identifier and
+    // carrying a DOI has nothing to say about where the DOI came from.
+    match looked_up(sections) {
+        Some(looked_up) => description.whole("identifier", &looked_up),
+        None if !identifier.is_empty() => description.whole("identifier", identifier),
+        None => {}
     }
-    description.field(
-        "record",
-        &record_from(source, *cached, tier.as_deref() == Some("library")),
-    );
-    unanswered(&mut description, library.as_ref());
+    if let Some(from) = record_from(record, sections.record_retrieval.as_ref()) {
+        description.field("record", &from);
+    }
+    unanswered(&mut description, sections.library.answer());
     description.field("type", type_name(record.entry_type));
     if let Some(title) = held(record.title.as_deref()) {
         description.field("title", title);
@@ -159,17 +169,15 @@ pub fn describe(
     if let Some(within) = within(record) {
         description.field("in", &within);
     }
-    match claims.split_first() {
-        None => description.field("file says", "nothing read"),
-        Some((first, rest)) => {
-            description.field("file says", &claimed(first));
-            for claim in rest {
-                description.field("", &claimed(claim));
-            }
-        }
-    }
-    if let Some(overrode) = overrode {
-        description.field("conflict", &alike(&overrode.field, overrode.similarity));
+    file_says(&mut description, &sections.extraction.titles);
+    if let (
+        Acceptance::Overridden,
+        MatchCheckStep::Conflict {
+            field, similarity, ..
+        },
+    ) = (sections.acceptance, &sections.match_check)
+    {
+        description.field("conflict", &alike(field, *similarity));
     }
     if let Some(proposal) = proposal {
         description.field("new name", &proposal.target);
@@ -293,76 +301,123 @@ pub(crate) fn escaped(text: &str) -> String {
         .collect()
 }
 
-/// Where the identifier was found, as the clause following it.
-///
-/// A file that was not opened has no pass to name, and the identifier
-/// it was filed under is what an earlier run found.
-fn whence(tier: Option<&str>) -> Option<&'static str> {
-    match tier {
-        Some("embedded-metadata") => Some("from embedded metadata"),
-        Some("text-layer") => Some("from the text layer"),
+/// The identifier `sections` says was looked up, with where it came
+/// from — `from embedded metadata` or `from the text layer` for the
+/// file's own, as extraction's result names the pass, and `supplied`
+/// for an operator's — or `None` when nothing was looked up.
+fn looked_up(sections: &Sections) -> Option<String> {
+    let (identifier, origin) = match &sections.lookup {
+        LookupStep::Attempted {
+            identifier, origin, ..
+        }
+        | LookupStep::NoEligibleService { identifier, origin } => (identifier, *origin),
+        LookupStep::NotAttempted { .. } => return None,
+    };
+    let whence = match (origin, &sections.extraction.result) {
         // Not "supplied by hand" or "supplied by you": every other
         // value in this slot names where the identifier was read, and
         // this one names that it was not read at all.
-        Some("supplied") => Some("supplied"),
-        // The library supplied the whole record, so nothing was read
-        // or looked up; [`record_from`] says where the record is from.
-        Some("library") => None,
-        Some(_) => Some("from the file"),
-        // Nothing was looked up, so nothing is known about where the
-        // record's identifier came from. [`record_from`] says what is
-        // known: the record itself is from an earlier run.
-        None => None,
+        (IdentifierOrigin::Operator, _) => Some("supplied"),
+        (IdentifierOrigin::Extracted, ExtractionResultStep::Found { tier, .. }) => {
+            Some(match tier.as_str() {
+                "embedded-metadata" => "from embedded metadata",
+                "text-layer" => "from the text layer",
+                _ => "from the file",
+            })
+        }
+        (IdentifierOrigin::Extracted, _) => None,
+    };
+    Some(match whence {
+        Some(whence) => format!("{identifier}, {whence}"),
+        None => identifier.clone(),
+    })
+}
+
+/// The `file says` lines: each title the file claims with where it was
+/// read, or the state its titles are in when there is none to show.
+fn file_says(description: &mut Description, titles: &TitlesStep) {
+    match titles {
+        TitlesStep::Read { claims } => match claims.split_first() {
+            None => description.field("file says", "no title in its metadata"),
+            Some((first, rest)) => {
+                description.field("file says", &claimed(first));
+                for claim in rest {
+                    description.field("", &claimed(claim));
+                }
+            }
+        },
+        TitlesStep::Failed { message } => {
+            description.field("file says", &format!("could not be opened ({message})"));
+        }
+        TitlesStep::NotAttempted { reason } => description.field(
+            "file says",
+            match reason.as_str() {
+                "content-index-hit" => "not read; an earlier run answered",
+                "library-answered" => "not read; the library answered",
+                "content-duplicate" => "not read; the library holds these bytes",
+                _ => "not read",
+            },
+        ),
     }
 }
 
 /// The lines describing a verdict that identified nothing, written
-/// after the `file` line.
+/// after the `file` line, from its `reason` and its `sections`.
 ///
-/// A failed verdict carries less than a resolution does, and the
-/// description shows what it carries and no more: a `skipped` event
-/// holds a path and a reason, so there is no record to lay out and no
-/// name to propose. What the operator is being asked to judge is why
-/// the file got no further, which is exactly what the reason holds.
-fn failure(description: &mut Description, reason: &SkipReason) {
+/// A failed verdict carries no record to lay out and no name to
+/// propose. What the operator is being asked to judge is why the file
+/// got no further, and what the file's own titles say, which is what an
+/// operator supplying an identifier has to go on. A skip with no
+/// sections — one made after the file resolved — is shown by its reason
+/// alone.
+fn failure(description: &mut Description, reason: &SkipReason, sections: Option<&Sections>) {
     match reason {
+        // The same slot as an identifier that was found: its question
+        // is what was looked up, and the answer here is nothing.
+        SkipReason::NoTextLayer => {
+            description.field("identifier", "none found; the pages read hold no text");
+        }
+        SkipReason::TextWithoutIdentifier => {
+            description.field("identifier", "none found in its metadata or the pages read");
+        }
+        SkipReason::Encrypted => {
+            description.field("identifier", "none read; the file is encrypted");
+        }
+        SkipReason::Unreadable { message } => {
+            description.field("unreadable", message);
+        }
         // The identifier is the thing a person asked to supply a better
         // one has to improve on, so it leads — and whole, as on a
         // resolution.
-        SkipReason::Unresolvable {
-            found,
-            tier,
-            attempts,
-        } => {
-            description.whole(
-                "identifier",
-                &match whence(tier.as_deref()) {
-                    Some(whence) => format!("{found}, {whence}"),
-                    None => found.clone(),
-                },
-            );
-            no_record(description, attempts);
-        }
-        // The same slot as an identifier that was found: its question
-        // is what was looked up, and the answer here is nothing.
-        SkipReason::NoIdentifier => {
-            description.field("identifier", "none found in the file");
+        SkipReason::Unresolvable => {
+            if let Some(sections) = sections {
+                if let Some(looked_up) = looked_up(sections) {
+                    description.whole("identifier", &looked_up);
+                }
+                match &sections.lookup {
+                    LookupStep::Attempted { attempts, .. } => no_record(description, attempts),
+                    LookupStep::NoEligibleService { .. } | LookupStep::NotAttempted { .. } => {
+                        no_record(description, &[]);
+                    }
+                }
+            }
         }
         // Both titles are already labelled on a resolution's layout, so
         // a conflict borrows those two labels and adds only how close
         // the two were.
-        SkipReason::Conflict {
-            field,
-            extracted,
-            resolved,
-            similarity,
-        } => {
-            description.field("title", resolved);
-            description.field("file says", extracted);
-            description.field("conflict", &alike(field, *similarity));
-        }
-        SkipReason::Unreadable { message } => {
-            description.field("unreadable", message);
+        SkipReason::Conflict => {
+            if let Some(MatchCheckStep::Conflict {
+                field,
+                extracted,
+                resolved,
+                similarity,
+            }) = sections.map(|sections| &sections.match_check)
+            {
+                description.field("title", resolved);
+                description.field("file says", extracted);
+                description.field("conflict", &alike(field, *similarity));
+            }
+            return;
         }
         SkipReason::TargetTaken { target } => {
             description.field("name taken", &target.display().to_string());
@@ -374,31 +429,30 @@ fn failure(description: &mut Description, reason: &SkipReason) {
         // (a duplicate, an unrecordable file) or a failure after a
         // decision was already made. Naming the file is all the
         // description has to say about it.
-        _ => {}
+        _ => return,
+    }
+    if let Some(sections) = sections {
+        file_says(description, &sections.extraction.titles);
     }
 }
 
 /// The `no record` block: what each service was asked and what it
-/// said, one to a line, in the order they were asked.
+/// said, one to a line, in the order they were asked, or that no
+/// source was asked.
 ///
 /// It replaces the `record` line rather than joining it — they answer
 /// the same question, and a file has either a record or the reasons it
 /// has none.
-fn no_record(description: &mut Description, attempts: &[Attempt]) {
+fn no_record(description: &mut Description, attempts: &[ServiceAnswer]) {
     match attempts.split_first() {
         None => description.field("no record", "no source was asked"),
         Some((first, rest)) => {
-            description.field("no record", &answered(first));
+            description.field("no record", &first.said());
             for attempt in rest {
-                description.field("", &answered(attempt));
+                description.field("", &attempt.said());
             }
         }
     }
-}
-
-/// One service's answer, as the `no record` block lists it.
-fn answered(attempt: &Attempt) -> String {
-    format!("{}: {}", attempt.source, attempt.error)
 }
 
 /// What became of a record an identifier the operator gave led to.
@@ -410,7 +464,7 @@ fn answered(attempt: &Attempt) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Candidate<'a> {
     /// No service held the identifier: what each of them answered.
-    Unheld { attempts: &'a [Attempt] },
+    Unheld { attempts: &'a [ServiceAnswer] },
     /// The name its record renders is taken by another file.
     NameTaken { target: &'a str },
     /// Its record renders no usable name.
@@ -505,17 +559,27 @@ fn alike(field: &str, similarity: f64) -> String {
     format!("{field}s {}% alike", (similarity * 100.0).round())
 }
 
-/// The services line: who supplied the record, and whether it was
-/// asked this time, kept from before, or held by the library, which
-/// `library` says it was.
-fn record_from(source: &str, cached: bool, library: bool) -> String {
-    let named = services(source);
-    match (library, cached) {
-        (true, _) if source == "library" => named,
-        (true, _) => format!("{named}, from the library"),
-        (false, true) if !named.is_empty() => format!("{named}, from an earlier run"),
+/// The `record` line: the services that supplied `record`
+/// ([`services_of`]), and whether it was kept from an earlier run or
+/// held by the library, as `retrieval` says. `None` when there is
+/// nothing to name.
+///
+/// A content-index or library answer whose record names no service is
+/// named by where it was kept: `an earlier run`, or `the library`.
+fn record_from(record: &Record, retrieval: Option<&RetrievedFrom>) -> Option<String> {
+    let named = services_of(record, retrieval)
+        .into_iter()
+        .map(service_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let from = match (retrieval, named.is_empty()) {
+        (Some(RetrievedFrom::Library { .. }), true) => "the library".to_string(),
+        (Some(RetrievedFrom::Library { .. }), false) => format!("{named}, from the library"),
+        (Some(RetrievedFrom::ContentIndex), true) => "an earlier run".to_string(),
+        (Some(RetrievedFrom::ContentIndex), false) => format!("{named}, from an earlier run"),
         _ => named,
-    }
+    };
+    (!from.is_empty()).then_some(from)
 }
 
 /// The `library` line, saying why the library could not answer for the
@@ -526,30 +590,18 @@ fn unanswered(description: &mut Description, library: Option<&LibraryAnswer>) {
     }
 }
 
-/// The services an event's `source` names, as a person reads them.
-///
-/// The event writes them lowercase and comma-separated, which is the
-/// form a `--json` consumer matches on; here each is spelled as its
-/// service spells itself, and the content index answering for a record
-/// whose makers are unknown is an earlier run rather than a cache the
-/// operator has no reason to think about. A library answer whose makers
-/// are unknown is the library's.
-fn services(source: &str) -> String {
-    source
-        .split(", ")
-        .map(|service| match service {
-            "crossref" => "Crossref",
-            "openalex" => "OpenAlex",
-            "arxiv" => "arXiv",
-            "datacite" => "DataCite",
-            "pubmed" => "PubMed",
-            "sidecar" => "a sidecar",
-            "cache" => "an earlier run",
-            "library" => "the library",
-            other => other,
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+/// A service as a person reads it, spelled as it spells itself: the
+/// stream's lowercase name is the form a `--json` consumer matches on.
+fn service_name(service: &str) -> &str {
+    match service {
+        "crossref" => "Crossref",
+        "openalex" => "OpenAlex",
+        "arxiv" => "arXiv",
+        "datacite" => "DataCite",
+        "pubmed" => "PubMed",
+        "sidecar" => "a sidecar",
+        other => other,
+    }
 }
 
 /// The document type, named as the project names it in prose rather

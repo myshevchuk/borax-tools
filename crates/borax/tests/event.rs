@@ -3,15 +3,17 @@
 use std::path::PathBuf;
 
 use borax::event::{
-    Adoption, Attempt, Claim, ClaimOrigin, Condition, Counts, Diagnostic, Event, Extraction,
-    Format, Level, LibraryAnswer, SCHEMA, SkipReason, Summary, TableUsed, human_line,
-    human_summary, json_line, render,
+    Acceptance, Adoption, Claim, ClaimOrigin, Condition, ContentIndexSection, Counts, Diagnostic,
+    Event, Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom, Format,
+    IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupStep, MatchCheckStep,
+    RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Summary, TableUsed,
+    TitlesStep, WriteStep, human_line, human_summary, json_line, render,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
     IndexWrite, LookupEvidence, MatchCheck, Origin, ServiceAttempt, Titles, Unattempted,
 };
-use borax::pipeline::{FileOutcome, FileRecord, event_for};
+use borax::pipeline::{FileRecord, resolved_event};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier};
 use borax_core::record::{BoraxExt, EntryType, Record, Source};
@@ -20,9 +22,9 @@ use borax_sources::cache::CacheWrite;
 use borax_sources::source::{Retrieval, SourceName};
 use serde_json::Value;
 
-/// The evidence of a record reached through a lookup: `source()` and
-/// `tier()` name `service` and the extraction pass that read
-/// `identifier`, and `cached()` is `false`.
+/// The evidence of a record reached through a lookup: the lookup
+/// attempted `identifier` through `service`, found it over the network,
+/// and wrote it to the content index.
 fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) -> Evidence {
     Evidence {
         library: Consultation::NotConsulted(Unattempted::NoLibrary),
@@ -49,8 +51,7 @@ fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) 
     }
 }
 
-/// The evidence of a record the content index answered for: `source()`
-/// and `tier()` are both `None`, and `cached()` is `true`.
+/// The evidence of a record the content index answered for.
 fn evidence_via_content_index_hit() -> Evidence {
     Evidence {
         library: Consultation::NotConsulted(Unattempted::NoLibrary),
@@ -65,6 +66,191 @@ fn evidence_via_content_index_hit() -> Evidence {
         lookup: LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
         match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
     }
+}
+
+// --- Sections fixtures (design D3, D12) ---
+
+/// Every section a file resolved by a fresh network lookup carries: no
+/// library, a content-index write, an identifier found in the text
+/// layer, titles read empty, a lookup naming `service`, a record
+/// retrieved over the network from that service, titles agreeing, and
+/// automatic acceptance.
+fn sections_via_network(service: &str, identifier: &str) -> Sections {
+    Sections {
+        library: LibraryStep::NotAttempted {
+            reason: "no-library".to_string(),
+        },
+        content_index: ContentIndexSection {
+            read: IndexReadStep::Miss,
+            write: WriteStep::Written,
+        },
+        extraction: ExtractionSection {
+            result: ExtractionResultStep::Found {
+                identifier: identifier.to_string(),
+                tier: "text-layer".to_string(),
+            },
+            titles: TitlesStep::Read { claims: Vec::new() },
+        },
+        lookup: LookupStep::Attempted {
+            identifier: identifier.to_string(),
+            origin: IdentifierOrigin::Extracted,
+            attempts: vec![ServiceAnswer {
+                service: service.to_string(),
+                outcome: ServiceOutcome::Found {
+                    retrieval: FetchedFrom::Network,
+                    stored: Some(WriteStep::Written),
+                },
+            }],
+        },
+        record_retrieval: Some(RetrievedFrom::Network {
+            service: service.to_string(),
+        }),
+        match_check: MatchCheckStep::Agreed,
+        acceptance: Acceptance::Automatic,
+    }
+}
+
+/// Every section as a content-index hit reports them: every step not
+/// attempted for `content-index-hit`, the record retrieved from the
+/// content index.
+fn sections_via_content_index() -> Sections {
+    let not_attempted = || "content-index-hit".to_string();
+    Sections {
+        library: LibraryStep::NotAttempted {
+            reason: "no-library".to_string(),
+        },
+        content_index: ContentIndexSection {
+            read: IndexReadStep::Hit,
+            write: WriteStep::NotAttempted {
+                reason: not_attempted(),
+            },
+        },
+        extraction: ExtractionSection {
+            result: ExtractionResultStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            titles: TitlesStep::NotAttempted {
+                reason: not_attempted(),
+            },
+        },
+        lookup: LookupStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        record_retrieval: Some(RetrievedFrom::ContentIndex),
+        match_check: MatchCheckStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        acceptance: Acceptance::Automatic,
+    }
+}
+
+/// Every section as a resolution reached through the library's own item
+/// reports them: every step not attempted for `library-answered`.
+fn sections_via_library(artifact: &str, item: &str) -> Sections {
+    let not_attempted = || "library-answered".to_string();
+    Sections {
+        library: LibraryStep::Consulted {
+            answer: tracked_answer_with(artifact, item),
+        },
+        content_index: ContentIndexSection {
+            read: IndexReadStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            write: WriteStep::NotAttempted {
+                reason: not_attempted(),
+            },
+        },
+        extraction: ExtractionSection {
+            result: ExtractionResultStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            titles: TitlesStep::NotAttempted {
+                reason: not_attempted(),
+            },
+        },
+        lookup: LookupStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        record_retrieval: Some(RetrievedFrom::Library {
+            artifact: artifact.to_string(),
+            item: item.to_string(),
+        }),
+        match_check: MatchCheckStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        acceptance: Acceptance::Automatic,
+    }
+}
+
+/// Every section as a verdict reached before any step ran: every step
+/// not attempted for `content-duplicate`, no record retrieved.
+fn sections_content_duplicate() -> Sections {
+    let not_attempted = || "content-duplicate".to_string();
+    Sections {
+        library: LibraryStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        content_index: ContentIndexSection {
+            read: IndexReadStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            write: WriteStep::NotAttempted {
+                reason: not_attempted(),
+            },
+        },
+        extraction: ExtractionSection {
+            result: ExtractionResultStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            titles: TitlesStep::NotAttempted {
+                reason: not_attempted(),
+            },
+        },
+        lookup: LookupStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        record_retrieval: None,
+        match_check: MatchCheckStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        acceptance: Acceptance::NotApplicable,
+    }
+}
+
+fn tracked_answer() -> LibraryAnswer {
+    tracked_answer_with(
+        "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f",
+        "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70",
+    )
+}
+
+fn tracked_answer_with(artifact: &str, item: &str) -> LibraryAnswer {
+    LibraryAnswer::Tracked {
+        artifact: artifact.to_string(),
+        item: item.to_string(),
+    }
+}
+
+/// A minimal record with the given title, authors and year, for the
+/// human-line tests that need a `<work>` clause.
+fn record_with(title: Option<&str>, authors: &[&str], year: Option<i32>) -> Record {
+    use borax_core::record::{DateParts, Name};
+
+    let mut record = Record::new(EntryType::Article);
+    record.title = title.map(str::to_string);
+    record.authors = authors
+        .iter()
+        .map(|family| Name {
+            family: family.to_string(),
+            given: None,
+        })
+        .collect();
+    record.issued = year.map(|year| DateParts {
+        year,
+        month: None,
+        day: None,
+    });
+    record
 }
 
 // --- event constructors ---
@@ -93,20 +279,14 @@ fn run_started_with_a_table() -> Event {
     }
 }
 
+/// design D3: a resolved event through a fresh network lookup, carrying
+/// no title (so the human line's `<work>` clause is absent).
 fn resolved() -> Event {
     Event::Resolved {
         path: PathBuf::from("paper.pdf"),
-        identifier: "10.1000/xyz123".to_string(),
+        identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
-        source: "crossref".to_string(),
-        found: "10.1000/xyz123".to_string(),
-
-        claims: Vec::new(),
-
-        tier: Some("first-page".to_string()),
-        cached: false,
-        overrode: None,
-        library: None,
+        sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz123")),
     }
 }
 
@@ -130,11 +310,45 @@ fn renamed() -> Event {
     }
 }
 
+/// design D12: a non-resolution skip, carrying `path` and `reason` and
+/// nothing else.
 fn skipped(reason: SkipReason) -> Event {
     Event::Skipped {
         path: PathBuf::from("mystery.pdf"),
         reason,
-        library: None,
+        sections: None,
+        candidate: None,
+    }
+}
+
+/// design D4, D12: a resolution-verdict skip, carrying every section.
+fn skipped_verdict(reason: SkipReason, sections: Sections) -> Event {
+    assert!(
+        reason.is_resolution_verdict(),
+        "skipped_verdict is for a resolution verdict; got {reason:?}"
+    );
+    Event::Skipped {
+        path: PathBuf::from("mystery.pdf"),
+        reason,
+        sections: Some(Box::new(sections)),
+        candidate: None,
+    }
+}
+
+/// design D4: a conflict skip, which alone carries `candidate`.
+fn skipped_conflict(sections: Sections, candidate: Record) -> Event {
+    Event::Skipped {
+        path: PathBuf::from("mystery.pdf"),
+        reason: SkipReason::Conflict,
+        sections: Some(Box::new(sections)),
+        candidate: Some(Box::new(candidate)),
+    }
+}
+
+fn content_index_write(write: WriteStep) -> Event {
+    Event::ContentIndexWrite {
+        path: PathBuf::from("smith2024_borax.pdf"),
+        write,
     }
 }
 
@@ -240,9 +454,71 @@ fn all_conditions() -> Vec<(&'static str, Condition)> {
     ]
 }
 
+/// Every resolution-verdict `SkipReason`, one instance each, paired with
+/// sections that satisfy it (design D4).
+fn all_resolution_skips() -> Vec<Event> {
+    vec![
+        skipped_verdict(SkipReason::NoTextLayer, no_text_layer_sections()),
+        skipped_verdict(
+            SkipReason::TextWithoutIdentifier,
+            text_without_identifier_sections(),
+        ),
+        skipped_verdict(SkipReason::Encrypted, encrypted_sections()),
+        skipped_verdict(
+            SkipReason::Unreadable {
+                message: "not a PDF".to_string(),
+            },
+            unreadable_extraction_sections("not a PDF"),
+        ),
+        skipped_verdict(SkipReason::Unresolvable, unresolvable_sections()),
+        skipped_conflict(conflict_sections(), conflict_candidate()),
+        skipped_verdict(
+            SkipReason::Duplicate {
+                reason: borax_core::library::DuplicateReason::Content,
+                existing_path: PathBuf::from("/lib/smith2015.pdf"),
+            },
+            sections_content_duplicate(),
+        ),
+        skipped_verdict(
+            SkipReason::Duplicate {
+                reason: borax_core::library::DuplicateReason::Work,
+                existing_path: PathBuf::from("/lib/smith2015.pdf"),
+            },
+            sections_via_content_index(),
+        ),
+    ]
+}
+
+/// Every non-resolution `SkipReason`, one instance each.
+fn all_plain_skips() -> Vec<Event> {
+    vec![
+        skipped(SkipReason::TargetTaken {
+            target: PathBuf::from("smith2024_borax.pdf"),
+        }),
+        skipped(SkipReason::Unnameable),
+        skipped(SkipReason::Declined),
+        skipped(SkipReason::RenameFailed {
+            message: "permission denied".to_string(),
+        }),
+        skipped(SkipReason::BibWriteFailed {
+            message: "disk full".to_string(),
+        }),
+        skipped(SkipReason::Unciteable),
+        skipped(SkipReason::SidecarTaken {
+            target: PathBuf::from("paper.bib"),
+        }),
+        skipped(SkipReason::Unrecordable {
+            message: "the file's content hash is unknown".to_string(),
+        }),
+        skipped(SkipReason::Stranding {
+            id: "0190c3a2-aaaa-7000-8000-000000000003".to_string(),
+        }),
+    ]
+}
+
 /// Every `Event` variant, so coverage-oriented tests can iterate once.
 fn all_events() -> Vec<Event> {
-    vec![
+    let mut events = vec![
         run_started(),
         resolved(),
         planned(),
@@ -262,34 +538,14 @@ fn all_events() -> Vec<Event> {
             },
         ),
         library_adoption("new.pdf", Adoption::Unindexed),
-        skipped(SkipReason::NoIdentifier),
-        skipped(SkipReason::Unresolvable {
-            found: "doi:10.1000/xyz123".to_string(),
-            tier: Some("text-layer".to_string()),
-            attempts: vec![Attempt {
-                source: "crossref".to_string(),
-                error: "not found".to_string(),
-            }],
-        }),
-        skipped(SkipReason::Conflict {
-            field: "year".to_string(),
-            extracted: "2023".to_string(),
-            resolved: "2024".to_string(),
-            similarity: 0.0,
-        }),
-        skipped(SkipReason::TargetTaken {
-            target: PathBuf::from("smith2024_borax.pdf"),
-        }),
-        skipped(SkipReason::Unreadable {
-            message: "not a PDF".to_string(),
-        }),
-        skipped(SkipReason::BibWriteFailed {
+        content_index_write(WriteStep::Written),
+        content_index_write(WriteStep::Failed {
             message: "disk full".to_string(),
         }),
-        skipped(SkipReason::Unciteable),
-        skipped(SkipReason::Unrecordable {
-            message: "the file's content hash is unknown".to_string(),
-        }),
+    ];
+    events.extend(all_resolution_skips());
+    events.extend(all_plain_skips());
+    events.extend([
         bib_entry(),
         sidecar(),
         config_setting(),
@@ -297,50 +553,13 @@ fn all_events() -> Vec<Event> {
         cache_cleared(),
         lookup_missed(),
         run_finished(),
-    ]
+    ]);
+    events
 }
 
-/// Every `SkipReason` variant, so nesting tests can iterate once.
-fn all_skip_reasons() -> Vec<SkipReason> {
-    vec![
-        SkipReason::NoIdentifier,
-        SkipReason::Unresolvable {
-            found: "doi:10.1000/xyz123".to_string(),
-            tier: Some("text-layer".to_string()),
-            attempts: vec![
-                Attempt {
-                    source: "crossref".to_string(),
-                    error: "not found".to_string(),
-                },
-                Attempt {
-                    source: "arxiv".to_string(),
-                    error: "timed out".to_string(),
-                },
-            ],
-        },
-        SkipReason::Conflict {
-            field: "year".to_string(),
-            extracted: "2023".to_string(),
-            resolved: "2024".to_string(),
-            similarity: 0.0,
-        },
-        SkipReason::TargetTaken {
-            target: PathBuf::from("smith2024_borax.pdf"),
-        },
-        SkipReason::Unreadable {
-            message: "not a PDF".to_string(),
-        },
-        SkipReason::BibWriteFailed {
-            message: "disk full".to_string(),
-        },
-        SkipReason::Unciteable,
-        SkipReason::Unrecordable {
-            message: "the file's content hash is unknown".to_string(),
-        },
-    ]
-}
-
-// --- json_line() renders every variant as one well-formed JSON object ---
+// ---------------------------------------------------------------------
+// json_line() renders every variant as one well-formed JSON object
+// ---------------------------------------------------------------------
 
 #[test]
 fn json_line_of_every_event_is_a_single_line_with_no_embedded_newline() {
@@ -365,13 +584,22 @@ fn json_line_of_every_event_parses_as_a_json_object_carrying_schema_and_event_ta
 }
 
 #[test]
+fn schema_is_four() {
+    assert_eq!(SCHEMA, 4);
+}
+
+#[test]
 fn json_line_event_tag_is_the_variant_name_in_kebab_case() {
     let cases: Vec<(Event, &str)> = vec![
         (run_started(), "run-started"),
         (resolved(), "resolved"),
         (planned(), "planned"),
         (renamed(), "renamed"),
-        (skipped(SkipReason::NoIdentifier), "skipped"),
+        (skipped(SkipReason::Declined), "skipped"),
+        (
+            content_index_write(WriteStep::Written),
+            "content-index-write",
+        ),
         (bib_entry(), "bib-entry"),
         (sidecar(), "sidecar"),
         (config_setting(), "config-setting"),
@@ -387,6 +615,9 @@ fn json_line_event_tag_is_the_variant_name_in_kebab_case() {
     }
 }
 
+/// design D3, D12: a `resolved` event serializes to exactly `schema`,
+/// `event`, `path`, `identifier`, `record`, then the seven section keys
+/// in pipeline order, and none of the six removed schema-3 fields.
 #[test]
 fn json_line_of_resolved_has_exactly_the_documented_field_set() {
     let value: Value = serde_json::from_str(&json_line(&resolved())).unwrap();
@@ -397,41 +628,116 @@ fn json_line_of_resolved_has_exactly_the_documented_field_set() {
     assert_eq!(
         keys,
         vec![
-            "cached",
-            "claims",
+            "acceptance",
+            "content_index",
             "event",
-            "found",
+            "extraction",
             "identifier",
             "library",
-            "overrode",
+            "lookup",
+            "match_check",
             "path",
             "record",
+            "record_retrieval",
             "schema",
-            "source",
-            "tier"
         ]
     );
 
+    for removed in ["found", "cached", "source", "tier", "claims", "overrode"] {
+        assert!(
+            !object.contains_key(removed),
+            "resolved still carries removed field {removed:?}: {object:?}"
+        );
+    }
+
     assert_eq!(object["path"], Value::from("paper.pdf"));
-    assert_eq!(object["identifier"], Value::from("10.1000/xyz123"));
-    assert_eq!(object["source"], Value::from("crossref"));
-    assert_eq!(object["tier"], Value::from("first-page"));
-    assert_eq!(object["cached"], Value::from(false));
+    assert_eq!(object["identifier"], Value::from("doi:10.1000/xyz123"));
 }
 
+/// design D1: the section keys appear in pipeline order, since a
+/// consumer that reads the raw text (rather than a parsed map) depends
+/// on it.
 #[test]
-fn json_line_of_skipped_has_exactly_the_documented_field_set() {
-    let value: Value =
-        serde_json::from_str(&json_line(&skipped(SkipReason::NoIdentifier))).unwrap();
-    let object = value.as_object().unwrap();
+fn json_line_of_resolved_orders_its_keys_in_pipeline_order() {
+    let line = json_line(&resolved());
+    let order = [
+        "\"schema\"",
+        "\"event\"",
+        "\"path\"",
+        "\"identifier\"",
+        "\"record\"",
+        "\"library\"",
+        "\"content_index\"",
+        "\"extraction\"",
+        "\"lookup\"",
+        "\"record_retrieval\"",
+        "\"match_check\"",
+        "\"acceptance\"",
+    ];
+    let mut last = 0;
+    for key in order {
+        let at = line
+            .find(key)
+            .unwrap_or_else(|| panic!("{key} missing from {line}"));
+        assert!(at >= last, "{key} appears out of pipeline order in {line}");
+        last = at;
+    }
+}
 
-    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    assert_eq!(keys, vec!["event", "library", "path", "reason", "schema"]);
+/// design D3: a resolution `skipped` event serializes to `schema`,
+/// `event`, `path`, `reason`, the seven sections, and `candidate` only
+/// on the conflict kind.
+#[test]
+fn json_line_of_a_resolution_skip_carries_sections_and_no_candidate_except_conflict() {
+    for event in all_resolution_skips() {
+        let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+        let object = value.as_object().unwrap();
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
 
-    assert_eq!(object["path"], Value::from("mystery.pdf"));
-    assert!(object["reason"].is_object());
-    assert_eq!(object["library"], Value::Null);
+        let is_conflict = matches!(
+            &event,
+            Event::Skipped {
+                reason: SkipReason::Conflict,
+                ..
+            }
+        );
+        let mut expected = vec![
+            "acceptance",
+            "content_index",
+            "event",
+            "extraction",
+            "library",
+            "lookup",
+            "match_check",
+            "path",
+            "reason",
+            "record_retrieval",
+            "schema",
+        ];
+        if is_conflict {
+            expected.push("candidate");
+            expected.sort_unstable();
+        }
+        assert_eq!(keys, expected, "event {event:?}");
+    }
+}
+
+/// design D4: a non-resolution `skipped` event serializes to `schema`,
+/// `event`, `path` and `reason` and nothing else.
+#[test]
+fn json_line_of_a_non_resolution_skip_carries_path_and_reason_only() {
+    for event in all_plain_skips() {
+        let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+        let object = value.as_object().unwrap();
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["event", "path", "reason", "schema"],
+            "event {event:?}"
+        );
+    }
 }
 
 #[test]
@@ -534,6 +840,29 @@ fn json_line_of_planned_has_exactly_the_documented_field_set() {
     assert_eq!(keys, vec!["event", "path", "schema", "target"]);
 }
 
+/// design D8: `content-index-write` serializes to `schema`, `event`,
+/// `path` and `write`, with `write` either `written` or `failed` with
+/// `message`.
+#[test]
+fn json_line_of_content_index_write_has_exactly_the_documented_field_set() {
+    let value: Value =
+        serde_json::from_str(&json_line(&content_index_write(WriteStep::Written))).unwrap();
+    let object = value.as_object().unwrap();
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["event", "path", "schema", "write"]);
+    assert_eq!(object["write"], serde_json::json!({"status": "written"}));
+
+    let value: Value = serde_json::from_str(&json_line(&content_index_write(WriteStep::Failed {
+        message: "disk full".to_string(),
+    })))
+    .unwrap();
+    assert_eq!(
+        value["write"],
+        serde_json::json!({"status": "failed", "message": "disk full"})
+    );
+}
+
 /// The component `Unrecordable` replaces is gone from every rendering,
 /// in either format — a name a future skip reason must not resurrect.
 #[test]
@@ -553,68 +882,139 @@ fn unjournalable_appears_nowhere_in_any_rendering() {
     }
 }
 
-// --- SkipReason nesting under Skipped.reason, tagged by kind ---
+// ---------------------------------------------------------------------
+// SkipReason nesting under Skipped.reason, tagged by kind (design D12)
+// ---------------------------------------------------------------------
 
 #[test]
 fn skipped_nests_the_reason_under_reason_with_a_kebab_case_kind_tag() {
-    let cases: Vec<(SkipReason, &str)> = vec![
-        (SkipReason::NoIdentifier, "no-identifier"),
+    let cases: Vec<(Event, &str)> = vec![
         (
-            SkipReason::Unresolvable {
-                found: "doi:10.1000/xyz123".to_string(),
-                tier: Some("text-layer".to_string()),
-                attempts: Vec::new(),
-            },
+            skipped_verdict(SkipReason::NoTextLayer, no_text_layer_sections()),
+            "no-text-layer",
+        ),
+        (
+            skipped_verdict(
+                SkipReason::TextWithoutIdentifier,
+                text_without_identifier_sections(),
+            ),
+            "text-without-identifier",
+        ),
+        (
+            skipped_verdict(SkipReason::Encrypted, encrypted_sections()),
+            "encrypted",
+        ),
+        (
+            skipped_verdict(SkipReason::Unresolvable, unresolvable_sections()),
             "unresolvable",
         ),
         (
-            SkipReason::Conflict {
-                field: "year".to_string(),
-                extracted: "2023".to_string(),
-                resolved: "2024".to_string(),
-                similarity: 0.0,
-            },
+            skipped_conflict(conflict_sections(), conflict_candidate()),
             "conflict",
         ),
         (
-            SkipReason::TargetTaken {
+            skipped(SkipReason::TargetTaken {
                 target: PathBuf::from("x.pdf"),
-            },
+            }),
             "target-taken",
         ),
         (
-            SkipReason::Unreadable {
+            skipped(SkipReason::Unreadable {
                 message: "bad".to_string(),
-            },
+            }),
             "unreadable",
         ),
         (
-            SkipReason::BibWriteFailed {
+            skipped(SkipReason::BibWriteFailed {
                 message: "disk full".to_string(),
-            },
+            }),
             "bib-write-failed",
         ),
-        (SkipReason::Unciteable, "unciteable"),
+        (skipped(SkipReason::Unciteable), "unciteable"),
         (
-            SkipReason::Unrecordable {
+            skipped(SkipReason::Unrecordable {
                 message: "the file's content hash is unknown".to_string(),
-            },
+            }),
             "unrecordable",
         ),
     ];
 
-    for (reason, expected_kind) in cases {
-        let value: Value = serde_json::from_str(&json_line(&skipped(reason))).unwrap();
+    for (event, expected_kind) in cases {
+        let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
         assert_eq!(value["reason"]["kind"], Value::from(expected_kind));
     }
 }
 
+/// design D4: `no-text-layer` and `text-without-identifier` carry
+/// nothing but their kind — the fact schema 3's `no-identifier` carried,
+/// now split in two (D14's mapping).
 #[test]
-fn no_identifier_reason_carries_nothing_but_its_kind() {
-    let value: Value =
-        serde_json::from_str(&json_line(&skipped(SkipReason::NoIdentifier))).unwrap();
+fn no_text_layer_reason_carries_nothing_but_its_kind() {
+    let value: Value = serde_json::from_str(&json_line(&skipped_verdict(
+        SkipReason::NoTextLayer,
+        no_text_layer_sections(),
+    )))
+    .unwrap();
     let reason = value["reason"].as_object().unwrap();
     assert_eq!(reason.keys().collect::<Vec<_>>(), vec!["kind"]);
+}
+
+#[test]
+fn text_without_identifier_reason_carries_nothing_but_its_kind() {
+    let value: Value = serde_json::from_str(&json_line(&skipped_verdict(
+        SkipReason::TextWithoutIdentifier,
+        text_without_identifier_sections(),
+    )))
+    .unwrap();
+    let reason = value["reason"].as_object().unwrap();
+    assert_eq!(reason.keys().collect::<Vec<_>>(), vec!["kind"]);
+}
+
+/// design D4: `encrypted` and `unresolvable` and `conflict` also carry
+/// nothing but their kind — every fact that used to sit on `reason`
+/// moved into the sections (D4's table).
+#[test]
+fn encrypted_unresolvable_and_conflict_reasons_carry_nothing_but_their_kind() {
+    for event in [
+        skipped_verdict(SkipReason::Encrypted, encrypted_sections()),
+        skipped_verdict(SkipReason::Unresolvable, unresolvable_sections()),
+        skipped_conflict(conflict_sections(), conflict_candidate()),
+    ] {
+        let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+        let reason = value["reason"].as_object().unwrap();
+        assert_eq!(
+            reason.keys().collect::<Vec<_>>(),
+            vec!["kind"],
+            "event {event:?}"
+        );
+    }
+}
+
+/// `unreadable` alone keeps its `message` on the reason, stated a
+/// second time in `extraction.result` (D4: "the maintainer kept it on
+/// the reason").
+#[test]
+fn unreadable_reason_keeps_its_message() {
+    let value: Value = serde_json::from_str(&json_line(&skipped_verdict(
+        SkipReason::Unreadable {
+            message: "truncated stream".to_string(),
+        },
+        unreadable_extraction_sections("truncated stream"),
+    )))
+    .unwrap();
+    let mut keys: Vec<&str> = value["reason"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["kind", "message"]);
+    assert_eq!(value["reason"]["message"], Value::from("truncated stream"));
+    assert_eq!(
+        value["extraction"]["result"]["message"],
+        Value::from("truncated stream")
+    );
 }
 
 #[test]
@@ -624,42 +1024,194 @@ fn unciteable_reason_carries_nothing_but_its_kind() {
     assert_eq!(reason.keys().collect::<Vec<_>>(), vec!["kind"]);
 }
 
+/// design D4, D5: the facts schema 3's `unresolvable {found, tier,
+/// attempts}` carried now live in `lookup` (`identifier`, `origin`,
+/// `attempts`) and `extraction.result.tier`; `reason` itself carries
+/// only `kind` (pinned above). `Attempt {source, error}` becomes
+/// `ServiceAnswer {service, outcome}`.
 #[test]
-fn unresolvable_reason_carries_an_attempts_array_of_source_and_error_objects() {
-    let reason = SkipReason::Unresolvable {
-        found: "doi:10.1000/xyz123".to_string(),
-        tier: Some("text-layer".to_string()),
-        attempts: vec![
-            Attempt {
-                source: "crossref".to_string(),
-                error: "not found".to_string(),
-            },
-            Attempt {
-                source: "arxiv".to_string(),
-                error: "timed out".to_string(),
-            },
-        ],
-    };
-    let value: Value = serde_json::from_str(&json_line(&skipped(reason))).unwrap();
-    let attempts = value["reason"]["attempts"].as_array().unwrap();
+fn unresolvable_sections_carry_the_lookup_identifier_origin_and_attempts() {
+    let event = skipped_verdict(SkipReason::Unresolvable, unresolvable_sections());
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
 
+    assert_eq!(value["lookup"]["status"], Value::from("attempted"));
+    assert_eq!(
+        value["lookup"]["identifier"],
+        Value::from("doi:10.1000/xyz123")
+    );
+    assert_eq!(value["lookup"]["origin"], Value::from("extracted"));
+    assert_eq!(
+        value["extraction"]["result"]["tier"],
+        Value::from("text-layer")
+    );
+
+    let attempts = value["lookup"]["attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 2);
-    assert_eq!(attempts[0]["source"], Value::from("crossref"));
-    assert_eq!(attempts[0]["error"], Value::from("not found"));
-    assert_eq!(attempts[1]["source"], Value::from("arxiv"));
-    assert_eq!(attempts[1]["error"], Value::from("timed out"));
-
-    let mut keys: Vec<&str> = value["reason"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    keys.sort_unstable();
-    assert_eq!(keys, vec!["attempts", "found", "kind", "tier"]);
+    assert_eq!(attempts[0]["service"], Value::from("crossref"));
+    assert_eq!(attempts[0]["outcome"]["status"], Value::from("not-found"));
+    assert_eq!(attempts[1]["service"], Value::from("arxiv"));
+    assert_eq!(attempts[1]["outcome"]["status"], Value::from("unavailable"));
+    assert_eq!(attempts[1]["outcome"]["message"], Value::from("timed out"));
 }
 
-// --- round-trip through Event's own (de)serialization ---
+fn no_text_layer_sections() -> Sections {
+    extraction_failure_sections(ExtractionResultStep::NoTextLayer)
+}
+
+fn text_without_identifier_sections() -> Sections {
+    extraction_failure_sections(ExtractionResultStep::TextWithoutIdentifier)
+}
+
+fn encrypted_sections() -> Sections {
+    extraction_failure_sections(ExtractionResultStep::Encrypted)
+}
+
+fn unreadable_extraction_sections(message: &str) -> Sections {
+    extraction_failure_sections(ExtractionResultStep::Unreadable {
+        message: message.to_string(),
+    })
+}
+
+/// Sections for a resolution that failed at extraction: `library` not
+/// attempted for `no-library`, the content index missed, extraction
+/// failed with `result`, titles failed too, and every later step not
+/// attempted for `extraction-failed`.
+fn extraction_failure_sections(result: ExtractionResultStep) -> Sections {
+    let not_attempted = || "extraction-failed".to_string();
+    Sections {
+        library: LibraryStep::NotAttempted {
+            reason: "no-library".to_string(),
+        },
+        content_index: ContentIndexSection {
+            read: IndexReadStep::Miss,
+            write: WriteStep::NotAttempted {
+                reason: not_attempted(),
+            },
+        },
+        extraction: ExtractionSection {
+            result,
+            titles: TitlesStep::Failed {
+                message: "could not open".to_string(),
+            },
+        },
+        lookup: LookupStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        record_retrieval: None,
+        match_check: MatchCheckStep::NotAttempted {
+            reason: not_attempted(),
+        },
+        acceptance: Acceptance::NotApplicable,
+    }
+}
+
+/// Sections for an identifier no source held.
+fn unresolvable_sections() -> Sections {
+    Sections {
+        library: LibraryStep::NotAttempted {
+            reason: "no-library".to_string(),
+        },
+        content_index: ContentIndexSection {
+            read: IndexReadStep::Miss,
+            write: WriteStep::NotAttempted {
+                reason: "no-record".to_string(),
+            },
+        },
+        extraction: ExtractionSection {
+            result: ExtractionResultStep::Found {
+                identifier: "doi:10.1000/xyz123".to_string(),
+                tier: "text-layer".to_string(),
+            },
+            titles: TitlesStep::Read { claims: Vec::new() },
+        },
+        lookup: LookupStep::Attempted {
+            identifier: "doi:10.1000/xyz123".to_string(),
+            origin: IdentifierOrigin::Extracted,
+            attempts: vec![
+                ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::NotFound,
+                },
+                ServiceAnswer {
+                    service: "arxiv".to_string(),
+                    outcome: ServiceOutcome::Unavailable {
+                        message: "timed out".to_string(),
+                    },
+                },
+            ],
+        },
+        record_retrieval: None,
+        match_check: MatchCheckStep::NotAttempted {
+            reason: "no-record".to_string(),
+        },
+        acceptance: Acceptance::NotApplicable,
+    }
+}
+
+/// Sections for a title conflict, the record found over the network.
+fn conflict_sections() -> Sections {
+    Sections {
+        library: LibraryStep::NotAttempted {
+            reason: "no-library".to_string(),
+        },
+        content_index: ContentIndexSection {
+            read: IndexReadStep::Miss,
+            write: WriteStep::NotAttempted {
+                reason: "refused".to_string(),
+            },
+        },
+        extraction: ExtractionSection {
+            result: ExtractionResultStep::Found {
+                identifier: "doi:10.1000/ref".to_string(),
+                tier: "text-layer".to_string(),
+            },
+            titles: TitlesStep::Read {
+                claims: vec![Claim {
+                    from: ClaimOrigin::Xmp,
+                    title: "Graphene on copper".to_string(),
+                }],
+            },
+        },
+        lookup: LookupStep::Attempted {
+            identifier: "doi:10.1000/ref".to_string(),
+            origin: IdentifierOrigin::Extracted,
+            attempts: vec![ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: ServiceOutcome::Found {
+                    retrieval: FetchedFrom::Network,
+                    stored: Some(WriteStep::Written),
+                },
+            }],
+        },
+        record_retrieval: Some(RetrievedFrom::Network {
+            service: "crossref".to_string(),
+        }),
+        match_check: MatchCheckStep::Conflict {
+            field: "title".to_string(),
+            extracted: "Graphene on copper".to_string(),
+            resolved: "A survey of something else".to_string(),
+            similarity: 0.08,
+        },
+        acceptance: Acceptance::NotApplicable,
+    }
+}
+
+fn conflict_candidate() -> Record {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A survey of something else".to_string());
+    record.doi = Some(Doi::parse("10.1000/ref").unwrap());
+    record
+}
+
+#[test]
+fn unciteable_reason_has_no_message_field() {
+    let value: Value = serde_json::from_str(&json_line(&skipped(SkipReason::Unciteable))).unwrap();
+    assert!(value["reason"].get("message").is_none());
+}
+
+// ---------------------------------------------------------------------
+// round-trip through Event's own (de)serialization
+// ---------------------------------------------------------------------
 //
 // `json_line` adds an extra top-level `schema` field alongside the
 // event's own fields. `Event`'s derive has no `deny_unknown_fields`, so
@@ -671,7 +1223,7 @@ fn every_event_round_trips_through_json_line_and_back() {
     for event in all_events() {
         let line = json_line(&event);
         let parsed: Event = serde_json::from_str(&line).unwrap();
-        assert_eq!(parsed, event);
+        assert_eq!(parsed, event, "line was {line}");
     }
 }
 
@@ -788,51 +1340,87 @@ fn human_line_of_run_finished_is_silent() {
 
 #[test]
 fn human_line_of_skipped_mentions_the_path_for_every_reason() {
-    for reason in all_skip_reasons() {
-        let line = human_line(&skipped(reason.clone())).unwrap();
+    for event in all_resolution_skips().into_iter().chain(all_plain_skips()) {
+        let line = human_line(&event).unwrap();
         assert!(!line.contains('\n'));
         assert!(
             line.contains("mystery.pdf"),
-            "reason {reason:?} produced line without the path: {line}"
+            "event {event:?} produced line without the path: {line}"
         );
     }
 }
 
+/// design D9's resolution skip clauses, one per extraction failure kind
+/// plus unresolvable and conflict.
 #[test]
-fn human_line_of_skipped_makes_the_reason_legible_for_every_variant() {
+fn human_line_of_resolution_skips_matches_design_d9() {
+    let cases: Vec<(Event, &str)> = vec![
+        (
+            skipped_verdict(SkipReason::NoTextLayer, no_text_layer_sections()),
+            "mystery.pdf: skipped, no identifier found; the pages read hold no text",
+        ),
+        (
+            skipped_verdict(
+                SkipReason::TextWithoutIdentifier,
+                text_without_identifier_sections(),
+            ),
+            "mystery.pdf: skipped, no identifier found in its metadata or the pages read",
+        ),
+        (
+            skipped_verdict(SkipReason::Encrypted, encrypted_sections()),
+            "mystery.pdf: skipped, encrypted, so no identifier could be read",
+        ),
+        (
+            skipped_verdict(
+                SkipReason::Unreadable {
+                    message: "not a PDF".to_string(),
+                },
+                unreadable_extraction_sections("not a PDF"),
+            ),
+            "mystery.pdf: skipped, unreadable (not a PDF)",
+        ),
+        (
+            skipped_verdict(SkipReason::Unresolvable, unresolvable_sections()),
+            "mystery.pdf: skipped, no source had a record for doi:10.1000/xyz123 \
+             (crossref: not found; arxiv: unavailable: timed out)",
+        ),
+        (
+            skipped_conflict(conflict_sections(), conflict_candidate()),
+            "mystery.pdf: skipped, title disagrees 8% (file says Graphene on copper, \
+             record says A survey of something else)",
+        ),
+    ];
+
+    for (event, expected) in cases {
+        assert_eq!(human_line(&event).unwrap(), expected);
+    }
+}
+
+/// design D9: `unresolvable` with `lookup` `no-eligible-service` names
+/// no services at all.
+#[test]
+fn human_line_of_unresolvable_with_no_eligible_service() {
+    let mut sections = unresolvable_sections();
+    sections.lookup = LookupStep::NoEligibleService {
+        identifier: "arXiv:2401.12345".to_string(),
+        origin: IdentifierOrigin::Extracted,
+    };
+    let event = skipped_verdict(SkipReason::Unresolvable, sections);
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "mystery.pdf: skipped, no configured service could be asked about arXiv:2401.12345"
+    );
+}
+
+#[test]
+fn human_line_of_skipped_makes_the_reason_legible_for_every_non_resolution_variant() {
     let cases: Vec<(SkipReason, &str)> = vec![
-        (SkipReason::NoIdentifier, "identifier"),
-        (
-            SkipReason::Unresolvable {
-                found: "doi:10.1000/xyz123".to_string(),
-                tier: Some("text-layer".to_string()),
-                attempts: vec![Attempt {
-                    source: "crossref".to_string(),
-                    error: "not found".to_string(),
-                }],
-            },
-            "crossref",
-        ),
-        (
-            SkipReason::Conflict {
-                field: "year".to_string(),
-                extracted: "2023".to_string(),
-                resolved: "2024".to_string(),
-                similarity: 0.0,
-            },
-            "year",
-        ),
         (
             SkipReason::TargetTaken {
                 target: PathBuf::from("smith2024_borax.pdf"),
             },
             "smith2024_borax.pdf",
-        ),
-        (
-            SkipReason::Unreadable {
-                message: "not a PDF".to_string(),
-            },
-            "not a PDF",
         ),
         (
             SkipReason::BibWriteFailed {
@@ -905,6 +1493,17 @@ fn counts_serializes_with_all_six_fields() {
         value,
         serde_json::json!({"resolved": 1, "renamed": 2, "skipped": 3, "named": 0, "unmatched": 4, "unreached": 0, "findings": 0})
     );
+}
+
+/// design D8: `Counts::observe` ignores `content-index-write` entirely.
+#[test]
+fn counts_observe_ignores_content_index_write() {
+    let mut counts = Counts::default();
+    counts.observe(&content_index_write(WriteStep::Written));
+    counts.observe(&content_index_write(WriteStep::Failed {
+        message: "disk full".to_string(),
+    }));
+    assert_eq!(counts, Counts::default());
 }
 
 // --- Event::LookupMissed ---
@@ -1294,42 +1893,23 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
         run_started(),
         Event::Resolved {
             path: PathBuf::from("a.pdf"),
-            identifier: "10.1000/aaa".to_string(),
+            identifier: "doi:10.1000/aaa".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
-            source: "crossref".to_string(),
-            found: "10.1000/aaa".to_string(),
-
-            claims: Vec::new(),
-
-            tier: Some("first-page".to_string()),
-            cached: false,
-            overrode: None,
-            library: None,
+            sections: Box::new(sections_via_network("crossref", "doi:10.1000/aaa")),
         },
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
-            identifier: "10.1000/bbb".to_string(),
+            identifier: "doi:10.1000/bbb".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
-            source: "arxiv".to_string(),
-            found: "10.1000/bbb".to_string(),
-
-            claims: Vec::new(),
-
-            tier: None,
-            cached: true,
-            overrode: None,
-            library: None,
+            sections: Box::new(sections_via_content_index()),
         },
         Event::Renamed {
             path: PathBuf::from("a.pdf"),
             target: PathBuf::from("smith2024_a.pdf"),
             hash: hash_of("a.pdf"),
         },
-        Event::Skipped {
-            path: PathBuf::from("c.pdf"),
-            reason: SkipReason::NoIdentifier,
-            library: None,
-        },
+        content_index_write(WriteStep::Written),
+        skipped(SkipReason::Declined),
         Event::RunFinished {
             counts: Counts {
                 resolved: 2,
@@ -1369,13 +1949,9 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
 fn a_rename_the_filesystem_refused_counts_as_a_skip_and_not_as_a_rename() {
     let mut counts = Counts::default();
 
-    counts.observe(&Event::Skipped {
-        path: PathBuf::from("/lib/a.pdf"),
-        reason: SkipReason::RenameFailed {
-            message: "permission denied".to_string(),
-        },
-        library: None,
-    });
+    counts.observe(&skipped(SkipReason::RenameFailed {
+        message: "permission denied".to_string(),
+    }));
 
     assert_eq!(
         counts,
@@ -1400,13 +1976,9 @@ fn a_refused_move_leaves_an_earlier_successful_one_counted() {
         target: PathBuf::from("/lib/smith2024.pdf"),
         hash: hash_bytes(b"a"),
     });
-    counts.observe(&Event::Skipped {
-        path: PathBuf::from("/lib/b.pdf"),
-        reason: SkipReason::RenameFailed {
-            message: "permission denied".to_string(),
-        },
-        library: None,
-    });
+    counts.observe(&skipped(SkipReason::RenameFailed {
+        message: "permission denied".to_string(),
+    }));
 
     assert_eq!(
         counts,
@@ -1421,20 +1993,15 @@ fn a_refused_move_leaves_an_earlier_successful_one_counted() {
 }
 
 // ---------------------------------------------------------------------
-// Tasks 1.2/1.2a: `resolved`'s `claims`, `found`, and provenance-derived
-// `source` (design D2a, D3, D4)
+// resolved's identifier, record and sections (design D2a, D3, D6)
 // ---------------------------------------------------------------------
 
-/// design D3: `claims` serializes each title with its origin, in the
-/// order they were read.
+/// design D3: `extraction.titles` serializes each claim with its
+/// origin, in the order they were read.
 #[test]
 fn resolved_serializes_claims_as_design_d3_shows() {
-    let event = Event::Resolved {
-        path: PathBuf::from("paper.pdf"),
-        identifier: "10.1000/xyz123".to_string(),
-        record: Box::new(Record::new(EntryType::Article)),
-        source: "crossref".to_string(),
-        found: "doi:10.1000/xyz123".to_string(),
+    let mut sections = sections_via_network("crossref", "doi:10.1000/xyz123");
+    sections.extraction.titles = TitlesStep::Read {
         claims: vec![
             Claim {
                 from: ClaimOrigin::Xmp,
@@ -1445,16 +2012,18 @@ fn resolved_serializes_claims_as_design_d3_shows() {
                 title: "Microsoft Word - manuscript.docx".to_string(),
             },
         ],
-        tier: Some("text-layer".to_string()),
-        cached: false,
-        overrode: None,
-        library: None,
+    };
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
     };
 
     let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
 
     assert_eq!(
-        value["claims"],
+        value["extraction"]["titles"]["claims"],
         serde_json::json!([
             {"from": "xmp", "title": "Applications of chiral sulfinyl compounds"},
             {"from": "info", "title": "Microsoft Word - manuscript.docx"}
@@ -1463,16 +2032,17 @@ fn resolved_serializes_claims_as_design_d3_shows() {
     );
 }
 
-/// design D2a: a file resolved from an arXiv identifier found in the
-/// text layer, whose record also carries a DOI, reports the arXiv
-/// identifier as `found` and the DOI as the record's own `identifier`.
+/// design D14's mapping for `found == X` after a lookup: the top-level
+/// `identifier` is the record's own identifier, and `lookup.identifier`
+/// is what was looked up — they differ for an arXiv identifier whose
+/// record also carries a DOI.
 #[test]
 fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
     let mut record = Record::new(EntryType::Preprint);
     record.doi = Some(Doi::parse("10.1000/from-the-record").unwrap());
     record.borax.arxiv = Some(ArxivId::parse("2401.01234").unwrap());
     let path = PathBuf::from("paper.pdf");
-    let outcome = FileOutcome::Resolved(FileRecord {
+    let file = FileRecord {
         record,
         hash: Some(hash_bytes(b"paper")),
         evidence: evidence_via_lookup(
@@ -1480,18 +2050,27 @@ fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
             Identifier::Arxiv(ArxivId::parse("2401.01234").unwrap()),
             Tier::TextLayer,
         ),
-        overrode: None,
-    });
+        overridden: false,
+    };
 
-    let event = event_for(&path, &outcome);
+    let event = resolved_event(&path, &file);
 
     match event {
         Event::Resolved {
-            identifier, found, ..
+            identifier,
+            sections,
+            ..
         } => {
+            let LookupStep::Attempted {
+                identifier: looked_up,
+                ..
+            } = sections.lookup
+            else {
+                panic!("expected an attempted lookup");
+            };
             assert_eq!(
-                found, "arXiv:2401.01234",
-                "found must be what was looked up"
+                looked_up, "arXiv:2401.01234",
+                "lookup.identifier must be what was looked up"
             );
             assert_eq!(
                 identifier, "doi:10.1000/from-the-record",
@@ -1502,8 +2081,10 @@ fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
     }
 }
 
-/// design D4: a content-index answer whose provenance names Crossref
-/// reports `source: "crossref"` and keeps `cached: true`.
+/// design D14: `cached == true` becomes `record_retrieval.kind ==
+/// "content-index"` with `content_index.read.status == "hit"`; the
+/// human line's `via` names the service `record.borax.provenance` names
+/// (D6), here Crossref.
 #[test]
 fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
     let mut record = Record::new(EntryType::Article);
@@ -1514,25 +2095,30 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
         ..BoraxExt::default()
     };
     let path = PathBuf::from("paper.pdf");
-    let outcome = FileOutcome::Resolved(FileRecord {
+    let file = FileRecord {
         record,
         hash: Some(hash_bytes(b"paper")),
         evidence: evidence_via_content_index_hit(),
-        overrode: None,
-    });
+        overridden: false,
+    };
 
-    let event = event_for(&path, &outcome);
+    let event = resolved_event(&path, &file);
 
-    match event {
-        Event::Resolved { source, cached, .. } => {
-            assert_eq!(source, "crossref");
-            assert!(cached);
+    match &event {
+        Event::Resolved { sections, .. } => {
+            assert_eq!(sections.record_retrieval, Some(RetrievedFrom::ContentIndex));
+            assert_eq!(sections.content_index.read, IndexReadStep::Hit);
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
+    assert!(
+        human_line(&event).unwrap().contains("via crossref"),
+        "got {:?}",
+        human_line(&event)
+    );
 }
 
-/// design D4/D1: a record whose provenance names two services is
+/// design D6/D1: a record whose provenance names two services is
 /// reported with both, in the fixed order Crossref, OpenAlex, arXiv,
 /// DataCite, PubMed, sidecar — not the order the fields happen to be
 /// keyed in.
@@ -1549,28 +2135,29 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
         ..BoraxExt::default()
     };
     let path = PathBuf::from("paper.pdf");
-    let outcome = FileOutcome::Resolved(FileRecord {
+    let file = FileRecord {
         record,
         hash: Some(hash_bytes(b"paper")),
         evidence: evidence_via_content_index_hit(),
-        overrode: None,
-    });
+        overridden: false,
+    };
 
-    let event = event_for(&path, &outcome);
+    let event = resolved_event(&path, &file);
 
-    match event {
-        Event::Resolved { source, .. } => {
-            assert_eq!(source, "crossref, openalex", "got {source:?}");
-        }
-        other => panic!("expected Event::Resolved, got {other:?}"),
-    }
+    assert!(
+        human_line(&event)
+            .unwrap()
+            .contains("via crossref, openalex"),
+        "got {:?}",
+        human_line(&event)
+    );
 }
 
-/// design D4: a record whose provenance names no service at all — only
-/// extraction, or nothing — keeps reporting the content index itself as
-/// `"cache"`.
+/// design D6: a record whose provenance names no service at all — only
+/// extraction, or nothing — names the content index as `from`, with no
+/// `via` clause at all (the schema-3 `"cache"` stand-in is gone).
 #[test]
-fn a_record_whose_provenance_names_no_service_keeps_cache() {
+fn a_record_whose_provenance_names_no_service_names_no_via() {
     let mut record = Record::new(EntryType::Article);
     record.borax = BoraxExt {
         provenance: [("title".to_string(), Source::Extraction)]
@@ -1579,79 +2166,61 @@ fn a_record_whose_provenance_names_no_service_keeps_cache() {
         ..BoraxExt::default()
     };
     let path = PathBuf::from("paper.pdf");
-    let outcome = FileOutcome::Resolved(FileRecord {
+    let file = FileRecord {
         record,
         hash: Some(hash_bytes(b"paper")),
         evidence: evidence_via_content_index_hit(),
-        overrode: None,
-    });
+        overridden: false,
+    };
 
-    let event = event_for(&path, &outcome);
+    let event = resolved_event(&path, &file);
+    let line = human_line(&event).unwrap();
 
-    match event {
-        Event::Resolved { source, .. } => {
-            assert_eq!(source, "cache", "got {source:?}");
-        }
-        other => panic!("expected Event::Resolved, got {other:?}"),
-    }
+    assert!(!line.contains(" via "), "got {line:?}");
+    assert!(line.contains("from the content index"), "got {line:?}");
 }
 
 // ---------------------------------------------------------------------
-// consult-library-first, task 2.1: the `library` field (design D3, D5)
+// the `library` section (design D3, D12)
 // ---------------------------------------------------------------------
 
-/// `resolved()` with `library` set to `answer` and `tier`/`cached` as
-/// given, following the JSON shape a library answer or a library
-/// problem actually carries (design D3's table).
-fn resolved_with_library(tier: Option<&str>, cached: bool, answer: LibraryAnswer) -> Event {
-    let Event::Resolved {
-        path,
-        identifier,
-        record,
-        source,
-        found,
-        claims,
-        overrode,
-        ..
-    } = resolved()
-    else {
-        unreachable!("resolved() builds a resolved event")
+/// `resolved()` with its `library` section set to `answer`, retrieved
+/// through the library item.
+fn resolved_with_library(answer: LibraryAnswer) -> Event {
+    let (artifact, item) = match &answer {
+        LibraryAnswer::Tracked { artifact, item } => (artifact.clone(), item.clone()),
+        _ => (
+            "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
+            "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
+        ),
     };
+    let mut sections = match &answer {
+        LibraryAnswer::Tracked { .. } => sections_via_library(&artifact, &item),
+        _ => sections_via_network("crossref", "doi:10.1000/xyz123"),
+    };
+    sections.library = LibraryStep::Consulted { answer };
     Event::Resolved {
-        path,
-        identifier,
-        record,
-        source,
-        found,
-        claims,
-        tier: tier.map(str::to_string),
-        overrode,
-        cached,
-        library: Some(answer),
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
     }
 }
 
-/// `skipped(reason)` with `library` set to `answer`.
-fn skipped_with_library(reason: SkipReason, answer: LibraryAnswer) -> Event {
-    let Event::Skipped { path, reason, .. } = skipped(reason) else {
-        unreachable!("skipped() builds a skipped event")
-    };
-    Event::Skipped {
-        path,
-        reason,
-        library: Some(answer),
-    }
-}
-
-fn tracked_answer() -> LibraryAnswer {
-    LibraryAnswer::Tracked {
-        artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
-        item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
-    }
+/// `skipped_verdict` with its `library` section set to `answer`,
+/// otherwise failing at extraction (so `library` is the only section a
+/// library-problem human-line test cares about).
+fn skipped_with_library(answer: LibraryAnswer) -> Event {
+    let mut sections = no_text_layer_sections();
+    sections.library = LibraryStep::Consulted { answer };
+    skipped_verdict(SkipReason::NoTextLayer, sections)
 }
 
 /// design D3: every `LibraryAnswer` variant round-trips through the
-/// JSON line, tagged by `kind` in kebab-case, on a `resolved` event.
+/// JSON line, tagged by `kind` in kebab-case, nested under
+/// `library.answer` on a `resolved` event (D14's mapping: `library ==
+/// {kind: ..}` becomes `library == {status: consulted, answer: {kind:
+/// ..}}`).
 #[test]
 fn json_line_of_resolved_carries_every_library_answer_variant_tagged_by_kind() {
     let cases: Vec<(LibraryAnswer, serde_json::Value)> = vec![
@@ -1746,25 +2315,29 @@ fn json_line_of_resolved_carries_every_library_answer_variant_tagged_by_kind() {
     ];
 
     for (answer, expected) in cases {
-        let event = resolved_with_library(Some("library"), false, answer.clone());
+        let event = resolved_with_library(answer.clone());
         let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
-        assert_eq!(value["schema"], Value::from(3));
-        assert_eq!(value["library"], expected, "for {answer:?}");
+        assert_eq!(value["schema"], Value::from(4));
+        assert_eq!(value["library"]["status"], Value::from("consulted"));
+        assert_eq!(value["library"]["answer"], expected, "for {answer:?}");
     }
 }
 
 /// The same shapes on a `skipped` event.
 #[test]
 fn json_line_of_skipped_carries_every_library_answer_variant_tagged_by_kind() {
-    let event = skipped_with_library(SkipReason::NoIdentifier, LibraryAnswer::Untracked);
+    let event = skipped_with_library(LibraryAnswer::Untracked);
     let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
-    assert_eq!(value["schema"], Value::from(3));
-    assert_eq!(value["library"], serde_json::json!({"kind": "untracked"}));
+    assert_eq!(value["schema"], Value::from(4));
+    assert_eq!(
+        value["library"]["answer"],
+        serde_json::json!({"kind": "untracked"})
+    );
 
-    let event = skipped_with_library(SkipReason::NoIdentifier, tracked_answer());
+    let event = skipped_with_library(tracked_answer());
     let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
     assert_eq!(
-        value["library"],
+        value["library"]["answer"],
         serde_json::json!({
             "kind": "tracked",
             "artifact": "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f",
@@ -1773,237 +2346,371 @@ fn json_line_of_skipped_carries_every_library_answer_variant_tagged_by_kind() {
     );
 }
 
-/// `library` is `"library":null` for `None`, on both event kinds, and
-/// carries the schema unchanged at 3 (design D3, D4).
+/// design D14's mapping `library == null` becomes `library == {status:
+/// not-attempted, reason: no-library / outside-library}` on a
+/// `resolved` event, and the `library` key is absent on a non-verdict
+/// skip.
 #[test]
-fn json_line_writes_library_null_when_the_library_was_not_consulted() {
+fn library_not_attempted_replaces_the_schema_3_null() {
     let value: Value = serde_json::from_str(&json_line(&resolved())).unwrap();
-    assert_eq!(value["library"], Value::Null);
-    assert_eq!(value["schema"], Value::from(3));
+    assert_eq!(
+        value["library"],
+        serde_json::json!({"status": "not-attempted", "reason": "no-library"})
+    );
+    assert_eq!(value["schema"], Value::from(4));
 
-    let value: Value =
-        serde_json::from_str(&json_line(&skipped(SkipReason::NoIdentifier))).unwrap();
-    assert_eq!(value["library"], Value::Null);
-    assert_eq!(value["schema"], Value::from(3));
+    let value: Value = serde_json::from_str(&json_line(&skipped(SkipReason::Declined))).unwrap();
+    assert!(value.get("library").is_none());
+    assert_eq!(value["schema"], Value::from(4));
 }
 
-/// A `resolved` JSON line written before this change — no `library` key
-/// at all — still deserializes, with `library: None` (design D10:
-/// `#[serde(default)]`).
+// --- human_line: design D9's exact strings ---
+
+/// design D9: a record retrieved from the library's own item is
+/// reported `from the library`.
 #[test]
-fn a_resolved_line_with_no_library_key_deserializes_with_library_none() {
-    let without_library = r#"{"schema":3,"event":"resolved","path":"paper.pdf",
-        "identifier":"doi:10.1000/xyz","record":{"type":"article-journal"},"source":"crossref",
-        "found":"doi:10.1000/xyz","claims":[],"tier":null,"overrode":null,"cached":false}"#;
-
-    let value: serde_json::Value = serde_json::from_str(without_library).unwrap();
-    let event: Event = serde_json::from_value(value).unwrap();
-
-    match event {
-        Event::Resolved { library, .. } => assert_eq!(library, None),
-        other => panic!("expected Event::Resolved, got {other:?}"),
-    }
-}
-
-/// The same for a `skipped` line with no `library` key.
-#[test]
-fn a_skipped_line_with_no_library_key_deserializes_with_library_none() {
-    let without_library = r#"{"schema":3,"event":"skipped","path":"mystery.pdf",
-        "reason":{"kind":"no-identifier"}}"#;
-
-    let value: serde_json::Value = serde_json::from_str(without_library).unwrap();
-    let event: Event = serde_json::from_value(value).unwrap();
-
-    match event {
-        Event::Skipped { library, .. } => assert_eq!(library, None),
-        other => panic!("expected Event::Skipped, got {other:?}"),
-    }
-}
-
-// --- human_line: design D5's exact strings ---
-
-/// design D5: `tier: Some("library")` gains ` (from the library)`.
-#[test]
-fn human_line_of_a_library_answer_gains_the_from_the_library_suffix() {
-    let event = resolved_with_library(Some("library"), false, tracked_answer());
+fn human_line_of_a_library_answer_names_the_library_as_where() {
+    let event = resolved_with_library(tracked_answer());
 
     assert_eq!(
         human_line(&event).unwrap(),
-        "paper.pdf: resolved 10.1000/xyz123 via crossref (from the library)"
+        "paper.pdf: resolved doi:10.1000/xyz123, from the library"
     );
 }
 
-/// A provenance-less item reports `source: "library"`, giving
-/// `… via library (from the library)` (design D5).
+/// design D9: a resolution whose `library` section could not answer
+/// appends `; the library could not answer: <what>` after the `from`
+/// clause.
 #[test]
-fn human_line_of_a_provenance_less_library_answer_names_library_as_the_source() {
-    let Event::Resolved {
-        path,
-        identifier,
-        record,
-        found,
-        claims,
-        overrode,
-        ..
-    } = resolved_with_library(Some("library"), false, tracked_answer())
-    else {
-        unreachable!()
-    };
-    let event = Event::Resolved {
-        path,
-        identifier,
-        record,
-        source: "library".to_string(),
-        found,
-        claims,
-        tier: Some("library".to_string()),
-        overrode,
-        cached: false,
-        library: Some(tracked_answer()),
-    };
+fn human_line_appends_the_library_problem_clause_after_the_from_clause() {
+    let event = skipped_with_library(LibraryAnswer::DanglingItem {
+        artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
+        item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
+    });
 
     assert_eq!(
         human_line(&event).unwrap(),
-        "paper.pdf: resolved 10.1000/xyz123 via library (from the library)"
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links \
+         to item 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70, which the library does not hold"
     );
 }
 
-/// design D5: a resolution whose `library.kind` is a problem appends
-/// `; the library could not answer: <what>` after the line it would
-/// otherwise have had — including ` (cached)`.
+/// The library-problem clause follows the `from` clause on a `resolved`
+/// line too, here a content-index answer whose record names no service.
 #[test]
-fn human_line_appends_the_library_problem_clause_to_a_cached_resolved_line() {
-    let event = resolved_with_library(
-        None,
-        true,
-        LibraryAnswer::DanglingItem {
+fn human_line_appends_the_library_problem_clause_to_a_content_index_resolved_line() {
+    let mut sections = sections_via_content_index();
+    sections.library = LibraryStep::Consulted {
+        answer: LibraryAnswer::DanglingItem {
             artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
             item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
         },
-    );
+    };
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    };
 
     assert_eq!(
         human_line(&event).unwrap(),
-        "paper.pdf: resolved 10.1000/xyz123 via crossref (cached); the library could not \
-         answer: artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links to item \
+        "paper.pdf: resolved doi:10.1000/xyz123, from the content index; the library \
+         could not answer: artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links to item \
          0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70, which the library does not hold"
     );
 }
 
-/// The same clause on a `skipped` line.
-#[test]
-fn human_line_appends_the_library_problem_clause_to_a_skipped_line() {
-    let event = skipped_with_library(
-        SkipReason::NoIdentifier,
-        LibraryAnswer::UnrecognisedContent {
-            artifacts: vec!["0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string()],
-        },
-    );
-
-    assert_eq!(
-        human_line(&event).unwrap(),
-        "mystery.pdf: skipped, no identifier found; the library could not answer: the \
-         library records artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f at this path, but \
-         not these bytes"
-    );
-}
-
-/// design D5's `<what>` with several artifacts, on `Ambiguous`.
 #[test]
 fn human_line_names_every_artifact_of_an_ambiguous_library_problem() {
-    let event = skipped_with_library(
-        SkipReason::NoIdentifier,
-        LibraryAnswer::Ambiguous {
-            artifacts: vec!["a-id".to_string(), "b-id".to_string()],
-        },
-    );
+    let event = skipped_with_library(LibraryAnswer::Ambiguous {
+        artifacts: vec!["a-id".to_string(), "b-id".to_string()],
+    });
 
     assert_eq!(
         human_line(&event).unwrap(),
-        "mystery.pdf: skipped, no identifier found; the library could not answer: 2 \
-         artifact records claim this file: a-id, b-id"
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: 2 artifact records claim this file: a-id, b-id"
     );
 }
 
-/// design D5's `<what>` for `unreadable-records`, singular and plural,
-/// and the `listed: false` wording.
 #[test]
 fn human_line_names_the_unreadable_records_wording_for_each_shape() {
-    let one = skipped_with_library(
-        SkipReason::NoIdentifier,
-        LibraryAnswer::UnreadableRecords {
-            listed: true,
-            unreadable: 1,
-        },
-    );
+    let one = skipped_with_library(LibraryAnswer::UnreadableRecords {
+        listed: true,
+        unreadable: 1,
+    });
     assert_eq!(
         human_line(&one).unwrap(),
-        "mystery.pdf: skipped, no identifier found; the library could not answer: 1 \
-         artifact record file could not be read, so the library cannot say whether it \
-         tracks this file"
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: 1 artifact record file could not be read, so the \
+         library cannot say whether it tracks this file"
     );
 
-    let several = skipped_with_library(
-        SkipReason::NoIdentifier,
-        LibraryAnswer::UnreadableRecords {
-            listed: true,
-            unreadable: 3,
-        },
-    );
+    let several = skipped_with_library(LibraryAnswer::UnreadableRecords {
+        listed: true,
+        unreadable: 3,
+    });
     assert_eq!(
         human_line(&several).unwrap(),
-        "mystery.pdf: skipped, no identifier found; the library could not answer: 3 \
-         artifact record files could not be read, so the library cannot say whether it \
-         tracks this file"
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: 3 artifact record files could not be read, so the \
+         library cannot say whether it tracks this file"
     );
 
-    let unlistable = skipped_with_library(
-        SkipReason::NoIdentifier,
-        LibraryAnswer::UnreadableRecords {
-            listed: false,
-            unreadable: 0,
-        },
-    );
+    let unlistable = skipped_with_library(LibraryAnswer::UnreadableRecords {
+        listed: false,
+        unreadable: 0,
+    });
     assert_eq!(
         human_line(&unlistable).unwrap(),
-        "mystery.pdf: skipped, no identifier found; the library could not answer: the \
-         library's artifact records could not be listed, so it cannot say whether it \
-         tracks this file"
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: the library's artifact records could not be listed, \
+         so it cannot say whether it tracks this file"
     );
 }
 
-/// `Tracked` with `tier: Some("supplied")` (an operator's
-/// re-identification of a tracked file) leaves the line byte-identical
-/// to today's: a library answer with no problem adds nothing when
-/// `tier` is not `"library"` (design D3, D5).
+/// A tracked file the operator re-identified is reported from the
+/// service that answered, and its library answer adds no clause.
 #[test]
-fn human_line_of_a_supplied_tracked_file_is_unchanged() {
-    let event = resolved_with_library(Some("supplied"), false, tracked_answer());
+fn human_line_of_a_supplied_tracked_file_names_the_service() {
+    let mut sections = sections_via_network("crossref", "doi:10.1000/xyz123");
+    sections.library = LibraryStep::Consulted {
+        answer: tracked_answer(),
+    };
+    if let LookupStep::Attempted { origin, .. } = &mut sections.lookup {
+        *origin = IdentifierOrigin::Operator;
+    }
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    };
 
     assert_eq!(
         human_line(&event).unwrap(),
-        "paper.pdf: resolved 10.1000/xyz123 via crossref"
+        "paper.pdf: resolved doi:10.1000/xyz123 via crossref, from the network"
     );
 }
 
-/// `Untracked` leaves the line unchanged too.
+/// `Untracked` adds nothing: a library answer with no problem leaves
+/// the line as the `from` clause alone states it.
 #[test]
-fn human_line_of_an_untracked_file_is_unchanged() {
-    let event = resolved_with_library(Some("first-page"), false, LibraryAnswer::Untracked);
+fn human_line_of_an_untracked_file_adds_nothing() {
+    let event = resolved_with_library(LibraryAnswer::Untracked);
 
     assert_eq!(
         human_line(&event).unwrap(),
-        "paper.pdf: resolved 10.1000/xyz123 via crossref"
+        "paper.pdf: resolved doi:10.1000/xyz123 via crossref, from the network"
     );
 }
 
-/// `library: None` — the library was not consulted at all — leaves the
-/// line unchanged, exactly as before this change.
+/// `library` not attempted — the run has no library at all — leaves the
+/// line unchanged too.
 #[test]
 fn human_line_with_no_library_consultation_is_unchanged() {
     assert_eq!(
         human_line(&resolved()).unwrap(),
-        "paper.pdf: resolved 10.1000/xyz123 via crossref"
+        "paper.pdf: resolved doi:10.1000/xyz123 via crossref, from the network"
+    );
+}
+
+/// design D9: the content-index examples, with a record carrying a
+/// title, authors and year.
+#[test]
+fn human_line_of_resolved_shows_the_work_and_the_from_clause() {
+    let mut record = record_with(Some("Determination of things"), &["Smith"], Some(2015));
+    record
+        .borax
+        .provenance
+        .insert("title".to_string(), Source::Crossref);
+    let mut sections = sections_via_network("crossref", "doi:10.1039/c5ay00042d");
+    sections.record_retrieval = Some(RetrievedFrom::ContentIndex);
+    sections.content_index.read = IndexReadStep::Hit;
+    let event = Event::Resolved {
+        path: PathBuf::from("papers/smith.pdf"),
+        identifier: "doi:10.1039/c5ay00042d".to_string(),
+        record: Box::new(record),
+        sections: Box::new(sections),
+    };
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "papers/smith.pdf: resolved doi:10.1039/c5ay00042d to \"Determination of things\" \
+         (Smith, 2015) via crossref, from the content index"
+    );
+}
+
+/// design D9: author rendering for two and for three-or-more authors.
+#[test]
+fn human_line_of_resolved_renders_author_counts() {
+    let two = record_with(Some("A Title"), &["Smith", "Jones"], Some(2020));
+    let event = Event::Resolved {
+        path: PathBuf::from("a.pdf"),
+        identifier: "doi:10.1000/xyz".to_string(),
+        record: Box::new(two),
+        sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+    };
+    assert!(
+        human_line(&event)
+            .unwrap()
+            .contains("(Smith and Jones, 2020)"),
+        "got {:?}",
+        human_line(&event)
+    );
+
+    let three = record_with(Some("A Title"), &["Smith", "Jones", "Lee"], Some(2020));
+    let event = Event::Resolved {
+        path: PathBuf::from("a.pdf"),
+        identifier: "doi:10.1000/xyz".to_string(),
+        record: Box::new(three),
+        sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+    };
+    assert!(
+        human_line(&event).unwrap().contains("(Smith et al., 2020)"),
+        "got {:?}",
+        human_line(&event)
+    );
+}
+
+/// design D9: no title, no authors and no year each drop their part of
+/// the `<work>` clause, and all three absent drops the clause whole.
+#[test]
+fn human_line_of_resolved_drops_absent_parts_of_the_work_clause() {
+    let no_title = record_with(None, &["Smith"], Some(2020));
+    let event = Event::Resolved {
+        path: PathBuf::from("a.pdf"),
+        identifier: "doi:10.1000/xyz".to_string(),
+        record: Box::new(no_title),
+        sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+    };
+    let line = human_line(&event).unwrap();
+    assert!(!line.contains('"'), "got {line:?}");
+    assert!(line.contains("(Smith, 2020)"), "got {line:?}");
+
+    let no_authors_or_year = record_with(Some("A Title"), &[], None);
+    let event = Event::Resolved {
+        path: PathBuf::from("a.pdf"),
+        identifier: "doi:10.1000/xyz".to_string(),
+        record: Box::new(no_authors_or_year),
+        sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+    };
+    let line = human_line(&event).unwrap();
+    assert!(line.contains("\"A Title\""), "got {line:?}");
+    assert!(!line.contains('('), "got {line:?}");
+
+    let nothing = record_with(None, &[], None);
+    let event = Event::Resolved {
+        path: PathBuf::from("a.pdf"),
+        identifier: "doi:10.1000/xyz".to_string(),
+        record: Box::new(nothing),
+        sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+    };
+    let line = human_line(&event).unwrap();
+    assert!(!line.contains(" to "), "got {line:?}");
+}
+
+/// design D9: a response-cache answer is `from the response cache`.
+#[test]
+fn human_line_of_resolved_names_the_response_cache() {
+    let mut sections = sections_via_network("crossref", "doi:10.1000/xyz");
+    sections.record_retrieval = Some(RetrievedFrom::ServiceCache {
+        service: "crossref".to_string(),
+    });
+    let event = Event::Resolved {
+        path: PathBuf::from("a.pdf"),
+        identifier: "doi:10.1000/xyz".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    };
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "a.pdf: resolved doi:10.1000/xyz via crossref, from the response cache"
+    );
+}
+
+/// `(cached)` and `(from the library)` go, replaced wholly by the
+/// `from` clause (design D9).
+#[test]
+fn human_line_never_shows_the_schema_3_cached_or_from_the_library_suffixes() {
+    for event in [
+        resolved(),
+        resolved_with_library(tracked_answer()),
+        Event::Resolved {
+            path: PathBuf::from("a.pdf"),
+            identifier: "doi:10.1000/xyz".to_string(),
+            record: Box::new(Record::new(EntryType::Article)),
+            sections: Box::new(sections_via_content_index()),
+        },
+    ] {
+        let line = human_line(&event).unwrap();
+        assert!(!line.contains("(cached)"), "got {line:?}");
+        assert!(!line.contains("(from the library)"), "got {line:?}");
+    }
+}
+
+// ---------------------------------------------------------------------
+// Escaping (design D9)
+// ---------------------------------------------------------------------
+
+/// design D9: a title carrying a control character is escaped on the
+/// `resolved` human line.
+#[test]
+fn human_line_of_resolved_escapes_a_control_character_in_the_title() {
+    let record = record_with(Some("Evil\u{1b}[2JTitle"), &["Smith"], Some(2020));
+    let event = Event::Resolved {
+        path: PathBuf::from("a.pdf"),
+        identifier: "doi:10.1000/xyz".to_string(),
+        record: Box::new(record),
+        sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+    };
+    assert!(
+        human_line(&event).unwrap().contains("Evil\\x1b[2JTitle"),
+        "got {:?}",
+        human_line(&event)
+    );
+}
+
+/// The same holds for a resolution skip's unreadable message and a
+/// non-resolution skip's message (`rename-failed`).
+#[test]
+fn human_line_escapes_control_characters_in_skip_messages() {
+    let event = skipped_verdict(
+        SkipReason::Unreadable {
+            message: "bad\u{1b}[2Jfile".to_string(),
+        },
+        unreadable_extraction_sections("bad\u{1b}[2Jfile"),
+    );
+    assert!(
+        human_line(&event).unwrap().contains("bad\\x1b[2Jfile"),
+        "got {:?}",
+        human_line(&event)
+    );
+
+    let event = skipped(SkipReason::RenameFailed {
+        message: "disk\u{1b}[2Jfull".to_string(),
+    });
+    assert!(
+        human_line(&event).unwrap().contains("disk\\x1b[2Jfull"),
+        "got {:?}",
+        human_line(&event)
+    );
+}
+
+/// design D8: `content-index-write` renders nothing for `written`, and
+/// the documented line, escaped, for `failed`.
+#[test]
+fn human_line_of_content_index_write() {
+    assert_eq!(human_line(&content_index_write(WriteStep::Written)), None);
+
+    let event = content_index_write(WriteStep::Failed {
+        message: "disk\u{1b}[2Jfull".to_string(),
+    });
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "smith2024_borax.pdf: the content index could not keep this answer (disk\\x1b[2Jfull)"
     );
 }
 
@@ -2056,7 +2763,10 @@ fn all_extractions() -> Vec<(Extraction, serde_json::Value)> {
 
 /// design D4: `json_line` of `Event::LibraryExtraction` carries
 /// `schema`, `event`, `path` and `extraction`, the last tagged by
-/// `kind` in kebab-case, for every result kind.
+/// `kind` in kebab-case, for every result kind. This event does not
+/// change in this change: the `found` status and `tier` field are
+/// `library-extraction`'s own, unaffected by `resolved`'s field
+/// removal (D14, "not about the stream").
 #[test]
 fn json_line_of_library_extraction_matches_design_d4_for_every_kind() {
     for (extraction, expected_extraction) in all_extractions() {
@@ -2066,7 +2776,7 @@ fn json_line_of_library_extraction_matches_design_d4_for_every_kind() {
         assert_eq!(
             value,
             serde_json::json!({
-                "schema": 3,
+                "schema": 4,
                 "event": "library-extraction",
                 "path": "sub/a.pdf",
                 "extraction": expected_extraction,
@@ -2260,7 +2970,7 @@ fn json_line_of_library_condition_matches_design_d3_for_every_kind() {
     let cases: Vec<(Event, String)> = vec![
         (
             library_condition("sub/new.pdf", Condition::Orphan),
-            r#"{"schema":3,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}"#
+            r#"{"schema":4,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}"#
                 .to_string(),
         ),
         (
@@ -2272,7 +2982,7 @@ fn json_line_of_library_condition_matches_design_d3_for_every_kind() {
                 },
             ),
             format!(
-                r#"{{"schema":3,"event":"library-condition","path":"gone.pdf","condition":{{"kind":"missing","id":"{COND_UUID_MISSING}","record":".borax/artifacts/{COND_UUID_MISSING}.toml"}}}}"#
+                r#"{{"schema":4,"event":"library-condition","path":"gone.pdf","condition":{{"kind":"missing","id":"{COND_UUID_MISSING}","record":".borax/artifacts/{COND_UUID_MISSING}.toml"}}}}"#
             ),
         ),
         (
@@ -2283,7 +2993,7 @@ fn json_line_of_library_condition_matches_design_d3_for_every_kind() {
                 },
             ),
             format!(
-                r#"{{"schema":3,"event":"library-condition","path":"items/milner1978.unlinked.toml","condition":{{"kind":"unlinked","id":"{COND_UUID_UNLINKED}"}}}}"#
+                r#"{{"schema":4,"event":"library-condition","path":"items/milner1978.unlinked.toml","condition":{{"kind":"unlinked","id":"{COND_UUID_UNLINKED}"}}}}"#
             ),
         ),
     ];
@@ -2301,7 +3011,7 @@ fn json_line_of_library_adoption_unindexed_matches_design_d6() {
 
     assert_eq!(
         json_line(&event),
-        r#"{"schema":3,"event":"library-adoption","path":"new.pdf","adoption":{"kind":"unindexed"}}"#
+        r#"{"schema":4,"event":"library-adoption","path":"new.pdf","adoption":{"kind":"unindexed"}}"#
     );
 }
 

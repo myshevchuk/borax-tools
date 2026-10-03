@@ -9,7 +9,10 @@ use std::thread;
 use std::time::Duration;
 
 use borax::event::{
-    Attempt, Claim, ClaimOrigin, Counts, Event, Extraction, LibraryAnswer, SkipReason,
+    Acceptance, Claim, ClaimOrigin, Counts, Event, Extraction, ExtractionResultStep, FetchedFrom,
+    IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep, LookupStep, MatchCheckStep,
+    RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason, TitlesStep, WriteStep,
+    human_line,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
@@ -18,9 +21,10 @@ use borax::evidence::{
 };
 use borax::library::{ArtifactStore, ItemStore, Stores};
 use borax::pipeline::{
-    Documents, FileOutcome, FileRecord, Provenance, RealDocuments, ResolveConfig, accept,
-    event_for, extraction, extraction_of, from_file, remember, resolve_batch, resolve_file,
-    resolve_supplied, standing, title_check, titles_of, unheld_evidence, verdict_event,
+    Documents, FileOutcome, FileRecord, RealDocuments, ResolveConfig, accept, attempts_of,
+    extraction, extraction_of, from_file, remember, resolution_skip, resolve_batch, resolve_file,
+    resolve_supplied, resolved_event, standing, title_check, titles_of, unheld_evidence,
+    verdict_event,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier};
@@ -32,7 +36,7 @@ use borax_pdf::scan::FoundIdentifier;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier};
 use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
-use borax_sources::conflict::Insufficient;
+use borax_sources::conflict::{Conflict, Insufficient};
 use borax_sources::source::{Fetched, Retrieval, Source, SourceError, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 use tempfile::tempdir;
@@ -370,13 +374,25 @@ fn config(cache: bool) -> ResolveConfig {
     }
 }
 
-/// Render [`Tier`] the way `event_for` is expected to: a kebab-case
+/// Render [`Tier`] the way `resolved_event` is expected to: a kebab-case
 /// name matching the variant, consistent with the rest of the event
 /// schema's kebab-case tags.
 fn tier_str(tier: Tier) -> &'static str {
     match tier {
         Tier::EmbeddedMetadata => "embedded-metadata",
         Tier::TextLayer => "text-layer",
+    }
+}
+
+/// What a schema-3 event's `library: Option<LibraryAnswer>` field
+/// reported, reconstructed from a section's `LibraryStep` (design D14's
+/// mapping: `library == {kind: ..}` becomes `library == {status:
+/// consulted, answer: {kind: ..}}`, and `library == null` becomes
+/// `not-attempted`).
+fn library_of(sections: &Sections) -> Option<LibraryAnswer> {
+    match &sections.library {
+        LibraryStep::Consulted { answer } => Some(answer.clone()),
+        LibraryStep::NotAttempted { .. } => None,
     }
 }
 
@@ -415,12 +431,19 @@ fn embedded_metadata_identifier_resolves_via_the_first_source_uncached() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(file_record.record, record_with_doi("10.1000/embedded"));
-    assert_eq!(file_record.source(), Some(SourceName::Crossref));
     assert_eq!(
-        file_record.tier(),
-        Some(Provenance::Extracted(Tier::EmbeddedMetadata))
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
     );
-    assert!(!file_record.cached());
+    assert_eq!(
+        file_record.evidence.lookup.extracted(),
+        Some((
+            &Identifier::Doi(doi("10.1000/embedded")),
+            Tier::EmbeddedMetadata
+        ))
+    );
 }
 
 #[test]
@@ -440,8 +463,8 @@ fn text_layer_identifier_reports_the_text_layer_tier() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(
-        file_record.tier(),
-        Some(Provenance::Extracted(Tier::TextLayer))
+        file_record.evidence.lookup.extracted(),
+        Some((&Identifier::Doi(doi("10.1000/text-layer")), Tier::TextLayer))
     );
 }
 
@@ -471,9 +494,15 @@ fn content_index_hit_is_returned_without_opening_the_file() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(file_record.record, indexed);
-    assert_eq!(file_record.source(), None);
-    assert_eq!(file_record.tier(), None);
-    assert!(file_record.cached());
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::ContentIndex)
+    );
+    assert_eq!(file_record.evidence.content_index.read, IndexRead::Hit);
+    assert_eq!(
+        file_record.evidence.lookup,
+        LookupEvidence::NotAttempted(Unattempted::ContentIndexHit)
+    );
     assert_eq!(documents.open_calls(), 0);
 }
 
@@ -495,7 +524,13 @@ fn cache_false_bypasses_the_content_index() {
     assert_eq!(documents.open_calls(), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(file_record.record, record_with_doi("10.1000/live"));
-    assert!(!file_record.cached());
+    assert_eq!(file_record.evidence.content_index.read, IndexRead::Bypassed);
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -525,7 +560,16 @@ fn a_hash_failure_proceeds_to_open_and_extract_rather_than_skipping() {
     assert_eq!(documents.hash_calls(), 1);
     assert_eq!(documents.open_calls(), 1);
     assert_eq!(file_record.record, record_with_doi("10.1000/unhashable"));
-    assert!(!file_record.cached());
+    assert!(matches!(
+        file_record.evidence.content_index.read,
+        IndexRead::Unavailable { .. }
+    ));
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -611,27 +655,11 @@ fn unreadable_file_is_skipped_with_the_open_error_message() {
     );
 }
 
+/// design D4's engine mapping: `ExtractionError::NoTextLayer` becomes
+/// `SkipReason::NoTextLayer` (D14: the fixture's own `status --identify`
+/// result says which of the two split reasons applies).
 #[test]
-fn encrypted_file_is_skipped_as_unreadable() {
-    let path = Path::new("paper.pdf");
-    let hash = hash_for("encrypted");
-    let documents = FakeDocuments::new().with_open_error(path, hash, ExtractionError::Encrypted);
-    let sources: Vec<&dyn Source> = Vec::new();
-    let index = ContentIndex::new(MemoryCache::new());
-
-    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
-    let reason = skipped_outcome(outcome);
-
-    assert_eq!(
-        reason,
-        SkipReason::Unreadable {
-            message: ExtractionError::Encrypted.to_string(),
-        }
-    );
-}
-
-#[test]
-fn a_file_with_no_text_layer_is_skipped_as_having_no_identifier() {
+fn a_file_with_no_text_layer_is_skipped_as_no_text_layer() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("no-text-layer");
     let documents = FakeDocuments::new().with_file(path, hash, pdf_with_no_text_layer());
@@ -641,11 +669,13 @@ fn a_file_with_no_text_layer_is_skipped_as_having_no_identifier() {
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let reason = skipped_outcome(outcome);
 
-    assert_eq!(reason, SkipReason::NoIdentifier);
+    assert_eq!(reason, SkipReason::NoTextLayer);
 }
 
+/// design D4's engine mapping: `ExtractionError::NoIdentifierFound`
+/// becomes `SkipReason::TextWithoutIdentifier`.
 #[test]
-fn a_file_with_text_but_no_identifier_is_skipped_as_having_no_identifier() {
+fn a_file_with_text_but_no_identifier_is_skipped_as_text_without_identifier() {
     let path = Path::new("paper.pdf");
     let hash = hash_for("no-identifier-found");
     let documents = FakeDocuments::new().with_file(path, hash, pdf_with_no_identifier());
@@ -655,9 +685,15 @@ fn a_file_with_text_but_no_identifier_is_skipped_as_having_no_identifier() {
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let reason = skipped_outcome(outcome);
 
-    assert_eq!(reason, SkipReason::NoIdentifier);
+    assert_eq!(reason, SkipReason::TextWithoutIdentifier);
 }
 
+/// design D14's mapping: `Unresolvable { found, tier, attempts }`
+/// becomes the unit reason `Unresolvable`, with the facts moved into
+/// `lookup` (`identifier`, `origin`, `attempts`) and
+/// `extraction.result.tier`. `Attempt { source, error }` is the
+/// engine's own `ServiceAttempt { service, outcome }`, unaffected by
+/// this change (D5's new type is the event-side `ServiceAnswer`).
 #[test]
 fn an_identifier_no_source_holds_is_skipped_as_unresolvable_with_attempts_in_priority_order() {
     let path = Path::new("paper.pdf");
@@ -670,30 +706,48 @@ fn an_identifier_no_source_holds_is_skipped_as_unresolvable_with_attempts_in_pri
     let sources: Vec<&dyn Source> = vec![&crossref, &openalex, &datacite];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
-    let reason = skipped_outcome(outcome);
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
 
     assert_eq!(
-        reason,
-        SkipReason::Unresolvable {
-            found: "doi:10.1000/nowhere".to_string(),
-            tier: Some("embedded-metadata".to_string()),
-            attempts: vec![
-                Attempt {
-                    source: "crossref".to_string(),
-                    error: SourceError::NotFound.to_string(),
-                },
-                Attempt {
-                    source: "openalex".to_string(),
-                    error: SourceError::NotFound.to_string(),
-                },
-                Attempt {
-                    source: "datacite".to_string(),
-                    error: SourceError::NotFound.to_string(),
-                },
-            ],
-        }
+        result.verdict,
+        FileOutcome::Skipped(SkipReason::Unresolvable)
     );
+    match &result.evidence.lookup {
+        LookupEvidence::Attempted {
+            identifier,
+            origin,
+            attempts,
+        } => {
+            assert_eq!(identifier, &Identifier::Doi(doi("10.1000/nowhere")));
+            assert_eq!(*origin, Origin::Extracted(Tier::EmbeddedMetadata));
+            assert_eq!(
+                attempts,
+                &vec![
+                    ServiceAttempt {
+                        service: SourceName::Crossref,
+                        outcome: Err(SourceError::NotFound),
+                    },
+                    ServiceAttempt {
+                        service: SourceName::OpenAlex,
+                        outcome: Err(SourceError::NotFound),
+                    },
+                    ServiceAttempt {
+                        service: SourceName::DataCite,
+                        outcome: Err(SourceError::NotFound),
+                    },
+                ]
+            );
+        }
+        other => panic!("expected an attempted lookup, got {other:?}"),
+    }
 }
 
 #[test]
@@ -715,27 +769,33 @@ fn a_title_conflict_is_a_skip_and_the_record_is_not_returned() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
 
-    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
 
-    assert!(!matches!(outcome, FileOutcome::Resolved(_)));
-    let SkipReason::Conflict {
-        field,
-        extracted,
-        resolved,
-        similarity,
-    } = skipped_outcome(outcome)
-    else {
-        panic!("expected a title conflict");
+    assert!(!matches!(result.verdict, FileOutcome::Resolved(_)));
+    assert_eq!(result.verdict, FileOutcome::Skipped(SkipReason::Conflict));
+    let MatchCheck::Conflict(conflict) = &result.evidence.match_check else {
+        panic!(
+            "expected a title conflict, got {:?}",
+            result.evidence.match_check
+        );
     };
 
-    assert_eq!(field, "title");
-    assert_eq!(extracted, "Old Title Extracted from the PDF");
+    assert_eq!(conflict.field, "title");
+    assert_eq!(conflict.extracted, "Old Title Extracted from the PDF");
     assert_eq!(
-        resolved,
+        conflict.resolved,
         "A Completely Different Title About Something Else"
     );
     // The two share only `title` out of four and six content words.
-    assert_eq!(similarity, 0.2);
+    assert_eq!(conflict.similarity, 0.2);
 }
 
 /// The regression this check was rewritten for: `2011ASC(353)575.pdf`,
@@ -821,7 +881,12 @@ fn crossref_outage_falls_back_to_openalex() {
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
-    assert_eq!(file_record.source(), Some(SourceName::OpenAlex));
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::OpenAlex
+        })
+    );
     assert_eq!(file_record.record, record_with_doi("10.1000/outage"));
 }
 
@@ -842,7 +907,7 @@ fn identifier_unknown_everywhere_is_skipped_as_unresolvable() {
 
     assert!(matches!(
         outcome,
-        FileOutcome::Skipped(SkipReason::Unresolvable { .. })
+        FileOutcome::Skipped(SkipReason::Unresolvable)
     ));
 }
 
@@ -851,10 +916,10 @@ fn identifier_unknown_everywhere_is_skipped_as_unresolvable() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_tier_and_cached() {
+fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_and_sections() {
     let path = PathBuf::from("paper.pdf");
     let record = record_with_doi("10.1000/xyz");
-    let outcome = FileOutcome::Resolved(FileRecord {
+    let file = FileRecord {
         record: record.clone(),
         evidence: evidence_via_lookup(
             SourceName::Crossref,
@@ -862,72 +927,945 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_source_
             Tier::EmbeddedMetadata,
         ),
         hash: Some(hash_for("paper")),
-        overrode: None,
-    });
+        overridden: false,
+    };
 
-    let event = event_for(&path, &outcome);
-
-    assert_eq!(
-        event,
-        Event::Resolved {
-            path: path.clone(),
-            identifier: "doi:10.1000/xyz".to_string(),
-            record: Box::new(record),
-            source: "crossref".to_string(),
-            found: "doi:10.1000/xyz".to_string(),
-
-            claims: Vec::new(),
-
-            tier: Some(tier_str(Tier::EmbeddedMetadata).to_string()),
-            cached: false,
-            overrode: None,
-            library: None,
-        }
-    );
-}
-
-#[test]
-fn a_content_index_hit_reports_its_source_as_cache() {
-    let path = PathBuf::from("paper.pdf");
-    let outcome = FileOutcome::Resolved(FileRecord {
-        record: record_with_doi("10.1000/cached-record"),
-        evidence: evidence_via_content_index_hit(),
-        hash: Some(hash_for("paper")),
-        overrode: None,
-    });
-
-    let event = event_for(&path, &outcome);
+    let event = resolved_event(&path, &file);
 
     match event {
         Event::Resolved {
-            source,
-            tier,
-            cached,
-            ..
+            path: event_path,
+            identifier,
+            record: event_record,
+            sections,
         } => {
-            assert_eq!(source, "cache");
-            assert_eq!(tier, None);
-            assert!(cached);
+            assert_eq!(event_path, path);
+            assert_eq!(identifier, "doi:10.1000/xyz");
+            assert_eq!(*event_record, record);
+            assert_eq!(
+                sections.record_retrieval,
+                Some(RetrievedFrom::Network {
+                    service: "crossref".to_string()
+                })
+            );
+            let ExtractionResultStep::Found { tier, .. } = sections.extraction.result else {
+                panic!("expected a found extraction result");
+            };
+            assert_eq!(tier, tier_str(Tier::EmbeddedMetadata));
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
 }
 
+/// design D14's mapping: `cached == true` becomes `record_retrieval.kind
+/// == "content-index"` and `content_index.read.status == "hit"`;
+/// `tier == null` becomes `record_retrieval.kind == "content-index"`
+/// too (there is no extraction tier to report).
 #[test]
-fn a_skipped_file_produces_a_skipped_event_carrying_the_same_reason() {
-    let path = PathBuf::from("mystery.pdf");
-    let outcome = FileOutcome::Skipped(SkipReason::NoIdentifier);
+fn a_content_index_hit_reports_its_record_retrieval_as_content_index() {
+    let path = PathBuf::from("paper.pdf");
+    let file = FileRecord {
+        record: record_with_doi("10.1000/cached-record"),
+        evidence: evidence_via_content_index_hit(),
+        hash: Some(hash_for("paper")),
+        overridden: false,
+    };
 
-    let event = event_for(&path, &outcome);
+    let event = resolved_event(&path, &file);
+
+    match event {
+        Event::Resolved { sections, .. } => {
+            assert_eq!(sections.record_retrieval, Some(RetrievedFrom::ContentIndex));
+            assert_eq!(sections.content_index.read, IndexReadStep::Hit);
+            assert_eq!(
+                sections.extraction.result,
+                ExtractionResultStep::NotAttempted {
+                    reason: "content-index-hit".to_string()
+                }
+            );
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D11, D12: `resolution_skip` builds the same event
+/// `verdict_event` gives a standing with that reason and evidence — the
+/// schema-4 replacement for `event_for`'s skip path, which cannot exist
+/// any more because a skip cannot be rendered from a bare `SkipReason`.
+#[test]
+fn resolution_skip_builds_a_skipped_event_carrying_the_reason_and_the_evidence() {
+    let path = PathBuf::from("mystery.pdf");
+    let evidence = Evidence::not_attempted(Unattempted::ExtractionFailed);
+
+    let event = resolution_skip(&path, SkipReason::NoTextLayer, &evidence, None);
+
+    match event {
+        Event::Skipped {
+            path: event_path,
+            reason,
+            sections,
+            candidate,
+        } => {
+            assert_eq!(event_path, path);
+            assert_eq!(reason, SkipReason::NoTextLayer);
+            assert!(sections.is_some());
+            assert!(candidate.is_none());
+        }
+        other => panic!("expected Event::Skipped, got {other:?}"),
+    }
+}
+
+/// design D5, D11: `attempts_of` turns a failed supply's `Unresolved`
+/// into the `ServiceAnswer`s the interactive report shares with the
+/// event stream, in the order the sources were asked.
+#[test]
+fn attempts_of_reports_each_source_in_order() {
+    let unresolved = borax_sources::dispatch::Unresolved {
+        attempts: vec![
+            (
+                SourceName::Crossref,
+                SourceError::Unavailable {
+                    message: "503".to_string(),
+                },
+            ),
+            (SourceName::OpenAlex, SourceError::NotFound),
+        ],
+    };
+
+    let attempts = attempts_of(&unresolved);
 
     assert_eq!(
-        event,
-        Event::Skipped {
-            path,
-            reason: SkipReason::NoIdentifier,
-            library: None,
+        attempts,
+        vec![
+            ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: ServiceOutcome::Unavailable {
+                    message: "503".to_string(),
+                },
+            },
+            ServiceAnswer {
+                service: "openalex".to_string(),
+                outcome: ServiceOutcome::NotFound,
+            },
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------
+// Evidence::sections: the projection itself, field by field
+// (design D3, D5, task 2.1)
+//
+// Every test here builds an `Evidence` directly and reads
+// `Evidence::sections(acceptance)` back, so what is pinned is the
+// projection's own mapping rather than anything a resolution pass
+// happens to produce. `evidence_with` holds everything but the one
+// field each test varies at its default ("no library", a miss, nothing
+// extracted, nothing looked up, no match check), so each test's diff
+// from the default is exactly the row it is pinning.
+// ---------------------------------------------------------------------
+
+/// A complete `Evidence`, every field defaulted so a test can override
+/// only the one field it is about.
+fn evidence_with(
+    library: Consultation,
+    content_index: IndexEvidence,
+    extraction: ExtractionEvidence,
+    lookup: LookupEvidence,
+    match_check: MatchCheck,
+) -> Evidence {
+    Evidence {
+        library,
+        content_index,
+        extraction,
+        lookup,
+        match_check,
+    }
+}
+
+fn default_content_index() -> IndexEvidence {
+    IndexEvidence {
+        read: IndexRead::Miss,
+        write: IndexWrite::Attempted(CacheWrite::Written),
+    }
+}
+
+fn default_extraction() -> ExtractionEvidence {
+    ExtractionEvidence {
+        result: ExtractionStep::NotAttempted(Unattempted::NoRecord),
+        titles: Titles::NotAttempted(Unattempted::NoRecord),
+    }
+}
+
+/// design D3: every `Consultation::Consulted` answer round-trips into
+/// `LibraryStep::Consulted { answer }` unchanged, for all ten
+/// `LibraryAnswer` kinds; `NotConsulted(reason)` becomes
+/// `NotAttempted { reason: reason.as_str() }`.
+#[test]
+fn sections_projects_every_consultation() {
+    let answers = [
+        LibraryAnswer::Tracked {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+        },
+        LibraryAnswer::Untracked,
+        LibraryAnswer::UnrecognisedContent {
+            artifacts: vec!["a".to_string()],
+        },
+        LibraryAnswer::Ambiguous {
+            artifacts: vec!["a".to_string(), "b".to_string()],
+        },
+        LibraryAnswer::NoItem {
+            artifact: "a".to_string(),
+        },
+        LibraryAnswer::DanglingItem {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+        },
+        LibraryAnswer::UnreadableItem {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+            path: PathBuf::from("/lib/items/key.i.toml"),
+            message: "bad toml".to_string(),
+        },
+        LibraryAnswer::AmbiguousItem {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+            files: vec![PathBuf::from("/lib/items/x.i.toml")],
+        },
+        LibraryAnswer::Unhashable {
+            artifacts: vec!["a".to_string()],
+        },
+        LibraryAnswer::UnreadableRecords {
+            listed: true,
+            unreadable: 2,
+        },
+    ];
+
+    for answer in answers {
+        let evidence = evidence_with(
+            Consultation::Consulted(answer.clone()),
+            default_content_index(),
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(
+            sections.library,
+            LibraryStep::Consulted {
+                answer: answer.clone()
+            },
+            "answer {answer:?}"
+        );
+    }
+
+    for reason in [
+        Unattempted::NoLibrary,
+        Unattempted::OutsideLibrary,
+        Unattempted::ContentDuplicate,
+    ] {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(reason),
+            default_content_index(),
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(
+            sections.library,
+            LibraryStep::NotAttempted {
+                reason: reason.as_str().to_string()
+            },
+            "reason {reason:?}"
+        );
+    }
+}
+
+/// design D3: every `IndexRead` and `IndexWrite` kind, including
+/// `IndexWrite::Attempted(CacheWrite::Failed { message })`, projects
+/// onto the matching `IndexReadStep`/`WriteStep`.
+#[test]
+fn sections_projects_every_index_read_and_write() {
+    let reads = [
+        (IndexRead::Hit, IndexReadStep::Hit),
+        (IndexRead::Miss, IndexReadStep::Miss),
+        (IndexRead::Bypassed, IndexReadStep::Bypassed),
+        (
+            IndexRead::Unavailable {
+                message: "cannot hash".to_string(),
+            },
+            IndexReadStep::Unavailable {
+                message: "cannot hash".to_string(),
+            },
+        ),
+        (
+            IndexRead::NotAttempted(Unattempted::ContentDuplicate),
+            IndexReadStep::NotAttempted {
+                reason: "content-duplicate".to_string(),
+            },
+        ),
+    ];
+    for (read, expected) in reads {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            IndexEvidence {
+                read,
+                write: IndexWrite::Attempted(CacheWrite::Written),
+            },
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(sections.content_index.read, expected);
+    }
+
+    let writes = [
+        (
+            IndexWrite::Attempted(CacheWrite::Written),
+            WriteStep::Written,
+        ),
+        (
+            IndexWrite::Attempted(CacheWrite::Failed {
+                message: "disk full".to_string(),
+            }),
+            WriteStep::Failed {
+                message: "disk full".to_string(),
+            },
+        ),
+        (
+            IndexWrite::NotAttempted(Unattempted::Refused),
+            WriteStep::NotAttempted {
+                reason: "refused".to_string(),
+            },
+        ),
+    ];
+    for (write, expected) in writes {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            IndexEvidence {
+                read: IndexRead::Miss,
+                write,
+            },
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(sections.content_index.write, expected);
+    }
+}
+
+/// design D3: every `ExtractionStep` kind and every `Titles` state,
+/// `Titles::Read(vec![])` included (an opened file claiming no title is
+/// not the same as a file not opened at all).
+#[test]
+fn sections_projects_every_extraction_step_and_titles_state() {
+    let results = [
+        (
+            ExtractionStep::Ran(Extraction::Found {
+                identifier: "doi:10.1000/x".to_string(),
+                tier: "text-layer".to_string(),
+            }),
+            ExtractionResultStep::Found {
+                identifier: "doi:10.1000/x".to_string(),
+                tier: "text-layer".to_string(),
+            },
+        ),
+        (
+            ExtractionStep::Ran(Extraction::NoTextLayer),
+            ExtractionResultStep::NoTextLayer,
+        ),
+        (
+            ExtractionStep::Ran(Extraction::TextWithoutIdentifier),
+            ExtractionResultStep::TextWithoutIdentifier,
+        ),
+        (
+            ExtractionStep::Ran(Extraction::Encrypted),
+            ExtractionResultStep::Encrypted,
+        ),
+        (
+            ExtractionStep::Ran(Extraction::Unreadable {
+                message: "truncated".to_string(),
+            }),
+            ExtractionResultStep::Unreadable {
+                message: "truncated".to_string(),
+            },
+        ),
+        (
+            ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+            ExtractionResultStep::NotAttempted {
+                reason: "content-index-hit".to_string(),
+            },
+        ),
+    ];
+    for (result, expected) in results {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            default_content_index(),
+            ExtractionEvidence {
+                result,
+                titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
+            },
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(sections.extraction.result, expected);
+    }
+
+    let claim = Claim {
+        from: ClaimOrigin::Info,
+        title: "A Title".to_string(),
+    };
+    let titles = [
+        (
+            Titles::Read(Vec::new()),
+            TitlesStep::Read { claims: Vec::new() },
+        ),
+        (
+            Titles::Read(vec![claim.clone()]),
+            TitlesStep::Read {
+                claims: vec![claim],
+            },
+        ),
+        (
+            Titles::Failed {
+                message: "corrupt stream".to_string(),
+            },
+            TitlesStep::Failed {
+                message: "corrupt stream".to_string(),
+            },
+        ),
+        (
+            Titles::NotAttempted(Unattempted::ExtractionFailed),
+            TitlesStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+        ),
+    ];
+    for (titles, expected) in titles {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            default_content_index(),
+            ExtractionEvidence {
+                result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+                titles: titles.clone(),
+            },
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(sections.extraction.titles, expected, "titles {titles:?}");
+    }
+}
+
+/// design D1, D3: an attempted lookup projects to `attempted` with its
+/// `origin` and no tier at all — `LookupStep::Attempted` has no tier
+/// field, since `extraction.result.tier` already states the pass once.
+/// Attempted with no attempts becomes `no-eligible-service` rather than
+/// `attempted` with an empty list.
+#[test]
+fn sections_projects_lookup_attempted_and_no_eligible_service() {
+    let identifier = Identifier::Doi(doi("10.1000/x"));
+    let found = ServiceAttempt {
+        service: SourceName::Crossref,
+        outcome: Ok(Retrieval::Network { stored: None }),
+    };
+
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![found.clone()],
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    let sections = evidence.sections(Acceptance::Automatic);
+    match sections.lookup {
+        LookupStep::Attempted {
+            identifier: got_identifier,
+            origin,
+            attempts,
+        } => {
+            assert_eq!(got_identifier, "doi:10.1000/x");
+            assert_eq!(origin, IdentifierOrigin::Extracted);
+            assert_eq!(attempts.len(), 1);
+        }
+        other => panic!("expected Attempted, got {other:?}"),
+    }
+
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Operator,
+            attempts: vec![found],
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    let sections = evidence.sections(Acceptance::Automatic);
+    assert!(matches!(
+        sections.lookup,
+        LookupStep::Attempted {
+            origin: IdentifierOrigin::Operator,
+            ..
+        }
+    ));
+
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: Vec::new(),
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    let sections = evidence.sections(Acceptance::Automatic);
+    assert_eq!(
+        sections.lookup,
+        LookupStep::NoEligibleService {
+            identifier: "doi:10.1000/x".to_string(),
+            origin: IdentifierOrigin::Extracted,
         }
     );
+
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::NotAttempted(Unattempted::ExtractionFailed),
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    let sections = evidence.sections(Acceptance::Automatic);
+    assert_eq!(
+        sections.lookup,
+        LookupStep::NotAttempted {
+            reason: "extraction-failed".to_string()
+        }
+    );
+}
+
+/// design D5: every `ServiceAttempt` outcome projects to its
+/// `ServiceOutcome`, including `Network { stored: None }` becoming a
+/// found attempt whose `stored` is not attempted for `cache-bypassed`
+/// — nothing was fetched is not the same as nothing in front of it.
+#[test]
+fn sections_projects_every_service_attempt_outcome() {
+    let identifier = Identifier::Doi(doi("10.1000/x"));
+    let cases = [
+        (
+            Ok(Retrieval::ServiceCache),
+            ServiceOutcome::Found {
+                retrieval: FetchedFrom::ServiceCache,
+                stored: None,
+            },
+        ),
+        (
+            Ok(Retrieval::Network {
+                stored: Some(CacheWrite::Written),
+            }),
+            ServiceOutcome::Found {
+                retrieval: FetchedFrom::Network,
+                stored: Some(WriteStep::Written),
+            },
+        ),
+        (
+            Ok(Retrieval::Network {
+                stored: Some(CacheWrite::Failed {
+                    message: "disk full".to_string(),
+                }),
+            }),
+            ServiceOutcome::Found {
+                retrieval: FetchedFrom::Network,
+                stored: Some(WriteStep::Failed {
+                    message: "disk full".to_string(),
+                }),
+            },
+        ),
+        (
+            Ok(Retrieval::Network { stored: None }),
+            ServiceOutcome::Found {
+                retrieval: FetchedFrom::Network,
+                stored: Some(WriteStep::NotAttempted {
+                    reason: "cache-bypassed".to_string(),
+                }),
+            },
+        ),
+        (Err(SourceError::NotFound), ServiceOutcome::NotFound),
+        (
+            Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+            ServiceOutcome::Unavailable {
+                message: "503".to_string(),
+            },
+        ),
+        (Err(SourceError::RateLimited), ServiceOutcome::RateLimited),
+        (
+            Err(SourceError::Malformed {
+                message: "not JSON".to_string(),
+            }),
+            ServiceOutcome::Malformed {
+                message: "not JSON".to_string(),
+            },
+        ),
+    ];
+
+    for (outcome, expected) in cases {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            default_content_index(),
+            default_extraction(),
+            LookupEvidence::Attempted {
+                identifier: identifier.clone(),
+                origin: Origin::Extracted(Tier::TextLayer),
+                attempts: vec![ServiceAttempt {
+                    service: SourceName::Crossref,
+                    outcome: outcome.clone(),
+                }],
+            },
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        let LookupStep::Attempted { attempts, .. } = sections.lookup else {
+            panic!("expected an attempted lookup");
+        };
+        assert_eq!(
+            attempts,
+            vec![ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: expected,
+            }],
+            "engine outcome {outcome:?}"
+        );
+    }
+}
+
+/// design D6: `record_retrieval` is `Evidence::retrieval()` projected,
+/// for all four places and for no record at all.
+#[test]
+fn sections_projects_record_retrieval_for_every_place_and_none() {
+    let identifier = Identifier::Doi(doi("10.1000/x"));
+
+    // Library: the lookup is not attempted because the library
+    // answered, and the library tracks the file.
+    let evidence = evidence_with(
+        Consultation::Consulted(LibraryAnswer::Tracked {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+        }),
+        IndexEvidence {
+            read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+            write: IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
+        },
+        ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::LibraryAnswered),
+            titles: Titles::NotAttempted(Unattempted::LibraryAnswered),
+        },
+        LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
+        MatchCheck::NotAttempted(Unattempted::LibraryAnswered),
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        Some(RetrievedFrom::Library {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+        })
+    );
+
+    // Content index: the index held a record for the hash.
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        IndexEvidence {
+            read: IndexRead::Hit,
+            write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+            titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
+        MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        Some(RetrievedFrom::ContentIndex)
+    );
+
+    // Service cache: a service's response cache answered.
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Ok(Retrieval::ServiceCache),
+            }],
+        },
+        MatchCheck::Agreed,
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        Some(RetrievedFrom::ServiceCache {
+            service: "crossref".to_string()
+        })
+    );
+
+    // Network: the service answered over the network.
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::OpenAlex,
+                outcome: Ok(Retrieval::Network {
+                    stored: Some(CacheWrite::Written),
+                }),
+            }],
+        },
+        MatchCheck::Agreed,
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        Some(RetrievedFrom::Network {
+            service: "openalex".to_string()
+        })
+    );
+
+    // None: the verdict reached no record at all.
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        IndexEvidence {
+            read: IndexRead::Miss,
+            write: IndexWrite::NotAttempted(Unattempted::NoRecord),
+        },
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier,
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Err(SourceError::NotFound),
+            }],
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        None
+    );
+}
+
+/// design D3: every `MatchCheck` kind, including the three
+/// `Insufficient` reasons.
+#[test]
+fn sections_projects_every_match_check() {
+    let cases = [
+        (MatchCheck::Agreed, MatchCheckStep::Agreed),
+        (
+            MatchCheck::Conflict(Conflict {
+                field: "title",
+                extracted: "Old Title".to_string(),
+                resolved: "New Title".to_string(),
+                similarity: 0.1,
+            }),
+            MatchCheckStep::Conflict {
+                field: "title".to_string(),
+                extracted: "Old Title".to_string(),
+                resolved: "New Title".to_string(),
+                similarity: 0.1,
+            },
+        ),
+        (
+            MatchCheck::Insufficient(Insufficient::RecordUntitled),
+            MatchCheckStep::InsufficientEvidence {
+                reason: "record-untitled".to_string(),
+            },
+        ),
+        (
+            MatchCheck::Insufficient(Insufficient::NoTitles),
+            MatchCheckStep::InsufficientEvidence {
+                reason: "no-titles".to_string(),
+            },
+        ),
+        (
+            MatchCheck::Insufficient(Insufficient::NoEvidence),
+            MatchCheckStep::InsufficientEvidence {
+                reason: "no-evidence".to_string(),
+            },
+        ),
+        (
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+            MatchCheckStep::NotAttempted {
+                reason: "no-record".to_string(),
+            },
+        ),
+    ];
+
+    for (match_check, expected) in cases {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            default_content_index(),
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            match_check.clone(),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(
+            sections.match_check, expected,
+            "match_check {match_check:?}"
+        );
+    }
+}
+
+/// design D2, D7: `acceptance` passes through unchanged, independently
+/// of every other field.
+#[test]
+fn sections_passes_acceptance_through() {
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::NotAttempted(Unattempted::NoRecord),
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+
+    for acceptance in [
+        Acceptance::Automatic,
+        Acceptance::Overridden,
+        Acceptance::NotApplicable,
+    ] {
+        assert_eq!(evidence.sections(acceptance).acceptance, acceptance);
+    }
+}
+
+/// design D11: `Unattempted::CacheBypassed` is the one not-attempted
+/// reason change 8's vocabulary lacked a name for, so the projection
+/// alone produces it (no engine section holds it).
+#[test]
+fn unattempted_cache_bypassed_as_str_is_cache_bypassed() {
+    assert_eq!(Unattempted::CacheBypassed.as_str(), "cache-bypassed");
+}
+
+/// design D1, D11: every reason string anywhere in a projected
+/// `Sections` is one of `Unattempted::as_str`'s kebab-case names —
+/// nothing invents its own vocabulary, including the `cache-bypassed`
+/// reason a found attempt's `stored` carries.
+#[test]
+fn every_reason_in_a_projected_sections_is_a_known_unattempted_reason() {
+    let known: Vec<&'static str> = [
+        Unattempted::NoLibrary,
+        Unattempted::OutsideLibrary,
+        Unattempted::ContentDuplicate,
+        Unattempted::LibraryAnswered,
+        Unattempted::ContentIndexHit,
+        Unattempted::ExtractionFailed,
+        Unattempted::NoRecord,
+        Unattempted::Refused,
+        Unattempted::Unhashable,
+        Unattempted::AwaitingAcceptance,
+        Unattempted::CacheBypassed,
+    ]
+    .into_iter()
+    .map(Unattempted::as_str)
+    .collect();
+
+    // A content-duplicate verdict: every section not attempted, and a
+    // found attempt whose cache was bypassed, so every reason the
+    // vocabulary can produce appears somewhere in one projection.
+    let evidence = Evidence::not_attempted(Unattempted::ContentDuplicate);
+    let sections = evidence.sections(Acceptance::NotApplicable);
+    let mut reasons = reasons_in(&sections);
+
+    let bypassed = evidence_with(
+        Consultation::NotConsulted(Unattempted::OutsideLibrary),
+        IndexEvidence {
+            read: IndexRead::NotAttempted(Unattempted::Unhashable),
+            write: IndexWrite::NotAttempted(Unattempted::Refused),
+        },
+        ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::LibraryAnswered),
+            titles: Titles::NotAttempted(Unattempted::ExtractionFailed),
+        },
+        LookupEvidence::Attempted {
+            identifier: Identifier::Doi(doi("10.1000/x")),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Ok(Retrieval::Network { stored: None }),
+            }],
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    reasons.extend(reasons_in(&bypassed.sections(Acceptance::Automatic)));
+
+    for reason in &reasons {
+        assert!(
+            known.contains(&reason.as_str()),
+            "reason {reason:?} is not in Unattempted::as_str()'s vocabulary"
+        );
+    }
+    assert!(
+        reasons.iter().any(|reason| reason == "cache-bypassed"),
+        "got {reasons:?}"
+    );
+}
+
+/// Every `reason` string a projected `Sections` carries, at any depth:
+/// each section's own `reason` field when it is `not-attempted`, plus a
+/// found attempt's `stored` reason.
+fn reasons_in(sections: &Sections) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if let LibraryStep::NotAttempted { reason } = &sections.library {
+        reasons.push(reason.clone());
+    }
+    if let IndexReadStep::NotAttempted { reason } = &sections.content_index.read {
+        reasons.push(reason.clone());
+    }
+    if let WriteStep::NotAttempted { reason } = &sections.content_index.write {
+        reasons.push(reason.clone());
+    }
+    if let ExtractionResultStep::NotAttempted { reason } = &sections.extraction.result {
+        reasons.push(reason.clone());
+    }
+    if let TitlesStep::NotAttempted { reason } = &sections.extraction.titles {
+        reasons.push(reason.clone());
+    }
+    match &sections.lookup {
+        LookupStep::NotAttempted { reason } => reasons.push(reason.clone()),
+        LookupStep::Attempted { attempts, .. } => {
+            for attempt in attempts {
+                if let ServiceOutcome::Found {
+                    stored: Some(WriteStep::NotAttempted { reason }),
+                    ..
+                } = &attempt.outcome
+                {
+                    reasons.push(reason.clone());
+                }
+            }
+        }
+        LookupStep::NoEligibleService { .. } => {}
+    }
+    if let MatchCheckStep::NotAttempted { reason } = &sections.match_check {
+        reasons.push(reason.clone());
+    }
+    reasons
 }
 
 // ---------------------------------------------------------------------
@@ -1207,8 +2145,7 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
             },
             Event::Resolved {
                 identifier: second_identifier,
-                source: second_source,
-                cached: second_cached,
+                sections: second_sections,
                 ..
             },
         ) = (first_event, second_event)
@@ -1216,8 +2153,10 @@ fn a_second_identical_batch_is_served_from_the_index_and_never_touches_a_source(
             panic!("expected both events to be Resolved: {first_event:?}, {second_event:?}");
         };
         assert_eq!(first_identifier, second_identifier);
-        assert_eq!(second_source, "cache");
-        assert!(*second_cached);
+        assert_eq!(
+            second_sections.record_retrieval,
+            Some(RetrievedFrom::ContentIndex)
+        );
     }
 }
 
@@ -1262,15 +2201,9 @@ fn a_renamed_file_with_identical_content_is_served_from_the_index_without_openin
     assert_eq!(documents.open_calls(), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     match &run.events[1] {
-        Event::Resolved {
-            path,
-            source,
-            cached,
-            ..
-        } => {
+        Event::Resolved { path, sections, .. } => {
             assert_eq!(path, &renamed);
-            assert_eq!(source, "cache");
-            assert!(*cached);
+            assert_eq!(sections.record_retrieval, Some(RetrievedFrom::ContentIndex));
         }
         other => panic!("expected Resolved for the renamed file, got {other:?}"),
     }
@@ -1575,7 +2508,7 @@ fn open_of_a_real_pdf_fixture_succeeds_with_a_nonzero_page_count() {
 }
 
 // ---------------------------------------------------------------------
-// event_for: the resolved record travels with the event
+// resolved_event: the resolved record travels with the event
 // ---------------------------------------------------------------------
 
 // The CLI spec defines `resolve` as "extract + resolve, emit records".
@@ -1585,7 +2518,7 @@ fn open_of_a_real_pdf_fixture_succeeds_with_a_nonzero_page_count() {
 fn a_resolved_event_carries_the_whole_record() {
     let path = Path::new("paper.pdf");
     let record = record_with_doi_and_title("10.1000/x", "A Title Worth Keeping");
-    let outcome = FileOutcome::Resolved(FileRecord {
+    let file = FileRecord {
         record: record.clone(),
         evidence: evidence_via_lookup(
             SourceName::Crossref,
@@ -1593,12 +2526,12 @@ fn a_resolved_event_carries_the_whole_record() {
             Tier::TextLayer,
         ),
         hash: None,
-        overrode: None,
-    });
+        overridden: false,
+    };
 
     let Event::Resolved {
         record: reported, ..
-    } = event_for(path, &outcome)
+    } = resolved_event(path, &file)
     else {
         panic!("expected a resolved event");
     };
@@ -1612,9 +2545,9 @@ fn a_resolved_event_carries_the_whole_record() {
 fn a_resolved_event_round_trips_its_record_through_json() {
     let path = Path::new("paper.pdf");
     let record = record_with_doi_and_title("10.1000/x", "A Title Worth Keeping");
-    let event = event_for(
+    let event = resolved_event(
         path,
-        &FileOutcome::Resolved(FileRecord {
+        &FileRecord {
             record: record.clone(),
             evidence: evidence_via_lookup(
                 SourceName::Crossref,
@@ -1622,8 +2555,8 @@ fn a_resolved_event_round_trips_its_record_through_json() {
                 Tier::TextLayer,
             ),
             hash: None,
-            overrode: None,
-        }),
+            overridden: false,
+        },
     );
 
     let line = borax::event::json_line(&event);
@@ -1873,7 +2806,10 @@ fn standing_passes_through_a_resolution_failure() {
 
     let outcome = checked(&path, &documents, &sources, &index, root, true);
 
-    assert_eq!(outcome, FileOutcome::Skipped(SkipReason::NoIdentifier));
+    assert_eq!(
+        outcome,
+        FileOutcome::Skipped(SkipReason::TextWithoutIdentifier)
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -1910,7 +2846,11 @@ fn a_content_match_at_the_incoming_path_is_not_a_duplicate_and_resolves_from_the
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, indexed);
-    assert!(file_record.cached(), "the file's own record is not a query");
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::ContentIndex),
+        "the file's own record is not a query"
+    );
     assert_eq!(documents.open_calls(), 0);
 }
 
@@ -2370,9 +3310,19 @@ fn a_failure_before_a_success_keeps_both_attempts_in_order() {
         }
         other => panic!("expected Attempted, got {other:?}"),
     }
-    assert_eq!(file.source(), Some(SourceName::OpenAlex));
-    match event_for(path, &result.verdict) {
-        Event::Resolved { source, .. } => assert_eq!(source, "openalex".to_string()),
+    assert_eq!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::OpenAlex
+        })
+    );
+    match resolved_event(path, &file) {
+        Event::Resolved { sections, .. } => assert_eq!(
+            sections.record_retrieval,
+            Some(RetrievedFrom::Network {
+                service: "openalex".to_string()
+            })
+        ),
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
 }
@@ -2414,7 +3364,7 @@ fn rate_limited_then_malformed_is_unresolvable_with_structured_attempts() {
 
     assert!(matches!(
         result.verdict,
-        FileOutcome::Skipped(SkipReason::Unresolvable { .. })
+        FileOutcome::Skipped(SkipReason::Unresolvable)
     ));
     assert!(!result.evidence.lookup.is_conclusive());
     assert_eq!(
@@ -2487,7 +3437,7 @@ fn no_eligible_service_gives_an_attempted_lookup_with_no_attempts() {
 
     assert!(matches!(
         result.verdict,
-        FileOutcome::Skipped(SkipReason::Unresolvable { .. })
+        FileOutcome::Skipped(SkipReason::Unresolvable)
     ));
     assert!(result.evidence.lookup.no_eligible_service());
 }
@@ -2527,7 +3477,6 @@ fn a_response_cache_hit_is_told_apart_from_the_network_answer() {
             service: SourceName::Crossref
         })
     );
-    assert!(!first_file.cached());
 
     let second_path = Path::new("second.pdf");
     let second_documents = FakeDocuments::new().with_file(
@@ -2551,7 +3500,6 @@ fn a_response_cache_hit_is_told_apart_from_the_network_answer() {
             service: SourceName::Crossref
         })
     );
-    assert!(!second_file.cached());
 }
 
 #[test]
@@ -2842,9 +3790,17 @@ fn a_file_outside_another_roots_library_is_not_consulted() {
 
 #[test]
 fn extraction_failed_keeps_the_title_beside_no_identifier_in_the_evidence() {
-    for (pdf, expected) in [
-        (pdf_blank_with_title(), Extraction::NoTextLayer),
-        (pdf_prose_with_title(), Extraction::TextWithoutIdentifier),
+    for (pdf, expected, reason) in [
+        (
+            pdf_blank_with_title(),
+            Extraction::NoTextLayer,
+            SkipReason::NoTextLayer,
+        ),
+        (
+            pdf_prose_with_title(),
+            Extraction::TextWithoutIdentifier,
+            SkipReason::TextWithoutIdentifier,
+        ),
     ] {
         let path = Path::new("paper.pdf");
         let documents =
@@ -2885,10 +3841,7 @@ fn extraction_failed_keeps_the_title_beside_no_identifier_in_the_evidence() {
             result.evidence.content_index.write,
             IndexWrite::NotAttempted(Unattempted::ExtractionFailed)
         );
-        assert_eq!(
-            result.verdict,
-            FileOutcome::Skipped(SkipReason::NoIdentifier)
-        );
+        assert_eq!(result.verdict, FileOutcome::Skipped(reason));
     }
 }
 
@@ -2922,7 +3875,7 @@ fn encrypted_and_unreadable_both_fail_the_titles() {
     ));
     assert!(matches!(
         encrypted.verdict,
-        FileOutcome::Skipped(SkipReason::Unreadable { .. })
+        FileOutcome::Skipped(SkipReason::Encrypted)
     ));
 
     let unreadable_documents = FakeDocuments::new().with_open_error(
@@ -3006,8 +3959,16 @@ fn unattempted_as_str_is_kebab_case_for_every_reason() {
     }
 }
 
+/// design D14's mapping for this schema-3 fact: `source == S` becomes
+/// `record_retrieval.service == S`; `tier == "embedded-metadata"` becomes
+/// `extraction.result.tier` with `lookup.origin == "extracted"`;
+/// `found == X` becomes `lookup.identifier == X`; `claims == []` with the
+/// file opened becomes `extraction.titles == {status: read, claims: []}`;
+/// `cached == false` becomes `record_retrieval.kind` naming the actual
+/// place (here `network`); `library == null` becomes `library ==
+/// {status: not-attempted, reason: no-library}`.
 #[test]
-fn resolved_event_projections_match_schema_3_for_the_failure_before_success_case() {
+fn resolved_event_sections_match_design_d3_for_the_failure_before_success_case() {
     let path = Path::new("paper.pdf");
     let documents = FakeDocuments::new().with_file(
         path,
@@ -3041,22 +4002,33 @@ fn resolved_event_projections_match_schema_3_for_the_failure_before_success_case
         None,
     );
 
-    match event_for(path, &result.verdict) {
-        Event::Resolved {
-            source,
-            tier,
-            found,
-            claims,
-            cached,
-            library,
-            ..
-        } => {
-            assert_eq!(source, "openalex".to_string());
-            assert_eq!(tier.as_deref(), Some("embedded-metadata"));
-            assert_eq!(found, "doi:10.1000/evidence-schema3-failure".to_string());
-            assert_eq!(claims, Vec::new());
-            assert!(!cached);
-            assert_eq!(library, None);
+    let file = resolved_outcome(result.verdict.clone());
+    match resolved_event(path, &file) {
+        Event::Resolved { sections, .. } => {
+            assert_eq!(
+                sections.record_retrieval,
+                Some(RetrievedFrom::Network {
+                    service: "openalex".to_string()
+                })
+            );
+            let ExtractionResultStep::Found { tier, .. } = &sections.extraction.result else {
+                panic!("expected a found extraction result");
+            };
+            assert_eq!(tier, "embedded-metadata");
+            let LookupStep::Attempted { identifier, .. } = &sections.lookup else {
+                panic!("expected an attempted lookup");
+            };
+            assert_eq!(identifier, "doi:10.1000/evidence-schema3-failure");
+            assert_eq!(
+                sections.extraction.titles,
+                TitlesStep::Read { claims: Vec::new() }
+            );
+            assert_eq!(
+                sections.library,
+                LibraryStep::NotAttempted {
+                    reason: "no-library".to_string()
+                }
+            );
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
@@ -3100,12 +4072,9 @@ fn a_conflict_candidate_keeps_its_whole_evidence() {
         None,
     );
 
-    assert!(matches!(
-        result.verdict,
-        FileOutcome::Skipped(SkipReason::Conflict { .. })
-    ));
-    let skip_similarity = match &result.verdict {
-        FileOutcome::Skipped(SkipReason::Conflict { similarity, .. }) => *similarity,
+    assert_eq!(result.verdict, FileOutcome::Skipped(SkipReason::Conflict));
+    let skip_similarity = match &result.evidence.match_check {
+        MatchCheck::Conflict(conflict) => conflict.similarity,
         other => panic!("expected Conflict, got {other:?}"),
     };
     let refused = result
@@ -3198,7 +4167,7 @@ fn a_refused_record_is_never_remembered_and_a_later_run_still_conflicts() {
     );
     assert!(matches!(
         first.verdict,
-        FileOutcome::Skipped(SkipReason::Conflict { .. })
+        FileOutcome::Skipped(SkipReason::Conflict)
     ));
     assert_eq!(index.get(&hash), None);
 
@@ -3213,7 +4182,7 @@ fn a_refused_record_is_never_remembered_and_a_later_run_still_conflicts() {
     );
     assert!(matches!(
         second.verdict,
-        FileOutcome::Skipped(SkipReason::Conflict { .. })
+        FileOutcome::Skipped(SkipReason::Conflict)
     ));
     let refused = second
         .refused
@@ -3259,7 +4228,7 @@ fn an_earlier_index_entry_survives_a_no_cache_conflict() {
 
     assert!(matches!(
         result.verdict,
-        FileOutcome::Skipped(SkipReason::Conflict { .. })
+        FileOutcome::Skipped(SkipReason::Conflict)
     ));
     assert_eq!(index.get(&hash), Some(earlier));
 }
@@ -3474,7 +4443,6 @@ fn resolve_supplied_on_a_file_with_no_identifier_fills_lookup_titles_and_match_c
     assert_eq!(file.evidence.library, prior.library);
     assert_eq!(file.evidence.content_index.read, prior.content_index.read);
     assert_eq!(file.evidence.extraction.result, prior.extraction.result);
-    assert_eq!(file.tier(), Some(Provenance::Supplied));
 }
 
 #[test]
@@ -3514,13 +4482,13 @@ fn resolve_supplied_reports_a_title_conflict_as_file_conflict() {
         ),
         "a conflicting record is still handed back, not refused"
     );
-    let Some(SkipReason::Conflict { field, .. }) = file.conflict() else {
+    let Some(conflict) = file.conflict() else {
         panic!(
             "expected the disagreement reported as a conflict, got {:?}",
             file.conflict()
         );
     };
-    assert_eq!(field, "title");
+    assert_eq!(conflict.field, "title");
 }
 
 #[test]
@@ -3549,7 +4517,10 @@ fn resolve_supplied_with_a_retrys_origin_reports_the_extracted_tier() {
     )
     .unwrap();
 
-    assert_eq!(file.tier(), Some(Provenance::Extracted(Tier::TextLayer)));
+    assert_eq!(
+        file.evidence.lookup.extracted(),
+        Some((&identifier, Tier::TextLayer))
+    );
 }
 
 #[test]
@@ -3592,8 +4563,13 @@ fn resolve_supplied_after_a_content_index_hit_re_reads_titles_and_keeps_the_read
             service: SourceName::Crossref
         })
     );
-    assert!(!file.cached());
-    assert_eq!(file.tier(), Some(Provenance::Supplied));
+    assert!(matches!(
+        file.evidence.lookup,
+        LookupEvidence::Attempted {
+            origin: Origin::Operator,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -3622,7 +4598,13 @@ fn resolve_supplied_on_a_tracked_file_keeps_the_library_answer() {
     )
     .unwrap();
 
-    assert_eq!(file.tier(), Some(Provenance::Supplied));
+    assert!(matches!(
+        file.evidence.lookup,
+        LookupEvidence::Attempted {
+            origin: Origin::Operator,
+            ..
+        }
+    ));
     assert_eq!(
         file.library(),
         Some(&LibraryAnswer::Tracked {
@@ -3630,7 +4612,6 @@ fn resolve_supplied_on_a_tracked_file_keeps_the_library_answer() {
             item: "item-id".to_string(),
         })
     );
-    assert!(!file.cached());
     assert!(matches!(
         file.evidence.retrieval(),
         Some(RecordRetrieval::Network { .. })
@@ -3862,12 +4843,10 @@ fn accept_over_a_conflict_overrides_it_and_awaits_the_move() {
 
     let accepted = accept(refused);
 
-    match &accepted.overrode {
-        Some(overridden) => {
-            assert_eq!(overridden.field, conflict.field);
-        }
-        None => panic!("expected overrode to be Some after accept"),
-    }
+    assert!(
+        accepted.overridden,
+        "expected overridden to be true after accept"
+    );
     assert_eq!(
         accepted.evidence.match_check,
         MatchCheck::Conflict(conflict)
@@ -3898,7 +4877,7 @@ fn accept_over_a_resolved_record_leaves_its_evidence_unchanged() {
 
     let accepted = accept(file);
 
-    assert_eq!(accepted.overrode, None);
+    assert!(!accepted.overridden);
     assert_eq!(accepted.evidence, before);
 }
 
@@ -4060,10 +5039,34 @@ fn a_tracked_file_resolves_from_its_item_with_no_extraction_no_source_and_no_ind
         match &result.verdict {
             FileOutcome::Resolved(file) => {
                 assert_eq!(file.record, item.record, "cache={cache}");
-                assert_eq!(file.tier(), Some(Provenance::Library), "cache={cache}");
-                assert!(!file.cached(), "cache={cache}");
-                assert_eq!(file.claims(), &[] as &[Claim], "cache={cache}");
-                assert_eq!(file.found(), None, "cache={cache}");
+                assert_eq!(
+                    file.evidence.retrieval(),
+                    Some(RecordRetrieval::Library {
+                        artifact: file_artifact_id(&stores, &path, &hash),
+                        item: item.id.to_string(),
+                    }),
+                    "cache={cache}"
+                );
+                assert_eq!(
+                    file.evidence.content_index.read,
+                    IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+                    "cache={cache}"
+                );
+                assert_eq!(
+                    file.evidence.content_index.write,
+                    IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
+                    "cache={cache}"
+                );
+                assert_eq!(
+                    file.evidence.extraction.titles.claims(),
+                    &[] as &[Claim],
+                    "cache={cache}"
+                );
+                assert_eq!(
+                    file.evidence.lookup,
+                    LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
+                    "cache={cache}"
+                );
                 assert_eq!(
                     result.library().cloned(),
                     Some(LibraryAnswer::Tracked {
@@ -4143,31 +5146,36 @@ fn verdict_event_of_a_tracked_standing_reports_found_and_source_from_the_item() 
     );
     let event = verdict_event(&path, &result);
 
-    match event {
-        Event::Resolved {
-            found,
-            source,
-            identifier,
-            library,
-            ..
-        } => {
+    match &event {
+        Event::Resolved { sections, .. } => {
             assert_eq!(
-                found, identifier,
-                "found must be the record's own identifier"
+                sections.lookup,
+                LookupStep::NotAttempted {
+                    reason: "library-answered".to_string()
+                },
+                "no lookup was made for a library answer, so `identifier` is the record's own"
             );
-            assert_eq!(source, "crossref");
-            assert!(matches!(library, Some(LibraryAnswer::Tracked { .. })));
+            assert!(matches!(
+                sections.library,
+                LibraryStep::Consulted {
+                    answer: LibraryAnswer::Tracked { .. }
+                }
+            ));
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
+    assert!(
+        human_line(&event).unwrap().contains("via crossref"),
+        "got {:?}",
+        human_line(&event)
+    );
 }
 
-/// design D3: an item whose provenance names no service reports
-/// `source: "library"`, not `"cache"` — `library` appears in `source`
-/// only where `cache` would otherwise appear (design D3, "Rejected:
-/// `source: \"library\"` on every library answer").
+/// design D6: an item whose provenance names no service reports no
+/// `via` clause at all — the schema-3 `"library"` source stand-in is
+/// gone, and `services_of` names nothing when the provenance does not.
 #[test]
-fn verdict_event_of_a_provenance_less_item_names_library_as_the_source() {
+fn verdict_event_of_a_provenance_less_item_names_no_service() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let path = root.join("paper.pdf");
@@ -4189,10 +5197,11 @@ fn verdict_event_of_a_provenance_less_item_names_library_as_the_source() {
     );
     let event = verdict_event(&path, &result);
 
-    match event {
-        Event::Resolved { source, .. } => assert_eq!(source, "library"),
-        other => panic!("expected Event::Resolved, got {other:?}"),
-    }
+    assert!(
+        !human_line(&event).unwrap().contains(" via "),
+        "got {:?}",
+        human_line(&event)
+    );
 }
 
 /// design D2: a `dangling-item` problem — the linked item is not in the
@@ -4253,7 +5262,9 @@ fn a_dangling_item_problem_falls_back_and_writes_the_content_index() {
         other => panic!("expected Resolved for the fallback, got {other:?}"),
     }
     match verdict_event(&path, &result) {
-        Event::Resolved { library, .. } => assert_eq!(library, Some(expected_problem)),
+        Event::Resolved { sections, .. } => {
+            assert_eq!(library_of(&sections), Some(expected_problem))
+        }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
 }
@@ -4301,7 +5312,7 @@ fn a_dangling_item_problem_on_a_file_with_no_identifier_carries_through_to_the_s
 
     assert!(matches!(
         result.verdict,
-        FileOutcome::Skipped(SkipReason::NoIdentifier)
+        FileOutcome::Skipped(SkipReason::TextWithoutIdentifier)
     ));
     let expected_problem = LibraryAnswer::DanglingItem {
         artifact: record_id_at(root, "mystery.pdf"),
@@ -4309,7 +5320,12 @@ fn a_dangling_item_problem_on_a_file_with_no_identifier_carries_through_to_the_s
     };
     assert_eq!(result.library().cloned(), Some(expected_problem.clone()));
     match verdict_event(&path, &result) {
-        Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
+        Event::Skipped { sections, .. } => assert_eq!(
+            sections.unwrap().library,
+            LibraryStep::Consulted {
+                answer: expected_problem
+            }
+        ),
         other => panic!("expected Event::Skipped, got {other:?}"),
     }
 }
@@ -4406,7 +5422,7 @@ fn passing_no_library_leaves_behaviour_and_events_unchanged() {
 
     assert_eq!(result.library().cloned(), None);
     match verdict_event(&path, &result) {
-        Event::Resolved { library, .. } => assert_eq!(library, None),
+        Event::Resolved { sections, .. } => assert_eq!(library_of(&sections), None),
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
 }
@@ -4455,9 +5471,14 @@ fn resolve_batch_with_a_library_gives_the_same_events_at_concurrency_one_and_eig
     assert_eq!(run_one.events, run_eight.events);
     assert_eq!(run_one.counts, run_eight.counts);
     for event in &run_one.events {
-        if let Event::Resolved { library, .. } = event {
+        if let Event::Resolved { sections, .. } = event {
             assert!(
-                matches!(library, Some(LibraryAnswer::Tracked { .. })),
+                matches!(
+                    sections.library,
+                    LibraryStep::Consulted {
+                        answer: LibraryAnswer::Tracked { .. }
+                    }
+                ),
                 "got {event:?}"
             );
         }
@@ -4509,7 +5530,7 @@ fn a_dangling_item_problem_on_an_unresolvable_skip_carries_through() {
     assert!(
         matches!(
             result.verdict,
-            FileOutcome::Skipped(SkipReason::Unresolvable { .. })
+            FileOutcome::Skipped(SkipReason::Unresolvable)
         ),
         "got {:?}",
         result.verdict
@@ -4520,7 +5541,10 @@ fn a_dangling_item_problem_on_an_unresolvable_skip_carries_through() {
     };
     assert_eq!(result.library().cloned(), Some(expected_problem.clone()));
     match verdict_event(&path, &result) {
-        Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
+        Event::Skipped { sections, .. } => assert_eq!(
+            sections.as_deref().and_then(library_of),
+            Some(expected_problem)
+        ),
         other => panic!("expected Event::Skipped, got {other:?}"),
     }
 }
@@ -4569,10 +5593,7 @@ fn a_dangling_item_problem_on_a_conflict_skip_carries_through() {
     );
 
     assert!(
-        matches!(
-            result.verdict,
-            FileOutcome::Skipped(SkipReason::Conflict { .. })
-        ),
+        matches!(result.verdict, FileOutcome::Skipped(SkipReason::Conflict)),
         "got {:?}",
         result.verdict
     );
@@ -4582,7 +5603,10 @@ fn a_dangling_item_problem_on_a_conflict_skip_carries_through() {
     };
     assert_eq!(result.library().cloned(), Some(expected_problem.clone()));
     match verdict_event(&path, &result) {
-        Event::Skipped { library, .. } => assert_eq!(library, Some(expected_problem)),
+        Event::Skipped { sections, .. } => assert_eq!(
+            sections.as_deref().and_then(library_of),
+            Some(expected_problem)
+        ),
         other => panic!("expected Event::Skipped, got {other:?}"),
     }
 }
@@ -4635,7 +5659,9 @@ fn assert_problem_propagates_through_a_successful_fallback(
         "on Standing::library"
     );
     match verdict_event(path, &result) {
-        Event::Resolved { library, .. } => assert_eq!(library, Some(expected), "on verdict_event"),
+        Event::Resolved { sections, .. } => {
+            assert_eq!(library_of(&sections), Some(expected), "on verdict_event")
+        }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
 }
@@ -4856,7 +5882,7 @@ fn unhashable_propagates_through_standing_and_verdict_event() {
     }
     assert_eq!(result.library().cloned(), Some(expected.clone()));
     match verdict_event(&path, &result) {
-        Event::Resolved { library, .. } => assert_eq!(library, Some(expected)),
+        Event::Resolved { sections, .. } => assert_eq!(library_of(&sections), Some(expected)),
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
 }
@@ -5373,18 +6399,16 @@ fn extraction_with_page_limit_zero_over_a_doi_bearing_page_is_no_text_layer() {
 }
 
 // ---------------------------------------------------------------------
-// report-extraction-per-file, task 1.2: regression guard
+// report-extraction-per-file / sectioned-resolved-event, task 3.1:
+// `resolve_file` reports each extraction failure as its own kind
+// (design D4's engine mapping table). This closes the known defect
+// "Resolution skip reasons merge distinct extraction failures"
+// (`openspec/STATE.md`), which the schema-3 regression guard this
+// replaces was pinning in place.
 // ---------------------------------------------------------------------
-//
-// `resolve_file` must keep collapsing `NoTextLayer` and
-// `NoIdentifierFound` into `SkipReason::NoIdentifier`, and `Encrypted`
-// into `SkipReason::Unreadable`, exactly as it does today. This change
-// adds a per-file report beside resolution; it does not touch
-// resolution's own skip reasons. The collapse is a known deviation that
-// Phase 3 owns (design D9, `openspec/STATE.md`).
 
 #[test]
-fn resolve_file_still_skips_a_blank_page_with_a_title_as_no_identifier() {
+fn resolve_file_skips_a_blank_page_as_no_text_layer() {
     let path = Path::new("paper.pdf");
     let documents =
         FakeDocuments::new().with_file(path, hash_for("regression-blank"), pdf_blank_with_title());
@@ -5393,11 +6417,11 @@ fn resolve_file_still_skips_a_blank_page_with_a_title_as_no_identifier() {
 
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
 
-    assert_eq!(skipped_outcome(outcome), SkipReason::NoIdentifier);
+    assert_eq!(skipped_outcome(outcome), SkipReason::NoTextLayer);
 }
 
 #[test]
-fn resolve_file_still_skips_prose_with_a_title_as_no_identifier() {
+fn resolve_file_skips_prose_as_text_without_identifier() {
     let path = Path::new("paper.pdf");
     let documents =
         FakeDocuments::new().with_file(path, hash_for("regression-prose"), pdf_prose_with_title());
@@ -5406,11 +6430,11 @@ fn resolve_file_still_skips_prose_with_a_title_as_no_identifier() {
 
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
 
-    assert_eq!(skipped_outcome(outcome), SkipReason::NoIdentifier);
+    assert_eq!(skipped_outcome(outcome), SkipReason::TextWithoutIdentifier);
 }
 
 #[test]
-fn resolve_file_still_skips_an_encrypted_file_as_unreadable_with_its_message() {
+fn resolve_file_skips_an_encrypted_file_as_encrypted() {
     let path = Path::new("paper.pdf");
     let documents = FakeDocuments::new().with_open_error(
         path,
@@ -5422,10 +6446,5 @@ fn resolve_file_still_skips_an_encrypted_file_as_unreadable_with_its_message() {
 
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
 
-    assert_eq!(
-        skipped_outcome(outcome),
-        SkipReason::Unreadable {
-            message: "PDF is encrypted".to_string(),
-        }
-    );
+    assert_eq!(skipped_outcome(outcome), SkipReason::Encrypted);
 }

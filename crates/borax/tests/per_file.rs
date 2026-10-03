@@ -24,7 +24,11 @@ use std::path::{Path, PathBuf};
 use borax::bib::BibFiles;
 use borax::cli::Command;
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
-use borax::event::{Event, SkipReason};
+use borax::event::{
+    Acceptance, ContentIndexSection, Event, ExtractionResultStep, ExtractionSection, FetchedFrom,
+    IdentifierOrigin, IndexReadStep, LibraryStep, LookupStep, MatchCheckStep, RetrievedFrom,
+    Sections, ServiceAnswer, ServiceOutcome, SkipReason, TitlesStep, WriteStep,
+};
 use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RenameError};
 use borax::run::{Adapters, Configs, events_for};
@@ -265,15 +269,78 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
         path: path.to_path_buf(),
         identifier: identifier.to_string(),
         record: Box::new(record.clone()),
-        source: "crossref".to_string(),
-        found: identifier.to_string(),
+        sections: Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Miss,
+                write: WriteStep::Written,
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::Found {
+                    identifier: identifier.to_string(),
+                    tier: "embedded-metadata".to_string(),
+                },
+                titles: TitlesStep::Read { claims: Vec::new() },
+            },
+            lookup: LookupStep::Attempted {
+                identifier: identifier.to_string(),
+                origin: IdentifierOrigin::Extracted,
+                attempts: vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Found {
+                        retrieval: FetchedFrom::Network,
+                        stored: Some(WriteStep::NotAttempted {
+                            reason: "cache-bypassed".to_string(),
+                        }),
+                    },
+                }],
+            },
+            record_retrieval: Some(RetrievedFrom::Network {
+                service: "crossref".to_string(),
+            }),
+            match_check: MatchCheckStep::InsufficientEvidence {
+                reason: "record-untitled".to_string(),
+            },
+            acceptance: Acceptance::Automatic,
+        }),
+    }
+}
 
-        claims: Vec::new(),
-
-        tier: Some("embedded-metadata".to_string()),
-        cached: false,
-        overrode: None,
-        library: None,
+/// design D4's engine mapping: a file whose only page holds prose and no
+/// identifier (`pdf_with_no_identifier`) is skipped as
+/// `TextWithoutIdentifier`, carrying every section (D3's extraction
+/// illustration, with no title claimed).
+fn text_without_identifier_skip(path: PathBuf) -> Event {
+    let not_attempted = || "extraction-failed".to_string();
+    Event::Skipped {
+        path,
+        reason: SkipReason::TextWithoutIdentifier,
+        sections: Some(Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Miss,
+                write: WriteStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::TextWithoutIdentifier,
+                titles: TitlesStep::Read { claims: Vec::new() },
+            },
+            lookup: LookupStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            acceptance: Acceptance::NotApplicable,
+        })),
+        candidate: None,
     }
 }
 
@@ -346,7 +413,7 @@ fn kind(event: &Event) -> &'static str {
         Event::Sidecar { .. } => "sidecar",
         Event::BibEntry { .. } => "bib-entry",
         Event::Skipped {
-            reason: SkipReason::NoIdentifier,
+            reason: SkipReason::TextWithoutIdentifier,
             ..
         } => "skipped-no-identifier",
         Event::AlreadyNamed { .. } => "already-named",
@@ -572,11 +639,7 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_in_preview() {
     assert_eq!(
         events,
         vec![
-            Event::Skipped {
-                path: blank,
-                reason: SkipReason::NoIdentifier,
-                library: None,
-            },
+            text_without_identifier_skip(blank),
             resolved_event(
                 &paper1,
                 "doi:10.1000/per-file-orig1",
@@ -651,11 +714,7 @@ fn the_same_mixed_batch_keeps_its_names_and_suffix_when_applied() {
     assert_eq!(
         events,
         vec![
-            Event::Skipped {
-                path: blank,
-                reason: SkipReason::NoIdentifier,
-                library: None,
-            },
+            text_without_identifier_skip(blank),
             resolved_event(
                 &paper1,
                 "doi:10.1000/per-file-orig1",

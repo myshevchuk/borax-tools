@@ -464,10 +464,10 @@ operator supplied SHALL be shown as supplied rather than as the find of
 an extraction pass.
 
 So that the first of these is possible without the description knowing
-more than the stream does, the `unresolvable` skip reason SHALL carry
-the identifier that was looked up, and the extraction pass that read
-it, alongside the services' answers. Those are additions, so the
-schema version does not change.
+more than the stream does, a resolution's `skipped` event SHALL carry
+the identifier that was looked up, where it came from, and the
+services' answers in its `lookup` section, and the extraction pass that
+read it in its `extraction` section, rather than in its reason.
 
 #### Scenario: Asked to supply an identifier for a file nobody holds
 - **WHEN** an interactive run reaches a file whose arXiv identifier no
@@ -478,8 +478,9 @@ schema version does not change.
 #### Scenario: The log says which identifier failed
 - **WHEN** a batch run skips a file because no service holds its
   identifier
-- **THEN** the `skipped` event's reason carries that identifier as well
-  as the services' answers
+- **THEN** the `skipped` event's `lookup` section carries that
+  identifier as well as the services' answers, and its reason is
+  `{"kind": "unresolvable"}`
 
 ### Requirement: A run's human summary fits its command
 The human rendering of `run-finished` SHALL be a summary shaped for the command the run's `run-started` names, and SHALL carry no counter that command cannot produce.
