@@ -176,7 +176,7 @@ fn resolved(path: &str, record: Record) -> (PathBuf, FileRecord) {
             record,
             hash: None,
             evidence: Evidence::not_attempted(Unattempted::ContentDuplicate),
-            overrode: None,
+            overridden: false,
         },
     )
 }
@@ -465,7 +465,8 @@ fn a_sidecar_target_holding_foreign_content_is_left_alone_and_reported() {
             reason: SkipReason::SidecarTaken {
                 target: target.clone(),
             },
-            library: None,
+            sections: None,
+            candidate: None,
         }]
     );
     assert!(
@@ -657,7 +658,8 @@ fn a_record_with_no_citation_key_is_skipped_as_unciteable_and_touches_neither_de
             Event::Skipped {
                 path: mystery.0.clone(),
                 reason: SkipReason::Unciteable,
-                library: None,
+                sections: None,
+                candidate: None,
             },
             Event::Sidecar {
                 path: keyed.0.clone(),
@@ -710,7 +712,8 @@ fn events_come_back_as_every_sidecar_and_unciteable_event_in_input_order_then_ev
         Event::Skipped {
             path: p2.0.clone(),
             reason: SkipReason::Unciteable,
-            library: None,
+            sections: None,
+            candidate: None,
         },
         Event::Sidecar {
             path: p3.0.clone(),
@@ -719,7 +722,8 @@ fn events_come_back_as_every_sidecar_and_unciteable_event_in_input_order_then_ev
         Event::Skipped {
             path: p4.0.clone(),
             reason: SkipReason::Unciteable,
-            library: None,
+            sections: None,
+            candidate: None,
         },
     ];
     expected.extend(bib_entry_events(

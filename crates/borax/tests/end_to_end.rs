@@ -24,6 +24,7 @@ use std::sync::Mutex;
 use borax::bib::{RealBibFiles, sidecar_path};
 use borax::cli::{Cli, Command};
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
+use borax::event::SCHEMA;
 use borax::pipeline::RealDocuments;
 use borax::renaming::RealFilesystem;
 use borax::run::{Adapters, Configs, Streams, dispatch};
@@ -109,14 +110,17 @@ const BATCH: [(&str, Expected); 8] = [
     ("publisher-xmp-doi.pdf", Expected::Renamed),
     ("arxiv-new-id.pdf", Expected::Renamed),
     ("arxiv-old-id.pdf", Expected::Renamed),
-    ("no-identifier.pdf", Expected::Skipped("no-identifier")),
+    (
+        "no-identifier.pdf",
+        Expected::Skipped("text-without-identifier"),
+    ),
     (
         "doi-past-page-range.pdf",
-        Expected::Skipped("no-identifier"),
+        Expected::Skipped("text-without-identifier"),
     ),
     (
         "encrypted-user-password.pdf",
-        Expected::Skipped("unreadable"),
+        Expected::Skipped("encrypted"),
     ),
     ("malformed-truncated.pdf", Expected::Skipped("unreadable")),
 ];
@@ -386,7 +390,7 @@ fn every_line_of_stdout_is_a_json_object_carrying_the_schema() {
     assert!(!ran.events.is_empty());
     for event in &ran.events {
         assert!(event.is_object(), "not an object: {event}");
-        assert_eq!(event["schema"], Value::from(3));
+        assert_eq!(event["schema"], Value::from(SCHEMA));
         assert!(event["event"].is_string(), "no event tag: {event}");
     }
 }
@@ -447,14 +451,23 @@ fn a_resolved_event_names_its_tier_and_carries_the_record() {
     let ran = run_the_batch();
 
     let embedded = ran.about("resolved", "publisher-info-doi.pdf");
-    assert_eq!(embedded["tier"], "embedded-metadata");
-    assert_eq!(embedded["source"], "crossref");
+    assert_eq!(
+        embedded["extraction"]["result"]["tier"],
+        "embedded-metadata"
+    );
+    assert_eq!(
+        embedded["record_retrieval"],
+        serde_json::json!({"kind": "network", "service": "crossref"})
+    );
     assert_eq!(embedded["identifier"], "doi:10.1234/borax.2024.001");
     assert_eq!(embedded["record"]["title"], "A Study of Probe Fixtures");
 
     let text = ran.about("resolved", "arxiv-new-id.pdf");
-    assert_eq!(text["tier"], "text-layer");
-    assert_eq!(text["source"], "arxiv");
+    assert_eq!(text["extraction"]["result"]["tier"], "text-layer");
+    assert_eq!(
+        text["record_retrieval"],
+        serde_json::json!({"kind": "network", "service": "arxiv"})
+    );
     assert_eq!(text["record"]["title"], "Preprints and Their Stamps");
 }
 
@@ -1158,7 +1171,7 @@ fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_ru
     assert_eq!(second_outcome, Outcome::Success, "got {events:?}");
     assert!(
         events.iter().any(|event| event["event"] == "resolved"
-            && event["cached"] == true
+            && event["record_retrieval"]["kind"] == "content-index"
             && event["path"]
                 .as_str()
                 .is_some_and(|p| p.ends_with("ashby2024.pdf"))),
@@ -1289,4 +1302,103 @@ fn status_identify_over_the_real_backend_reports_every_fixture() {
         "got {:?}",
         ran.events.last()
     );
+}
+
+// ---------------------------------------------------------------------
+// sectioned-resolved-event, tasks 8.1 and 9.3: the real binary's
+// `resolved` and `skipped` events carry schema 4's key set and none of
+// the six removed fields.
+// ---------------------------------------------------------------------
+
+/// design D3: over the real backend, every `resolved` event carries
+/// exactly the schema-4 key set, in pipeline order, and none of
+/// `found`, `cached`, `source`, `tier`, `claims` or `overrode` at the
+/// top level; every resolution `skipped` event's `reason` object
+/// carries none of `found`, `tier`, `attempts`, `field`, `extracted`,
+/// `resolved` or `similarity` — the facts D4 moved into the sections.
+#[test]
+fn resolve_and_rename_over_the_real_backend_carry_no_removed_field() {
+    let ran = run_the_batch();
+
+    let mut saw_resolved = false;
+    let mut saw_skipped = false;
+    for event in &ran.events {
+        match event["event"].as_str() {
+            Some("resolved") => {
+                saw_resolved = true;
+                let object = event.as_object().unwrap();
+                for removed in ["found", "cached", "source", "tier", "claims", "overrode"] {
+                    assert!(
+                        !object.contains_key(removed),
+                        "resolved event still carries {removed:?}: {event}"
+                    );
+                }
+                for section in [
+                    "library",
+                    "content_index",
+                    "extraction",
+                    "lookup",
+                    "record_retrieval",
+                    "match_check",
+                    "acceptance",
+                ] {
+                    assert!(
+                        object.contains_key(section),
+                        "resolved event is missing section {section:?}: {event}"
+                    );
+                }
+            }
+            Some("skipped") => {
+                saw_skipped = true;
+                let reason = event["reason"].as_object().unwrap();
+                for removed in [
+                    "found",
+                    "tier",
+                    "attempts",
+                    "field",
+                    "extracted",
+                    "resolved",
+                    "similarity",
+                ] {
+                    assert!(
+                        !reason.contains_key(removed),
+                        "skipped event's reason still carries {removed:?}: {event}"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_resolved, "the batch must resolve at least one file");
+    assert!(saw_skipped, "the batch must skip at least one file");
+}
+
+/// The same audit over `borax resolve --json`, which never renames and
+/// so exercises a different code path to the same events.
+#[test]
+fn resolve_over_the_real_backend_carries_no_removed_field() {
+    let library = library_of_copies();
+    let state = tempdir().unwrap();
+    let master = state.path().join("refs.bib");
+    let paths: Vec<PathBuf> = BATCH
+        .iter()
+        .map(|(name, _)| library.path().join(name))
+        .collect();
+
+    let ran = invoke(Command::resolve(paths), &master, state.path(), None);
+
+    let resolved = ran.tagged("resolved");
+    assert!(
+        !resolved.is_empty(),
+        "the batch must resolve at least one file"
+    );
+    for event in resolved {
+        let object = event.as_object().unwrap();
+        for removed in ["found", "cached", "source", "tier", "claims", "overrode"] {
+            assert!(
+                !object.contains_key(removed),
+                "resolved event still carries {removed:?}: {event}"
+            );
+        }
+    }
 }

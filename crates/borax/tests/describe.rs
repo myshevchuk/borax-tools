@@ -14,7 +14,12 @@
 use std::path::PathBuf;
 
 use borax::describe::{DEFAULT_WIDTH, Position, Proposal, describe};
-use borax::event::{Attempt, Claim, ClaimOrigin, Event, LibraryAnswer, Overridden, SkipReason};
+use borax::event::{
+    Acceptance, Claim, ClaimOrigin, ContentIndexSection, Event, ExtractionResultStep,
+    ExtractionSection, FetchedFrom, IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep,
+    LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason,
+    TitlesStep, WriteStep,
+};
 use borax_core::identifier::{ArxivId, Doi};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
 
@@ -54,19 +59,243 @@ impl Fixture {
         }
     }
 
+    /// Design D14's mapping, read backwards: the schema-3 shape this
+    /// fixture holds, translated into schema-4 sections.
+    ///
+    /// - `tier: Some(t)` where `t` is `"embedded-metadata"` or
+    ///   `"text-layer"` becomes an extracted-origin lookup, found over
+    ///   the network by `source`.
+    /// - `tier: Some("supplied")` becomes an operator-origin lookup,
+    ///   otherwise the same.
+    /// - `tier: None, cached: true` becomes a content-index hit, which
+    ///   names no service of its own; `source` is injected into the
+    ///   record's own provenance so `services_of` still names it,
+    ///   unless the record already carries provenance (a test that set
+    ///   it directly keeps what it set) or `source` is the schema-3
+    ///   `"library"` stand-in for naming none.
+    fn sections(&self) -> Sections {
+        match (self.tier.as_deref(), self.cached) {
+            (None, true) => Sections {
+                library: LibraryStep::NotAttempted {
+                    reason: "no-library".to_string(),
+                },
+                content_index: ContentIndexSection {
+                    read: IndexReadStep::Hit,
+                    write: WriteStep::NotAttempted {
+                        reason: "content-index-hit".to_string(),
+                    },
+                },
+                extraction: ExtractionSection {
+                    result: ExtractionResultStep::NotAttempted {
+                        reason: "content-index-hit".to_string(),
+                    },
+                    titles: TitlesStep::NotAttempted {
+                        reason: "content-index-hit".to_string(),
+                    },
+                },
+                lookup: LookupStep::NotAttempted {
+                    reason: "content-index-hit".to_string(),
+                },
+                record_retrieval: Some(RetrievedFrom::ContentIndex),
+                match_check: MatchCheckStep::NotAttempted {
+                    reason: "content-index-hit".to_string(),
+                },
+                acceptance: Acceptance::Automatic,
+            },
+            (Some(tier), _) => {
+                let origin = if tier == "supplied" {
+                    IdentifierOrigin::Operator
+                } else {
+                    IdentifierOrigin::Extracted
+                };
+                let result_tier = if tier == "supplied" {
+                    "text-layer".to_string()
+                } else {
+                    tier.to_string()
+                };
+                Sections {
+                    library: LibraryStep::NotAttempted {
+                        reason: "no-library".to_string(),
+                    },
+                    content_index: ContentIndexSection {
+                        read: IndexReadStep::Miss,
+                        write: WriteStep::Written,
+                    },
+                    extraction: ExtractionSection {
+                        result: ExtractionResultStep::Found {
+                            identifier: self.found.clone(),
+                            tier: result_tier,
+                        },
+                        titles: TitlesStep::Read {
+                            claims: self.claims.clone(),
+                        },
+                    },
+                    lookup: LookupStep::Attempted {
+                        identifier: self.found.clone(),
+                        origin,
+                        attempts: vec![ServiceAnswer {
+                            service: self.source.clone(),
+                            outcome: ServiceOutcome::Found {
+                                retrieval: FetchedFrom::Network,
+                                stored: Some(WriteStep::Written),
+                            },
+                        }],
+                    },
+                    record_retrieval: Some(RetrievedFrom::Network {
+                        service: self.source.clone(),
+                    }),
+                    match_check: MatchCheckStep::Agreed,
+                    acceptance: Acceptance::Automatic,
+                }
+            }
+            (None, false) => unreachable!("every fixture sets a tier or a content-index hit"),
+        }
+    }
+
+    /// `self.record`, with `source` injected as its provenance when
+    /// nothing already names one — the schema-3 `source` field's fact,
+    /// carried by `record.borax.provenance` wherever the retrieval
+    /// itself (content index, library) does not name a service.
+    fn record_with_provenance(&self) -> Record {
+        let is_content_index_hit = self.tier.is_none() && self.cached;
+        match is_content_index_hit {
+            true => record_with_source_provenance(&self.record, &self.source),
+            false => self.record.clone(),
+        }
+    }
+
     fn event(&self) -> Event {
         Event::Resolved {
             path: self.path.clone(),
             identifier: self.found.clone(),
-            record: Box::new(self.record.clone()),
-            source: self.source.clone(),
-            found: self.found.clone(),
-            claims: self.claims.clone(),
-            tier: self.tier.clone(),
-            overrode: None,
-            cached: self.cached,
-            library: None,
+            record: Box::new(self.record_with_provenance()),
+            sections: Box::new(self.sections()),
         }
+    }
+}
+
+/// The [`Source`] a schema-3 `source` string named, or `None` for the
+/// schema-3 stand-ins (`"cache"`, `"library"`) that named no service.
+fn source_enum(source: &str) -> Option<Source> {
+    match source {
+        "crossref" => Some(Source::Crossref),
+        "openalex" => Some(Source::OpenAlex),
+        "arxiv" => Some(Source::Arxiv),
+        "datacite" => Some(Source::DataCite),
+        "pubmed" => Some(Source::PubMed),
+        _ => None,
+    }
+}
+
+/// `record`, with `source` injected as its provenance when nothing
+/// already names one — the schema-3 `source` field's fact, carried by
+/// `record.borax.provenance` wherever the retrieval itself (content
+/// index, library) does not name a service (D14's mapping: `source ==
+/// S` on an index or library answer becomes `record.borax.provenance`).
+fn record_with_source_provenance(record: &Record, source: &str) -> Record {
+    let mut record = record.clone();
+    if record.borax.provenance.is_empty() && source != "library" {
+        if let Some(source) = source_enum(source) {
+            record.borax.provenance.insert("title".to_string(), source);
+        }
+    }
+    record
+}
+
+fn not_found(service: &str) -> ServiceAnswer {
+    ServiceAnswer {
+        service: service.to_string(),
+        outcome: ServiceOutcome::NotFound,
+    }
+}
+
+fn unavailable(service: &str, message: &str) -> ServiceAnswer {
+    ServiceAnswer {
+        service: service.to_string(),
+        outcome: ServiceOutcome::Unavailable {
+            message: message.to_string(),
+        },
+    }
+}
+
+/// A resolution-verdict `skipped` event for an identifier `extraction`
+/// found through `tier`, that `attempts` names in lookup order and no
+/// service answered. Design D4's mapping for schema-3's
+/// `Unresolvable { found, tier, attempts }`.
+fn unresolvable_skip(
+    path: &str,
+    identifier: &str,
+    tier: &str,
+    attempts: Vec<ServiceAnswer>,
+) -> Event {
+    let not_attempted = || "no-record".to_string();
+    Event::Skipped {
+        path: PathBuf::from(path),
+        reason: SkipReason::Unresolvable,
+        sections: Some(Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Miss,
+                write: WriteStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::Found {
+                    identifier: identifier.to_string(),
+                    tier: tier.to_string(),
+                },
+                titles: TitlesStep::Read { claims: Vec::new() },
+            },
+            lookup: LookupStep::Attempted {
+                identifier: identifier.to_string(),
+                origin: IdentifierOrigin::Extracted,
+                attempts,
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            acceptance: Acceptance::NotApplicable,
+        })),
+        candidate: None,
+    }
+}
+
+/// A resolution-verdict `skipped` event whose extraction itself failed
+/// with `result`, carrying no titles (the file opened with none
+/// claimed). Design D4's mapping for the four extraction failure kinds.
+fn extraction_failure_skip(path: &str, reason: SkipReason, result: ExtractionResultStep) -> Event {
+    let not_attempted = || "extraction-failed".to_string();
+    Event::Skipped {
+        path: PathBuf::from(path),
+        reason,
+        sections: Some(Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Miss,
+                write: WriteStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+            },
+            extraction: ExtractionSection {
+                result,
+                titles: TitlesStep::Read { claims: Vec::new() },
+            },
+            lookup: LookupStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            acceptance: Acceptance::NotApplicable,
+        })),
+        candidate: None,
     }
 }
 
@@ -233,7 +462,7 @@ fn a_content_index_answer_is_d1s_worked_example() {
             continuation("Soloshonok"),
             label_line("issued", "2023"),
             label_line("in", "Ukrainica Bioorganica Acta 18(1), 10\u{2013}21"),
-            label_line("file says", "nothing read"),
+            label_line("file says", "not read; an earlier run answered"),
             label_line("new name", "lyutenko2023_ApplicationsChiralSulfinyl.pdf"),
         ],
         "got {lines:#?}"
@@ -859,24 +1088,12 @@ fn a_word_longer_than_the_width_is_broken_rather_than_overrunning() {
 /// `no record` label that replaces the `record` line.
 #[test]
 fn a_file_no_service_holds_a_record_for_names_what_each_one_said() {
-    let skipped = Event::Skipped {
-        path: PathBuf::from("preprint-v2.pdf"),
-        reason: SkipReason::Unresolvable {
-            found: "arXiv:2401.12345".to_string(),
-            tier: Some("text-layer".to_string()),
-            attempts: vec![
-                Attempt {
-                    source: "crossref".to_string(),
-                    error: "not found".to_string(),
-                },
-                Attempt {
-                    source: "openalex".to_string(),
-                    error: "not found".to_string(),
-                },
-            ],
-        },
-        library: None,
-    };
+    let skipped = unresolvable_skip(
+        "preprint-v2.pdf",
+        "arXiv:2401.12345",
+        "text-layer",
+        vec![not_found("crossref"), not_found("openalex")],
+    );
 
     let lines = describe(
         &skipped,
@@ -897,6 +1114,7 @@ fn a_file_no_service_holds_a_record_for_names_what_each_one_said() {
             label_line("identifier", "arXiv:2401.12345, from the text layer"),
             label_line("no record", "crossref: not found"),
             continuation("openalex: not found"),
+            label_line("file says", "no title in its metadata"),
         ],
         "design D8's worked example, and no `new name` line: there is \
          no proposal to make for a file with no record"
@@ -908,18 +1126,12 @@ fn a_file_no_service_holds_a_record_for_names_what_each_one_said() {
 /// difference the operator is being asked to judge.
 #[test]
 fn an_unreachable_service_is_shown_saying_what_it_said() {
-    let skipped = Event::Skipped {
-        path: PathBuf::from("preprint-v2.pdf"),
-        reason: SkipReason::Unresolvable {
-            found: "arXiv:2401.12345".to_string(),
-            tier: Some("embedded-metadata".to_string()),
-            attempts: vec![Attempt {
-                source: "arxiv".to_string(),
-                error: "timed out".to_string(),
-            }],
-        },
-        library: None,
-    };
+    let skipped = unresolvable_skip(
+        "preprint-v2.pdf",
+        "arXiv:2401.12345",
+        "embedded-metadata",
+        vec![unavailable("arxiv", "timed out")],
+    );
 
     let lines = describe(
         &skipped,
@@ -938,20 +1150,21 @@ fn an_unreachable_service_is_shown_saying_what_it_said() {
             rule(1, 1, DEFAULT_WIDTH),
             label_line("file", "preprint-v2.pdf"),
             label_line("identifier", "arXiv:2401.12345, from embedded metadata"),
-            label_line("no record", "arxiv: timed out"),
+            label_line("no record", "arxiv: unavailable: timed out"),
+            label_line("file says", "no title in its metadata"),
         ]
     );
 }
 
-/// A file with no identifier at all has nothing to say beyond which
-/// file it is: the reason names nothing by definition.
+/// A file with no identifier at all names the extraction failure and
+/// what the file's titles say (design D10's table), and nothing else.
 #[test]
 fn a_file_with_no_identifier_describes_only_itself() {
-    let skipped = Event::Skipped {
-        path: PathBuf::from("scanned.pdf"),
-        reason: SkipReason::NoIdentifier,
-        library: None,
-    };
+    let skipped = extraction_failure_skip(
+        "scanned.pdf",
+        SkipReason::TextWithoutIdentifier,
+        ExtractionResultStep::TextWithoutIdentifier,
+    );
 
     let lines = describe(
         &skipped,
@@ -969,7 +1182,8 @@ fn a_file_with_no_identifier_describes_only_itself() {
         vec![
             rule(2, 9, DEFAULT_WIDTH),
             label_line("file", "scanned.pdf"),
-            label_line("identifier", "none found in the file"),
+            label_line("identifier", "none found in its metadata or the pages read"),
+            label_line("file says", "no title in its metadata"),
         ]
     );
 }
@@ -979,15 +1193,57 @@ fn a_file_with_no_identifier_describes_only_itself() {
 /// `conflict` line carries only how close they were.
 #[test]
 fn a_conflict_asked_about_shows_how_close_the_two_titles_were() {
+    let not_attempted = || "refused".to_string();
+    let mut candidate = Record::new(EntryType::Article);
+    candidate.title = Some("Asymmetric Synthesis of Fluorinated Amines".to_string());
     let skipped = Event::Skipped {
         path: PathBuf::from("paper.pdf"),
-        reason: SkipReason::Conflict {
-            field: "title".to_string(),
-            extracted: "Preliminary Notes on Solvent Effects".to_string(),
-            resolved: "Asymmetric Synthesis of Fluorinated Amines".to_string(),
-            similarity: 0.08,
-        },
-        library: None,
+        reason: SkipReason::Conflict,
+        sections: Some(Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Miss,
+                write: WriteStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::Found {
+                    identifier: "doi:10.1000/conflict".to_string(),
+                    tier: "text-layer".to_string(),
+                },
+                titles: TitlesStep::Read {
+                    claims: vec![Claim {
+                        from: ClaimOrigin::Xmp,
+                        title: "Preliminary Notes on Solvent Effects".to_string(),
+                    }],
+                },
+            },
+            lookup: LookupStep::Attempted {
+                identifier: "doi:10.1000/conflict".to_string(),
+                origin: IdentifierOrigin::Extracted,
+                attempts: vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Found {
+                        retrieval: FetchedFrom::Network,
+                        stored: Some(WriteStep::Written),
+                    },
+                }],
+            },
+            record_retrieval: Some(RetrievedFrom::Network {
+                service: "crossref".to_string(),
+            }),
+            match_check: MatchCheckStep::Conflict {
+                field: "title".to_string(),
+                extracted: "Preliminary Notes on Solvent Effects".to_string(),
+                resolved: "Asymmetric Synthesis of Fluorinated Amines".to_string(),
+                similarity: 0.08,
+            },
+            acceptance: Acceptance::NotApplicable,
+        })),
+        candidate: Some(Box::new(candidate)),
     };
 
     let lines = describe(
@@ -1034,32 +1290,23 @@ fn an_overridden_conflict_shows_the_same_line_on_the_record_it_accepted() {
         path,
         identifier,
         record,
-        source,
-        found,
-        claims,
-        tier,
-        cached,
-        ..
+        mut sections,
     } = fixture.event()
     else {
         unreachable!("the fixture builds a resolved event")
     };
+    sections.match_check = MatchCheckStep::Conflict {
+        field: "title".to_string(),
+        extracted: "Preliminary Notes on Solvent Effects".to_string(),
+        resolved: "Asymmetric Synthesis of Fluorinated Amines".to_string(),
+        similarity: 0.08,
+    };
+    sections.acceptance = Acceptance::Overridden;
     let resolved = Event::Resolved {
         path,
         identifier,
         record,
-        source,
-        found,
-        claims,
-        tier,
-        cached,
-        overrode: Some(Overridden {
-            field: "title".to_string(),
-            extracted: "Preliminary Notes on Solvent Effects".to_string(),
-            resolved: "Asymmetric Synthesis of Fluorinated Amines".to_string(),
-            similarity: 0.08,
-        }),
-        library: None,
+        sections,
     };
 
     let lines = describe(
@@ -1135,29 +1382,47 @@ fn tracked_answer() -> LibraryAnswer {
 /// the shape of the resolved event a library answer actually produces:
 /// `tier: "library"`, `cached: false`, `claims: []`.
 fn library_resolved_event(fixture: &Fixture, answer: LibraryAnswer) -> Event {
-    let Event::Resolved {
-        path,
-        identifier,
-        record,
-        source,
-        found,
-        overrode,
-        ..
-    } = fixture.event()
-    else {
-        unreachable!()
+    let LibraryAnswer::Tracked { artifact, item } = &answer else {
+        unreachable!("library_resolved_event is only called with a Tracked answer")
     };
+    let not_attempted = || "library-answered".to_string();
+    let record = record_with_source_provenance(&fixture.record, &fixture.source);
     Event::Resolved {
-        path,
-        identifier,
-        record,
-        source,
-        found,
-        claims: Vec::new(),
-        tier: Some("library".to_string()),
-        overrode,
-        cached: false,
-        library: Some(answer),
+        path: fixture.path.clone(),
+        identifier: fixture.found.clone(),
+        record: Box::new(record),
+        sections: Box::new(Sections {
+            library: LibraryStep::Consulted {
+                answer: answer.clone(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+                write: WriteStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+                titles: TitlesStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+            },
+            lookup: LookupStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            record_retrieval: Some(RetrievedFrom::Library {
+                artifact: artifact.clone(),
+                item: item.clone(),
+            }),
+            match_check: MatchCheckStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            acceptance: Acceptance::Automatic,
+        }),
     }
 }
 
@@ -1240,10 +1505,11 @@ fn record_line_for_a_provenance_less_library_answer_names_only_the_library() {
     );
 }
 
-/// design D5: `file says` reads `nothing read`, as for a content-index
-/// answer — the file was not opened.
+/// design D10: `file says` reads `not read; the library answered` — the
+/// file was not opened, and the state names why (D14's mapping: the
+/// schema-3 `nothing read` line becomes D10's state line).
 #[test]
-fn file_says_line_for_a_library_answer_reads_nothing_read() {
+fn file_says_line_for_a_library_answer_reads_not_read_the_library_answered() {
     let record = Record::new(EntryType::Article);
     let fixture = Fixture::new(record, "doi:10.1000/library-answer-4");
     let event = library_resolved_event(&fixture, tracked_answer());
@@ -1260,7 +1526,7 @@ fn file_says_line_for_a_library_answer_reads_nothing_read() {
     );
 
     assert!(
-        lines.contains(&label_line("file says", "nothing read")),
+        lines.contains(&label_line("file says", "not read; the library answered")),
         "got {lines:#?}"
     );
 }
@@ -1277,31 +1543,22 @@ fn a_library_problem_on_a_resolved_event_adds_a_library_line_after_record() {
         path,
         identifier,
         record,
-        source,
-        found,
-        claims,
-        tier,
-        overrode,
-        cached,
-        ..
+        mut sections,
     } = fixture.event()
     else {
         unreachable!()
+    };
+    sections.library = LibraryStep::Consulted {
+        answer: LibraryAnswer::DanglingItem {
+            artifact: "a".to_string(),
+            item: "b".to_string(),
+        },
     };
     let event = Event::Resolved {
         path,
         identifier,
         record,
-        source,
-        found,
-        claims,
-        tier,
-        overrode,
-        cached,
-        library: Some(LibraryAnswer::DanglingItem {
-            artifact: "a".to_string(),
-            item: "b".to_string(),
-        }),
+        sections,
     };
 
     let lines = describe(
@@ -1333,12 +1590,29 @@ fn a_library_problem_on_a_resolved_event_adds_a_library_line_after_record() {
 /// reason's own lines.
 #[test]
 fn a_library_problem_on_a_skipped_event_follows_the_reasons_lines() {
-    let event = Event::Skipped {
-        path: PathBuf::from("scanned.pdf"),
-        reason: SkipReason::NoIdentifier,
-        library: Some(LibraryAnswer::UnrecognisedContent {
+    let Event::Skipped {
+        path,
+        reason,
+        mut sections,
+        candidate,
+    } = extraction_failure_skip(
+        "scanned.pdf",
+        SkipReason::TextWithoutIdentifier,
+        ExtractionResultStep::TextWithoutIdentifier,
+    )
+    else {
+        unreachable!()
+    };
+    sections.as_mut().unwrap().library = LibraryStep::Consulted {
+        answer: LibraryAnswer::UnrecognisedContent {
             artifacts: vec!["a".to_string()],
-        }),
+        },
+    };
+    let event = Event::Skipped {
+        path,
+        reason,
+        sections,
+        candidate,
     };
 
     let lines = describe(
@@ -1357,7 +1631,8 @@ fn a_library_problem_on_a_skipped_event_follows_the_reasons_lines() {
         vec![
             rule(1, 1, DEFAULT_WIDTH),
             label_line("file", "scanned.pdf"),
-            label_line("identifier", "none found in the file"),
+            label_line("identifier", "none found in its metadata or the pages read"),
+            label_line("file says", "no title in its metadata"),
             label_line(
                 "library",
                 "the library records artifact a at this path, but not these bytes"

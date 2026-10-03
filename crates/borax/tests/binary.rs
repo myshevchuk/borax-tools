@@ -435,7 +435,9 @@ fn seed_stale_content_index(cache_home: &Path, bytes: &[u8], stale_title: &str) 
 /// `borax resolve --json paper.pdf` and
 /// `borax resolve --json ./sub/../paper.pdf`, run from the library
 /// root, both report the tracked file from its library item — over a
-/// stale content-index entry — with `tier: "library"` (design D1a).
+/// stale content-index entry — with `record_retrieval.kind: "library"`
+/// (design D1a; D14's mapping: `tier == "library"` becomes
+/// `record_retrieval.kind == "library"`).
 #[test]
 fn resolve_reports_a_tracked_file_the_same_way_for_every_relative_spelling() {
     let library = tempfile::tempdir().expect("a temporary library");
@@ -468,13 +470,13 @@ fn resolve_reports_a_tracked_file_the_same_way_for_every_relative_spelling() {
             .unwrap_or_else(|| panic!("no resolved event for {spelling:?}: {stdout}"));
 
         assert_eq!(
-            resolved["tier"], "library",
+            resolved["record_retrieval"]["kind"], "library",
             "spelling {spelling:?} must be consulted the same way: {stdout}"
         );
         assert_eq!(
             resolved["record"]["title"], "The Corrected Title",
             "spelling {spelling:?}: {stdout}"
         );
-        assert_eq!(resolved["library"]["kind"], "tracked");
+        assert_eq!(resolved["library"]["answer"]["kind"], "tracked");
     }
 }

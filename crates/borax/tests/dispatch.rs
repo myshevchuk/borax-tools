@@ -15,8 +15,10 @@ use borax::config::{
     ValueKindName, resolve,
 };
 use borax::event::{
-    Admission, Adoption, Attempt, Condition, Event, Extraction, Level, LibraryAnswer, Overridden,
-    Repair, SCHEMA, SkipReason, human_line,
+    Acceptance, Admission, Adoption, Condition, ContentIndexSection, Event, Extraction,
+    ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierOrigin, IndexReadStep, Level,
+    LibraryAnswer, LibraryStep, LookupStep, MatchCheckStep, Repair, RetrievedFrom, SCHEMA,
+    Sections, ServiceAnswer, ServiceOutcome, SkipReason, TitlesStep, WriteStep, human_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -439,6 +441,82 @@ fn record_by(family: &str, year: i32, doi_value: &str) -> Record {
     }
 }
 
+/// Design D14's mapping, read backwards: the schema-3 shape
+/// `resolved_event`'s callers hold, translated into schema-4 sections.
+/// `tier: Some(t)` with `t` `"embedded-metadata"` or `"text-layer"`
+/// becomes an extracted-origin lookup found over the network by
+/// `source`; `tier: Some("supplied")` becomes an operator-origin
+/// lookup; `tier: None, cached: true` becomes a content-index hit.
+fn sections_for(identifier: &str, source: &str, tier: Option<&str>, cached: bool) -> Sections {
+    match (tier, cached) {
+        (None, true) => {
+            let reason = || "content-index-hit".to_string();
+            Sections {
+                library: LibraryStep::NotAttempted {
+                    reason: "no-library".to_string(),
+                },
+                content_index: ContentIndexSection {
+                    read: IndexReadStep::Hit,
+                    write: WriteStep::NotAttempted { reason: reason() },
+                },
+                extraction: ExtractionSection {
+                    result: ExtractionResultStep::NotAttempted { reason: reason() },
+                    titles: TitlesStep::NotAttempted { reason: reason() },
+                },
+                lookup: LookupStep::NotAttempted { reason: reason() },
+                record_retrieval: Some(RetrievedFrom::ContentIndex),
+                match_check: MatchCheckStep::NotAttempted { reason: reason() },
+                acceptance: Acceptance::Automatic,
+            }
+        }
+        (Some(tier), _) => {
+            let origin = if tier == "supplied" {
+                IdentifierOrigin::Operator
+            } else {
+                IdentifierOrigin::Extracted
+            };
+            let result_tier = if tier == "supplied" {
+                "text-layer".to_string()
+            } else {
+                tier.to_string()
+            };
+            Sections {
+                library: LibraryStep::NotAttempted {
+                    reason: "no-library".to_string(),
+                },
+                content_index: ContentIndexSection {
+                    read: IndexReadStep::Miss,
+                    write: WriteStep::Written,
+                },
+                extraction: ExtractionSection {
+                    result: ExtractionResultStep::Found {
+                        identifier: identifier.to_string(),
+                        tier: result_tier,
+                    },
+                    titles: TitlesStep::Read { claims: Vec::new() },
+                },
+                lookup: LookupStep::Attempted {
+                    identifier: identifier.to_string(),
+                    origin,
+                    attempts: vec![ServiceAnswer {
+                        service: source.to_string(),
+                        outcome: ServiceOutcome::Found {
+                            retrieval: FetchedFrom::Network,
+                            stored: Some(WriteStep::Written),
+                        },
+                    }],
+                },
+                record_retrieval: Some(RetrievedFrom::Network {
+                    service: source.to_string(),
+                }),
+                match_check: MatchCheckStep::Agreed,
+                acceptance: Acceptance::Automatic,
+            }
+        }
+        (None, false) => unreachable!("every caller sets a tier or a content-index hit"),
+    }
+}
+
 fn resolved_event(
     path: &Path,
     identifier: &str,
@@ -451,16 +529,54 @@ fn resolved_event(
         path: path.to_path_buf(),
         identifier: identifier.to_string(),
         record: Box::new(record.clone()),
-        source: source.to_string(),
-        found: identifier.to_string(),
-
-        claims: Vec::new(),
-
-        tier: tier.map(str::to_string),
-        cached,
-        overrode: None,
-        library: None,
+        sections: Box::new(sections_for(identifier, source, tier, cached)),
     }
+}
+
+/// A resolution-verdict skip for a file whose text held no identifier
+/// (`pdf_with_no_identifier`), carrying every section not attempted or
+/// failed as design D3's extraction illustration shows.
+fn text_without_identifier_skip(path: PathBuf) -> Event {
+    let reason = || "extraction-failed".to_string();
+    Event::Skipped {
+        path,
+        reason: SkipReason::TextWithoutIdentifier,
+        sections: Some(Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Miss,
+                write: WriteStep::NotAttempted { reason: reason() },
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::TextWithoutIdentifier,
+                titles: TitlesStep::Read { claims: Vec::new() },
+            },
+            lookup: LookupStep::NotAttempted { reason: reason() },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted { reason: reason() },
+            acceptance: Acceptance::NotApplicable,
+        })),
+        candidate: None,
+    }
+}
+
+/// What a schema-3 event's `library: Option<LibraryAnswer>` field
+/// reported, reconstructed from a section's `LibraryStep` (design D14's
+/// mapping).
+fn library_of(sections: &Sections) -> Option<LibraryAnswer> {
+    match &sections.library {
+        LibraryStep::Consulted { answer } => Some(answer.clone()),
+        LibraryStep::NotAttempted { .. } => None,
+    }
+}
+
+/// The same, for a `skipped` event's `Option<Box<Sections>>` — `None`
+/// on a non-resolution skip, exactly as the schema-3 `library` field
+/// was.
+fn skip_library_of(sections: &Option<Box<Sections>>) -> Option<LibraryAnswer> {
+    sections.as_deref().and_then(library_of)
 }
 
 fn bib_entry_event(path: &Path, outcome: &MergeOutcome) -> Event {
@@ -1062,11 +1178,7 @@ fn resolve_emits_resolved_then_skipped_for_a_mixed_batch() {
                 Some("embedded-metadata"),
                 false,
             ),
-            Event::Skipped {
-                path: bad,
-                reason: SkipReason::NoIdentifier,
-                library: None,
-            },
+            text_without_identifier_skip(bad),
         ],
         "got {events:?}"
     );
@@ -4420,10 +4532,10 @@ fn two_files_of_one_name_in_two_directories_are_asked_about_distinguishably() {
     );
 }
 
-/// design D4: "the batch line changes in one word: a content-index
-/// answer reads `via crossref (cached)` rather than `via cache
-/// (cached)`". A batch run's human output for a cached hit whose record
-/// was made by Crossref names Crossref, not the content index.
+/// design D9: a content-index answer reads `via crossref, from the
+/// content index`, never `via cache`. A batch run's human output for a
+/// cached hit whose record was made by Crossref names Crossref, not the
+/// content index, as the service.
 #[test]
 fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
     let path = PathBuf::from("/lib/paper.pdf");
@@ -4479,11 +4591,12 @@ fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
 
     let text = String::from_utf8(out).unwrap();
     assert!(
-        text.contains("via crossref (cached)"),
+        text.contains("via crossref, from the content index"),
         "a cached hit whose provenance names Crossref must say so, not \
-         \"via cache\": got {text:?}"
+         name the content index as a service: got {text:?}"
     );
-    assert!(!text.contains("via cache (cached)"), "got {text:?}");
+    assert!(!text.contains("via cache"), "got {text:?}");
+    assert!(!text.contains("(cached)"), "got {text:?}");
 }
 
 // ---------------------------------------------------------------------
@@ -4637,7 +4750,7 @@ fn a_file_with_no_identifier_offers_to_supply_one() {
             event,
             Event::Skipped {
                 path,
-                reason: SkipReason::NoIdentifier,
+                reason: SkipReason::TextWithoutIdentifier,
                 ..
             } if *path == fixture.path
         )),
@@ -4836,7 +4949,7 @@ fn a_conflict_whose_target_is_not_free_offers_no_override() {
             event,
             Event::Skipped {
                 path: skipped_path,
-                reason: SkipReason::Conflict { .. },
+                reason: SkipReason::Conflict,
                 ..
             } if *skipped_path == path
         )),
@@ -5424,15 +5537,16 @@ fn overriding_a_conflict_reports_what_was_overridden_and_renames() {
     assert_eq!(renamed.len(), 1, "got {events:?}");
     assert!(skipped.is_empty(), "got {events:?}");
     match resolved[0] {
-        Event::Resolved { overrode, .. } => {
+        Event::Resolved { sections, .. } => {
+            assert_eq!(sections.acceptance, Acceptance::Overridden);
             assert_eq!(
-                *overrode,
-                Some(Overridden {
+                sections.match_check,
+                MatchCheckStep::Conflict {
                     field: "title".to_string(),
                     extracted: "Old Title Extracted from the PDF".to_string(),
                     resolved: "A Completely Different Title About Something Else".to_string(),
                     similarity: 0.2,
-                }),
+                },
                 "must carry the same field, values and similarity the skip would have: \
                  got {resolved:?}"
             );
@@ -5510,7 +5624,7 @@ fn skipping_a_conflict_that_could_have_been_overridden_writes_nothing() {
             event,
             Event::Skipped {
                 path: p,
-                reason: SkipReason::Conflict { .. },
+                reason: SkipReason::Conflict,
                 ..
             } if *p == path
         )),
@@ -5619,7 +5733,7 @@ fn a_supplied_identifier_resolving_into_a_taken_target_reports_and_reasks() {
             event,
             Event::Skipped {
                 path: p,
-                reason: SkipReason::NoIdentifier,
+                reason: SkipReason::TextWithoutIdentifier,
                 ..
             } if *p == path
         )),
@@ -5707,7 +5821,7 @@ fn a_supplied_identifier_resolving_into_an_unnameable_record_reports_and_reasks(
             event,
             Event::Skipped {
                 path: p,
-                reason: SkipReason::NoIdentifier,
+                reason: SkipReason::TextWithoutIdentifier,
                 ..
             } if *p == path
         )),
@@ -5787,7 +5901,7 @@ fn a_supplied_identifier_resolving_into_the_files_own_current_name_reports_and_r
             event,
             Event::Skipped {
                 path: p,
-                reason: SkipReason::NoIdentifier,
+                reason: SkipReason::TextWithoutIdentifier,
                 ..
             } if *p == path
         )),
@@ -6084,6 +6198,149 @@ fn a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_ne
         1,
         "an unremembered file must be asked about again: got {:?}",
         asker_again.questions_asked()
+    );
+}
+
+// ---------------------------------------------------------------------
+// sectioned-resolved-event, task 5.1: content-index-write follows
+// renamed for an operator-reached record (design D8)
+// ---------------------------------------------------------------------
+
+/// design D8: a supplied identifier that is renamed emits `resolved`
+/// (`content_index.write` not attempted for `awaiting-acceptance`),
+/// then `renamed`, then `content-index-write` naming the target path
+/// and `written` — nothing about the file between `renamed` and
+/// `content-index-write`.
+#[test]
+fn a_supplied_identifier_renamed_is_followed_by_content_index_write() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let hash = hash_for("d8-content-index-write");
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d8-content-index-write",
+        record_by("Smith", 2024, "10.1000/d8-content-index-write"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/d8-content-index-write".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let about_the_file: Vec<&Event> = events
+        .iter()
+        .filter(|event| {
+            matches!(event,
+                Event::Resolved { path: p, .. }
+                | Event::Renamed { path: p, .. }
+                | Event::ContentIndexWrite { path: p, .. }
+                    if *p == path || p.ends_with("Smith2024.pdf"))
+        })
+        .collect();
+
+    match about_the_file.as_slice() {
+        [
+            Event::Resolved { sections, .. },
+            Event::Renamed { target, .. },
+            Event::ContentIndexWrite {
+                path: written_path,
+                write,
+            },
+        ] => {
+            assert_eq!(
+                sections.content_index.write,
+                WriteStep::NotAttempted {
+                    reason: "awaiting-acceptance".to_string()
+                },
+                "the verdict must not claim the write before the move"
+            );
+            assert_eq!(written_path, target, "design D8: path after the move");
+            assert_eq!(write, &WriteStep::Written);
+        }
+        other => panic!("expected resolved, renamed, content-index-write in order, got {other:?}"),
+    }
+}
+
+/// design D8: when the content index's write fails, `content-index-write`
+/// reports `failed` with the message, the rename stands, and run-finished
+/// counts are unaffected — a failed cache write is evidence, not a
+/// failure.
+#[test]
+fn a_rename_time_content_index_write_failure_is_reported_without_failing_the_rename() {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let hash = hash_for("d8-write-failure");
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d8-write-failure",
+        record_by("Smith", 2024, "10.1000/d8-write-failure"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(WriteFailingCache);
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/d8-write-failure".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Renamed { path: p, .. } if *p == path)),
+        "the rename must stand even though the index write failed: got {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ContentIndexWrite {
+                write: WriteStep::Failed { .. },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+    let counts = counts_for(&events);
+    assert_eq!(
+        counts.renamed, 1,
+        "a failed content-index write must not be counted as a failure of the rename"
     );
 }
 
@@ -13854,7 +14111,7 @@ fn batch_rename_over_one_already_named_file_keeps_the_renaming_summary_line() {
 
 /// design D5: `status --json` is unaffected by the summary shape —
 /// JSON always closes with `run-finished` carrying all seven counters
-/// and schema 3, whatever the human rendering does.
+/// and the schema version, whatever the human rendering does.
 #[test]
 fn status_json_still_ends_with_run_finished_and_all_seven_counters() {
     let dir = tempdir().unwrap();
@@ -14017,9 +14274,9 @@ fn seed_tracked_file(root: &Path, relative: &str, hash: ContentHash, record: Rec
 /// The review scenario (proposal "Why"): an item corrected after
 /// admission is served over a stale content-index entry sharing the
 /// file's hash. `resolve --json` must read the library first: the
-/// corrected title, `tier: "library"`, `cached: false`, no claims, a
-/// `library` object of kind `tracked`, schema 3 — and the index entry
-/// left byte-identical.
+/// corrected title, `record_retrieval.kind: "library"`, titles not
+/// attempted for `library-answered`, a `library.answer` object of kind
+/// `tracked` — and the index entry left byte-identical.
 #[test]
 fn resolve_reports_the_librarys_corrected_item_over_a_stale_index_entry() {
     let library = real_library();
@@ -14063,18 +14320,23 @@ fn resolve_reports_the_librarys_corrected_item_over_a_stale_index_entry() {
         .unwrap_or_else(|| panic!("expected a Resolved event: got {events:?}"));
     match resolved {
         Event::Resolved {
-            record,
-            tier,
-            cached,
-            claims,
-            library,
-            ..
+            record, sections, ..
         } => {
             assert_eq!(record.title, corrected.title);
-            assert_eq!(tier.as_deref(), Some("library"));
-            assert!(!cached);
-            assert_eq!(claims, &Vec::new());
-            assert!(matches!(library, Some(LibraryAnswer::Tracked { .. })));
+            assert!(matches!(
+                sections.record_retrieval,
+                Some(RetrievedFrom::Library { .. })
+            ));
+            assert_eq!(
+                sections.extraction.titles,
+                TitlesStep::NotAttempted {
+                    reason: "library-answered".to_string()
+                }
+            );
+            assert!(matches!(
+                library_of(sections),
+                Some(LibraryAnswer::Tracked { .. })
+            ));
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
@@ -14187,18 +14449,17 @@ fn resolve_reports_untracked_for_an_unrecorded_file_inside_a_library() {
         .iter()
         .find(|event| matches!(event, Event::Resolved { .. }))
     {
-        Some(Event::Resolved {
-            cached, library, ..
-        }) => {
-            assert!(cached);
-            assert_eq!(library, &Some(LibraryAnswer::Untracked));
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(sections.record_retrieval, Some(RetrievedFrom::ContentIndex));
+            assert_eq!(library_of(sections), Some(LibraryAnswer::Untracked));
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
 }
 
 /// `collection_root: None` — a run outside any library — leaves
-/// `library: null` and every other field exactly as it is today.
+/// `library` not attempted and every other field exactly as it is
+/// today.
 #[test]
 fn resolve_outside_any_library_reports_library_null() {
     let path = PathBuf::from("paper.pdf");
@@ -14239,7 +14500,7 @@ fn resolve_outside_any_library_reports_library_null() {
         .iter()
         .find(|event| matches!(event, Event::Resolved { .. }))
     {
-        Some(Event::Resolved { library, .. }) => assert_eq!(library, &None),
+        Some(Event::Resolved { sections, .. }) => assert_eq!(library_of(sections), None),
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
 }
@@ -14293,8 +14554,8 @@ fn resolve_under_a_nested_library_reports_library_null() {
         .iter()
         .find(|event| matches!(event, Event::Resolved { .. } | Event::Skipped { .. }))
     {
-        Some(Event::Resolved { library, .. }) => assert_eq!(library, &None),
-        Some(Event::Skipped { library, .. }) => assert_eq!(library, &None),
+        Some(Event::Resolved { sections, .. }) => assert_eq!(library_of(sections), None),
+        Some(Event::Skipped { sections, .. }) => assert_eq!(skip_library_of(sections), None),
         other => panic!("expected a per-file event, got {other:?}"),
     }
 }
@@ -14438,9 +14699,9 @@ fn resolve_over_a_clean_library_writes_no_artifact_store_warning() {
     assert_eq!(String::from_utf8(err).unwrap(), String::new());
 }
 
-/// Human mode: the tracked file's line ends ` (from the library)`, and
+/// Human mode: the tracked file's line ends `, from the library`, and
 /// the closing line is `1 resolved, 0 skipped` — unaffected by the
-/// library answer (design D5).
+/// library answer (design D9).
 #[test]
 fn resolve_human_mode_line_ends_with_from_the_library() {
     let library = real_library();
@@ -14489,7 +14750,7 @@ fn resolve_human_mode_line_ends_with_from_the_library() {
     assert!(
         lines
             .iter()
-            .any(|line| line.ends_with("(from the library)")),
+            .any(|line| line.ends_with(", from the library")),
         "got {lines:?}"
     );
     assert_eq!(
@@ -14705,11 +14966,16 @@ fn batch_rename_over_a_dangling_item_file_with_no_identifier_carries_the_problem
         .find(|event| matches!(event, Event::Skipped { .. }))
     {
         Some(Event::Skipped {
-            reason: SkipReason::NoIdentifier,
-            library,
+            reason: SkipReason::TextWithoutIdentifier,
+            sections,
             ..
-        }) => assert!(matches!(library, Some(LibraryAnswer::DanglingItem { .. }))),
-        other => panic!("expected a Skipped(NoIdentifier) event, got {other:?}"),
+        }) => assert!(matches!(
+            sections.as_ref().unwrap().library,
+            LibraryStep::Consulted {
+                answer: LibraryAnswer::DanglingItem { .. }
+            }
+        )),
+        other => panic!("expected a Skipped(TextWithoutIdentifier) event, got {other:?}"),
     }
 }
 
@@ -14797,7 +15063,8 @@ fn the_second_of_two_files_sharing_a_dangling_item_still_gets_dangling_item() {
                 panic!("no event for second.pdf (no_record={no_record}): {events:?}")
             });
         let library_answer = match second_event {
-            Event::Resolved { library, .. } | Event::Skipped { library, .. } => library,
+            Event::Resolved { sections, .. } => library_of(sections),
+            Event::Skipped { sections, .. } => skip_library_of(sections),
             _ => unreachable!(),
         };
         assert!(
@@ -14871,10 +15138,13 @@ fn bib_reports_the_librarys_corrected_title() {
 
     match events.first() {
         Some(Event::Resolved {
-            record, library, ..
+            record, sections, ..
         }) => {
             assert_eq!(record.title, corrected.title);
-            assert!(matches!(library, Some(LibraryAnswer::Tracked { .. })));
+            assert!(matches!(
+                library_of(sections),
+                Some(LibraryAnswer::Tracked { .. })
+            ));
         }
         other => panic!("expected a Resolved event first, got {other:?}"),
     }
@@ -15157,9 +15427,18 @@ fn supplying_a_different_identifier_for_a_tracked_file_reports_supplied_and_reli
         .iter()
         .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
     {
-        Some(Event::Resolved { tier, library, .. }) => {
-            assert_eq!(tier.as_deref(), Some("supplied"));
-            assert!(matches!(library, Some(LibraryAnswer::Tracked { .. })));
+        Some(Event::Resolved { sections, .. }) => {
+            assert!(matches!(
+                sections.lookup,
+                LookupStep::Attempted {
+                    origin: IdentifierOrigin::Operator,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                library_of(sections),
+                Some(LibraryAnswer::Tracked { .. })
+            ));
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
@@ -15227,7 +15506,9 @@ fn interactive_skip_of_a_dangling_item_file_keeps_the_problem() {
         .iter()
         .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
     {
-        Some(Event::Skipped { library, .. }) => assert_eq!(library, &Some(expected_problem)),
+        Some(Event::Skipped { sections, .. }) => {
+            assert_eq!(skip_library_of(sections), Some(expected_problem))
+        }
         other => panic!("expected Event::Skipped, got {other:?}"),
     }
     assert_eq!(
@@ -15305,8 +15586,8 @@ fn interactive_retry_after_an_outage_keeps_the_dangling_item_problem() {
         .iter()
         .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
     {
-        Some(Event::Resolved { library, .. }) => {
-            assert_eq!(library, &Some(expected_problem));
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(library_of(sections), Some(expected_problem));
         }
         other => panic!("expected Event::Resolved after the retry, got {other:?}"),
     }
@@ -15378,13 +15659,10 @@ fn interactive_retry_that_finds_a_conflict_keeps_the_dangling_item_problem() {
         .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
     {
         Some(Event::Skipped {
-            reason, library, ..
+            reason, sections, ..
         }) => {
-            assert!(
-                matches!(reason, SkipReason::Conflict { .. }),
-                "got {reason:?}"
-            );
-            assert_eq!(library, &Some(expected_problem));
+            assert!(matches!(reason, SkipReason::Conflict), "got {reason:?}");
+            assert_eq!(skip_library_of(sections), Some(expected_problem));
         }
         other => panic!("expected a conflict Skipped after the retry, got {other:?}"),
     }
@@ -15503,14 +15781,18 @@ fn an_outage_then_not_found_on_retry_stops_offering_a_retry() {
         .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
     {
         Some(Event::Skipped {
-            reason: SkipReason::Unresolvable { attempts, .. },
+            reason: SkipReason::Unresolvable,
+            sections,
             ..
         }) => {
+            let LookupStep::Attempted { attempts, .. } = &sections.as_ref().unwrap().lookup else {
+                panic!("expected an attempted lookup");
+            };
             assert_eq!(
                 attempts,
-                &vec![Attempt {
-                    source: "crossref".to_string(),
-                    error: "not found".to_string(),
+                &vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::NotFound,
                 }],
                 "the skip carries the retry's attempt, not the outage's"
             );
@@ -15704,9 +15986,15 @@ fn interactive_supplied_candidate_for_a_dangling_item_file_keeps_the_problem() {
         .iter()
         .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
     {
-        Some(Event::Resolved { tier, library, .. }) => {
-            assert_eq!(tier.as_deref(), Some("supplied"));
-            assert_eq!(library, &Some(expected_problem));
+        Some(Event::Resolved { sections, .. }) => {
+            assert!(matches!(
+                sections.lookup,
+                LookupStep::Attempted {
+                    origin: IdentifierOrigin::Operator,
+                    ..
+                }
+            ));
+            assert_eq!(library_of(sections), Some(expected_problem));
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
@@ -15776,21 +16064,18 @@ fn batch_conflict_on_a_dangling_item_file_keeps_the_problem() {
         .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
     {
         Some(Event::Skipped {
-            reason, library, ..
+            reason, sections, ..
         }) => {
-            assert!(
-                matches!(reason, SkipReason::Conflict { .. }),
-                "got {reason:?}"
-            );
-            assert_eq!(library, &Some(expected_problem));
+            assert!(matches!(reason, SkipReason::Conflict), "got {reason:?}");
+            assert_eq!(skip_library_of(sections), Some(expected_problem));
         }
         other => panic!("expected a conflict Skipped, got {other:?}"),
     }
 }
 
-/// design D3: `target-taken` is a non-verdict skip and stays
-/// `library: null`, even though the file's own `resolved` event —
-/// reached by fallback from a dangling-item record — carries the
+/// design D3: `target-taken` is a non-verdict skip and carries no
+/// `library` section at all, even though the file's own `resolved`
+/// event — reached by fallback from a dangling-item record — carries the
 /// problem.
 #[test]
 fn batch_target_taken_stays_library_null_while_resolved_carries_the_problem() {
@@ -15856,7 +16141,9 @@ fn batch_target_taken_stays_library_null_while_resolved_carries_the_problem() {
         .iter()
         .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
     {
-        Some(Event::Resolved { library, .. }) => assert_eq!(library, &Some(expected_problem)),
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(library_of(sections), Some(expected_problem))
+        }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
     match events
@@ -15865,9 +16152,12 @@ fn batch_target_taken_stays_library_null_while_resolved_carries_the_problem() {
     {
         Some(Event::Skipped {
             reason: SkipReason::TargetTaken { .. },
-            library,
+            sections,
             ..
-        }) => assert_eq!(library, &None, "target-taken is a non-verdict skip"),
+        }) => assert!(
+            sections.is_none(),
+            "target-taken is a non-verdict skip and carries no sections"
+        ),
         other => panic!("expected a TargetTaken Skipped, got {other:?}"),
     }
 }
@@ -15933,9 +16223,14 @@ fn preview_reports_the_same_resolved_event_and_plan_as_apply() {
     assert!(matches!(
         resolved,
         Event::Resolved {
-            library: Some(LibraryAnswer::Tracked { .. }),
+            sections,
             ..
-        }
+        } if matches!(
+            sections.library,
+            LibraryStep::Consulted {
+                answer: LibraryAnswer::Tracked { .. }
+            }
+        )
     ));
     assert!(
         preview.iter().any(|event| matches!(
