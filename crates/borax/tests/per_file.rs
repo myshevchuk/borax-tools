@@ -291,14 +291,18 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
                     service: "crossref".to_string(),
                     outcome: ServiceOutcome::Found {
                         retrieval: FetchedFrom::Network,
-                        stored: Some(WriteStep::Written),
+                        stored: Some(WriteStep::NotAttempted {
+                            reason: "cache-bypassed".to_string(),
+                        }),
                     },
                 }],
             },
             record_retrieval: Some(RetrievedFrom::Network {
                 service: "crossref".to_string(),
             }),
-            match_check: MatchCheckStep::Agreed,
+            match_check: MatchCheckStep::InsufficientEvidence {
+                reason: "record-untitled".to_string(),
+            },
             acceptance: Acceptance::Automatic,
         }),
     }

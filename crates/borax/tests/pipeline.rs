@@ -9,10 +9,10 @@ use std::thread;
 use std::time::Duration;
 
 use borax::event::{
-    Acceptance, Claim, ClaimOrigin, ContentIndexSection, Counts, Event, Extraction,
-    ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierOrigin, IndexReadStep,
-    LibraryAnswer, LibraryStep, LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer,
-    ServiceOutcome, SkipReason, TitlesStep, WriteStep, human_line,
+    Acceptance, Claim, ClaimOrigin, Counts, Event, Extraction, ExtractionResultStep, FetchedFrom,
+    IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep, LookupStep, MatchCheckStep,
+    RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason, TitlesStep, WriteStep,
+    human_line,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
@@ -651,25 +651,6 @@ fn unreadable_file_is_skipped_with_the_open_error_message() {
         reason,
         SkipReason::Unreadable {
             message: "corrupt stream".to_string(),
-        }
-    );
-}
-
-#[test]
-fn encrypted_file_is_skipped_as_unreadable() {
-    let path = Path::new("paper.pdf");
-    let hash = hash_for("encrypted");
-    let documents = FakeDocuments::new().with_open_error(path, hash, ExtractionError::Encrypted);
-    let sources: Vec<&dyn Source> = Vec::new();
-    let index = ContentIndex::new(MemoryCache::new());
-
-    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
-    let reason = skipped_outcome(outcome);
-
-    assert_eq!(
-        reason,
-        SkipReason::Unreadable {
-            message: ExtractionError::Encrypted.to_string(),
         }
     );
 }
@@ -3894,7 +3875,7 @@ fn encrypted_and_unreadable_both_fail_the_titles() {
     ));
     assert!(matches!(
         encrypted.verdict,
-        FileOutcome::Skipped(SkipReason::Unreadable { .. })
+        FileOutcome::Skipped(SkipReason::Encrypted)
     ));
 
     let unreadable_documents = FakeDocuments::new().with_open_error(

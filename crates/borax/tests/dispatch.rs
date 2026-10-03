@@ -502,14 +502,18 @@ fn sections_for(identifier: &str, source: &str, tier: Option<&str>, cached: bool
                         service: source.to_string(),
                         outcome: ServiceOutcome::Found {
                             retrieval: FetchedFrom::Network,
-                            stored: Some(WriteStep::Written),
+                            stored: Some(WriteStep::NotAttempted {
+                                reason: "cache-bypassed".to_string(),
+                            }),
                         },
                     }],
                 },
                 record_retrieval: Some(RetrievedFrom::Network {
                     service: source.to_string(),
                 }),
-                match_check: MatchCheckStep::Agreed,
+                match_check: MatchCheckStep::InsufficientEvidence {
+                    reason: "record-untitled".to_string(),
+                },
                 acceptance: Acceptance::Automatic,
             }
         }
@@ -1981,7 +1985,9 @@ fn human_format_omits_run_started_but_still_ends_with_the_summary_line() {
 
     assert_eq!(
         lines.first(),
-        Some(&"/lib/paper.pdf: resolved doi:10.1000/dispatch-human via crossref"),
+        Some(
+            &"/lib/paper.pdf: resolved doi:10.1000/dispatch-human to (Smith, 2024) via crossref, from the network"
+        ),
         "RunStarted must be omitted in human format, got {lines:?}"
     );
     assert_eq!(
@@ -5373,11 +5379,16 @@ fn a_file_settled_by_a_supplied_identifier_is_reported_once() {
     assert_eq!(renamed.len(), 1, "got {events:?}");
     assert!(skipped.is_empty(), "got {events:?}");
     match resolved[0] {
-        Event::Resolved { tier, .. } => {
-            assert_eq!(
-                tier.as_deref(),
-                Some("supplied"),
-                "the tier reported must say the identifier was supplied: got {resolved:?}"
+        Event::Resolved { sections, .. } => {
+            assert!(
+                matches!(
+                    sections.lookup,
+                    LookupStep::Attempted {
+                        origin: IdentifierOrigin::Operator,
+                        ..
+                    }
+                ),
+                "the lookup must say the identifier was supplied: got {resolved:?}"
             );
         }
         other => panic!("expected Resolved, got {other:?}"),
@@ -14687,9 +14698,14 @@ fn resolve_no_cache_still_reads_the_library_and_writes_nothing_to_the_index() {
         .find(|event| matches!(event, Event::Resolved { .. }))
         .unwrap_or_else(|| panic!("expected a Resolved event: got {events:?}"));
     match resolved {
-        Event::Resolved { record, tier, .. } => {
+        Event::Resolved {
+            record, sections, ..
+        } => {
             assert_eq!(record.title, corrected.title);
-            assert_eq!(tier.as_deref(), Some("library"));
+            assert!(matches!(
+                sections.record_retrieval,
+                Some(RetrievedFrom::Library { .. })
+            ));
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
@@ -14931,7 +14947,7 @@ fn resolve_with_one_unreadable_record_warns_once_and_still_tracks_the_rest() {
         .iter()
         .find(|line| line["path"].as_str().unwrap_or("").ends_with("good.pdf"))
         .unwrap_or_else(|| panic!("no event for good.pdf: {lines:?}"));
-    assert_eq!(good_event["library"]["kind"], "tracked");
+    assert_eq!(good_event["library"]["answer"]["kind"], "tracked");
     let unrecorded_event = lines
         .iter()
         .find(|line| {
@@ -14941,7 +14957,10 @@ fn resolve_with_one_unreadable_record_warns_once_and_still_tracks_the_rest() {
                 .ends_with("unrecorded.pdf")
         })
         .unwrap_or_else(|| panic!("no event for unrecorded.pdf: {lines:?}"));
-    assert_eq!(unrecorded_event["library"]["kind"], "unreadable-records");
+    assert_eq!(
+        unrecorded_event["library"]["answer"]["kind"],
+        "unreadable-records"
+    );
 }
 
 /// A library with no store faults writes no artifact-store warning.
@@ -16029,8 +16048,18 @@ fn a_retry_after_an_outage_keeps_the_extraction_pass_as_tier_not_supplied() {
         .iter()
         .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
     {
-        Some(Event::Resolved { tier, .. }) => {
-            assert_eq!(tier.as_deref(), Some("embedded-metadata"));
+        Some(Event::Resolved { sections, .. }) => {
+            assert!(matches!(
+                &sections.extraction.result,
+                ExtractionResultStep::Found { tier, .. } if tier == "embedded-metadata"
+            ));
+            assert!(matches!(
+                sections.lookup,
+                LookupStep::Attempted {
+                    origin: IdentifierOrigin::Extracted,
+                    ..
+                }
+            ));
         }
         other => panic!("expected Event::Resolved after the retry, got {other:?}"),
     }
@@ -16827,8 +16856,8 @@ fn resolve_with_an_unlistable_artifact_store_warns_once_and_reports_unreadable_r
         .iter()
         .find(|line| line["event"] == "resolved" || line["event"] == "skipped")
         .unwrap_or_else(|| panic!("no per-file event: {lines:?}"));
-    assert_eq!(resolved["library"]["kind"], "unreadable-records");
-    assert_eq!(resolved["library"]["listed"], false);
+    assert_eq!(resolved["library"]["answer"]["kind"], "unreadable-records");
+    assert_eq!(resolved["library"]["answer"]["listed"], false);
 }
 
 /// design D2a: `borax validate` over a library whose

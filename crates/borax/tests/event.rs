@@ -2396,6 +2396,105 @@ fn human_line_appends_the_library_problem_clause_after_the_from_clause() {
     );
 }
 
+/// The library-problem clause follows the `from` clause on a `resolved`
+/// line too, here a content-index answer whose record names no service.
+#[test]
+fn human_line_appends_the_library_problem_clause_to_a_content_index_resolved_line() {
+    let mut sections = sections_via_content_index();
+    sections.library = LibraryStep::Consulted {
+        answer: LibraryAnswer::DanglingItem {
+            artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
+            item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
+        },
+    };
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    };
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: resolved doi:10.1000/xyz123, from the content index; the library \
+         could not answer: artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links to item \
+         0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70, which the library does not hold"
+    );
+}
+
+#[test]
+fn human_line_names_every_artifact_of_an_ambiguous_library_problem() {
+    let event = skipped_with_library(LibraryAnswer::Ambiguous {
+        artifacts: vec!["a-id".to_string(), "b-id".to_string()],
+    });
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: 2 artifact records claim this file: a-id, b-id"
+    );
+}
+
+#[test]
+fn human_line_names_the_unreadable_records_wording_for_each_shape() {
+    let one = skipped_with_library(LibraryAnswer::UnreadableRecords {
+        listed: true,
+        unreadable: 1,
+    });
+    assert_eq!(
+        human_line(&one).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: 1 artifact record file could not be read, so the \
+         library cannot say whether it tracks this file"
+    );
+
+    let several = skipped_with_library(LibraryAnswer::UnreadableRecords {
+        listed: true,
+        unreadable: 3,
+    });
+    assert_eq!(
+        human_line(&several).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: 3 artifact record files could not be read, so the \
+         library cannot say whether it tracks this file"
+    );
+
+    let unlistable = skipped_with_library(LibraryAnswer::UnreadableRecords {
+        listed: false,
+        unreadable: 0,
+    });
+    assert_eq!(
+        human_line(&unlistable).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: the library's artifact records could not be listed, \
+         so it cannot say whether it tracks this file"
+    );
+}
+
+/// A tracked file the operator re-identified is reported from the
+/// service that answered, and its library answer adds no clause.
+#[test]
+fn human_line_of_a_supplied_tracked_file_names_the_service() {
+    let mut sections = sections_via_network("crossref", "doi:10.1000/xyz123");
+    sections.library = LibraryStep::Consulted {
+        answer: tracked_answer(),
+    };
+    if let LookupStep::Attempted { origin, .. } = &mut sections.lookup {
+        *origin = IdentifierOrigin::Operator;
+    }
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    };
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: resolved doi:10.1000/xyz123 via crossref, from the network"
+    );
+}
+
 /// `Untracked` adds nothing: a library answer with no problem leaves
 /// the line as the `from` clause alone states it.
 #[test]
@@ -2422,7 +2521,11 @@ fn human_line_with_no_library_consultation_is_unchanged() {
 /// title, authors and year.
 #[test]
 fn human_line_of_resolved_shows_the_work_and_the_from_clause() {
-    let record = record_with(Some("Determination of things"), &["Smith"], Some(2015));
+    let mut record = record_with(Some("Determination of things"), &["Smith"], Some(2015));
+    record
+        .borax
+        .provenance
+        .insert("title".to_string(), Source::Crossref);
     let mut sections = sections_via_network("crossref", "doi:10.1039/c5ay00042d");
     sections.record_retrieval = Some(RetrievedFrom::ContentIndex);
     sections.content_index.read = IndexReadStep::Hit;
