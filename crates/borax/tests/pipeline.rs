@@ -36,7 +36,7 @@ use borax_pdf::scan::FoundIdentifier;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
 use borax_pdf::tiered::{Extracted, ExtractionConfig, Tier};
 use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
-use borax_sources::conflict::Insufficient;
+use borax_sources::conflict::{Conflict, Insufficient};
 use borax_sources::source::{Fetched, Retrieval, Source, SourceError, SourceName};
 use borax_sources::store::{ContentIndex, hash_file};
 use tempfile::tempdir;
@@ -384,57 +384,6 @@ fn tier_str(tier: Tier) -> &'static str {
     }
 }
 
-/// What `FileRecord::tier()` reported before design D11 removed it,
-/// reconstructed directly from `evidence`: the same three cases
-/// (extracted, supplied, the library) plus `None` for a content-index
-/// answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Provenance {
-    Extracted(Tier),
-    Supplied,
-    Library,
-}
-
-fn tier_of(evidence: &Evidence) -> Option<Provenance> {
-    match evidence.retrieval()? {
-        RecordRetrieval::ServiceCache { .. } | RecordRetrieval::Network { .. } => {
-            match &evidence.lookup {
-                LookupEvidence::Attempted {
-                    origin: Origin::Extracted(tier),
-                    ..
-                } => Some(Provenance::Extracted(*tier)),
-                LookupEvidence::Attempted {
-                    origin: Origin::Operator,
-                    ..
-                } => Some(Provenance::Supplied),
-                LookupEvidence::NotAttempted(_) => None,
-            }
-        }
-        RecordRetrieval::Library { .. } => Some(Provenance::Library),
-        RecordRetrieval::ContentIndex => None,
-    }
-}
-
-/// What `FileRecord::source()` reported before design D11 removed it.
-fn source_of(evidence: &Evidence) -> Option<SourceName> {
-    match evidence.retrieval()? {
-        RecordRetrieval::ServiceCache { service } | RecordRetrieval::Network { service } => {
-            Some(service)
-        }
-        RecordRetrieval::Library { .. } | RecordRetrieval::ContentIndex => None,
-    }
-}
-
-/// What `FileRecord::cached()` reported before design D11 removed it.
-fn cached_of(evidence: &Evidence) -> bool {
-    evidence.retrieval() == Some(RecordRetrieval::ContentIndex)
-}
-
-/// What `FileRecord::claims()` reported before design D11 removed it.
-fn claims_of(evidence: &Evidence) -> &[Claim] {
-    evidence.extraction.titles.claims()
-}
-
 /// What a schema-3 event's `library: Option<LibraryAnswer>` field
 /// reported, reconstructed from a section's `LibraryStep` (design D14's
 /// mapping: `library == {kind: ..}` becomes `library == {status:
@@ -444,14 +393,6 @@ fn library_of(sections: &Sections) -> Option<LibraryAnswer> {
     match &sections.library {
         LibraryStep::Consulted { answer } => Some(answer.clone()),
         LibraryStep::NotAttempted { .. } => None,
-    }
-}
-
-/// What `FileRecord::found()` reported before design D11 removed it.
-fn found_of(evidence: &Evidence) -> Option<&Identifier> {
-    match &evidence.lookup {
-        LookupEvidence::Attempted { identifier, .. } => Some(identifier),
-        LookupEvidence::NotAttempted(_) => None,
     }
 }
 
@@ -490,12 +431,19 @@ fn embedded_metadata_identifier_resolves_via_the_first_source_uncached() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(file_record.record, record_with_doi("10.1000/embedded"));
-    assert_eq!(source_of(&file_record.evidence), Some(SourceName::Crossref));
     assert_eq!(
-        tier_of(&file_record.evidence),
-        Some(Provenance::Extracted(Tier::EmbeddedMetadata))
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
     );
-    assert!(!cached_of(&file_record.evidence));
+    assert_eq!(
+        file_record.evidence.lookup.extracted(),
+        Some((
+            &Identifier::Doi(doi("10.1000/embedded")),
+            Tier::EmbeddedMetadata
+        ))
+    );
 }
 
 #[test]
@@ -515,8 +463,8 @@ fn text_layer_identifier_reports_the_text_layer_tier() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(
-        tier_of(&file_record.evidence),
-        Some(Provenance::Extracted(Tier::TextLayer))
+        file_record.evidence.lookup.extracted(),
+        Some((&Identifier::Doi(doi("10.1000/text-layer")), Tier::TextLayer))
     );
 }
 
@@ -546,9 +494,15 @@ fn content_index_hit_is_returned_without_opening_the_file() {
     let file_record = resolved_outcome(outcome);
 
     assert_eq!(file_record.record, indexed);
-    assert_eq!(source_of(&file_record.evidence), None);
-    assert_eq!(tier_of(&file_record.evidence), None);
-    assert!(cached_of(&file_record.evidence));
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::ContentIndex)
+    );
+    assert_eq!(file_record.evidence.content_index.read, IndexRead::Hit);
+    assert_eq!(
+        file_record.evidence.lookup,
+        LookupEvidence::NotAttempted(Unattempted::ContentIndexHit)
+    );
     assert_eq!(documents.open_calls(), 0);
 }
 
@@ -570,7 +524,13 @@ fn cache_false_bypasses_the_content_index() {
     assert_eq!(documents.open_calls(), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(file_record.record, record_with_doi("10.1000/live"));
-    assert!(!cached_of(&file_record.evidence));
+    assert_eq!(file_record.evidence.content_index.read, IndexRead::Bypassed);
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -600,7 +560,16 @@ fn a_hash_failure_proceeds_to_open_and_extract_rather_than_skipping() {
     assert_eq!(documents.hash_calls(), 1);
     assert_eq!(documents.open_calls(), 1);
     assert_eq!(file_record.record, record_with_doi("10.1000/unhashable"));
-    assert!(!cached_of(&file_record.evidence));
+    assert!(matches!(
+        file_record.evidence.content_index.read,
+        IndexRead::Unavailable { .. }
+    ));
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::Crossref
+        })
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -931,7 +900,12 @@ fn crossref_outage_falls_back_to_openalex() {
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
     let file_record = resolved_outcome(outcome);
 
-    assert_eq!(source_of(&file_record.evidence), Some(SourceName::OpenAlex));
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::OpenAlex
+        })
+    );
     assert_eq!(file_record.record, record_with_doi("10.1000/outage"));
 }
 
@@ -1094,6 +1068,823 @@ fn attempts_of_reports_each_source_in_order() {
             },
         ]
     );
+}
+
+// ---------------------------------------------------------------------
+// Evidence::sections: the projection itself, field by field
+// (design D3, D5, task 2.1)
+//
+// Every test here builds an `Evidence` directly and reads
+// `Evidence::sections(acceptance)` back, so what is pinned is the
+// projection's own mapping rather than anything a resolution pass
+// happens to produce. `evidence_with` holds everything but the one
+// field each test varies at its default ("no library", a miss, nothing
+// extracted, nothing looked up, no match check), so each test's diff
+// from the default is exactly the row it is pinning.
+// ---------------------------------------------------------------------
+
+/// A complete `Evidence`, every field defaulted so a test can override
+/// only the one field it is about.
+fn evidence_with(
+    library: Consultation,
+    content_index: IndexEvidence,
+    extraction: ExtractionEvidence,
+    lookup: LookupEvidence,
+    match_check: MatchCheck,
+) -> Evidence {
+    Evidence {
+        library,
+        content_index,
+        extraction,
+        lookup,
+        match_check,
+    }
+}
+
+fn default_content_index() -> IndexEvidence {
+    IndexEvidence {
+        read: IndexRead::Miss,
+        write: IndexWrite::Attempted(CacheWrite::Written),
+    }
+}
+
+fn default_extraction() -> ExtractionEvidence {
+    ExtractionEvidence {
+        result: ExtractionStep::NotAttempted(Unattempted::NoRecord),
+        titles: Titles::NotAttempted(Unattempted::NoRecord),
+    }
+}
+
+/// design D3: every `Consultation::Consulted` answer round-trips into
+/// `LibraryStep::Consulted { answer }` unchanged, for all ten
+/// `LibraryAnswer` kinds; `NotConsulted(reason)` becomes
+/// `NotAttempted { reason: reason.as_str() }`.
+#[test]
+fn sections_projects_every_consultation() {
+    let answers = [
+        LibraryAnswer::Tracked {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+        },
+        LibraryAnswer::Untracked,
+        LibraryAnswer::UnrecognisedContent {
+            artifacts: vec!["a".to_string()],
+        },
+        LibraryAnswer::Ambiguous {
+            artifacts: vec!["a".to_string(), "b".to_string()],
+        },
+        LibraryAnswer::NoItem {
+            artifact: "a".to_string(),
+        },
+        LibraryAnswer::DanglingItem {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+        },
+        LibraryAnswer::UnreadableItem {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+            path: PathBuf::from("/lib/items/key.i.toml"),
+            message: "bad toml".to_string(),
+        },
+        LibraryAnswer::AmbiguousItem {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+            files: vec![PathBuf::from("/lib/items/x.i.toml")],
+        },
+        LibraryAnswer::Unhashable {
+            artifacts: vec!["a".to_string()],
+        },
+        LibraryAnswer::UnreadableRecords {
+            listed: true,
+            unreadable: 2,
+        },
+    ];
+
+    for answer in answers {
+        let evidence = evidence_with(
+            Consultation::Consulted(answer.clone()),
+            default_content_index(),
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(
+            sections.library,
+            LibraryStep::Consulted {
+                answer: answer.clone()
+            },
+            "answer {answer:?}"
+        );
+    }
+
+    for reason in [
+        Unattempted::NoLibrary,
+        Unattempted::OutsideLibrary,
+        Unattempted::ContentDuplicate,
+    ] {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(reason),
+            default_content_index(),
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(
+            sections.library,
+            LibraryStep::NotAttempted {
+                reason: reason.as_str().to_string()
+            },
+            "reason {reason:?}"
+        );
+    }
+}
+
+/// design D3: every `IndexRead` and `IndexWrite` kind, including
+/// `IndexWrite::Attempted(CacheWrite::Failed { message })`, projects
+/// onto the matching `IndexReadStep`/`WriteStep`.
+#[test]
+fn sections_projects_every_index_read_and_write() {
+    let reads = [
+        (IndexRead::Hit, IndexReadStep::Hit),
+        (IndexRead::Miss, IndexReadStep::Miss),
+        (IndexRead::Bypassed, IndexReadStep::Bypassed),
+        (
+            IndexRead::Unavailable {
+                message: "cannot hash".to_string(),
+            },
+            IndexReadStep::Unavailable {
+                message: "cannot hash".to_string(),
+            },
+        ),
+        (
+            IndexRead::NotAttempted(Unattempted::ContentDuplicate),
+            IndexReadStep::NotAttempted {
+                reason: "content-duplicate".to_string(),
+            },
+        ),
+    ];
+    for (read, expected) in reads {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            IndexEvidence {
+                read,
+                write: IndexWrite::Attempted(CacheWrite::Written),
+            },
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(sections.content_index.read, expected);
+    }
+
+    let writes = [
+        (
+            IndexWrite::Attempted(CacheWrite::Written),
+            WriteStep::Written,
+        ),
+        (
+            IndexWrite::Attempted(CacheWrite::Failed {
+                message: "disk full".to_string(),
+            }),
+            WriteStep::Failed {
+                message: "disk full".to_string(),
+            },
+        ),
+        (
+            IndexWrite::NotAttempted(Unattempted::Refused),
+            WriteStep::NotAttempted {
+                reason: "refused".to_string(),
+            },
+        ),
+    ];
+    for (write, expected) in writes {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            IndexEvidence {
+                read: IndexRead::Miss,
+                write,
+            },
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(sections.content_index.write, expected);
+    }
+}
+
+/// design D3: every `ExtractionStep` kind and every `Titles` state,
+/// `Titles::Read(vec![])` included (an opened file claiming no title is
+/// not the same as a file not opened at all).
+#[test]
+fn sections_projects_every_extraction_step_and_titles_state() {
+    let results = [
+        (
+            ExtractionStep::Ran(Extraction::Found {
+                identifier: "doi:10.1000/x".to_string(),
+                tier: "text-layer".to_string(),
+            }),
+            ExtractionResultStep::Found {
+                identifier: "doi:10.1000/x".to_string(),
+                tier: "text-layer".to_string(),
+            },
+        ),
+        (
+            ExtractionStep::Ran(Extraction::NoTextLayer),
+            ExtractionResultStep::NoTextLayer,
+        ),
+        (
+            ExtractionStep::Ran(Extraction::TextWithoutIdentifier),
+            ExtractionResultStep::TextWithoutIdentifier,
+        ),
+        (
+            ExtractionStep::Ran(Extraction::Encrypted),
+            ExtractionResultStep::Encrypted,
+        ),
+        (
+            ExtractionStep::Ran(Extraction::Unreadable {
+                message: "truncated".to_string(),
+            }),
+            ExtractionResultStep::Unreadable {
+                message: "truncated".to_string(),
+            },
+        ),
+        (
+            ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+            ExtractionResultStep::NotAttempted {
+                reason: "content-index-hit".to_string(),
+            },
+        ),
+    ];
+    for (result, expected) in results {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            default_content_index(),
+            ExtractionEvidence {
+                result,
+                titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
+            },
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(sections.extraction.result, expected);
+    }
+
+    let claim = Claim {
+        from: ClaimOrigin::Info,
+        title: "A Title".to_string(),
+    };
+    let titles = [
+        (
+            Titles::Read(Vec::new()),
+            TitlesStep::Read { claims: Vec::new() },
+        ),
+        (
+            Titles::Read(vec![claim.clone()]),
+            TitlesStep::Read {
+                claims: vec![claim],
+            },
+        ),
+        (
+            Titles::Failed {
+                message: "corrupt stream".to_string(),
+            },
+            TitlesStep::Failed {
+                message: "corrupt stream".to_string(),
+            },
+        ),
+        (
+            Titles::NotAttempted(Unattempted::ExtractionFailed),
+            TitlesStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+        ),
+    ];
+    for (titles, expected) in titles {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            default_content_index(),
+            ExtractionEvidence {
+                result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+                titles: titles.clone(),
+            },
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(sections.extraction.titles, expected, "titles {titles:?}");
+    }
+}
+
+/// design D1, D3: an attempted lookup projects to `attempted` with its
+/// `origin` and no tier at all — `LookupStep::Attempted` has no tier
+/// field, since `extraction.result.tier` already states the pass once.
+/// Attempted with no attempts becomes `no-eligible-service` rather than
+/// `attempted` with an empty list.
+#[test]
+fn sections_projects_lookup_attempted_and_no_eligible_service() {
+    let identifier = Identifier::Doi(doi("10.1000/x"));
+    let found = ServiceAttempt {
+        service: SourceName::Crossref,
+        outcome: Ok(Retrieval::Network { stored: None }),
+    };
+
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![found.clone()],
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    let sections = evidence.sections(Acceptance::Automatic);
+    match sections.lookup {
+        LookupStep::Attempted {
+            identifier: got_identifier,
+            origin,
+            attempts,
+        } => {
+            assert_eq!(got_identifier, "doi:10.1000/x");
+            assert_eq!(origin, IdentifierOrigin::Extracted);
+            assert_eq!(attempts.len(), 1);
+        }
+        other => panic!("expected Attempted, got {other:?}"),
+    }
+
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Operator,
+            attempts: vec![found],
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    let sections = evidence.sections(Acceptance::Automatic);
+    assert!(matches!(
+        sections.lookup,
+        LookupStep::Attempted {
+            origin: IdentifierOrigin::Operator,
+            ..
+        }
+    ));
+
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: Vec::new(),
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    let sections = evidence.sections(Acceptance::Automatic);
+    assert_eq!(
+        sections.lookup,
+        LookupStep::NoEligibleService {
+            identifier: "doi:10.1000/x".to_string(),
+            origin: IdentifierOrigin::Extracted,
+        }
+    );
+
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::NotAttempted(Unattempted::ExtractionFailed),
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    let sections = evidence.sections(Acceptance::Automatic);
+    assert_eq!(
+        sections.lookup,
+        LookupStep::NotAttempted {
+            reason: "extraction-failed".to_string()
+        }
+    );
+}
+
+/// design D5: every `ServiceAttempt` outcome projects to its
+/// `ServiceOutcome`, including `Network { stored: None }` becoming a
+/// found attempt whose `stored` is not attempted for `cache-bypassed`
+/// — nothing was fetched is not the same as nothing in front of it.
+#[test]
+fn sections_projects_every_service_attempt_outcome() {
+    let identifier = Identifier::Doi(doi("10.1000/x"));
+    let cases = [
+        (
+            Ok(Retrieval::ServiceCache),
+            ServiceOutcome::Found {
+                retrieval: FetchedFrom::ServiceCache,
+                stored: None,
+            },
+        ),
+        (
+            Ok(Retrieval::Network {
+                stored: Some(CacheWrite::Written),
+            }),
+            ServiceOutcome::Found {
+                retrieval: FetchedFrom::Network,
+                stored: Some(WriteStep::Written),
+            },
+        ),
+        (
+            Ok(Retrieval::Network {
+                stored: Some(CacheWrite::Failed {
+                    message: "disk full".to_string(),
+                }),
+            }),
+            ServiceOutcome::Found {
+                retrieval: FetchedFrom::Network,
+                stored: Some(WriteStep::Failed {
+                    message: "disk full".to_string(),
+                }),
+            },
+        ),
+        (
+            Ok(Retrieval::Network { stored: None }),
+            ServiceOutcome::Found {
+                retrieval: FetchedFrom::Network,
+                stored: Some(WriteStep::NotAttempted {
+                    reason: "cache-bypassed".to_string(),
+                }),
+            },
+        ),
+        (Err(SourceError::NotFound), ServiceOutcome::NotFound),
+        (
+            Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+            ServiceOutcome::Unavailable {
+                message: "503".to_string(),
+            },
+        ),
+        (Err(SourceError::RateLimited), ServiceOutcome::RateLimited),
+        (
+            Err(SourceError::Malformed {
+                message: "not JSON".to_string(),
+            }),
+            ServiceOutcome::Malformed {
+                message: "not JSON".to_string(),
+            },
+        ),
+    ];
+
+    for (outcome, expected) in cases {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            default_content_index(),
+            default_extraction(),
+            LookupEvidence::Attempted {
+                identifier: identifier.clone(),
+                origin: Origin::Extracted(Tier::TextLayer),
+                attempts: vec![ServiceAttempt {
+                    service: SourceName::Crossref,
+                    outcome: outcome.clone(),
+                }],
+            },
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        let LookupStep::Attempted { attempts, .. } = sections.lookup else {
+            panic!("expected an attempted lookup");
+        };
+        assert_eq!(
+            attempts,
+            vec![ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: expected,
+            }],
+            "engine outcome {outcome:?}"
+        );
+    }
+}
+
+/// design D6: `record_retrieval` is `Evidence::retrieval()` projected,
+/// for all four places and for no record at all.
+#[test]
+fn sections_projects_record_retrieval_for_every_place_and_none() {
+    let identifier = Identifier::Doi(doi("10.1000/x"));
+
+    // Library: the lookup is not attempted because the library
+    // answered, and the library tracks the file.
+    let evidence = evidence_with(
+        Consultation::Consulted(LibraryAnswer::Tracked {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+        }),
+        IndexEvidence {
+            read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+            write: IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
+        },
+        ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::LibraryAnswered),
+            titles: Titles::NotAttempted(Unattempted::LibraryAnswered),
+        },
+        LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
+        MatchCheck::NotAttempted(Unattempted::LibraryAnswered),
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        Some(RetrievedFrom::Library {
+            artifact: "a".to_string(),
+            item: "i".to_string(),
+        })
+    );
+
+    // Content index: the index held a record for the hash.
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        IndexEvidence {
+            read: IndexRead::Hit,
+            write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+            titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
+        MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        Some(RetrievedFrom::ContentIndex)
+    );
+
+    // Service cache: a service's response cache answered.
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Ok(Retrieval::ServiceCache),
+            }],
+        },
+        MatchCheck::Agreed,
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        Some(RetrievedFrom::ServiceCache {
+            service: "crossref".to_string()
+        })
+    );
+
+    // Network: the service answered over the network.
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::OpenAlex,
+                outcome: Ok(Retrieval::Network {
+                    stored: Some(CacheWrite::Written),
+                }),
+            }],
+        },
+        MatchCheck::Agreed,
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        Some(RetrievedFrom::Network {
+            service: "openalex".to_string()
+        })
+    );
+
+    // None: the verdict reached no record at all.
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        IndexEvidence {
+            read: IndexRead::Miss,
+            write: IndexWrite::NotAttempted(Unattempted::NoRecord),
+        },
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier,
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Err(SourceError::NotFound),
+            }],
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    assert_eq!(
+        evidence.sections(Acceptance::Automatic).record_retrieval,
+        None
+    );
+}
+
+/// design D3: every `MatchCheck` kind, including the three
+/// `Insufficient` reasons.
+#[test]
+fn sections_projects_every_match_check() {
+    let cases = [
+        (MatchCheck::Agreed, MatchCheckStep::Agreed),
+        (
+            MatchCheck::Conflict(Conflict {
+                field: "title",
+                extracted: "Old Title".to_string(),
+                resolved: "New Title".to_string(),
+                similarity: 0.1,
+            }),
+            MatchCheckStep::Conflict {
+                field: "title".to_string(),
+                extracted: "Old Title".to_string(),
+                resolved: "New Title".to_string(),
+                similarity: 0.1,
+            },
+        ),
+        (
+            MatchCheck::Insufficient(Insufficient::RecordUntitled),
+            MatchCheckStep::InsufficientEvidence {
+                reason: "record-untitled".to_string(),
+            },
+        ),
+        (
+            MatchCheck::Insufficient(Insufficient::NoTitles),
+            MatchCheckStep::InsufficientEvidence {
+                reason: "no-titles".to_string(),
+            },
+        ),
+        (
+            MatchCheck::Insufficient(Insufficient::NoEvidence),
+            MatchCheckStep::InsufficientEvidence {
+                reason: "no-evidence".to_string(),
+            },
+        ),
+        (
+            MatchCheck::NotAttempted(Unattempted::NoRecord),
+            MatchCheckStep::NotAttempted {
+                reason: "no-record".to_string(),
+            },
+        ),
+    ];
+
+    for (match_check, expected) in cases {
+        let evidence = evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            default_content_index(),
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::NoRecord),
+            match_check.clone(),
+        );
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(
+            sections.match_check, expected,
+            "match_check {match_check:?}"
+        );
+    }
+}
+
+/// design D2, D7: `acceptance` passes through unchanged, independently
+/// of every other field.
+#[test]
+fn sections_passes_acceptance_through() {
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::NotAttempted(Unattempted::NoRecord),
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+
+    for acceptance in [
+        Acceptance::Automatic,
+        Acceptance::Overridden,
+        Acceptance::NotApplicable,
+    ] {
+        assert_eq!(evidence.sections(acceptance).acceptance, acceptance);
+    }
+}
+
+/// design D11: `Unattempted::CacheBypassed` is the one not-attempted
+/// reason change 8's vocabulary lacked a name for, so the projection
+/// alone produces it (no engine section holds it).
+#[test]
+fn unattempted_cache_bypassed_as_str_is_cache_bypassed() {
+    assert_eq!(Unattempted::CacheBypassed.as_str(), "cache-bypassed");
+}
+
+/// design D1, D11: every reason string anywhere in a projected
+/// `Sections` is one of `Unattempted::as_str`'s kebab-case names —
+/// nothing invents its own vocabulary, including the `cache-bypassed`
+/// reason a found attempt's `stored` carries.
+#[test]
+fn every_reason_in_a_projected_sections_is_a_known_unattempted_reason() {
+    let known: Vec<&'static str> = [
+        Unattempted::NoLibrary,
+        Unattempted::OutsideLibrary,
+        Unattempted::ContentDuplicate,
+        Unattempted::LibraryAnswered,
+        Unattempted::ContentIndexHit,
+        Unattempted::ExtractionFailed,
+        Unattempted::NoRecord,
+        Unattempted::Refused,
+        Unattempted::Unhashable,
+        Unattempted::AwaitingAcceptance,
+        Unattempted::CacheBypassed,
+    ]
+    .into_iter()
+    .map(Unattempted::as_str)
+    .collect();
+
+    // A content-duplicate verdict: every section not attempted, and a
+    // found attempt whose cache was bypassed, so every reason the
+    // vocabulary can produce appears somewhere in one projection.
+    let evidence = Evidence::not_attempted(Unattempted::ContentDuplicate);
+    let sections = evidence.sections(Acceptance::NotApplicable);
+    let mut reasons = reasons_in(&sections);
+
+    let bypassed = evidence_with(
+        Consultation::NotConsulted(Unattempted::OutsideLibrary),
+        IndexEvidence {
+            read: IndexRead::NotAttempted(Unattempted::Unhashable),
+            write: IndexWrite::NotAttempted(Unattempted::Refused),
+        },
+        ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::LibraryAnswered),
+            titles: Titles::NotAttempted(Unattempted::ExtractionFailed),
+        },
+        LookupEvidence::Attempted {
+            identifier: Identifier::Doi(doi("10.1000/x")),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Ok(Retrieval::Network { stored: None }),
+            }],
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    reasons.extend(reasons_in(&bypassed.sections(Acceptance::Automatic)));
+
+    for reason in &reasons {
+        assert!(
+            known.contains(&reason.as_str()),
+            "reason {reason:?} is not in Unattempted::as_str()'s vocabulary"
+        );
+    }
+    assert!(
+        reasons.iter().any(|reason| reason == "cache-bypassed"),
+        "got {reasons:?}"
+    );
+}
+
+/// Every `reason` string a projected `Sections` carries, at any depth:
+/// each section's own `reason` field when it is `not-attempted`, plus a
+/// found attempt's `stored` reason.
+fn reasons_in(sections: &Sections) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if let LibraryStep::NotAttempted { reason } = &sections.library {
+        reasons.push(reason.clone());
+    }
+    if let IndexReadStep::NotAttempted { reason } = &sections.content_index.read {
+        reasons.push(reason.clone());
+    }
+    if let WriteStep::NotAttempted { reason } = &sections.content_index.write {
+        reasons.push(reason.clone());
+    }
+    if let ExtractionResultStep::NotAttempted { reason } = &sections.extraction.result {
+        reasons.push(reason.clone());
+    }
+    if let TitlesStep::NotAttempted { reason } = &sections.extraction.titles {
+        reasons.push(reason.clone());
+    }
+    match &sections.lookup {
+        LookupStep::NotAttempted { reason } => reasons.push(reason.clone()),
+        LookupStep::Attempted { attempts, .. } => {
+            for attempt in attempts {
+                if let ServiceOutcome::Found {
+                    stored: Some(WriteStep::NotAttempted { reason }),
+                    ..
+                } = &attempt.outcome
+                {
+                    reasons.push(reason.clone());
+                }
+            }
+        }
+        LookupStep::NoEligibleService { .. } => {}
+    }
+    if let MatchCheckStep::NotAttempted { reason } = &sections.match_check {
+        reasons.push(reason.clone());
+    }
+    reasons
 }
 
 // ---------------------------------------------------------------------
@@ -2074,8 +2865,9 @@ fn a_content_match_at_the_incoming_path_is_not_a_duplicate_and_resolves_from_the
 
     let file_record = resolved_outcome(outcome);
     assert_eq!(file_record.record, indexed);
-    assert!(
-        cached_of(&file_record.evidence),
+    assert_eq!(
+        file_record.evidence.retrieval(),
+        Some(RecordRetrieval::ContentIndex),
         "the file's own record is not a query"
     );
     assert_eq!(documents.open_calls(), 0);
@@ -2537,7 +3329,12 @@ fn a_failure_before_a_success_keeps_both_attempts_in_order() {
         }
         other => panic!("expected Attempted, got {other:?}"),
     }
-    assert_eq!(source_of(&file.evidence), Some(SourceName::OpenAlex));
+    assert_eq!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::Network {
+            service: SourceName::OpenAlex
+        })
+    );
     match resolved_event(path, &file) {
         Event::Resolved { sections, .. } => assert_eq!(
             sections.record_retrieval,
@@ -2699,7 +3496,6 @@ fn a_response_cache_hit_is_told_apart_from_the_network_answer() {
             service: SourceName::Crossref
         })
     );
-    assert!(!cached_of(&first_file.evidence));
 
     let second_path = Path::new("second.pdf");
     let second_documents = FakeDocuments::new().with_file(
@@ -2723,7 +3519,6 @@ fn a_response_cache_hit_is_told_apart_from_the_network_answer() {
             service: SourceName::Crossref
         })
     );
-    assert!(!cached_of(&second_file.evidence));
 }
 
 #[test]
@@ -3667,7 +4462,6 @@ fn resolve_supplied_on_a_file_with_no_identifier_fills_lookup_titles_and_match_c
     assert_eq!(file.evidence.library, prior.library);
     assert_eq!(file.evidence.content_index.read, prior.content_index.read);
     assert_eq!(file.evidence.extraction.result, prior.extraction.result);
-    assert_eq!(tier_of(&file.evidence), Some(Provenance::Supplied));
 }
 
 #[test]
@@ -3743,8 +4537,8 @@ fn resolve_supplied_with_a_retrys_origin_reports_the_extracted_tier() {
     .unwrap();
 
     assert_eq!(
-        tier_of(&file.evidence),
-        Some(Provenance::Extracted(Tier::TextLayer))
+        file.evidence.lookup.extracted(),
+        Some((&identifier, Tier::TextLayer))
     );
 }
 
@@ -3788,8 +4582,13 @@ fn resolve_supplied_after_a_content_index_hit_re_reads_titles_and_keeps_the_read
             service: SourceName::Crossref
         })
     );
-    assert!(!cached_of(&file.evidence));
-    assert_eq!(tier_of(&file.evidence), Some(Provenance::Supplied));
+    assert!(matches!(
+        file.evidence.lookup,
+        LookupEvidence::Attempted {
+            origin: Origin::Operator,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -3818,7 +4617,13 @@ fn resolve_supplied_on_a_tracked_file_keeps_the_library_answer() {
     )
     .unwrap();
 
-    assert_eq!(tier_of(&file.evidence), Some(Provenance::Supplied));
+    assert!(matches!(
+        file.evidence.lookup,
+        LookupEvidence::Attempted {
+            origin: Origin::Operator,
+            ..
+        }
+    ));
     assert_eq!(
         file.library(),
         Some(&LibraryAnswer::Tracked {
@@ -3826,7 +4631,6 @@ fn resolve_supplied_on_a_tracked_file_keeps_the_library_answer() {
             item: "item-id".to_string(),
         })
     );
-    assert!(!cached_of(&file.evidence));
     assert!(matches!(
         file.evidence.retrieval(),
         Some(RecordRetrieval::Network { .. })
@@ -4255,13 +5059,33 @@ fn a_tracked_file_resolves_from_its_item_with_no_extraction_no_source_and_no_ind
             FileOutcome::Resolved(file) => {
                 assert_eq!(file.record, item.record, "cache={cache}");
                 assert_eq!(
-                    tier_of(&file.evidence),
-                    Some(Provenance::Library),
+                    file.evidence.retrieval(),
+                    Some(RecordRetrieval::Library {
+                        artifact: file_artifact_id(&stores, &path, &hash),
+                        item: item.id.to_string(),
+                    }),
                     "cache={cache}"
                 );
-                assert!(!cached_of(&file.evidence), "cache={cache}");
-                assert_eq!(claims_of(&file.evidence), &[] as &[Claim], "cache={cache}");
-                assert_eq!(found_of(&file.evidence), None, "cache={cache}");
+                assert_eq!(
+                    file.evidence.content_index.read,
+                    IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+                    "cache={cache}"
+                );
+                assert_eq!(
+                    file.evidence.content_index.write,
+                    IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
+                    "cache={cache}"
+                );
+                assert_eq!(
+                    file.evidence.extraction.titles.claims(),
+                    &[] as &[Claim],
+                    "cache={cache}"
+                );
+                assert_eq!(
+                    file.evidence.lookup,
+                    LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
+                    "cache={cache}"
+                );
                 assert_eq!(
                     result.library().cloned(),
                     Some(LibraryAnswer::Tracked {

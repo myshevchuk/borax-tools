@@ -4971,7 +4971,7 @@ fn an_unreadable_file_with_a_known_hash_offers_to_supply_an_identifier() {
     let effective = effective_with_default_template("[auth][year]");
     let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
 
-    events_for(
+    let events = events_for(
         &Command::rename(vec![fixture.path.clone()], false),
         &Configs::uniform(effective),
         &fixture.adapters(&sources),
@@ -4982,6 +4982,19 @@ fn an_unreadable_file_with_a_known_hash_offers_to_supply_an_identifier() {
     let questions = asker.questions_asked();
     assert_eq!(questions.len(), 1, "got {questions:?}");
     assert_choices(&questions[0], Answer::Supply, &[Answer::Skip, Answer::Quit]);
+    // design D4, task 4.1: an encrypted file is still offered Supply,
+    // and declining reports the extraction kind, not `declined`.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path,
+                reason: SkipReason::Encrypted,
+                ..
+            } if *path == fixture.path
+        )),
+        "got {events:?}"
+    );
 }
 
 /// "already named, `--no-skip-named`": keep · supply a different
@@ -5448,17 +5461,25 @@ fn skipping_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
     )
     .unwrap();
 
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            Event::Skipped {
-                path,
-                reason: SkipReason::Declined,
-                ..
-            } if *path == fixture.path
-        )),
-        "a move that was on offer and then abandoned is declined: got {events:?}"
-    );
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path, .. } if *path == fixture.path))
+    {
+        Some(Event::Skipped {
+            reason: SkipReason::Declined,
+            sections,
+            candidate,
+            ..
+        }) => {
+            // design D4, task 4.1: `declined` is a non-verdict skip —
+            // the one that can only be reached interactively — and
+            // carries no sections and no candidate, same as a
+            // `target-taken` skip from a batch run.
+            assert!(sections.is_none(), "declined must carry no sections");
+            assert!(candidate.is_none(), "declined must carry no candidate");
+        }
+        other => panic!("a move that was on offer and then abandoned is declined: got {other:?}"),
+    }
     assert_eq!(
         fixture.index.get(&hash),
         Some(already_held),
@@ -11137,6 +11158,116 @@ fn a_batch_run_skips_a_file_whose_identifier_an_item_already_carries_as_a_work_d
     );
 }
 
+/// The maintainer's decision of 2026-10-03 (design D4): a work
+/// duplicate is also a resolution verdict, so its sections are
+/// `Standing::evidence` — the evidence of the record the file itself
+/// resolved to, `library` included — not a bare reason. The library
+/// here answers `untracked` for the incoming file; the sibling's own
+/// tracked status is a separate fact the `existing_path` already names.
+#[test]
+fn a_batch_work_duplicate_skip_carries_its_own_evidence_with_library_included() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    seed_sibling_artifact(
+        &root,
+        "sibling-original.pdf",
+        "Sibling",
+        2025,
+        "10.1000/task-7.6a-sections",
+        b"task-7.6a-sections sibling bytes",
+    );
+
+    let incoming = write_real_file(&root, "incoming.pdf", b"task-7.6a-sections incoming bytes");
+    let documents = FakeDocuments::new().with_file(
+        &incoming,
+        hash_bytes(b"task-7.6a-sections incoming bytes"),
+        pdf_with_embedded_doi("10.1000/task-7.6a-sections"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Sibling", 2025, "10.1000/task-7.6a-sections")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![incoming.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path, .. } if *path == incoming))
+    {
+        Some(Event::Skipped {
+            reason,
+            sections,
+            candidate,
+            ..
+        }) => {
+            assert!(
+                matches!(
+                    reason,
+                    SkipReason::Duplicate {
+                        reason: DuplicateReason::Work,
+                        ..
+                    }
+                ),
+                "got {reason:?}"
+            );
+            let sections = sections
+                .as_ref()
+                .unwrap_or_else(|| panic!("a work-duplicate skip must carry sections"));
+            assert_eq!(
+                sections.library,
+                LibraryStep::Consulted {
+                    answer: LibraryAnswer::Untracked
+                },
+                "the library section is the incoming file's own, not omitted"
+            );
+            assert!(
+                matches!(
+                    sections.lookup,
+                    LookupStep::Attempted {
+                        origin: IdentifierOrigin::Extracted,
+                        ..
+                    }
+                ),
+                "got {:?}",
+                sections.lookup
+            );
+            assert_eq!(
+                sections.record_retrieval,
+                Some(RetrievedFrom::Network {
+                    service: "crossref".to_string()
+                }),
+                "the record the file resolved to, not the sibling's own retrieval"
+            );
+            assert_eq!(sections.acceptance, Acceptance::NotApplicable);
+            assert!(
+                candidate.is_none(),
+                "candidate stays the conflict's refused record alone"
+            );
+        }
+        other => panic!("expected a work-duplicate Skipped, got {other:?}"),
+    }
+}
+
 /// task 7.6a: an interactive run over the same shape of file puts the
 /// question, offering exactly file-as-another-artifact, skip and quit
 /// with skip as the default — filing must never be — and naming both
@@ -11237,6 +11368,21 @@ fn an_interactive_run_offers_filing_a_work_duplicate_as_another_artifact() {
         )),
         "declining must report the work-duplicate reason and not `declined`: got {events:?}"
     );
+    // design D4, task 4.1: declining carries the same sections a batch
+    // run's work-duplicate skip would — the same verdict, reached
+    // interactively.
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path, .. } if *path == incoming))
+    {
+        Some(Event::Skipped { sections, .. }) => {
+            assert!(
+                sections.is_some(),
+                "declining a work duplicate must still carry its sections"
+            );
+        }
+        other => panic!("expected a work-duplicate Skipped, got {other:?}"),
+    }
 }
 
 /// task 7.6a: accepting returns the file to planning, where the
@@ -11312,6 +11458,21 @@ fn filing_a_work_duplicate_moves_it_and_records_it_against_the_same_item() {
         vec![Answer::Rename, Answer::Supply, Answer::Skip, Answer::Quit],
         "the second question must be the ordinary one about the move: got {:?}",
         questions[1].choices
+    );
+    // design D4, task 4.1: filing it reports a `resolved` event for the
+    // path, not a `skipped` one — the operator's "file it as another
+    // artifact" answer is an ordinary resolution from here on.
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Resolved { path, .. } if *path == incoming)),
+        "filing a work duplicate must emit a resolved event: got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Skipped { path, .. } if *path == incoming)),
+        "a filed work duplicate must not also be reported skipped: got {events:?}"
     );
     let moved = events
         .iter()
@@ -13007,6 +13168,137 @@ fn a_byte_identical_pair_neither_recorded_is_one_admission_and_one_content_dupli
         1,
         "the pair must mint one item, not two"
     );
+}
+
+/// The maintainer's decision of 2026-10-03 (design D4): `duplicate` is
+/// a resolution verdict whatever the run does next, so a content
+/// duplicate carries every section not attempted for
+/// `content-duplicate`, `record_retrieval` null, `acceptance`
+/// `not-applicable`, and no `candidate` — the shape
+/// `Evidence::not_attempted(ContentDuplicate)` projects, now pinned
+/// through the real batch driver rather than only at the event's own
+/// level.
+#[test]
+fn a_batch_content_duplicate_skip_carries_every_section_not_attempted() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = b"task-9.5-sections-pair bytes";
+    let a = write_real_file(&root, "a.pdf", bytes);
+    let b = write_real_file(&root, "b.pdf", bytes);
+    let hash = hash_bytes(bytes);
+    let documents = FakeDocuments::new()
+        .with_file(
+            &a,
+            hash.clone(),
+            pdf_with_embedded_doi("10.1000/task-9.5-sections-pair"),
+        )
+        .with_open_error(
+            &b,
+            hash.clone(),
+            ExtractionError::Unreadable {
+                message: "must never be opened: the content check runs before resolution"
+                    .to_string(),
+            },
+        );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Pair", 2024, "10.1000/task-9.5-sections-pair")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![a.clone(), b.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path, .. } if *path == b))
+    {
+        Some(Event::Skipped {
+            reason,
+            sections,
+            candidate,
+            ..
+        }) => {
+            assert!(
+                matches!(
+                    reason,
+                    SkipReason::Duplicate {
+                        reason: DuplicateReason::Content,
+                        ..
+                    }
+                ),
+                "got {reason:?}"
+            );
+            let sections = sections
+                .as_ref()
+                .unwrap_or_else(|| panic!("a duplicate skip must carry sections"));
+            let not_attempted = "content-duplicate".to_string();
+            assert_eq!(
+                sections.library,
+                LibraryStep::NotAttempted {
+                    reason: not_attempted.clone()
+                }
+            );
+            assert_eq!(
+                sections.content_index.read,
+                IndexReadStep::NotAttempted {
+                    reason: not_attempted.clone()
+                }
+            );
+            assert_eq!(
+                sections.content_index.write,
+                WriteStep::NotAttempted {
+                    reason: not_attempted.clone()
+                }
+            );
+            assert_eq!(
+                sections.extraction.result,
+                ExtractionResultStep::NotAttempted {
+                    reason: not_attempted.clone()
+                }
+            );
+            assert_eq!(
+                sections.extraction.titles,
+                TitlesStep::NotAttempted {
+                    reason: not_attempted.clone()
+                }
+            );
+            assert_eq!(
+                sections.lookup,
+                LookupStep::NotAttempted {
+                    reason: not_attempted.clone()
+                }
+            );
+            assert_eq!(sections.record_retrieval, None);
+            assert_eq!(
+                sections.match_check,
+                MatchCheckStep::NotAttempted {
+                    reason: not_attempted
+                }
+            );
+            assert_eq!(sections.acceptance, Acceptance::NotApplicable);
+            assert!(candidate.is_none());
+        }
+        other => panic!("expected a content-duplicate Skipped for b.pdf, got {other:?}"),
+    }
 }
 
 /// task 9.5, scenario "A byte-identical pair in one run": a preview of
@@ -15439,6 +15731,16 @@ fn supplying_a_different_identifier_for_a_tracked_file_reports_supplied_and_reli
                 library_of(sections),
                 Some(LibraryAnswer::Tracked { .. })
             ));
+            // design D6, task 4.1: supplying over a tracked file still
+            // names the service that answered, not the library — the
+            // library's own `tracked` answer is a separate fact from
+            // where the record itself came from.
+            assert_eq!(
+                sections.record_retrieval,
+                Some(RetrievedFrom::Network {
+                    service: "crossref".to_string()
+                })
+            );
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
@@ -15659,10 +15961,23 @@ fn interactive_retry_that_finds_a_conflict_keeps_the_dangling_item_problem() {
         .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
     {
         Some(Event::Skipped {
-            reason, sections, ..
+            reason,
+            sections,
+            candidate,
+            ..
         }) => {
             assert!(matches!(reason, SkipReason::Conflict), "got {reason:?}");
             assert_eq!(skip_library_of(sections), Some(expected_problem));
+            // design D4, task 4.1: a retry that lands on a conflict
+            // holds the refused candidate, exactly as a batch run's
+            // conflict skip would.
+            let candidate = candidate
+                .as_ref()
+                .unwrap_or_else(|| panic!("a conflict skip must carry its candidate"));
+            assert_eq!(
+                candidate.title,
+                Some("A Completely Different Title About Something Else".to_string())
+            );
         }
         other => panic!("expected a conflict Skipped after the retry, got {other:?}"),
     }
@@ -16158,6 +16473,142 @@ fn batch_target_taken_stays_library_null_while_resolved_carries_the_problem() {
             sections.is_none(),
             "target-taken is a non-verdict skip and carries no sections"
         ),
+        other => panic!("expected a TargetTaken Skipped, got {other:?}"),
+    }
+}
+
+/// design D4, task 4.1: in one batch run, the conflict skip and the
+/// unresolvable skip each carry every section, while the target-taken
+/// skip — reached after its own file resolved cleanly — carries none.
+/// The same invariant event.rs and pipeline.rs pin at the event's own
+/// level, now exercised through the real batch driver.
+#[test]
+fn batch_conflict_and_unresolvable_skips_carry_sections_while_target_taken_does_not() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let conflict_path = root.join("conflict.pdf");
+    let unresolvable_path = root.join("unresolvable.pdf");
+    let taken_path = root.join("taken.pdf");
+    let documents = FakeDocuments::new()
+        .with_file(
+            &conflict_path,
+            hash_for("batch-sections-conflict"),
+            pdf_with_embedded_doi("10.1000/batch-sections-conflict")
+                .with_title("Old Title Extracted from the PDF"),
+        )
+        .with_file(
+            &unresolvable_path,
+            hash_for("batch-sections-unresolvable"),
+            pdf_with_embedded_doi("10.1000/batch-sections-unresolvable"),
+        )
+        .with_file(
+            &taken_path,
+            hash_for("batch-sections-taken"),
+            pdf_with_embedded_doi("10.1000/batch-sections-taken"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/batch-sections-conflict",
+            record_by_with_title(
+                "Smith",
+                2024,
+                "10.1000/batch-sections-conflict",
+                "A Completely Different Title About Something Else",
+            ),
+        )
+        .answering(
+            "doi:10.1000/batch-sections-taken",
+            record_by("Taken", 2024, "10.1000/batch-sections-taken"),
+        );
+    // Nothing answers `batch-sections-unresolvable`, so `KeyedSource`
+    // reports `NotFound` and the file is unresolvable.
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new()
+        .with_existing(root.clone(), [("Taken2024.pdf", Some("some-other-hash"))]);
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(
+            vec![
+                conflict_path.clone(),
+                unresolvable_path.clone(),
+                taken_path.clone(),
+            ],
+            true,
+        ),
+        &Configs::uniform(effective_with(|layer| {
+            layer.templates = Some(BTreeMap::from([(
+                "default".to_string(),
+                "[auth][year]".to_string(),
+            )]));
+            layer.rename = Some(borax::config::RenameLayer {
+                collision: Some("skip".to_string()),
+                ..Default::default()
+            });
+        })),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let skip_for = |path: &Path| {
+        events
+            .iter()
+            .find(|event| matches!(event, Event::Skipped { path: p, .. } if p == path))
+            .unwrap_or_else(|| panic!("expected a skip for {path:?}: got {events:?}"))
+    };
+
+    match skip_for(&conflict_path) {
+        Event::Skipped {
+            reason: SkipReason::Conflict,
+            sections,
+            candidate,
+            ..
+        } => {
+            assert!(sections.is_some(), "a conflict skip must carry sections");
+            assert!(
+                candidate.is_some(),
+                "a conflict skip must carry its candidate"
+            );
+        }
+        other => panic!("expected a Conflict Skipped, got {other:?}"),
+    }
+    match skip_for(&unresolvable_path) {
+        Event::Skipped {
+            reason: SkipReason::Unresolvable,
+            sections,
+            ..
+        } => assert!(
+            sections.is_some(),
+            "an unresolvable skip must carry sections"
+        ),
+        other => panic!("expected an Unresolvable Skipped, got {other:?}"),
+    }
+    match skip_for(&taken_path) {
+        Event::Skipped {
+            reason: SkipReason::TargetTaken { .. },
+            sections,
+            candidate,
+            ..
+        } => {
+            assert!(
+                sections.is_none(),
+                "target-taken is a non-verdict skip and carries no sections"
+            );
+            assert!(candidate.is_none());
+        }
         other => panic!("expected a TargetTaken Skipped, got {other:?}"),
     }
 }
