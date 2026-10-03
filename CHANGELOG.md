@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING:** JSONL events now use schema 4. `resolved` events remove
+  `found`, `cached`, `source`, `tier`, `claims`, and `overrode` and replace
+  them with the ordered `library`, `content_index`, `extraction`, `lookup`,
+  `record_retrieval`, `match_check`, and `acceptance` sections. A step that
+  did not run has a `not-attempted` status and a reason. Per-field source
+  attribution remains in `record.borax.provenance`. Resolution-verdict
+  `skipped` events carry the same sections and distinguish
+  `no-text-layer`, `text-without-identifier`, `encrypted`, and `unreadable`;
+  their reasons no longer duplicate the identifier, attempts, or conflict
+  details held in those sections. A conflict skip carries its refused
+  record as `candidate`; duplicate skips carry sections; and skips that are
+  not resolution verdicts no longer carry `library`. The new
+  `content-index-write` event reports a rename-time write of an
+  operator-reached record. Human resolution lines now name the work, the
+  services that supplied its fields, and whether the library, content
+  index, response cache, or network supplied the record. Human `resolved`,
+  `skipped`, and `content-index-write` clauses now escape control
+  characters. In the `borax` crate, the `FileRecord::source`, `tier`,
+  `found`, `claims`, and `cached` methods, `event_for`,
+  `pipeline::unresolvable`, `Provenance`, `event::Attempt`, and
+  `event::Overridden` are removed. `FileRecord::overrode` becomes the
+  `overridden` Boolean field, and `FileRecord::conflict` now returns
+  `Option<&Conflict>`. The crate adds `Evidence::sections`,
+  `pipeline::resolution_skip`, `FileRecord::acceptance`,
+  `SkipReason::is_resolution_verdict`, and `Unattempted::CacheBypassed`.
+
 - Resolution now retains per-file evidence internally: ordered service
   attempts with structured outcomes, including failures before a
   success; whether the response cache or the network answered; response
