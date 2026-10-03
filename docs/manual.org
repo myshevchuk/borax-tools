@@ -12,7 +12,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-01 Thu 21:16] -- borax status and JSONL schema
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-01 Thu 22:19] -- library conditions and adoption
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-03 Sat 13:19] -- sectioned resolution events
-#+AI_PASS: fact-check claude-opus-5-5 [2026-10-03 Sat] -- model line and example file name restored
+#+AI_PASS: fact-check claude-opus-5-5 [2026-10-03 Sat] -- model line and example file name restored; content-duplicate shape and unreachable prompt line corrected after review
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -308,9 +308,8 @@ how to install it, and a handful of examples.
     which is the work's. An opened file with no title reads ~no title in
     its metadata~. A file that could not be opened reads ~could not be
     opened (<message>)~. When borax did not open the file, the line reads
-    ~not read; an earlier run answered~, ~not read; the library answered~,
-    or ~not read; the library holds these bytes~. ~new name~ is the name
-    the file would take.
+    ~not read; an earlier run answered~ or ~not read; the library
+    answered~. ~new name~ is the name the file would take.
 
     The target includes a collision suffix when one is needed. A
     separate line below ~new name~ then names the rendered name that was
@@ -1577,9 +1576,11 @@ how to install it, and a handful of examples.
   ~lookup~. The corresponding human-readable line names them, for
   example ~no source had a record for doi:... (crossref: not found;
   openalex: not found)~. A conflict skip also carries the refused record
-  as ~candidate~. Content duplicates carry all seven sections as
-  not-attempted with reason ~content-duplicate~ and a null
-  ~record_retrieval~. Work duplicates carry the record's evidence.
+  as ~candidate~. A content duplicate's ~library~, ~content_index~,
+  ~extraction~, ~lookup~ and ~match_check~ steps are not-attempted with
+  reason ~content-duplicate~, its ~record_retrieval~ is ~null~, and its
+  ~acceptance~ is ~not-applicable~. Work duplicates carry the record's
+  evidence.
 
   A ~content-index-write~ event reports the rename-time write for a
   record you supplied, retried, or accepted over a conflict. It follows
