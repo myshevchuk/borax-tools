@@ -15,10 +15,11 @@ use std::path::PathBuf;
 
 use borax::describe::{DEFAULT_WIDTH, Position, Proposal, describe};
 use borax::event::{
-    Acceptance, Claim, ClaimOrigin, ContentIndexSection, Event, ExtractionResultStep,
-    ExtractionSection, FetchedFrom, IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep,
-    LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason,
-    TitlesStep, WriteStep,
+    Acceptance, Claim, ClaimOrigin, ContentIndexSection, Displaced, Event, ExtractionResultStep,
+    ExtractionSection, FetchedFrom, IdentifierInputStep, IdentifierOrigin, IndexReadStep,
+    LibraryAnswer, LibraryStep, LookupRound, LookupStep, MatchCheckStep, RetrievedFrom, Sections,
+    ServiceAnswer, ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome,
+    SyntaxStep, TitlesStep, WriteStep,
 };
 use borax_core::identifier::{ArxivId, Doi};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
@@ -93,6 +94,9 @@ impl Fixture {
                         reason: "content-index-hit".to_string(),
                     },
                 },
+                identifier_input: IdentifierInputStep::NotAttempted {
+                    reason: "not-asked".to_string(),
+                },
                 lookup: LookupStep::NotAttempted {
                     reason: "content-index-hit".to_string(),
                 },
@@ -103,15 +107,47 @@ impl Fixture {
                 acceptance: Acceptance::Automatic,
             },
             (Some(tier), _) => {
-                let origin = if tier == "supplied" {
+                let supplied = tier == "supplied";
+                let origin = if supplied {
                     IdentifierOrigin::Operator
                 } else {
                     IdentifierOrigin::Extracted
                 };
-                let result_tier = if tier == "supplied" {
+                let result_tier = if supplied {
                     "text-layer".to_string()
                 } else {
                     tier.to_string()
+                };
+                // design D2, D11: a candidate on offer, modelled as one
+                // used submission; `displaced` holds the file's own
+                // (not-attempted) lookup, since invariant 4 requires it
+                // non-null exactly when `used` is.
+                let identifier_input = if supplied {
+                    IdentifierInputStep::Supplied {
+                        submissions: vec![Submission {
+                            submission: 1,
+                            raw: self.found.clone(),
+                            syntax: SyntaxStep::Parsed {
+                                identifier: self.found.clone(),
+                            },
+                            outcome: None,
+                        }],
+                        used: Some(1),
+                        displaced: Some(Box::new(Displaced {
+                            lookup: LookupStep::NotAttempted {
+                                reason: "extraction-failed".to_string(),
+                            },
+                            record_retrieval: None,
+                            match_check: MatchCheckStep::NotAttempted {
+                                reason: "extraction-failed".to_string(),
+                            },
+                            record: None,
+                        })),
+                    }
+                } else {
+                    IdentifierInputStep::NotAttempted {
+                        reason: "not-asked".to_string(),
+                    }
                 };
                 Sections {
                     library: LibraryStep::NotAttempted {
@@ -130,6 +166,7 @@ impl Fixture {
                             claims: self.claims.clone(),
                         },
                     },
+                    identifier_input,
                     lookup: LookupStep::Attempted {
                         identifier: self.found.clone(),
                         origin,
@@ -140,12 +177,17 @@ impl Fixture {
                                 stored: Some(WriteStep::Written),
                             },
                         }],
+                        earlier: vec![],
                     },
                     record_retrieval: Some(RetrievedFrom::Network {
                         service: self.source.clone(),
                     }),
                     match_check: MatchCheckStep::Agreed,
-                    acceptance: Acceptance::Automatic,
+                    acceptance: if supplied {
+                        Acceptance::Pending
+                    } else {
+                        Acceptance::Automatic
+                    },
                 }
             }
             (None, false) => unreachable!("every fixture sets a tier or a content-index hit"),
@@ -249,10 +291,14 @@ fn unresolvable_skip(
                 },
                 titles: TitlesStep::Read { claims: Vec::new() },
             },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
+            },
             lookup: LookupStep::Attempted {
                 identifier: identifier.to_string(),
                 origin: IdentifierOrigin::Extracted,
                 attempts,
+                earlier: vec![],
             },
             record_retrieval: None,
             match_check: MatchCheckStep::NotAttempted {
@@ -285,6 +331,9 @@ fn extraction_failure_skip(path: &str, reason: SkipReason, result: ExtractionRes
             extraction: ExtractionSection {
                 result,
                 titles: TitlesStep::Read { claims: Vec::new() },
+            },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
             },
             lookup: LookupStep::NotAttempted {
                 reason: not_attempted(),
@@ -1221,6 +1270,9 @@ fn a_conflict_asked_about_shows_how_close_the_two_titles_were() {
                     }],
                 },
             },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
+            },
             lookup: LookupStep::Attempted {
                 identifier: "doi:10.1000/conflict".to_string(),
                 origin: IdentifierOrigin::Extracted,
@@ -1231,6 +1283,7 @@ fn a_conflict_asked_about_shows_how_close_the_two_titles_were() {
                         stored: Some(WriteStep::Written),
                     },
                 }],
+                earlier: vec![],
             },
             record_retrieval: Some(RetrievedFrom::Network {
                 service: "crossref".to_string(),
@@ -1367,6 +1420,407 @@ fn a_supplied_identifier_says_supplied_where_a_pass_would_be_named() {
 }
 
 // ---------------------------------------------------------------------
+// operator-input-evidence (design D4, D7, D12; task 7.1): the
+// `candidate` and `rejected` lines, and the conflict line on a pending
+// candidate.
+// ---------------------------------------------------------------------
+
+/// A resolved event whose `acceptance` is `pending`, with no
+/// submission, for the plain pending-line tests.
+fn pending_event() -> Event {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Published Version".to_string());
+    record.doi = Some(Doi::parse("10.1021/jacs.4c01234").unwrap());
+    let mut fixture = Fixture::new(record, "doi:10.1021/jacs.4c01234");
+    fixture.tier = Some("supplied".to_string());
+    fixture.event()
+}
+
+/// design D7: a pending event's description carries `candidate
+/// pending; skipping leaves the file as it was`, before `new name` and
+/// after any `rejected` lines.
+#[test]
+fn a_pending_candidate_shows_the_candidate_pending_line() {
+    let lines = describe(
+        &pending_event(),
+        "paper.pdf",
+        Some(&Proposal {
+            target: "jacs2024.pdf".to_string(),
+            rendered: None,
+        }),
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line(
+            "candidate",
+            "pending; skipping leaves the file as it was"
+        )),
+        "got {lines:#?}"
+    );
+    let candidate_at = lines
+        .iter()
+        .position(|line| line.starts_with("candidate "))
+        .unwrap_or_else(|| panic!("expected a candidate line: got {lines:#?}"));
+    let new_name_at = lines
+        .iter()
+        .position(|line| line.starts_with("new name "))
+        .unwrap_or_else(|| panic!("expected a new name line: got {lines:#?}"));
+    assert!(candidate_at < new_name_at, "got {lines:#?}");
+}
+
+/// design D7: a pending candidate whose `match_check` is a conflict
+/// also shows the `conflict` line.
+#[test]
+fn a_pending_candidate_with_a_conflict_shows_the_conflict_line() {
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        mut sections,
+    } = pending_event()
+    else {
+        unreachable!("pending_event builds a resolved event")
+    };
+    sections.match_check = MatchCheckStep::Conflict {
+        field: "title".to_string(),
+        extracted: "Old Title".to_string(),
+        resolved: "A Published Version".to_string(),
+        similarity: 0.1,
+    };
+    let event = Event::Resolved {
+        path,
+        identifier,
+        record,
+        sections,
+    };
+
+    let lines = describe(
+        &event,
+        "paper.pdf",
+        Some(&Proposal {
+            target: "jacs2024.pdf".to_string(),
+            rendered: None,
+        }),
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line("conflict", "titles 10% alike")),
+        "got {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with("candidate ")),
+        "got {lines:#?}"
+    );
+}
+
+/// design D7: an `automatic` event shows neither the `candidate` line
+/// nor the conflict line.
+#[test]
+fn an_automatic_event_shows_neither_candidate_nor_conflict() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Published Version".to_string());
+    record.doi = Some(Doi::parse("10.1021/jacs.4c01234").unwrap());
+    let fixture = Fixture::new(record, "doi:10.1021/jacs.4c01234");
+
+    let lines = describe(
+        &fixture.event(),
+        "paper.pdf",
+        Some(&Proposal {
+            target: "jacs2024.pdf".to_string(),
+            rendered: None,
+        }),
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        !lines.iter().any(|line| line.starts_with("candidate ")),
+        "got {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("conflict ")),
+        "got {lines:#?}"
+    );
+}
+
+/// design D7: each submission whose `acceptance` is `rejected` gives a
+/// `rejected` line naming the identifier whole, in submission order; on
+/// a resolution they sit after `file says` and `conflict`.
+#[test]
+fn rejected_submissions_give_rejected_lines_in_order() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Published Version".to_string());
+    record.doi = Some(Doi::parse("10.1021/jacs.4c01234").unwrap());
+    let fixture = Fixture::new(record, "doi:10.1021/jacs.4c01234");
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        mut sections,
+    } = fixture.event()
+    else {
+        unreachable!("the fixture builds a resolved event")
+    };
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![
+            rejected_candidate_submission(1, "doi:10.1000/a"),
+            rejected_candidate_submission(2, "doi:10.1000/b"),
+        ],
+        used: None,
+        displaced: None,
+    };
+    let event = Event::Resolved {
+        path,
+        identifier,
+        record,
+        sections,
+    };
+
+    let lines = describe(
+        &event,
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line("rejected", "doi:10.1000/a")),
+        "got {lines:#?}"
+    );
+    assert!(
+        lines.contains(&label_line("rejected", "doi:10.1000/b")),
+        "got {lines:#?}"
+    );
+    let a_at = lines
+        .iter()
+        .position(|line| line == &label_line("rejected", "doi:10.1000/a"))
+        .unwrap();
+    let b_at = lines
+        .iter()
+        .position(|line| line == &label_line("rejected", "doi:10.1000/b"))
+        .unwrap();
+    assert!(a_at < b_at, "got {lines:#?}");
+    let file_says_at = lines.iter().position(|line| line.starts_with("file says"));
+    if let Some(file_says_at) = file_says_at {
+        assert!(file_says_at < a_at, "got {lines:#?}");
+    }
+}
+
+/// design D7: on a failed verdict, `rejected` lines come last, after
+/// `library`.
+#[test]
+fn rejected_submissions_on_a_failed_verdict_come_last_after_library() {
+    let mut sections = unresolvable_sections_for_describe();
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![rejected_candidate_submission(1, "doi:10.1000/a")],
+        used: None,
+        displaced: None,
+    };
+    let event = Event::Skipped {
+        path: PathBuf::from("mystery.pdf"),
+        reason: SkipReason::Unresolvable,
+        sections: Some(Box::new(sections)),
+        candidate: None,
+    };
+
+    let lines = describe(
+        &event,
+        "mystery.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert_eq!(
+        lines.last(),
+        Some(&label_line("rejected", "doi:10.1000/a")),
+        "got {lines:#?}"
+    );
+}
+
+/// `unresolvable_skip`'s sections, exposed directly for a test that
+/// needs to add a submission to them.
+fn unresolvable_sections_for_describe() -> Sections {
+    let Event::Skipped {
+        sections: Some(sections),
+        ..
+    } = unresolvable_skip(
+        "mystery.pdf",
+        "doi:10.1000/xyz123",
+        "text-layer",
+        vec![not_found("crossref")],
+    )
+    else {
+        unreachable!("unresolvable_skip builds a resolution-verdict skip")
+    };
+    *sections
+}
+
+/// A submission rejected with its record, for the `rejected`-line
+/// tests, following the shape of the one in `tests/event.rs`.
+fn rejected_candidate_submission(number: u32, identifier: &str) -> Submission {
+    Submission {
+        submission: number,
+        raw: identifier.to_string(),
+        syntax: SyntaxStep::Parsed {
+            identifier: identifier.to_string(),
+        },
+        outcome: Some(Box::new(SubmissionOutcome {
+            lookup: LookupStep::Attempted {
+                identifier: identifier.to_string(),
+                origin: IdentifierOrigin::Operator,
+                attempts: vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Found {
+                        retrieval: FetchedFrom::Network,
+                        stored: Some(WriteStep::Written),
+                    },
+                }],
+                earlier: vec![],
+            },
+            record_retrieval: Some(RetrievedFrom::Network {
+                service: "crossref".to_string(),
+            }),
+            match_check: MatchCheckStep::Agreed,
+            acceptance: SubmissionAcceptance::Rejected,
+            record: Some(Box::new(Record::new(EntryType::Article))),
+        })),
+    }
+}
+
+/// design D7: a `rejected` identifier carrying a control character is
+/// escaped, as every description value is.
+#[test]
+fn rejected_line_escapes_a_control_character() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Published Version".to_string());
+    record.doi = Some(Doi::parse("10.1021/jacs.4c01234").unwrap());
+    let fixture = Fixture::new(record, "doi:10.1021/jacs.4c01234");
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        mut sections,
+    } = fixture.event()
+    else {
+        unreachable!("the fixture builds a resolved event")
+    };
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![rejected_candidate_submission(1, "doi:10.1000/a\u{7}b")],
+        used: None,
+        displaced: None,
+    };
+    let event = Event::Resolved {
+        path,
+        identifier,
+        record,
+        sections,
+    };
+
+    let lines = describe(
+        &event,
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        !lines.iter().any(|line| line.contains('\u{7}')),
+        "got {lines:#?}"
+    );
+}
+
+/// design D7: a description with no submissions is unchanged — the
+/// `automatic`-event test above pins this directly.
+#[test]
+fn a_description_with_no_submissions_shows_no_rejected_or_candidate_lines() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Published Version".to_string());
+    record.doi = Some(Doi::parse("10.1021/jacs.4c01234").unwrap());
+    let fixture = Fixture::new(record, "doi:10.1021/jacs.4c01234");
+
+    let lines = describe(
+        &fixture.event(),
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(!lines.iter().any(|line| line.starts_with("rejected ")));
+    assert!(!lines.iter().any(|line| line.starts_with("candidate ")));
+}
+
+/// design D12: an `unresolvable` skip with an `earlier` round gives the
+/// same `no record` block as one without it — the description shows
+/// the current round only. Expected to pass at once; it pins
+/// behaviour.
+#[test]
+fn unresolvable_description_shows_the_current_round_only() {
+    let without_earlier = unresolvable_skip(
+        "mystery.pdf",
+        "doi:10.1000/xyz123",
+        "text-layer",
+        vec![not_found("crossref")],
+    );
+    let mut with_earlier_sections = unresolvable_sections_for_describe();
+    let LookupStep::Attempted { earlier, .. } = &mut with_earlier_sections.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    *earlier = vec![LookupRound::Attempted {
+        attempts: vec![unavailable("crossref", "HTTP 503")],
+    }];
+    let with_earlier = Event::Skipped {
+        path: PathBuf::from("mystery.pdf"),
+        reason: SkipReason::Unresolvable,
+        sections: Some(Box::new(with_earlier_sections)),
+        candidate: None,
+    };
+
+    let position = Position {
+        of_this: 1,
+        total: 1,
+    };
+    assert_eq!(
+        describe(&with_earlier, "mystery.pdf", None, position, DEFAULT_WIDTH),
+        describe(
+            &without_earlier,
+            "mystery.pdf",
+            None,
+            position,
+            DEFAULT_WIDTH
+        )
+    );
+}
+
+// ---------------------------------------------------------------------
 // consult-library-first, task 5.2: the description names a library
 // answer, and states a library problem (design D5)
 // ---------------------------------------------------------------------
@@ -1410,6 +1864,9 @@ fn library_resolved_event(fixture: &Fixture, answer: LibraryAnswer) -> Event {
                 titles: TitlesStep::NotAttempted {
                     reason: not_attempted(),
                 },
+            },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
             },
             lookup: LookupStep::NotAttempted {
                 reason: not_attempted(),
@@ -1676,6 +2133,9 @@ fn a_titled_blank_scan_shows_the_no_text_layer_line_and_the_retained_title() {
                     }],
                 },
             },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
+            },
             lookup: LookupStep::NotAttempted {
                 reason: "extraction-failed".to_string(),
             },
@@ -1735,6 +2195,9 @@ fn an_encrypted_file_shows_the_encrypted_line_and_could_not_be_opened() {
                 titles: TitlesStep::Failed {
                     message: "PDF is encrypted".to_string(),
                 },
+            },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
             },
             lookup: LookupStep::NotAttempted {
                 reason: "extraction-failed".to_string(),
@@ -1797,9 +2260,13 @@ fn a_no_eligible_service_lookup_shows_no_source_was_asked() {
                 },
                 titles: TitlesStep::Read { claims: Vec::new() },
             },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
+            },
             lookup: LookupStep::NoEligibleService {
                 identifier: "arXiv:2401.12345".to_string(),
                 origin: IdentifierOrigin::Extracted,
+                earlier: vec![],
             },
             record_retrieval: None,
             match_check: MatchCheckStep::NotAttempted {

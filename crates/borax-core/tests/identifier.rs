@@ -1,6 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
-use borax_core::identifier::{ArxivId, Doi, Identifier, IdentifierError, Isbn, Pmid, supplied};
+use borax_core::identifier::{
+    ArxivId, Doi, Identifier, IdentifierError, IdentifierKind, Isbn, Pmid, SuppliedError, supplied,
+};
 
 // ---------------------------------------------------------------------
 // Doi
@@ -360,21 +362,191 @@ fn supplied_parses_an_isbn_prefixed_value() {
 /// nothing.
 #[test]
 fn supplied_refuses_bare_digits_that_could_be_a_pmid_or_an_isbn() {
-    assert!(supplied("12345678").is_none());
-    assert!(supplied("9781593278281").is_none());
+    assert_eq!(
+        supplied("12345678").unwrap_err(),
+        SuppliedError::Unrecognised
+    );
+    assert_eq!(
+        supplied("9781593278281").unwrap_err(),
+        SuppliedError::Unrecognised
+    );
 }
 
 #[test]
 fn supplied_refuses_prose_naming_no_identifier() {
-    assert!(supplied("see email from Anna").is_none());
+    assert_eq!(
+        supplied("see email from Anna").unwrap_err(),
+        SuppliedError::Unrecognised
+    );
 }
 
 #[test]
 fn supplied_refuses_an_empty_string() {
-    assert!(supplied("").is_none());
+    assert_eq!(supplied("").unwrap_err(), SuppliedError::Unrecognised);
 }
 
 #[test]
 fn supplied_refuses_whitespace_only_input() {
-    assert!(supplied("   ").is_none());
+    assert_eq!(supplied("   ").unwrap_err(), SuppliedError::Unrecognised);
+}
+
+// ---------------------------------------------------------------------
+// supplied: the Result's error distinguishes why the text was refused
+// (design D3, task 1.1)
+// ---------------------------------------------------------------------
+
+#[test]
+fn supplied_reports_unrecognised_for_every_row_of_the_design_table() {
+    for text in [
+        "see email from Anna",
+        "not-an-identifier",
+        "",
+        "   ",
+        "12345678",
+        "9781593278281",
+    ] {
+        assert_eq!(
+            supplied(text).unwrap_err(),
+            SuppliedError::Unrecognised,
+            "text {text:?}"
+        );
+    }
+}
+
+#[test]
+fn supplied_reports_invalid_doi_for_every_row_of_the_design_table() {
+    for text in [
+        "doi:not-a-doi",
+        "https://doi.org/abc",
+        "10.12/x",
+        "10.1234",
+        "10.1234/",
+    ] {
+        assert_eq!(
+            supplied(text).unwrap_err(),
+            SuppliedError::Invalid {
+                kind: IdentifierKind::Doi
+            },
+            "text {text:?}"
+        );
+    }
+}
+
+#[test]
+fn supplied_reports_invalid_arxiv_for_a_malformed_prefixed_id() {
+    assert_eq!(
+        supplied("arXiv:12345").unwrap_err(),
+        SuppliedError::Invalid {
+            kind: IdentifierKind::Arxiv
+        }
+    );
+}
+
+#[test]
+fn supplied_reports_invalid_pmid_for_a_zero_or_non_numeric_value() {
+    for text in ["pmid:0", "pmid:abc"] {
+        assert_eq!(
+            supplied(text).unwrap_err(),
+            SuppliedError::Invalid {
+                kind: IdentifierKind::Pmid
+            },
+            "text {text:?}"
+        );
+    }
+}
+
+#[test]
+fn supplied_reports_invalid_isbn_for_a_wrong_length_value() {
+    assert_eq!(
+        supplied("isbn:123").unwrap_err(),
+        SuppliedError::Invalid {
+            kind: IdentifierKind::Isbn
+        }
+    );
+}
+
+#[test]
+fn supplied_reports_checksum_for_an_isbn_that_fails_its_check_digit() {
+    assert_eq!(
+        supplied("isbn:9781593278282").unwrap_err(),
+        SuppliedError::Checksum {
+            kind: IdentifierKind::Isbn
+        }
+    );
+}
+
+#[test]
+fn supplied_parses_a_truncated_doi_exactly_as_typed_with_no_repair() {
+    let identifier = supplied("10.1039/c9cc02492").unwrap();
+    assert_eq!(
+        identifier,
+        Identifier::Doi(Doi::parse("10.1039/c9cc02492").unwrap())
+    );
+    assert_eq!(identifier.to_string(), "10.1039/c9cc02492");
+}
+
+#[test]
+fn supplied_matches_the_doi_prefix_without_regard_to_case() {
+    assert_eq!(
+        supplied("DOI:abc").unwrap_err(),
+        SuppliedError::Invalid {
+            kind: IdentifierKind::Doi
+        }
+    );
+}
+
+#[test]
+fn supplied_matches_the_arxiv_prefix_without_regard_to_case() {
+    assert_eq!(
+        supplied("ArXiv:12345").unwrap_err(),
+        SuppliedError::Invalid {
+            kind: IdentifierKind::Arxiv
+        }
+    );
+}
+
+#[test]
+fn identifier_kind_as_str_names_each_form() {
+    assert_eq!(IdentifierKind::Doi.as_str(), "doi");
+    assert_eq!(IdentifierKind::Arxiv.as_str(), "arxiv");
+    assert_eq!(IdentifierKind::Pmid.as_str(), "pmid");
+    assert_eq!(IdentifierKind::Isbn.as_str(), "isbn");
+}
+
+#[test]
+fn supplied_error_reason_names_the_design_d8_string() {
+    assert_eq!(SuppliedError::Unrecognised.reason(), "unrecognised");
+    assert_eq!(
+        SuppliedError::Invalid {
+            kind: IdentifierKind::Doi
+        }
+        .reason(),
+        "invalid"
+    );
+    assert_eq!(
+        SuppliedError::Checksum {
+            kind: IdentifierKind::Isbn
+        }
+        .reason(),
+        "checksum"
+    );
+}
+
+#[test]
+fn supplied_error_expected_is_present_only_for_invalid_and_checksum() {
+    assert_eq!(SuppliedError::Unrecognised.expected(), None);
+    assert_eq!(
+        SuppliedError::Invalid {
+            kind: IdentifierKind::Pmid
+        }
+        .expected(),
+        Some(IdentifierKind::Pmid)
+    );
+    assert_eq!(
+        SuppliedError::Checksum {
+            kind: IdentifierKind::Isbn
+        }
+        .expected(),
+        Some(IdentifierKind::Isbn)
+    );
 }

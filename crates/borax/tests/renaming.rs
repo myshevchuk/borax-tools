@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 
 use borax::event::{
     Acceptance, ContentIndexSection, Counts, Event, ExtractionResultStep, ExtractionSection,
-    IndexReadStep, LibraryStep, LookupStep, MatchCheckStep, RetrievedFrom, Sections, SkipReason,
-    TitlesStep, WriteStep,
+    IdentifierInputStep, IndexReadStep, LibraryStep, LookupStep, MatchCheckStep, RetrievedFrom,
+    Sections, SkipReason, TitlesStep, WriteStep,
 };
 use borax::evidence::Evidence;
 use borax::evidence::Unattempted;
@@ -196,6 +196,9 @@ fn sections_via_content_index() -> Sections {
                 reason: not_attempted(),
             },
         },
+        identifier_input: IdentifierInputStep::NotAttempted {
+            reason: "not-asked".to_string(),
+        },
         lookup: LookupStep::NotAttempted {
             reason: not_attempted(),
         },
@@ -217,6 +220,7 @@ fn resolved(path: &str, record: Record, hash: Option<ContentHash>) -> (PathBuf, 
             hash,
             evidence: Evidence::not_attempted(Unattempted::ContentDuplicate),
             overridden: false,
+            accepted: false,
         },
     )
 }

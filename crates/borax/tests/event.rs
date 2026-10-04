@@ -4,14 +4,15 @@ use std::path::PathBuf;
 
 use borax::event::{
     Acceptance, Adoption, Claim, ClaimOrigin, Condition, ContentIndexSection, Counts, Diagnostic,
-    Event, Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom, Format,
-    IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupStep, MatchCheckStep,
-    RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Summary, TableUsed,
-    TitlesStep, WriteStep, human_line, human_summary, json_line, render,
+    Displaced, Event, Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom, Format,
+    IdentifierInputStep, IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep,
+    LookupRound, LookupStep, MatchCheckStep, RetrievedFrom, SCHEMA, Sections, ServiceAnswer,
+    ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome, Summary,
+    SyntaxStep, TableUsed, TitlesStep, WriteStep, human_line, human_summary, json_line, render,
 };
 use borax::evidence::{
-    Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
-    IndexWrite, LookupEvidence, MatchCheck, Origin, ServiceAttempt, Titles, Unattempted,
+    Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
+    IndexRead, IndexWrite, LookupEvidence, MatchCheck, Origin, ServiceAttempt, Titles, Unattempted,
 };
 use borax::pipeline::{FileRecord, resolved_event};
 use borax_core::content::{ContentHash, hash_bytes};
@@ -39,6 +40,7 @@ fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) 
             }),
             titles: Titles::Read(Vec::new()),
         },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
         lookup: LookupEvidence::Attempted {
             identifier,
             origin: Origin::Extracted(tier),
@@ -46,6 +48,7 @@ fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) 
                 service,
                 outcome: Ok(Retrieval::Network { stored: None }),
             }],
+            earlier: vec![],
         },
         match_check: MatchCheck::Agreed,
     }
@@ -63,6 +66,7 @@ fn evidence_via_content_index_hit() -> Evidence {
             result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
             titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
         },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
         lookup: LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
         match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
     }
@@ -91,6 +95,9 @@ fn sections_via_network(service: &str, identifier: &str) -> Sections {
             },
             titles: TitlesStep::Read { claims: Vec::new() },
         },
+        identifier_input: IdentifierInputStep::NotAttempted {
+            reason: "not-asked".to_string(),
+        },
         lookup: LookupStep::Attempted {
             identifier: identifier.to_string(),
             origin: IdentifierOrigin::Extracted,
@@ -101,6 +108,7 @@ fn sections_via_network(service: &str, identifier: &str) -> Sections {
                     stored: Some(WriteStep::Written),
                 },
             }],
+            earlier: vec![],
         },
         record_retrieval: Some(RetrievedFrom::Network {
             service: service.to_string(),
@@ -132,6 +140,9 @@ fn sections_via_content_index() -> Sections {
             titles: TitlesStep::NotAttempted {
                 reason: not_attempted(),
             },
+        },
+        identifier_input: IdentifierInputStep::NotAttempted {
+            reason: "not-asked".to_string(),
         },
         lookup: LookupStep::NotAttempted {
             reason: not_attempted(),
@@ -167,6 +178,9 @@ fn sections_via_library(artifact: &str, item: &str) -> Sections {
             titles: TitlesStep::NotAttempted {
                 reason: not_attempted(),
             },
+        },
+        identifier_input: IdentifierInputStep::NotAttempted {
+            reason: "not-asked".to_string(),
         },
         lookup: LookupStep::NotAttempted {
             reason: not_attempted(),
@@ -205,6 +219,9 @@ fn sections_content_duplicate() -> Sections {
             titles: TitlesStep::NotAttempted {
                 reason: not_attempted(),
             },
+        },
+        identifier_input: IdentifierInputStep::NotAttempted {
+            reason: not_attempted(),
         },
         lookup: LookupStep::NotAttempted {
             reason: not_attempted(),
@@ -615,9 +632,11 @@ fn json_line_event_tag_is_the_variant_name_in_kebab_case() {
     }
 }
 
-/// design D3, D12: a `resolved` event serializes to exactly `schema`,
-/// `event`, `path`, `identifier`, `record`, then the seven section keys
-/// in pipeline order, and none of the six removed schema-3 fields.
+/// design D1, D3, D12: a `resolved` event serializes to exactly
+/// `schema`, `event`, `path`, `identifier`, `record`, then the eight
+/// section keys in pipeline order (`identifier_input` between
+/// `extraction` and `lookup`), and none of the six removed schema-3
+/// fields.
 #[test]
 fn json_line_of_resolved_has_exactly_the_documented_field_set() {
     let value: Value = serde_json::from_str(&json_line(&resolved())).unwrap();
@@ -633,6 +652,7 @@ fn json_line_of_resolved_has_exactly_the_documented_field_set() {
             "event",
             "extraction",
             "identifier",
+            "identifier_input",
             "library",
             "lookup",
             "match_check",
@@ -656,7 +676,7 @@ fn json_line_of_resolved_has_exactly_the_documented_field_set() {
 
 /// design D1: the section keys appear in pipeline order, since a
 /// consumer that reads the raw text (rather than a parsed map) depends
-/// on it.
+/// on it. `identifier_input` sits between `extraction` and `lookup`.
 #[test]
 fn json_line_of_resolved_orders_its_keys_in_pipeline_order() {
     let line = json_line(&resolved());
@@ -669,6 +689,7 @@ fn json_line_of_resolved_orders_its_keys_in_pipeline_order() {
         "\"library\"",
         "\"content_index\"",
         "\"extraction\"",
+        "\"identifier_input\"",
         "\"lookup\"",
         "\"record_retrieval\"",
         "\"match_check\"",
@@ -685,7 +706,7 @@ fn json_line_of_resolved_orders_its_keys_in_pipeline_order() {
 }
 
 /// design D3: a resolution `skipped` event serializes to `schema`,
-/// `event`, `path`, `reason`, the seven sections, and `candidate` only
+/// `event`, `path`, `reason`, the eight sections, and `candidate` only
 /// on the conflict kind.
 #[test]
 fn json_line_of_a_resolution_skip_carries_sections_and_no_candidate_except_conflict() {
@@ -707,6 +728,7 @@ fn json_line_of_a_resolution_skip_carries_sections_and_no_candidate_except_confl
             "content_index",
             "event",
             "extraction",
+            "identifier_input",
             "library",
             "lookup",
             "match_check",
@@ -1094,6 +1116,9 @@ fn extraction_failure_sections(result: ExtractionResultStep) -> Sections {
                 message: "could not open".to_string(),
             },
         },
+        identifier_input: IdentifierInputStep::NotAttempted {
+            reason: not_attempted(),
+        },
         lookup: LookupStep::NotAttempted {
             reason: not_attempted(),
         },
@@ -1124,6 +1149,9 @@ fn unresolvable_sections() -> Sections {
             },
             titles: TitlesStep::Read { claims: Vec::new() },
         },
+        identifier_input: IdentifierInputStep::NotAttempted {
+            reason: "not-asked".to_string(),
+        },
         lookup: LookupStep::Attempted {
             identifier: "doi:10.1000/xyz123".to_string(),
             origin: IdentifierOrigin::Extracted,
@@ -1139,6 +1167,7 @@ fn unresolvable_sections() -> Sections {
                     },
                 },
             ],
+            earlier: vec![],
         },
         record_retrieval: None,
         match_check: MatchCheckStep::NotAttempted {
@@ -1172,6 +1201,9 @@ fn conflict_sections() -> Sections {
                 }],
             },
         },
+        identifier_input: IdentifierInputStep::NotAttempted {
+            reason: "not-asked".to_string(),
+        },
         lookup: LookupStep::Attempted {
             identifier: "doi:10.1000/ref".to_string(),
             origin: IdentifierOrigin::Extracted,
@@ -1182,6 +1214,7 @@ fn conflict_sections() -> Sections {
                     stored: Some(WriteStep::Written),
                 },
             }],
+            earlier: vec![],
         },
         record_retrieval: Some(RetrievedFrom::Network {
             service: "crossref".to_string(),
@@ -1233,6 +1266,692 @@ fn every_event_round_trips_through_plain_serde_json_to_string() {
         let text = serde_json::to_string(&event).unwrap();
         let parsed: Event = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed, event);
+    }
+}
+
+// ---------------------------------------------------------------------
+// identifier_input: the section between `extraction` and `lookup`
+// (design D1-D4, D8; task 2.1)
+// ---------------------------------------------------------------------
+
+/// A submission that was refused: it parsed to nothing, so every one of
+/// its own outcome steps is not attempted for `unparsed`.
+fn refused_submission(number: u32, raw: &str) -> Submission {
+    Submission {
+        submission: number,
+        raw: raw.to_string(),
+        syntax: SyntaxStep::Rejected {
+            reason: "unrecognised".to_string(),
+            expected: None,
+        },
+        outcome: Some(Box::new(SubmissionOutcome {
+            lookup: LookupStep::NotAttempted {
+                reason: "unparsed".to_string(),
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: "unparsed".to_string(),
+            },
+            acceptance: SubmissionAcceptance::NotAttempted {
+                reason: "unparsed".to_string(),
+            },
+            record: None,
+        })),
+    }
+}
+
+/// A submission whose identifier no service held: not attempted for
+/// `no-record`, with its lookup's attempts kept.
+fn no_record_submission(number: u32, raw: &str, identifier: &str) -> Submission {
+    Submission {
+        submission: number,
+        raw: raw.to_string(),
+        syntax: SyntaxStep::Parsed {
+            identifier: identifier.to_string(),
+        },
+        outcome: Some(Box::new(SubmissionOutcome {
+            lookup: LookupStep::Attempted {
+                identifier: identifier.to_string(),
+                origin: IdentifierOrigin::Operator,
+                attempts: vec![
+                    ServiceAnswer {
+                        service: "crossref".to_string(),
+                        outcome: ServiceOutcome::NotFound,
+                    },
+                    ServiceAnswer {
+                        service: "openalex".to_string(),
+                        outcome: ServiceOutcome::NotFound,
+                    },
+                ],
+                earlier: vec![],
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: "no-record".to_string(),
+            },
+            acceptance: SubmissionAcceptance::NotAttempted {
+                reason: "no-record".to_string(),
+            },
+            record: None,
+        })),
+    }
+}
+
+/// A submission whose record was reached and then rejected: the
+/// operator answered Skip, or a later submission took its place on
+/// offer.
+fn rejected_submission(number: u32, raw: &str, identifier: &str) -> Submission {
+    Submission {
+        submission: number,
+        raw: raw.to_string(),
+        syntax: SyntaxStep::Parsed {
+            identifier: identifier.to_string(),
+        },
+        outcome: Some(Box::new(SubmissionOutcome {
+            lookup: LookupStep::Attempted {
+                identifier: identifier.to_string(),
+                origin: IdentifierOrigin::Operator,
+                attempts: vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Found {
+                        retrieval: FetchedFrom::Network,
+                        stored: Some(WriteStep::Written),
+                    },
+                }],
+                earlier: vec![],
+            },
+            record_retrieval: Some(RetrievedFrom::Network {
+                service: "crossref".to_string(),
+            }),
+            match_check: MatchCheckStep::InsufficientEvidence {
+                reason: "no-titles".to_string(),
+            },
+            acceptance: SubmissionAcceptance::Rejected,
+            record: Some(Box::new(Record::new(EntryType::Article))),
+        })),
+    }
+}
+
+/// The used submission: bare, carrying only `submission`, `raw` and
+/// `syntax` (design D2, D9).
+fn used_submission(number: u32, raw: &str, identifier: &str) -> Submission {
+    Submission {
+        submission: number,
+        raw: raw.to_string(),
+        syntax: SyntaxStep::Parsed {
+            identifier: identifier.to_string(),
+        },
+        outcome: None,
+    }
+}
+
+#[test]
+fn identifier_input_not_attempted_serializes_status_and_reason_only() {
+    for reason in ["content-duplicate", "not-asked", "not-supplied"] {
+        let step = IdentifierInputStep::NotAttempted {
+            reason: reason.to_string(),
+        };
+        let value = serde_json::to_value(&step).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"status": "not-attempted", "reason": reason})
+        );
+    }
+}
+
+#[test]
+fn identifier_input_supplied_serializes_status_submissions_used_displaced_in_order() {
+    let step = IdentifierInputStep::Supplied {
+        submissions: vec![used_submission(
+            1,
+            "10.1039/c9cc02492a",
+            "doi:10.1039/c9cc02492a",
+        )],
+        used: Some(1),
+        displaced: Some(Box::new(Displaced {
+            lookup: LookupStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+            record: None,
+        })),
+    };
+    let value = serde_json::to_value(&step).unwrap();
+    let object = value.as_object().unwrap();
+    let keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    assert_eq!(keys, vec!["status", "submissions", "used", "displaced"]);
+    assert_eq!(object["used"], Value::from(1));
+}
+
+#[test]
+fn identifier_input_supplied_serializes_null_used_and_displaced_when_none() {
+    let step = IdentifierInputStep::Supplied {
+        submissions: vec![refused_submission(1, "not-an-identifier")],
+        used: None,
+        displaced: None,
+    };
+    let value = serde_json::to_value(&step).unwrap();
+    assert_eq!(value["used"], Value::Null);
+    assert_eq!(value["displaced"], Value::Null);
+}
+
+#[test]
+fn a_submission_with_an_outcome_serializes_its_flattened_keys_and_the_record() {
+    let submission = rejected_submission(1, "10.1039/c9cc02492a", "doi:10.1039/c9cc02492a");
+    let value = serde_json::to_value(&submission).unwrap();
+    let object = value.as_object().unwrap();
+    let keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        vec![
+            "submission",
+            "raw",
+            "syntax",
+            "lookup",
+            "record_retrieval",
+            "match_check",
+            "acceptance",
+            "record",
+        ]
+    );
+}
+
+#[test]
+fn the_used_submission_serializes_submission_raw_and_syntax_only() {
+    let submission = used_submission(1, "10.1039/c9cc02492a", "doi:10.1039/c9cc02492a");
+    let value = serde_json::to_value(&submission).unwrap();
+    let object = value.as_object().unwrap();
+    let keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    assert_eq!(keys, vec!["submission", "raw", "syntax"]);
+}
+
+#[test]
+fn syntax_parsed_serializes_status_and_identifier() {
+    let step = SyntaxStep::Parsed {
+        identifier: "doi:10.1039/c9cc02492".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(&step).unwrap(),
+        serde_json::json!({"status": "parsed", "identifier": "doi:10.1039/c9cc02492"})
+    );
+}
+
+#[test]
+fn syntax_rejected_omits_expected_when_none() {
+    let step = SyntaxStep::Rejected {
+        reason: "unrecognised".to_string(),
+        expected: None,
+    };
+    let value = serde_json::to_value(&step).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"status": "rejected", "reason": "unrecognised"})
+    );
+}
+
+#[test]
+fn syntax_rejected_carries_expected_when_some() {
+    let step = SyntaxStep::Rejected {
+        reason: "invalid".to_string(),
+        expected: Some("doi".to_string()),
+    };
+    let value = serde_json::to_value(&step).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"status": "rejected", "reason": "invalid", "expected": "doi"})
+    );
+}
+
+#[test]
+fn acceptance_pending_and_accepted_serialize_by_status_alone() {
+    assert_eq!(
+        serde_json::to_value(Acceptance::Pending).unwrap(),
+        serde_json::json!({"status": "pending"})
+    );
+    assert_eq!(
+        serde_json::to_value(Acceptance::Accepted).unwrap(),
+        serde_json::json!({"status": "accepted"})
+    );
+}
+
+#[test]
+fn submission_acceptance_rejected_serializes_by_status_alone() {
+    assert_eq!(
+        serde_json::to_value(SubmissionAcceptance::Rejected).unwrap(),
+        serde_json::json!({"status": "rejected"})
+    );
+}
+
+/// design D1: `identifier_input` sits between `extraction` and
+/// `lookup` on every `resolved` event and every resolution `skipped`
+/// event.
+#[test]
+fn identifier_input_sits_between_extraction_and_lookup() {
+    for event in all_resolution_skips()
+        .into_iter()
+        .chain(std::iter::once(resolved()))
+    {
+        let line = json_line(&event);
+        let extraction_at = line.find("\"extraction\"").unwrap();
+        let input_at = line.find("\"identifier_input\"").unwrap();
+        let lookup_at = line.find("\"lookup\"").unwrap();
+        assert!(
+            extraction_at < input_at && input_at < lookup_at,
+            "got {line}"
+        );
+    }
+}
+
+/// The round-two session's final skip (design.md's first illustrative
+/// line): a refused text, a truncated DOI no service holds, and the
+/// published DOI, rejected after a final Skip.
+fn round_two_final_skip_event() -> Event {
+    let mut sections = text_without_identifier_sections();
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![
+            refused_submission(1, "not-an-identifier"),
+            no_record_submission(2, "10.1039/c9cc02492", "doi:10.1039/c9cc02492"),
+            rejected_submission(3, "10.1039/c9cc02492a", "doi:10.1039/c9cc02492a"),
+        ],
+        used: None,
+        displaced: None,
+    };
+    Event::Skipped {
+        path: PathBuf::from("paper.pdf"),
+        reason: SkipReason::TextWithoutIdentifier,
+        sections: Some(Box::new(sections)),
+        candidate: None,
+    }
+}
+
+#[test]
+fn the_round_two_final_skip_carries_every_submission_in_order() {
+    let event = round_two_final_skip_event();
+    match &event {
+        Event::Skipped {
+            sections: Some(sections),
+            ..
+        } => match &sections.identifier_input {
+            IdentifierInputStep::Supplied {
+                submissions,
+                used,
+                displaced,
+            } => {
+                assert_eq!(submissions.len(), 3);
+                assert_eq!(submissions[0].submission, 1);
+                assert_eq!(submissions[1].submission, 2);
+                assert_eq!(submissions[2].submission, 3);
+                assert_eq!(*used, None);
+                assert!(displaced.is_none());
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected a resolution skip, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_round_two_final_skip_human_line_names_the_rejected_candidate() {
+    let event = round_two_final_skip_event();
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: skipped, no identifier found in its metadata or the pages read; \
+candidate rejected: doi:10.1039/c9cc02492a"
+    );
+}
+
+/// The event the third question's description rendered, before the
+/// Skip: submission 3 is the used one, and the event's own `lookup`,
+/// `match_check` and `acceptance` are its outcome, stated once.
+fn pending_candidate_event() -> Event {
+    let mut sections = conflict_sections();
+    sections.extraction = ExtractionSection {
+        result: ExtractionResultStep::TextWithoutIdentifier,
+        titles: TitlesStep::Read { claims: Vec::new() },
+    };
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![
+            refused_submission(1, "not-an-identifier"),
+            no_record_submission(2, "10.1039/c9cc02492", "doi:10.1039/c9cc02492"),
+            used_submission(3, "10.1039/c9cc02492a", "doi:10.1039/c9cc02492a"),
+        ],
+        used: Some(3),
+        displaced: Some(Box::new(Displaced {
+            lookup: LookupStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+            record_retrieval: None,
+            match_check: MatchCheckStep::NotAttempted {
+                reason: "extraction-failed".to_string(),
+            },
+            record: None,
+        })),
+    };
+    sections.lookup = LookupStep::Attempted {
+        identifier: "doi:10.1039/c9cc02492a".to_string(),
+        origin: IdentifierOrigin::Operator,
+        attempts: vec![ServiceAnswer {
+            service: "crossref".to_string(),
+            outcome: ServiceOutcome::Found {
+                retrieval: FetchedFrom::Network,
+                stored: Some(WriteStep::Written),
+            },
+        }],
+        earlier: vec![],
+    };
+    sections.record_retrieval = Some(RetrievedFrom::Network {
+        service: "crossref".to_string(),
+    });
+    sections.match_check = MatchCheckStep::InsufficientEvidence {
+        reason: "no-titles".to_string(),
+    };
+    sections.acceptance = Acceptance::Pending;
+    Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1039/c9cc02492a".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    }
+}
+
+#[test]
+fn the_pending_candidate_event_names_the_used_submission_and_its_displaced_facts() {
+    let event = pending_candidate_event();
+    match &event {
+        Event::Resolved { sections, .. } => {
+            assert_eq!(sections.acceptance, Acceptance::Pending);
+            match &sections.identifier_input {
+                IdentifierInputStep::Supplied {
+                    used, displaced, ..
+                } => {
+                    assert_eq!(*used, Some(3));
+                    assert!(displaced.is_some());
+                }
+                other => panic!("expected Supplied, got {other:?}"),
+            }
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// invariant 1 (design D2): `used` is a number exactly when the
+/// event's `lookup.origin` is `operator`, and that submission's
+/// `syntax.identifier` equals `lookup.identifier`.
+#[test]
+fn used_submission_identifier_matches_the_events_own_lookup_identifier() {
+    let event = pending_candidate_event();
+    let Event::Resolved { sections, .. } = &event else {
+        panic!("expected Event::Resolved");
+    };
+    let LookupStep::Attempted {
+        identifier: looked_up,
+        origin,
+        ..
+    } = &sections.lookup
+    else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(*origin, IdentifierOrigin::Operator);
+    let IdentifierInputStep::Supplied {
+        submissions, used, ..
+    } = &sections.identifier_input
+    else {
+        panic!("expected Supplied");
+    };
+    let used_entry = submissions
+        .iter()
+        .find(|s| Some(s.submission) == *used)
+        .unwrap();
+    let SyntaxStep::Parsed { identifier } = &used_entry.syntax else {
+        panic!("expected Parsed syntax");
+    };
+    assert_eq!(identifier, looked_up);
+}
+
+/// A `resolved` event whose `identifier_input` is `supplied`, with a
+/// used entry, a rejected entry carrying a record and a conflict
+/// `match_check`, and `displaced` holding a record, round-trips through
+/// `json_line` and back to an equal `Event`.
+#[test]
+fn a_supplied_resolved_event_with_displaced_record_round_trips() {
+    let mut sections = conflict_sections();
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![
+            rejected_submission(1, "10.1000/old", "doi:10.1000/old"),
+            used_submission(2, "10.1000/ref", "doi:10.1000/ref"),
+        ],
+        used: Some(2),
+        displaced: Some(Box::new(Displaced {
+            lookup: LookupStep::Attempted {
+                identifier: "doi:10.1000/extracted".to_string(),
+                origin: IdentifierOrigin::Extracted,
+                attempts: vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::NotFound,
+                }],
+                earlier: vec![],
+            },
+            record_retrieval: Some(RetrievedFrom::Network {
+                service: "crossref".to_string(),
+            }),
+            match_check: MatchCheckStep::Agreed,
+            record: Some(Box::new(Record::new(EntryType::Article))),
+        })),
+    };
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/ref".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    };
+    let line = json_line(&event);
+    let parsed: Event = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed, event, "line was {line}");
+}
+
+/// design.md's first illustrative line: the round-two final skip's
+/// `identifier_input` matches the published JSON exactly.
+#[test]
+fn the_round_two_final_skip_identifier_input_matches_the_illustrative_json() {
+    let event = round_two_final_skip_event();
+    let Event::Skipped {
+        sections: Some(sections),
+        ..
+    } = &event
+    else {
+        panic!("expected a resolution skip");
+    };
+    let value = serde_json::to_value(&sections.identifier_input).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "status": "supplied",
+            "submissions": [
+                {
+                    "submission": 1,
+                    "raw": "not-an-identifier",
+                    "syntax": {"status": "rejected", "reason": "unrecognised"},
+                    "lookup": {"status": "not-attempted", "reason": "unparsed"},
+                    "record_retrieval": null,
+                    "match_check": {"status": "not-attempted", "reason": "unparsed"},
+                    "acceptance": {"status": "not-attempted", "reason": "unparsed"},
+                },
+                {
+                    "submission": 2,
+                    "raw": "10.1039/c9cc02492",
+                    "syntax": {"status": "parsed", "identifier": "doi:10.1039/c9cc02492"},
+                    "lookup": {
+                        "status": "attempted",
+                        "identifier": "doi:10.1039/c9cc02492",
+                        "origin": "operator",
+                        "attempts": [
+                            {"service": "crossref", "outcome": {"status": "not-found"}},
+                            {"service": "openalex", "outcome": {"status": "not-found"}},
+                        ],
+                    },
+                    "record_retrieval": null,
+                    "match_check": {"status": "not-attempted", "reason": "no-record"},
+                    "acceptance": {"status": "not-attempted", "reason": "no-record"},
+                },
+                {
+                    "submission": 3,
+                    "raw": "10.1039/c9cc02492a",
+                    "syntax": {"status": "parsed", "identifier": "doi:10.1039/c9cc02492a"},
+                    "lookup": {
+                        "status": "attempted",
+                        "identifier": "doi:10.1039/c9cc02492a",
+                        "origin": "operator",
+                        "attempts": [
+                            {"service": "crossref", "outcome": {
+                                "status": "found", "retrieval": "network",
+                                "stored": {"status": "written"}
+                            }},
+                        ],
+                    },
+                    "record_retrieval": {"kind": "network", "service": "crossref"},
+                    "match_check": {"status": "insufficient-evidence", "reason": "no-titles"},
+                    "acceptance": {"status": "rejected"},
+                    "record": serde_json::to_value(Record::new(EntryType::Article)).unwrap(),
+                },
+            ],
+            "used": null,
+            "displaced": null,
+        })
+    );
+}
+
+/// A `skipped` event whose `identifier_input` is `supplied` with
+/// `used: null` round-trips.
+#[test]
+fn a_supplied_skipped_event_with_used_null_round_trips() {
+    let event = round_two_final_skip_event();
+    let line = json_line(&event);
+    let parsed: Event = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed, event, "line was {line}");
+}
+
+// ---------------------------------------------------------------------
+// lookup.earlier: every round of the file's own lookup (design D12)
+// ---------------------------------------------------------------------
+
+#[test]
+fn attempted_lookup_serializes_earlier_after_attempts_oldest_first() {
+    let step = LookupStep::Attempted {
+        identifier: "doi:10.1000/xyz".to_string(),
+        origin: IdentifierOrigin::Extracted,
+        attempts: vec![ServiceAnswer {
+            service: "crossref".to_string(),
+            outcome: ServiceOutcome::Found {
+                retrieval: FetchedFrom::Network,
+                stored: Some(WriteStep::Written),
+            },
+        }],
+        earlier: vec![
+            LookupRound::Attempted {
+                attempts: vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Unavailable {
+                        message: "HTTP 503".to_string(),
+                    },
+                }],
+            },
+            LookupRound::NoEligibleService,
+        ],
+    };
+    let value = serde_json::to_value(&step).unwrap();
+    let keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let attempts_pos = keys.iter().position(|k| *k == "attempts").unwrap();
+    let earlier_pos = keys.iter().position(|k| *k == "earlier").unwrap();
+    assert!(attempts_pos < earlier_pos, "got {keys:?}");
+    assert_eq!(
+        value["earlier"],
+        serde_json::json!([
+            {"status": "attempted", "attempts": [
+                {"service": "crossref", "outcome": {"status": "unavailable", "message": "HTTP 503"}}
+            ]},
+            {"status": "no-eligible-service"},
+        ])
+    );
+}
+
+#[test]
+fn no_eligible_service_lookup_serializes_earlier_after_origin() {
+    let step = LookupStep::NoEligibleService {
+        identifier: "pmid:12345678".to_string(),
+        origin: IdentifierOrigin::Extracted,
+        earlier: vec![LookupRound::NoEligibleService],
+    };
+    let value = serde_json::to_value(&step).unwrap();
+    let keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let origin_pos = keys.iter().position(|k| *k == "origin").unwrap();
+    let earlier_pos = keys.iter().position(|k| *k == "earlier").unwrap();
+    assert!(origin_pos < earlier_pos, "got {keys:?}");
+    assert_eq!(
+        value["earlier"],
+        serde_json::json!([{"status": "no-eligible-service"}])
+    );
+}
+
+#[test]
+fn empty_earlier_is_omitted_and_absent_earlier_deserializes_to_empty() {
+    let step = LookupStep::Attempted {
+        identifier: "doi:10.1000/xyz".to_string(),
+        origin: IdentifierOrigin::Extracted,
+        attempts: vec![ServiceAnswer {
+            service: "crossref".to_string(),
+            outcome: ServiceOutcome::NotFound,
+        }],
+        earlier: vec![],
+    };
+    let text = serde_json::to_string(&step).unwrap();
+    assert!(!text.contains("earlier"), "got {text}");
+    let parsed: LookupStep = serde_json::from_str(&text).unwrap();
+    let LookupStep::Attempted { earlier, .. } = parsed else {
+        panic!("expected Attempted");
+    };
+    assert_eq!(earlier, Vec::<LookupRound>::new());
+}
+
+#[test]
+fn lookup_earlier_round_trips_for_attempted_and_no_eligible_service() {
+    let attempted = LookupStep::Attempted {
+        identifier: "doi:10.1000/xyz".to_string(),
+        origin: IdentifierOrigin::Extracted,
+        attempts: vec![ServiceAnswer {
+            service: "crossref".to_string(),
+            outcome: ServiceOutcome::NotFound,
+        }],
+        earlier: vec![LookupRound::Attempted {
+            attempts: vec![ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: ServiceOutcome::Unavailable {
+                    message: "HTTP 503".to_string(),
+                },
+            }],
+        }],
+    };
+    let no_eligible = LookupStep::NoEligibleService {
+        identifier: "pmid:1".to_string(),
+        origin: IdentifierOrigin::Extracted,
+        earlier: vec![LookupRound::NoEligibleService],
+    };
+    for step in [attempted, no_eligible] {
+        let text = serde_json::to_string(&step).unwrap();
+        let parsed: LookupStep = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, step, "line was {text}");
     }
 }
 
@@ -1404,12 +2123,187 @@ fn human_line_of_unresolvable_with_no_eligible_service() {
     sections.lookup = LookupStep::NoEligibleService {
         identifier: "arXiv:2401.12345".to_string(),
         origin: IdentifierOrigin::Extracted,
+        earlier: vec![],
     };
     let event = skipped_verdict(SkipReason::Unresolvable, sections);
 
     assert_eq!(
         human_line(&event).unwrap(),
         "mystery.pdf: skipped, no configured service could be asked about arXiv:2401.12345"
+    );
+}
+
+// ---------------------------------------------------------------------
+// human_line: the rejected-candidate clause (design D6, task 6.1)
+// ---------------------------------------------------------------------
+
+/// A submission rejected with its record, for the human-line and
+/// description tests: `number` numbers it, `identifier` is its parsed
+/// text.
+fn rejected_candidate_submission(number: u32, identifier: &str) -> Submission {
+    Submission {
+        submission: number,
+        raw: identifier.to_string(),
+        syntax: SyntaxStep::Parsed {
+            identifier: identifier.to_string(),
+        },
+        outcome: Some(Box::new(SubmissionOutcome {
+            lookup: LookupStep::Attempted {
+                identifier: identifier.to_string(),
+                origin: IdentifierOrigin::Operator,
+                attempts: vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Found {
+                        retrieval: FetchedFrom::Network,
+                        stored: Some(WriteStep::Written),
+                    },
+                }],
+                earlier: vec![],
+            },
+            record_retrieval: Some(RetrievedFrom::Network {
+                service: "crossref".to_string(),
+            }),
+            match_check: MatchCheckStep::Agreed,
+            acceptance: SubmissionAcceptance::Rejected,
+            record: Some(Box::new(Record::new(EntryType::Article))),
+        })),
+    }
+}
+
+/// design D6: a `resolved` line whose file had two candidates rejected
+/// ends `; candidates rejected: <a>, <b>`, in submission order.
+#[test]
+fn human_line_of_resolved_with_two_rejected_candidates() {
+    let mut sections = sections_via_network("crossref", "doi:10.1000/xyz123");
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![
+            rejected_candidate_submission(1, "doi:10.1000/a"),
+            rejected_candidate_submission(2, "doi:10.1000/b"),
+        ],
+        used: None,
+        displaced: None,
+    };
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    };
+    assert!(
+        human_line(&event)
+            .unwrap()
+            .ends_with("; candidates rejected: doi:10.1000/a, doi:10.1000/b"),
+        "got {:?}",
+        human_line(&event)
+    );
+}
+
+/// design D6: a `resolved` line with one rejected candidate carries the
+/// clause after the library clause, when there is one.
+#[test]
+fn human_line_of_resolved_with_one_rejected_candidate_follows_the_library_clause() {
+    let mut sections = sections_via_library("0192a1b2", "item-1");
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![rejected_candidate_submission(1, "doi:10.1000/a")],
+        used: None,
+        displaced: None,
+    };
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    };
+    let line = human_line(&event).unwrap();
+    assert!(
+        line.ends_with("; candidate rejected: doi:10.1000/a"),
+        "got {line:?}"
+    );
+}
+
+/// design D6: a line whose submissions hold none `rejected` has no
+/// clause — `unparsed`, `no-record`, `no-move`, a used submission, and
+/// not attempted.
+#[test]
+fn human_line_has_no_clause_when_nothing_was_rejected() {
+    let unparsed = refused_submission(1, "garbage");
+    let no_record = no_record_submission(1, "10.1000/x", "doi:10.1000/x");
+    let used = used_submission(1, "10.1000/x", "doi:10.1000/x");
+
+    for submissions in [vec![unparsed], vec![no_record], vec![used]] {
+        let mut sections = sections_via_network("crossref", "doi:10.1000/xyz123");
+        sections.identifier_input = IdentifierInputStep::Supplied {
+            submissions,
+            used: None,
+            displaced: None,
+        };
+        let event = Event::Resolved {
+            path: PathBuf::from("paper.pdf"),
+            identifier: "doi:10.1000/xyz123".to_string(),
+            record: Box::new(Record::new(EntryType::Article)),
+            sections: Box::new(sections),
+        };
+        assert!(
+            !human_line(&event).unwrap().contains("rejected"),
+            "got {:?}",
+            human_line(&event)
+        );
+    }
+
+    let not_attempted = sections_via_network("crossref", "doi:10.1000/xyz123");
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(not_attempted),
+    };
+    assert!(!human_line(&event).unwrap().contains("rejected"));
+}
+
+/// design D6: a rejected identifier carrying a control character is
+/// written escaped, as the rest of the line is.
+#[test]
+fn human_line_escapes_a_control_character_in_a_rejected_identifier() {
+    let mut sections = sections_via_network("crossref", "doi:10.1000/xyz123");
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![rejected_candidate_submission(1, "doi:10.1000/a\u{7}b")],
+        used: None,
+        displaced: None,
+    };
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1000/xyz123".to_string(),
+        record: Box::new(Record::new(EntryType::Article)),
+        sections: Box::new(sections),
+    };
+    let line = human_line(&event).unwrap();
+    assert!(!line.contains('\u{7}'), "got {line:?}");
+}
+
+/// design D12: an `unresolvable` skip whose `lookup` has an `earlier`
+/// round of `unavailable` answers gives exactly the line it gives
+/// without `earlier` — the human line states the current round only.
+/// Expected to pass at once; it pins behaviour.
+#[test]
+fn human_line_of_unresolvable_shows_the_current_round_only() {
+    let plain = skipped_verdict(SkipReason::Unresolvable, unresolvable_sections());
+    let mut with_earlier_sections = unresolvable_sections();
+    let LookupStep::Attempted { earlier, .. } = &mut with_earlier_sections.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    *earlier = vec![LookupRound::Attempted {
+        attempts: vec![ServiceAnswer {
+            service: "crossref".to_string(),
+            outcome: ServiceOutcome::Unavailable {
+                message: "HTTP 503".to_string(),
+            },
+        }],
+    }];
+    let with_earlier = skipped_verdict(SkipReason::Unresolvable, with_earlier_sections);
+
+    assert_eq!(
+        human_line(&with_earlier).unwrap(),
+        human_line(&plain).unwrap()
     );
 }
 
@@ -2051,6 +2945,7 @@ fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
             Tier::TextLayer,
         ),
         overridden: false,
+        accepted: false,
     };
 
     let event = resolved_event(&path, &file);
@@ -2100,6 +2995,7 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
         hash: Some(hash_bytes(b"paper")),
         evidence: evidence_via_content_index_hit(),
         overridden: false,
+        accepted: false,
     };
 
     let event = resolved_event(&path, &file);
@@ -2140,6 +3036,7 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
         hash: Some(hash_bytes(b"paper")),
         evidence: evidence_via_content_index_hit(),
         overridden: false,
+        accepted: false,
     };
 
     let event = resolved_event(&path, &file);
@@ -2171,6 +3068,7 @@ fn a_record_whose_provenance_names_no_service_names_no_via() {
         hash: Some(hash_bytes(b"paper")),
         evidence: evidence_via_content_index_hit(),
         overridden: false,
+        accepted: false,
     };
 
     let event = resolved_event(&path, &file);

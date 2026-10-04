@@ -26,8 +26,8 @@ use borax::cli::Command;
 use borax::config::{BibLayer, Effective, Layer, Origin, resolve};
 use borax::event::{
     Acceptance, ContentIndexSection, Event, ExtractionResultStep, ExtractionSection, FetchedFrom,
-    IdentifierOrigin, IndexReadStep, LibraryStep, LookupStep, MatchCheckStep, RetrievedFrom,
-    Sections, ServiceAnswer, ServiceOutcome, SkipReason, TitlesStep, WriteStep,
+    IdentifierInputStep, IdentifierOrigin, IndexReadStep, LibraryStep, LookupStep, MatchCheckStep,
+    RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason, TitlesStep, WriteStep,
 };
 use borax::pipeline::Documents;
 use borax::renaming::{Filesystem, RenameError};
@@ -284,6 +284,9 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
                 },
                 titles: TitlesStep::Read { claims: Vec::new() },
             },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
+            },
             lookup: LookupStep::Attempted {
                 identifier: identifier.to_string(),
                 origin: IdentifierOrigin::Extracted,
@@ -296,6 +299,7 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
                         }),
                     },
                 }],
+                earlier: vec![],
             },
             record_retrieval: Some(RetrievedFrom::Network {
                 service: "crossref".to_string(),
@@ -330,6 +334,9 @@ fn text_without_identifier_skip(path: PathBuf) -> Event {
             extraction: ExtractionSection {
                 result: ExtractionResultStep::TextWithoutIdentifier,
                 titles: TitlesStep::Read { claims: Vec::new() },
+            },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
             },
             lookup: LookupStep::NotAttempted {
                 reason: not_attempted(),

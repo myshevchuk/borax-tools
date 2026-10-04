@@ -1337,6 +1337,7 @@ fn resolve_and_rename_over_the_real_backend_carry_no_removed_field() {
                     "library",
                     "content_index",
                     "extraction",
+                    "identifier_input",
                     "lookup",
                     "record_retrieval",
                     "match_check",
@@ -1347,6 +1348,23 @@ fn resolve_and_rename_over_the_real_backend_carry_no_removed_field() {
                         "resolved event is missing section {section:?}: {event}"
                     );
                 }
+                // design D1: a batch run asks no question, so
+                // `identifier_input` is `not-attempted` with reason
+                // `not-asked`, or `content-duplicate` on a content
+                // duplicate.
+                let reason = object["identifier_input"]["reason"].as_str();
+                assert!(
+                    matches!(reason, Some("not-asked") | Some("content-duplicate")),
+                    "resolved event's identifier_input has an unexpected reason: {event}"
+                );
+                let line = event.to_string();
+                let extraction_at = line.find("\"extraction\"").unwrap();
+                let input_at = line.find("\"identifier_input\"").unwrap();
+                let lookup_at = line.find("\"lookup\"").unwrap();
+                assert!(
+                    extraction_at < input_at && input_at < lookup_at,
+                    "identifier_input is out of pipeline order: {line}"
+                );
             }
             Some("skipped") => {
                 saw_skipped = true;
@@ -1363,6 +1381,19 @@ fn resolve_and_rename_over_the_real_backend_carry_no_removed_field() {
                     assert!(
                         !reason.contains_key(removed),
                         "skipped event's reason still carries {removed:?}: {event}"
+                    );
+                }
+                // design D1: every resolution-verdict skip (one that
+                // carries sections) carries identifier_input too.
+                if let Some(sections) = event.get("sections").filter(|v| !v.is_null()) {
+                    assert!(
+                        sections.get("identifier_input").is_some(),
+                        "resolution skip is missing identifier_input: {event}"
+                    );
+                    let input_reason = sections["identifier_input"]["reason"].as_str();
+                    assert!(
+                        matches!(input_reason, Some("not-asked") | Some("content-duplicate")),
+                        "skip's identifier_input has an unexpected reason: {event}"
                     );
                 }
             }
