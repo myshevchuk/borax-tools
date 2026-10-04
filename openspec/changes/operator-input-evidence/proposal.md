@@ -113,9 +113,27 @@ repository) assigns it these tasks:
   over its conflict. `accepted` replaces change 9's interim `automatic`
   for a supplied record. A submission that was set aside reports
   `rejected` on its entry: the operator answered Skip while it was on
-  offer, or supplied another identifier that parsed. An entry that
-  reached nothing to accept is not attempted, with reason `unparsed`,
-  `no-record` or `no-move`. Design D4.
+  offer, or a later submission reached a record that took its place on
+  offer. An entry that reached nothing to accept is not attempted, with
+  reason `unparsed`, `no-record` or `no-move`. Some things leave a
+  candidate on offer and `pending`:
+  - a later identifier that reaches no record, or a record with no
+    move;
+  - a rename met with the notice that the library already holds the
+    work.
+
+  A record reached by retrying the file's own identifier is `automatic`
+  when renamed from, or `overridden` when renamed over its title
+  conflict. Design D4.
+- **Restored: a supply that leads nowhere keeps the candidate on
+  offer.** The living `rename` requirement "An interactive run asks
+  about files it could not settle" says a supplied identifier that does
+  not resolve leaves the file "exactly as it was, with the record and
+  the choices it already had". The driver breaks that when the record
+  on offer was itself a candidate: the `Err(unheld)` branch of
+  `Answer::Supply` (`run.rs`, near line 2079) sets
+  `offer = own.clone()` and drops it. This change restores the record
+  on offer from before the supply. Design D4, D5.
 - **No reported verdict is `pending`.** Only the event a question's
   description is rendered from carries `pending`. Every verdict is
   reported after the operator's answer (design D4).
@@ -158,14 +176,20 @@ repository) assigns it these tasks:
   event it builds (design D5).
 
 The schema version stays 4. `identifier_input` and `lookup.earlier` are
-new keys, and `pending` and `accepted` are new values. A consumer that ignores what it
-does not know reads them unchanged, and the `cli` requirement "JSON Lines
-output is first-class" asks no bump for an addition. One value changes
-meaning: a supplied record renamed with no conflict reported `automatic`
-and now reports `accepted`. That would need a bump if a release had
-carried it. None has. Schema 4 and the interim value exist only on
-`main` after 0.8.0, which shipped schema 3. The maintainer accepted the
-interim value on exactly this condition.
+new keys, and `pending` and `accepted` are new values. A consumer that
+ignores what it does not know reads them unchanged, so the `cli`
+requirement "JSON Lines output is first-class" asks no bump for them.
+
+One value changes meaning, and it is not an addition: a supplied record
+renamed with no conflict reported `automatic` and now reports
+`accepted`. That is the unreleased exception change 9's D7 authorised.
+Schema 4 and the interim value exist only on `main` after 0.8.0, which
+shipped schema 3. As written, the `cli` requirement speaks of what a
+consumer reads "today", which could take in an unreleased build. So
+this change modifies that requirement to say what changes 9 and 10 have
+both relied on: a schema version is fixed by the first release that
+emits it, and until then it may change without a further bump. Design
+D4.
 
 Explicitly out of scope:
 
@@ -214,13 +238,17 @@ None.
       candidates"
   - MODIFIED:
     - "An interactive run asks about files it could not settle": a
-      skipped file carries its submissions, and "exactly as it was"
-      described the file's situation, not its report
+      skipped file carries its submissions. "Exactly as it was" is kept,
+      and is made explicit for a candidate on offer, with the one
+      exception that the unresolved identifier is recorded
     - "A candidate the operator abandoned leaves nothing behind": an
       abandoned candidate is now reported, as evidence and never as the
       resolution
     - "An interactive question shows what the answer rests on": a
       candidate's pending state belongs to the question
+- `cli`: MODIFIED "JSON Lines output is first-class". A schema version
+  is fixed by the first release that emits it, and an unreleased schema
+  may change without a further bump.
 
 Requirements checked and left unchanged:
 
@@ -248,8 +276,6 @@ Requirements checked and left unchanged:
     conflict is still shown "whether the conflict is being asked about
     or was accepted", and a pending candidate's conflict is the first
     case.
-  - "JSON Lines output is first-class". This change is additive except
-    for the unreleased interim value, as stated above.
   - "Non-interactive contexts never prompt".
 - `extraction`: nothing. Extraction's results and titles are unchanged.
 
@@ -282,6 +308,10 @@ Requirements checked and left unchanged:
 - `crates/borax/src/run.rs`:
   - the driver records each submission, the refused ones included;
   - it marks a candidate rejected or not offered;
+  - an unheld supply, or one whose record has no move, restores the
+    record on offer before it, rather than the file's own;
+  - a candidate is rejected only when a later record replaces it on
+    offer, or on Skip;
   - it puts the input on every event it builds;
   - `described` no longer calls `accept`;
   - `skipped` rebuilds the held verdict with the input;

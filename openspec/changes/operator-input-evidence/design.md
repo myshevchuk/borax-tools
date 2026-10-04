@@ -35,11 +35,31 @@ this change. These are decisions, not open questions:
 3. **`pending` is never emitted in this change.** It appears only on
    the event a question's description is rendered from (D4).
 4. **`rejected` covers both ways a candidate is set aside**: Skip while
-   it is on offer, and a later submission that parses (D4).
+   it is on offer, and a later submission whose record replaces it on
+   offer (D4, as amended after the critic gate).
 5. **Quit at a candidate reports nothing about that file**, its
    submissions included (D4, D5).
 6. **The change from `automatic` to `accepted` is allowed without a
    version bump**, because no release carries schema 4 (D4).
+
+**Amended after the critic gate** (findings accepted by the
+coordinator):
+
+- **A supply that does not resolve keeps a candidate on offer.** This is
+  a restoration of the living `rename` text "SHALL leave the file
+  exactly as it was, with the record and the choices it already had".
+  Today's driver breaks it when the record on offer is itself a
+  candidate (D4, D5).
+- **A collision notice leaves a candidate pending.** Rename or Rename
+  anyway on a candidate whose work the library already holds is
+  answered with a notice, and the question is put again (D4).
+- **A retried record accepted over its conflict is `overridden`**, not
+  `automatic` (D4).
+- **The schema-version rule is made explicit about unreleased schemas**
+  by modifying the `cli` requirement "JSON Lines output is first-class"
+  (D4, D10).
+- **D11 splits the `earlier` edits** into constructor sites and pattern
+  sites.
 
 What the engine does today, at the points this change touches:
 
@@ -64,9 +84,20 @@ What the engine does today, at the points this change touches:
   - **A record.** `resolve_supplied` returns `Ok(file)`. That record
     goes on offer.
   - **No record.** `resolve_supplied` returns `Err(unheld)`. A report
-    block is shown and the file's own record goes back on offer.
+    block is shown and the file's own record goes back on offer
+    (`offer = own.clone()`, near line 2079). That holds even when the
+    record on offer was a candidate, so a candidate is dropped by a
+    supply that leads nowhere, against the living `rename` requirement
+    (D4, "Restored").
   - **No move.** A candidate whose decision is not a move is set aside
-    by `run::elsewhere` before any question is put about it.
+    by `run::elsewhere` before any question is put about it, and the
+    file's own record goes back on offer (near line 1922).
+  - **A collision notice.** Rename, Rename anyway or Keep on a record
+    the operator reached (`!on.kept`) is checked against the library
+    first (near line 2026). Where the library already holds a file of
+    its work and the operator has not been told, the driver shows the
+    collision, sets `told`, and puts the question again without
+    accepting anything.
 - `run::skipped` (line 2283) replays the held verdict. On a skip, a
   candidate the operator saw is reported nowhere.
 - `run::described` (line 2327) renders a candidate's would-be
@@ -173,8 +204,9 @@ These invariants hold, and tests pin them:
 4. `displaced` is non-null exactly when `used` is.
 5. Submission numbers run 1, 2, … with no gaps, in `submissions` order.
    The used entry need not be last. A candidate stays on offer when a
-   text typed after it is refused and the prompt is then abandoned, so
-   the refused text follows it.
+   text typed after it is refused, when an identifier typed after it
+   reaches no record, or when one reaches a record that leads to no
+   move (D4). Each of those submissions follows it.
 
 **Why a pointer, and why the used entry is bare.** The section follows
 the pipeline. `identifier_input` produces the identifier `lookup` looks
@@ -328,23 +360,76 @@ A submission's `acceptance`, on every entry except the used one:
 
 | `status` | When |
 |---|---|
-| `rejected` | its record was on offer and stopped being: the operator answered Skip, or submitted a text that parsed |
+| `rejected` | its record was on offer and stopped being: the operator answered Skip, or a later submission reached a record that replaced it on offer |
 | `not-attempted`, `unparsed` | the text did not parse |
 | `not-attempted`, `no-record` | it parsed, and no service held the identifier or none could be asked |
 | `not-attempted`, `no-move` | its record leads to no move (a taken target, no usable name, or the file's current name), so the driver set it aside without asking (`run::elsewhere`) |
 
-What does not reject a candidate: a refused text (the candidate stays on
-offer), an abandoned prompt, and Quit. Quit is settled (Context, item
-5): the file is reported nothing, so its submissions are reported
-nowhere.
+What does not reject a candidate, which stays on offer and `pending`:
 
-**`pending` is never a reported verdict** (settled, Context item 3). An interactive run reports a
-file once its operator has answered (`rename` "A file's verdict follows
-the operator's decision"). Each answer settles the candidate on offer:
+- a refused text;
+- an abandoned prompt;
+- a later identifier that reaches no record (closed `no-record`);
+- a later identifier whose record leads to no move (closed `no-move`);
+- a collision notice (below).
 
-- Rename or Rename anyway accepts it;
-- Skip, or another parsed submission, rejects it;
+Quit does not reject one either. It is settled (Context, item 5): the
+file is reported nothing, so its submissions are reported nowhere.
+
+**Restored: a supply that does not resolve keeps the candidate.** The
+living `rename` requirement "An interactive run asks about files it
+could not settle" says a supplied identifier that does not resolve
+"SHALL leave the file exactly as it was, with the record and the
+choices it already had". Today's driver reverts to the file's own
+record (`offer = own.clone()`), and so drops a candidate that was on
+offer. This change restores the requirement: the record on offer
+before the supply, candidate or own, is on offer after it. The
+requirement is the authority, so this is a restoration inside this
+change, not a new rule. The first draft had instead rejected the
+candidate as soon as a later text parsed, which contradicted the
+requirement.
+
+**Decided here: a later record with no move keeps the candidate too.**
+The living text does not say what is on offer after a candidate whose
+record leads to no move. Today `elsewhere` reverts to the file's own
+record. This change reverts to the record on offer before that supply.
+That treats a supply that led nowhere the same whether no service held
+it or its record had no move, and it keeps the rule one sentence long:
+a candidate is rejected only by Skip, or by a later record that takes
+its place on offer. Where no candidate was on offer, the record before
+the supply is the file's own, so today's behaviour is unchanged
+(`a_resolved_candidate_that_led_nowhere_leaves_the_files_own_record_to_cite`
+still holds).
+
+**A collision notice is `pending` → `pending`.** Rename or Rename
+anyway, given on a candidate whose work the library already holds a
+file of, settles nothing the first time. The driver shows the
+collision, as the living `rename` requirement asks, and puts the
+question again with the candidate still on offer and still `pending`.
+The answer given after the notice settles it like any other:
+
+- Rename or Rename anyway accepts it, and the move files the file as
+  another artifact of that item;
+- Skip rejects it;
+- a later submission rejects it if its record replaces the candidate on
+  offer, and leaves it pending otherwise;
 - Quit reports nothing.
+
+The notice is shown once per file (`told`), as today, so the second
+answer is never met with it again.
+
+**`pending` is never a reported verdict** (settled, Context item 3).
+An interactive run reports a file only once an answer has settled it
+(`rename` "A file's verdict follows the operator's decision"). The
+answers that settle a candidate on offer:
+
+- Rename or Rename anyway accepts it, except the first time on a work
+  the library already holds, which only brings the notice;
+- Skip rejects it, and so does a later record that replaces it on
+  offer;
+- Quit reports nothing.
+
+Every other answer leaves it on offer and `pending`.
 
 `pending` therefore appears only on the event a question's description
 is rendered from. It is still a stream value, because that event is a
@@ -359,26 +444,50 @@ Reporting such a record as `accepted` would change `overridden`'s
 meaning, which is not additive. The event still says the record was
 the operator's, in `lookup.origin` and `identifier_input.used`.
 
-**A retried record stays `automatic`.** A retry is the file's own
-lookup made again, and its origin is `extracted`. D12 keeps its earlier
-rounds, but it stays the file's own lookup. The interim value the
-maintainer named was the supplied record's.
+**A retried record is `automatic`, or `overridden` over its
+conflict.** A retry is the file's own lookup made again, and its origin
+is `extracted`. D12 keeps its earlier rounds, but it stays the file's
+own lookup, so it is never `pending` or `accepted`. A retried record
+that cleared the title check and is renamed from reports `automatic`. A
+retry can also reach a record whose title conflicts (the Retry arm
+then holds a `conflict` skip, near line 2107). If the operator renames
+over that conflict, `accept` sets `overridden`, and the record reports
+`overridden` like any record accepted over its conflict. The interim
+value the maintainer named was the supplied record's.
 
 **The one change of meaning, and the version** (settled, Context item
 6). Change 9 made a
 supplied record renamed with no conflict report `automatic`, and this
 change makes it report `accepted`. The `cli` requirement "JSON Lines
 output is first-class" asks a bump for "a field whose meaning changes".
-That rule protects a consumer of a released stream, and no release
+As written, its phrase "a consumer that reads the stream correctly
+today" could take in a build of `main` between two changes. That rule
+protects a consumer of a released stream, and no release
 carries schema 4: 0.8.0 shipped schema 3, and changes 9 and 10 both land
 before 0.9.0. The maintainer accepted the interim value on exactly this
 condition (change 9's D7). Everything else here is additive, so the
 version stays 4.
 
+**The `cli` requirement is modified rather than read around.** The
+alternative was to argue in the delta that the requirement is not
+contradicted, because it speaks of releases. But its wording is about
+what a consumer reads "today", and change 9 relied on the release
+reading without writing it down. This change modifies "JSON Lines
+output is first-class" to say:
+
+- the version separates schemas as released;
+- a schema not yet carried by any release may change without a further
+  bump;
+- the first release that carries a schema fixes it.
+
+That is the rule changes 9 and 10 have both followed. Writing it down
+lets the next unreleased change check against it, rather than against
+an interpretation.
+
 **Settled: one `rejected` for both ways** (Context item 4), rather than
 telling them apart as `skipped` and `superseded`. The entries' order
-already tells it. A rejected entry
-followed by a parsed submission was set aside by that submission. The
+already tells it. A rejected entry followed by a submission whose
+record went on offer was set aside by that submission. The
 last rejected entry was set aside by the final answer.
 
 **Rejected: `accepted` for every supplied record the operator accepted,
@@ -446,16 +555,31 @@ The batch path never calls `accept`, and never has an operator origin.
   `Unparsed`. The function can take the list, or return the refused
   texts beside the parsed one; that is the implementer's choice. The
   refusal is still shown and the prompt put again.
-- A parsed text, while a candidate is on offer, first closes that
-  candidate's entry as `Rejected`. The entry takes the candidate's
-  lookup, match check and record. Then:
-  - if `resolve_supplied` gives `Ok`, the new submission is open and on
-    offer;
-  - if it gives `Err(unheld)`, the new submission is closed as
+- Before resolving a parsed text, the driver remembers the record on
+  offer, which is a candidate or the file's own (`before`). Then:
+  - **`Err(unheld)`.** The new submission is closed as
     `NotAttempted(NoRecord)`. Its lookup is `unheld_evidence`'s, and
-    its match check is not attempted for `NoRecord`.
-- `elsewhere` closes the candidate's entry as `NotAttempted(NoMove)`.
+    its match check is not attempted for `NoRecord`. The offer is
+    restored to `before`: a candidate on offer stays on offer, open and
+    `pending`. This replaces `offer = own.clone()` in the Supply arm's
+    `Err` branch. It is the restoration D4 describes, so it changes
+    what the driver does and needs its own red test (task 5.1).
+  - **`Ok(file)` whose record leads to no move.** `elsewhere` reports
+    it, closes the new submission as `NotAttempted(NoMove)`, and
+    restores the offer to `before`, where today it reverts to the
+    file's own.
+  - **`Ok(file)` whose record leads to a move.** The new record goes on
+    offer, open. Only now is a candidate in `before` closed as
+    `Rejected`, taking its lookup, match check and record.
+
+  "Leads to a move" is what the loop already tests before asking
+  (`candidate && !matches!(decision, Some(PlannedRename::Rename { .. }))`).
+  The rejection is therefore made where that test passes, not where
+  `resolve_supplied` returns.
 - Skip with a candidate on offer closes it as `Rejected`.
+- The collision notice (Rename, Rename anyway or Keep with `!on.kept &&
+  !told` and a held work) closes nothing. The candidate stays open and
+  `pending`, and the next answer is handled as any answer is.
 - Every event the driver builds carries the input as it stands at that
   moment:
   - the event a description renders;
@@ -962,6 +1086,10 @@ kept except the one renamed below:
     as evidence only;
   - "An interactive question shows what the answer rests on": the
     pending state belongs to the question.
+- `cli`:
+  - "JSON Lines output is first-class": the version separates released
+    schemas, and a schema no release has carried may change without a
+    further bump (D4).
 
 Each requirement's first line carries its SHALL. One MODIFIED
 requirement carries a `<!-- drops: … -->` marker: "A resolution keeps
@@ -980,7 +1108,8 @@ the brief named. Only the two requirements above said a retry replaces
 the file's lookup. Three hits are left alone:
 
 - `cli` "A question describes whichever verdict it is asking about"
-  already requires a conflict "being asked about" to be shown.
+  already requires a conflict "being asked about" to be shown. A
+  pending candidate's conflict is that case.
 - `rename` "A file's verdict follows the operator's decision" forbids
   reporting an abandoned record "as the file's resolution". That stays
   true.
@@ -1009,17 +1138,36 @@ Change 9's rules apply:
 | `crates/borax/tests/bib.rs` | (a) the `FileRecord` literal (1) |
 | `crates/borax/tests/end_to_end.rs` | none required. The presence check near line 1340 is extended by task 8.1, not rewritten |
 
-**`earlier` (D12), kind (a) throughout.** Every
-`LookupEvidence::Attempted`, `LookupStep::Attempted` and
-`LookupStep::NoEligibleService` literal, and every exact pattern
-without `..`, takes `earlier: vec![]`. Patterns with `..` are
-unaffected. At `a62839b` the sites are about:
+**`earlier` (D12), kind (a) throughout.** A struct literal and a
+struct pattern take different edits. `earlier: vec![]` is an expression
+and does not compile in a pattern. The sites at `a62839b`, by line:
 
-- `pipeline.rs`: 16;
-- `event.rs`: 5;
-- `describe.rs`: 4;
-- `dispatch.rs`: 1;
-- `per_file.rs`: 1.
+| File | Constructors: add `earlier: vec![]` | Exact patterns: add `..` | Patterns already ending in `..`: no edit |
+|---|---|---|---|
+| `tests/pipeline.rs` | `LookupEvidence::Attempted` 1381, 1406, 1426, 1529, 1610, 1632, 1659, 1806, 4310; `LookupStep::NoEligibleService` 1436 | `LookupStep::Attempted` 1390; `LookupEvidence::Attempted` 724, 3131, 4085, 4420, 4732 | 1416, 1540, 1852, 1863, 3305, 4018, 4191, 4278, 4568, 4603, 4654 |
+| `tests/event.rs` | `LookupEvidence::Attempted` 42; `LookupStep::Attempted` 94, 1127, 1175; `LookupStep::NoEligibleService` 1404 | none | 2064, 2482 |
+| `tests/describe.rs` | `LookupStep::Attempted` 133, 252, 1224; `LookupStep::NoEligibleService` 1800 | none | none |
+| `tests/dispatch.rs` | `LookupStep::Attempted` 498 (the `sections_for` helper) | none | 5386, 11257, 15744, 16058, 16132, 16336 |
+| `tests/per_file.rs` | `LookupStep::Attempted` 287 | none | none |
+
+That is 21 constructors and 6 exact patterns. An exact pattern takes
+`..`, not `earlier, ..`. It is a shape-only edit, and binding `earlier`
+to assert on it would change what the test expects (kind (b)), which
+no existing test is asked to do. Line numbers drift as earlier groups
+edit a file. The test stage reports a site it cannot find, rather than
+guessing.
+
+The same split applies in `crates/borax/src`, which the implementer
+edits:
+
+- `evidence.rs`: the two exact `LookupEvidence::Attempted` patterns
+  in `sections` (near lines 136 and 144) bind `earlier`, because the
+  projection uses it. The two `LookupStep` constructors there take it.
+  Its other patterns end in `..`;
+- `pipeline.rs`: the constructors in `found_lookup` and
+  `unheld_lookup`;
+- `describe.rs`: the or-pattern `LookupStep::NoEligibleService { identifier,
+  origin }` in `looked_up` (near line 313) takes `..`.
 
 No exact-JSON text changes, because an empty `earlier` is omitted. The
 existing retry tests in `dispatch.rs`

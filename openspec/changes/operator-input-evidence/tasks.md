@@ -60,6 +60,10 @@ is returned exactly as given.
 | outage, Retry, found: both rounds kept | 4, 5 |
 | outage, Retry, all not-found: both rounds kept, no further Retry | 4, 5, 6 |
 | the human line and the description show the current round only | 6, 7 |
+| restored: candidate A found, supply B unheld, A still on offer and pending; Rename accepts A | 5 |
+| candidate A found, supply B found, A rejected and B pending | 5, 7 |
+| a collision notice keeps a candidate pending; then Rename, Skip, Supply, Quit | 5 |
+| Retry finds a conflict, Override gives `overridden` | 4, 5 |
 
 ## 1. The parser's reasons
 
@@ -208,8 +212,10 @@ is returned exactly as given.
         with `Origin::Extracted(tier)`, before and after `accept`. A
         supplied record whose titles agree is `Pending` before `accept`
         and `Accepted` after. One whose titles conflict is `Pending`
-        before and `Overridden` after. A retried record is `Automatic`
-        both times.
+        before and `Overridden` after. A retried record whose titles
+        agree is `Automatic` before and after `accept`. A retried
+        record whose titles conflict is `Automatic` before `accept` and
+        `Overridden` after, since `accept` sets `overridden`.
       - **`resolved_event` passes the acceptance through**: for a
         pending supplied record it carries `acceptance` `pending`.
       - **Rounds are carried forward** (D12):
@@ -284,6 +290,56 @@ is returned exactly as given.
       - **A candidate replaced by another.** The answers are `[Supply,
         Supply, Rename]`. Submission 1 is `rejected` with its record,
         and submission 2 is `used`.
+      - **Restored: an unheld supply keeps the candidate** (D4, D5).
+        This test fails against today's driver, which reverts to the
+        file's own record. The setup: a file with no identifier; DOI A
+        resolves to a record that renders a move; DOI B is held by no
+        service. The answers are `[Supply, Supply, Rename]` and the
+        texts are A then B.
+        - The third question offers the move to A's record: its
+          `target` is A's rendered name, and its choices are Rename,
+          Supply, Skip, Quit.
+        - Its description carries the `candidate` line, read from
+          `ScriptedAsker::questions_asked`, so A is still pending.
+        - After Rename, the `resolved` event reports A's record with
+          `acceptance` `accepted` and `used` 1. Submission 2 has
+          `acceptance` not attempted for `no-record`.
+        - `renamed` and `content-index-write` follow.
+      - **A found, B found** (D4). The answers are `[Supply, Supply,
+        Skip]`, and both DOIs resolve to records that render moves.
+        - The third question describes B's record as pending, and
+          carries a `rejected` line naming A.
+        - The final `skipped` event has submission 1 `rejected` with
+          A's record, and submission 2 `rejected` with B's.
+      - **No-move B keeps A** (D4's "decided here"). A resolves to a
+        move. B resolves to a record whose name is taken. The answers
+        are `[Supply, Supply, Rename]`.
+        - The `name taken` report is shown, and the third question
+          still offers A's move.
+        - The `resolved` event has `used` 1, and submission 2 not
+          attempted for `no-move`.
+      - **A collision notice keeps the candidate pending** (D4). A
+        library holds a file of the work that supplied DOI A resolves
+        to. Each case starts with the answers `[Supply, Rename]`. The
+        second question is the notice: it carries the `same work` block
+        and a description with the `candidate` line. Then:
+        - `[…, Rename]`: the file is moved and filed against the same
+          item. The `resolved` event has `acceptance` `accepted` and
+          `used` 1.
+        - `[…, Skip]`: the file is reported with its own verdict, and
+          submission 1 is `rejected`.
+        - `[…, Supply, Rename]` with a DOI B whose record renders a
+          move: submission 1 is `rejected`, and submission 2 is `used`
+          and `accepted`.
+        - `[…, Quit]`: no event names the file, and the content index
+          holds nothing new.
+      - **Retry finds a conflict, Override** (D4). Crossref fails
+        `Unavailable` once, then answers with a record whose title
+        conflicts with the file's (`FlakySource`). The answers are
+        `[Retry, Override]`. The `resolved` event has `match_check`
+        `conflict`, `acceptance` `overridden`, `lookup.origin`
+        `extracted`, one `earlier` round, and `identifier_input` not
+        attempted for `not-supplied`.
       - **A refused text after a candidate.** The answers are `[Supply,
         Supply, Rename]`, with texts `DOI-A`, `garbage`, then `None`.
         Submission 1 is `used`, and submission 2 follows it with
@@ -342,7 +398,13 @@ is returned exactly as given.
 - [ ] 5.2 Green, in `crates/borax/src/run.rs`:
       - the driver records submissions (D5), including refused texts
         from `supplied_identifier`;
-      - it marks candidates `Rejected` or `NoMove`;
+      - it marks candidates `Rejected` only when a later record takes
+        their place on offer or on Skip, and marks submissions `NoMove`
+        or `NoRecord`;
+      - restoration: the Supply arm's `Err(unheld)` branch, and the
+        `elsewhere` reset after a candidate, put back the record that
+        was on offer before the supply, in place of `own.clone()`;
+      - the collision notice leaves the candidate open;
       - it puts the input as it stands on every event it builds;
       - `described` stops calling `accept`;
       - `skipped` rebuilds the held verdict with the input.
@@ -395,9 +457,9 @@ is returned exactly as given.
         it. Expected to pass at once; it pins behaviour.
       - Kind (b): the `Fixture`'s `"supplied"` arm per D11.
       - In `dispatch.rs`, on what the terminal is shown: after a
-        candidate is set aside by a second DOI that no service holds,
-        the re-asked question's description carries `rejected` naming
-        the first DOI.
+        candidate is replaced on offer by a second DOI's record, the
+        question about the second record carries `rejected` naming the
+        first DOI. This shares its setup with 5.1's "A found, B found".
 - [ ] 7.2 Green, in `describe.rs`: add the two lines and the conflict
       condition, and update `describe`'s docstring list of lines.
 

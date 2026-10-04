@@ -75,10 +75,17 @@ A submission's outcome SHALL be:
     cache or the network answered;
   - its `match_check`;
   - the `record`, in full;
-  - its `acceptance`: `rejected` when the record was on offer and the
-    operator answered skip or submitted another text that parsed, or
-    not attempted with reason `no-move` when the record led to no move
-    and so was never put to the operator.
+  - its `acceptance`: `rejected` when the record was on offer and
+    stopped being, because the operator answered skip or a later
+    submission reached a record that took its place on offer; or not
+    attempted with reason `no-move` when the record led to no move and
+    so was never put to the operator.
+
+A record on offer SHALL NOT be rejected by a later text that is
+refused, by a later identifier that reaches no record or a record with
+no move, or by the run's saying the library already holds a file of its
+work. It stays on offer, as the `rename` requirement "A file's verdict
+keeps every identifier its operator supplied" states.
 
 `used` SHALL be a submission number exactly when the event's `lookup`
 names the operator as the identifier's origin. When it is:
@@ -123,9 +130,15 @@ Otherwise `displaced` SHALL be `null`.
 
 #### Scenario: A candidate set aside for another identifier
 - **WHEN** a supplied DOI's record is on offer and the operator supplies
-  a second DOI that parses
-- **THEN** the first submission's `acceptance` is `rejected`, whatever
-  the second DOI's lookup comes to
+  a second DOI whose record is offered in its place
+- **THEN** the first submission's `acceptance` is `rejected`
+
+#### Scenario: A candidate outlasts a supply nobody holds
+- **WHEN** a supplied DOI's record is on offer, the operator supplies a
+  second DOI that no service holds, and then renames the file from the
+  first record
+- **THEN** `used` names the first submission, and the second follows it
+  with `acceptance` not attempted for `no-record`
 
 #### Scenario: A candidate that leads to no move
 - **WHEN** the record a supplied DOI reaches renders the name the file
@@ -300,10 +313,17 @@ SHALL carry a schema-3 rendering of a fact beside its schema-4 one. A
 `resolved` event keeps `path`, `identifier`, the record's preferred
 identifier, and `record`, the whole record.
 
-The `identifier_input` section and the `acceptance` values `pending` and
-`accepted` are additions to schema 4. A consumer that ignores what it
-does not know reads them unchanged, so they SHALL NOT change the
-version.
+The `identifier_input` section, the `earlier` rounds of a lookup, and
+the `acceptance` value `pending` are additions to schema 4. A consumer
+that ignores what it does not know reads them unchanged.
+
+One change is not an addition. A record reached from a supplied
+identifier and renamed from with no conflict is `accepted`, so
+`automatic` no longer covers it, which narrows that value's meaning.
+No release has carried schema 4. The requirement "JSON Lines output is
+first-class" lets a schema that no release has carried change without
+a further bump. So none of these SHALL change the version, and it SHALL
+remain 4.
 
 #### Scenario: A content-index answer in sections
 - **WHEN** a run with no library resolves a file from the content index
@@ -436,8 +456,10 @@ SHALL carry nothing beside its status. It SHALL be:
 - `not-applicable` on every resolution skip, a conflict skip included.
 
 A file's reported verdict SHALL NOT carry `pending`. An interactive run
-reports a file only once its operator has answered, and every answer
-settles the record on offer. `pending` is carried by the event a
+reports a file only once an answer has settled the record on offer.
+A rename the run meets with a notice that the library already holds a
+file of the record's work settles nothing, and the record stays
+`pending`. `pending` is carried by the event a
 question's description is rendered from. What the operator decided
 about a record that did not become the file's verdict is reported on
 the submission that reached it, and never in this section.
@@ -481,8 +503,23 @@ Agreement and too little evidence SHALL NOT be reported alike.
 
 #### Scenario: A retried record renamed
 - **WHEN** an operator asks the services again after an outage, and
-  renames the file from the record its own DOI now reaches
+  renames the file from the record its own DOI now reaches, whose title
+  agrees with the file's
 - **THEN** its `resolved` event carries `acceptance` `automatic`
+
+#### Scenario: A retried record renamed over its conflict
+- **WHEN** an operator asks the services again after an outage, the
+  record its own DOI now reaches has a title that conflicts with the
+  file's, and the operator renames the file anyway
+- **THEN** its `resolved` event carries `match_check` `conflict`,
+  `acceptance` `overridden`, and `lookup.origin` `extracted`
+
+#### Scenario: A collision notice keeps a supplied record pending
+- **WHEN** an operator answers rename on a record a supplied DOI
+  reached, and the run says the library already holds a file of its
+  work
+- **THEN** the event the next question's description is rendered from
+  still carries `acceptance` `pending`
 
 ### Requirement: A resolution skip names its cause and states each fact once
 A `skipped` event that is a file's resolution verdict SHALL carry a `reason` whose `kind` is one of `no-text-layer`, `text-without-identifier`, `encrypted`, `unreadable`, `unresolvable`, `conflict` or `duplicate`, and SHALL carry no field in its reason other than the reader's `message` on `unreadable` and, on `duplicate`, the duplicate's `reason` and `existing_path` as before.

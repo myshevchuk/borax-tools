@@ -13,6 +13,22 @@ reported with that record and its submission named as `used`. Its
 `acceptance` SHALL be `accepted`, or `overridden` where the rename went
 over the record's title conflict.
 
+A record a supplied identifier reached SHALL stay on offer, awaiting the
+operator's answer, until one of these:
+
+- the operator renames from it;
+- the operator skips the file;
+- a later supplied identifier reaches a record that takes its place on
+  offer;
+- the operator quits.
+
+A later identifier that reaches no record, or a record that leads to no
+move, SHALL leave it on offer. So SHALL a rename the run answers by
+saying the library already holds a file of the record's work, as the
+requirement "An interactive run asks about files it could not settle"
+requires. The answer given after that notice is the one that settles
+the record.
+
 A file renamed from its own record SHALL report its submissions, if
 any, beside that record's evidence.
 
@@ -62,6 +78,33 @@ at, since nothing at all is reported for it.
 - **THEN** the first submission carries its record with `acceptance`
   `rejected`, and the second is `used`
 
+#### Scenario: A supply nobody holds keeps the candidate on offer
+- **WHEN** the operator supplies a DOI whose record is offered as a
+  move, then supplies a second DOI that no service holds
+- **THEN** the services' answers about the second DOI are shown, the
+  question put again still offers the move to the first record's name,
+  and that record is still pending; answering rename then reports it
+  with `acceptance` `accepted` and the first DOI's submission as `used`,
+  and the second submission with `acceptance` not attempted for
+  `no-record`
+
+#### Scenario: A second candidate takes the first one's place
+- **WHEN** the operator supplies a DOI whose record is offered as a
+  move, then supplies a second DOI whose record is also offered as a
+  move
+- **THEN** the first submission is `rejected` with its record, and the
+  question put next describes the second record as pending
+
+#### Scenario: A collision notice keeps the candidate pending
+- **WHEN** the operator supplies a DOI whose work the library already
+  holds a file of, and answers rename
+- **THEN** the run names the item and the recorded path, puts the
+  question again, and the record is still described as pending; a
+  second rename moves the file and reports `acceptance` `accepted`, a
+  skip reports the submission `rejected`, a further supply that reaches
+  a record on offer rejects it, and a quit reports nothing about the
+  file
+
 #### Scenario: Quitting at a candidate
 - **WHEN** the operator supplies a DOI, sees its record, and quits
 - **THEN** no event reports the file, and the content index holds
@@ -99,9 +142,9 @@ without them.
 
 #### Scenario: A rejected candidate named in the next question
 - **WHEN** a supplied DOI's record is on offer, and the operator
-  supplies a second DOI that no service holds
-- **THEN** the question put again carries a `rejected` line naming the
-  first DOI
+  supplies a second DOI whose record is offered in its place
+- **THEN** the question about the second record carries a `rejected`
+  line naming the first DOI
 
 ## MODIFIED Requirements
 
@@ -183,10 +226,12 @@ A supplied identifier that resolves SHALL leave the file in whatever
 situation its new record puts it: a move to offer, a target taken, a
 name that renders empty, or a file already named. A supplied
 identifier that does not resolve, and an input the operator abandons,
-SHALL leave the file in the situation it was in, with the record and the
-choices it already had. The identifier that did not resolve is kept
-among the file's submissions, with what its lookup came to; an
-abandoned input submitted nothing and adds none.
+SHALL leave the file exactly as it was, with the record and the choices
+it already had. Where the record on offer was one an earlier supplied
+identifier reached, that record stays on offer, still awaiting the
+operator's answer. The one thing that does change: the identifier that
+did not resolve is kept among the file's submissions, with what its
+lookup came to. An abandoned input submitted nothing and adds none.
 
 #### Scenario: Supplying an identifier for an unidentified file
 - **WHEN** an interactive run finds no identifier in an author manuscript
