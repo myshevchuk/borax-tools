@@ -79,7 +79,7 @@ pub enum Event {
         /// run, where every event pays the size of the largest variant.
         record: Box<Record>,
         /// The resolution's evidence, one section per step, written as
-        /// seven keys beside `record`.
+        /// eight keys beside `record`.
         #[serde(flatten)]
         sections: Box<Sections>,
     },
@@ -106,7 +106,7 @@ pub enum Event {
     Skipped {
         path: PathBuf,
         reason: SkipReason,
-        /// The resolution's evidence, written as seven keys beside
+        /// The resolution's evidence, written as eight keys beside
         /// `reason`: `Some` exactly when the skip is the file's
         /// resolution verdict ([`SkipReason::is_resolution_verdict`]),
         /// and absent from the line otherwise. Its absence is how a
@@ -764,7 +764,12 @@ pub struct Sections {
     pub content_index: ContentIndexSection,
     /// What extraction found, and the titles the file claims.
     pub extraction: ExtractionSection,
-    /// The identifier looked up and every service asked about it.
+    /// Every text an operator typed at the identifier prompt for the
+    /// file, or why none was taken.
+    pub identifier_input: IdentifierInputStep,
+    /// The identifier looked up and every service asked about it. When
+    /// `identifier_input` names a used submission, this is that
+    /// submission's lookup.
     pub lookup: LookupStep,
     /// Where the record the verdict is about was retrieved from, or
     /// `null` when the verdict reached no record. On a conflict skip
@@ -772,9 +777,118 @@ pub struct Sections {
     pub record_retrieval: Option<RetrievedFrom>,
     /// What the title check concluded about the record reached.
     pub match_check: MatchCheckStep,
-    /// Whether the record was used, and whether an operator overrode
-    /// the title check to use it.
+    /// Whether the record was used, and how: automatically, by an
+    /// operator over the title check, or as an operator's own record.
     pub acceptance: Acceptance,
+}
+
+/// What an operator typed at the identifier prompt for a file.
+/// Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum IdentifierInputStep {
+    /// At least one text was submitted. `submissions` are every one,
+    /// in the order typed. `used` is the number of the submission whose
+    /// identifier the event's own `lookup` looked up, or `null`;
+    /// `displaced` is non-null exactly when `used` is, and holds the
+    /// file's own steps that submission's outcome replaced in the
+    /// event's sections.
+    Supplied {
+        submissions: Vec<Submission>,
+        used: Option<u32>,
+        displaced: Option<Box<Displaced>>,
+    },
+    /// Nothing was submitted: `not-asked`, `not-supplied` or
+    /// `content-duplicate`.
+    NotAttempted { reason: String },
+}
+
+/// One text an operator submitted at the identifier prompt.
+///
+/// Every submission but the used one carries its own outcome, whose
+/// keys sit beside `syntax`. The used submission's outcome is the
+/// event's own `lookup`, `record_retrieval`, `match_check`, `acceptance`
+/// and record, so its entry carries `submission`, `raw` and `syntax`
+/// only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Submission {
+    /// The submission's number, counting from 1 within the file.
+    pub submission: u32,
+    /// The text as the prompt returned it.
+    pub raw: String,
+    /// Whether the text parsed, and to what.
+    pub syntax: SyntaxStep,
+    /// Flattened: its keys sit beside `syntax`. `None` exactly for the
+    /// submission `used` names, whose keys are then absent.
+    #[serde(flatten)]
+    pub outcome: Option<Box<SubmissionOutcome>>,
+}
+
+/// What a submission that was not used came to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubmissionOutcome {
+    /// The lookup of the identifier it parsed to, with origin
+    /// `operator`, or not attempted for `unparsed`.
+    pub lookup: LookupStep,
+    /// Where its record was retrieved from, or `null` when it reached
+    /// none.
+    pub record_retrieval: Option<RetrievedFrom>,
+    /// What the title check concluded about its record.
+    pub match_check: MatchCheckStep,
+    /// What the operator decided about its record.
+    pub acceptance: SubmissionAcceptance,
+    /// The record it reached: present exactly when `record_retrieval`
+    /// is not `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<Box<Record>>,
+}
+
+/// Whether a submitted text parsed. Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum SyntaxStep {
+    /// The text named `identifier`, normalised and written as the
+    /// stream writes one (`doi:…`, `arXiv:…`, `pmid:…`, `isbn:…`).
+    Parsed { identifier: String },
+    /// The text named no identifier: `reason` is `unrecognised`,
+    /// `invalid` or `checksum`, and `expected` names the form the text
+    /// named (`doi`, `arxiv`, `pmid` or `isbn`), present exactly when
+    /// `reason` is `invalid` or `checksum`.
+    Rejected {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected: Option<String>,
+    },
+}
+
+/// What an operator decided about the record a submission reached.
+/// Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum SubmissionAcceptance {
+    /// Its record was on offer and stopped being: the operator answered
+    /// Skip, or a later submission's record took its place.
+    Rejected,
+    /// It reached nothing to accept: `unparsed`, `no-record` or
+    /// `no-move`.
+    NotAttempted { reason: String },
+}
+
+/// The file's own steps that a used submission replaced in the event's
+/// sections.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Displaced {
+    /// The file's own lookup, every round of it.
+    pub lookup: LookupStep,
+    /// Where the file's own record came from, or `null` when its own
+    /// resolution reached none.
+    pub record_retrieval: Option<RetrievedFrom>,
+    /// The file's own title check.
+    pub match_check: MatchCheckStep,
+    /// The file's own record, resolved or refused: present exactly when
+    /// `record_retrieval` is not `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<Box<Record>>,
 }
 
 /// What a run's library said about a file. Serialized with a `status`
@@ -886,6 +1000,12 @@ pub enum TitlesStep {
 
 /// The lookup made for a file, or why none was. Serialized with a
 /// `status` tag.
+///
+/// The variant and its fields describe the current round. `earlier` is
+/// every round of the same lookup made before it, oldest first, when an
+/// operator asked for the file's own identifier to be looked up again;
+/// it is absent from the line when there is none, which is always the
+/// case for an identifier an operator supplied.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "kebab-case")]
 pub enum LookupStep {
@@ -896,15 +1016,30 @@ pub enum LookupStep {
         identifier: String,
         origin: IdentifierOrigin,
         attempts: Vec<ServiceAnswer>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        earlier: Vec<LookupRound>,
     },
     /// `identifier`, which came from `origin`, was to be looked up, and
     /// no configured service supports its kind.
     NoEligibleService {
         identifier: String,
         origin: IdentifierOrigin,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        earlier: Vec<LookupRound>,
     },
     /// Nothing was looked up.
     NotAttempted { reason: String },
+}
+
+/// One earlier round of a file's own lookup. Serialized with a
+/// `status` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum LookupRound {
+    /// The services asked in that round, in order: never empty.
+    Attempted { attempts: Vec<ServiceAnswer> },
+    /// No configured service supported the identifier in that round.
+    NoEligibleService,
 }
 
 /// Where an identifier that was looked up came from.
@@ -1027,12 +1162,20 @@ pub enum Acceptance {
     /// The verdict is a skip, whose record, if it reports one, was not
     /// used.
     NotApplicable,
-    /// A record was used, and no title-check conflict was overridden to
-    /// use it.
+    /// A record was used, no title-check conflict was overridden to use
+    /// it, and it was not reached from an operator's submission.
     Automatic,
     /// An operator accepted the record over the conflict `match_check`
-    /// holds.
+    /// holds, whether it was the file's own or one they supplied.
     Overridden,
+    /// The record reached from an operator's submission is on offer and
+    /// unanswered, whatever its title check concluded. Only the event a
+    /// question's description is rendered from carries it; no reported
+    /// verdict does.
+    Pending,
+    /// An operator accepted the record reached from their submission,
+    /// with no conflict overridden.
+    Accepted,
 }
 
 /// The services that supplied `record`, as the human line and the
@@ -1212,9 +1355,10 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: {}",
             path.display(),
             escaped(&format!(
-                "{}{}",
+                "{}{}{}",
                 resolved_as(identifier, record, sections),
-                unanswered(sections.library.answer())
+                unanswered(sections.library.answer()),
+                rejected_candidates(Some(sections))
             ))
         )),
         Event::Planned { path, target } => Some(format!(
@@ -1236,13 +1380,14 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: skipped, {}",
             path.display(),
             escaped(&format!(
-                "{}{}",
+                "{}{}{}",
                 skipped_because(reason, sections.as_deref()),
                 unanswered(
                     sections
                         .as_deref()
                         .and_then(|sections| sections.library.answer())
-                )
+                ),
+                rejected_candidates(sections.as_deref())
             ))
         )),
         Event::AlreadyNamed { path } => Some(format!("{}: already named", path.display())),
@@ -1585,6 +1730,42 @@ fn unanswered(library: Option<&LibraryAnswer>) -> String {
         Some(what) => format!("; the library could not answer: {what}"),
         None => String::new(),
     }
+}
+
+/// The clause a resolution's human line ends with when an operator
+/// rejected a candidate for the file: `; candidate rejected: <id>`, or
+/// `; candidates rejected: <a>, <b>` in submission order, and nothing
+/// otherwise.
+fn rejected_candidates(sections: Option<&Sections>) -> String {
+    let rejected = sections.map(rejected_identifiers).unwrap_or_default();
+    match rejected.as_slice() {
+        [] => String::new(),
+        [one] => format!("; candidate rejected: {one}"),
+        many => format!("; candidates rejected: {}", many.join(", ")),
+    }
+}
+
+/// The identifiers of the submissions an operator rejected, in
+/// submission order.
+///
+/// Shared by the human line and the interactive description.
+pub(crate) fn rejected_identifiers(sections: &Sections) -> Vec<&str> {
+    let IdentifierInputStep::Supplied { submissions, .. } = &sections.identifier_input else {
+        return Vec::new();
+    };
+    submissions
+        .iter()
+        .filter_map(
+            |submission| match (&submission.syntax, &submission.outcome) {
+                (SyntaxStep::Parsed { identifier }, Some(outcome))
+                    if outcome.acceptance == SubmissionAcceptance::Rejected =>
+                {
+                    Some(identifier.as_str())
+                }
+                _ => None,
+            },
+        )
+        .collect()
 }
 
 /// Why the library could not answer for a file, as a clause whose

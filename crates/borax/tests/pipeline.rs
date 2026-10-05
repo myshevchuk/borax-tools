@@ -10,14 +10,15 @@ use std::time::Duration;
 
 use borax::event::{
     Acceptance, Claim, ClaimOrigin, Counts, Event, Extraction, ExtractionResultStep, FetchedFrom,
-    IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep, LookupStep, MatchCheckStep,
-    RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason, TitlesStep, WriteStep,
-    human_line,
+    IdentifierInputStep, IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep, LookupRound,
+    LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason,
+    SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep, human_line,
 };
 use borax::evidence::{
-    Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
-    IndexWrite, LookupEvidence, MatchCheck, Origin, RecordRetrieval, ServiceAttempt, Titles,
-    Unattempted,
+    CandidateDecision, Consultation, Displacement, Evidence, ExtractionEvidence, ExtractionStep,
+    IdentifierInput, IndexEvidence, IndexRead, IndexWrite, LookupEvidence,
+    LookupRound as EvidenceLookupRound, MatchCheck, Origin, RecordRetrieval, ServiceAttempt,
+    Titles, Unattempted,
 };
 use borax::library::{ArtifactStore, ItemStore, Stores};
 use borax::pipeline::{
@@ -27,7 +28,7 @@ use borax::pipeline::{
     verdict_event,
 };
 use borax_core::content::{ContentHash, hash_bytes};
-use borax_core::identifier::{ArxivId, Doi, Identifier};
+use borax_core::identifier::{ArxivId, Doi, Identifier, IdentifierKind, SuppliedError};
 use borax_core::library::{
     ArtifactId, ArtifactRecord, DuplicateReason, HashEntry, Item, ItemId, RunId as LibraryRunId,
 };
@@ -725,6 +726,7 @@ fn an_identifier_no_source_holds_is_skipped_as_unresolvable_with_attempts_in_pri
             identifier,
             origin,
             attempts,
+            ..
         } => {
             assert_eq!(identifier, &Identifier::Doi(doi("10.1000/nowhere")));
             assert_eq!(*origin, Origin::Extracted(Tier::EmbeddedMetadata));
@@ -928,6 +930,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_and_sec
         ),
         hash: Some(hash_for("paper")),
         overridden: false,
+        accepted: false,
     };
 
     let event = resolved_event(&path, &file);
@@ -969,6 +972,7 @@ fn a_content_index_hit_reports_its_record_retrieval_as_content_index() {
         evidence: evidence_via_content_index_hit(),
         hash: Some(hash_for("paper")),
         overridden: false,
+        accepted: false,
     };
 
     let event = resolved_event(&path, &file);
@@ -1077,6 +1081,7 @@ fn evidence_with(
         library,
         content_index,
         extraction,
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
         lookup,
         match_check,
     }
@@ -1382,6 +1387,7 @@ fn sections_projects_lookup_attempted_and_no_eligible_service() {
             identifier: identifier.clone(),
             origin: Origin::Extracted(Tier::TextLayer),
             attempts: vec![found.clone()],
+            earlier: vec![],
         },
         MatchCheck::NotAttempted(Unattempted::NoRecord),
     );
@@ -1391,6 +1397,7 @@ fn sections_projects_lookup_attempted_and_no_eligible_service() {
             identifier: got_identifier,
             origin,
             attempts,
+            ..
         } => {
             assert_eq!(got_identifier, "doi:10.1000/x");
             assert_eq!(origin, IdentifierOrigin::Extracted);
@@ -1407,6 +1414,7 @@ fn sections_projects_lookup_attempted_and_no_eligible_service() {
             identifier: identifier.clone(),
             origin: Origin::Operator,
             attempts: vec![found],
+            earlier: vec![],
         },
         MatchCheck::NotAttempted(Unattempted::NoRecord),
     );
@@ -1427,6 +1435,7 @@ fn sections_projects_lookup_attempted_and_no_eligible_service() {
             identifier: identifier.clone(),
             origin: Origin::Extracted(Tier::TextLayer),
             attempts: Vec::new(),
+            earlier: vec![],
         },
         MatchCheck::NotAttempted(Unattempted::NoRecord),
     );
@@ -1436,6 +1445,7 @@ fn sections_projects_lookup_attempted_and_no_eligible_service() {
         LookupStep::NoEligibleService {
             identifier: "doi:10.1000/x".to_string(),
             origin: IdentifierOrigin::Extracted,
+            earlier: vec![],
         }
     );
 
@@ -1533,6 +1543,7 @@ fn sections_projects_every_service_attempt_outcome() {
                     service: SourceName::Crossref,
                     outcome: outcome.clone(),
                 }],
+                earlier: vec![],
             },
             MatchCheck::NotAttempted(Unattempted::NoRecord),
         );
@@ -1614,6 +1625,7 @@ fn sections_projects_record_retrieval_for_every_place_and_none() {
                 service: SourceName::Crossref,
                 outcome: Ok(Retrieval::ServiceCache),
             }],
+            earlier: vec![],
         },
         MatchCheck::Agreed,
     );
@@ -1638,6 +1650,7 @@ fn sections_projects_record_retrieval_for_every_place_and_none() {
                     stored: Some(CacheWrite::Written),
                 }),
             }],
+            earlier: vec![],
         },
         MatchCheck::Agreed,
     );
@@ -1663,6 +1676,7 @@ fn sections_projects_record_retrieval_for_every_place_and_none() {
                 service: SourceName::Crossref,
                 outcome: Err(SourceError::NotFound),
             }],
+            earlier: vec![],
         },
         MatchCheck::NotAttempted(Unattempted::NoRecord),
     );
@@ -1810,6 +1824,7 @@ fn every_reason_in_a_projected_sections_is_a_known_unattempted_reason() {
                 service: SourceName::Crossref,
                 outcome: Ok(Retrieval::Network { stored: None }),
             }],
+            earlier: vec![],
         },
         MatchCheck::NotAttempted(Unattempted::NoRecord),
     );
@@ -1866,6 +1881,440 @@ fn reasons_in(sections: &Sections) -> Vec<String> {
         reasons.push(reason.clone());
     }
     reasons
+}
+
+// ---------------------------------------------------------------------
+// Evidence::identifier_input and its projection (design D1-D4, D8, D9,
+// D12; task 3.1)
+// ---------------------------------------------------------------------
+
+/// A full `Evidence` whose `identifier_input` is overridden, every
+/// other field at `evidence_with`'s defaults.
+fn evidence_with_input(identifier_input: IdentifierInput) -> Evidence {
+    let mut evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::NotAttempted(Unattempted::NoRecord),
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    evidence.identifier_input = identifier_input;
+    evidence
+}
+
+#[test]
+fn sections_projects_not_attempted_identifier_input_for_every_reason() {
+    for reason in [
+        Unattempted::NotAsked,
+        Unattempted::NotSupplied,
+        Unattempted::ContentDuplicate,
+    ] {
+        let evidence = evidence_with_input(IdentifierInput::NotAttempted(reason));
+        let sections = evidence.sections(Acceptance::Automatic);
+        assert_eq!(
+            sections.identifier_input,
+            IdentifierInputStep::NotAttempted {
+                reason: reason.as_str().to_string()
+            },
+            "reason {reason:?}"
+        );
+    }
+}
+
+#[test]
+fn sections_projects_rejected_syntax_with_expected_and_without() {
+    let evidence = evidence_with_input(IdentifierInput::Supplied {
+        submissions: vec![borax::evidence::Submission {
+            number: 1,
+            raw: "pmid:abc".to_string(),
+            syntax: Err(SuppliedError::Invalid {
+                kind: IdentifierKind::Pmid,
+            }),
+            outcome: Some(borax::evidence::SubmissionOutcome {
+                lookup: LookupEvidence::NotAttempted(Unattempted::Unparsed),
+                match_check: MatchCheck::NotAttempted(Unattempted::Unparsed),
+                record: None,
+                decision: CandidateDecision::NotAttempted(Unattempted::Unparsed),
+            }),
+        }],
+        used: None,
+    });
+    let sections = evidence.sections(Acceptance::Automatic);
+    let IdentifierInputStep::Supplied { submissions, .. } = &sections.identifier_input else {
+        panic!("expected Supplied");
+    };
+    assert_eq!(
+        submissions[0].syntax,
+        SyntaxStep::Rejected {
+            reason: "invalid".to_string(),
+            expected: Some("pmid".to_string()),
+        }
+    );
+
+    let unrecognised = evidence_with_input(IdentifierInput::Supplied {
+        submissions: vec![borax::evidence::Submission {
+            number: 1,
+            raw: "prose".to_string(),
+            syntax: Err(SuppliedError::Unrecognised),
+            outcome: Some(borax::evidence::SubmissionOutcome {
+                lookup: LookupEvidence::NotAttempted(Unattempted::Unparsed),
+                match_check: MatchCheck::NotAttempted(Unattempted::Unparsed),
+                record: None,
+                decision: CandidateDecision::NotAttempted(Unattempted::Unparsed),
+            }),
+        }],
+        used: None,
+    });
+    let sections = unrecognised.sections(Acceptance::Automatic);
+    let IdentifierInputStep::Supplied { submissions, .. } = &sections.identifier_input else {
+        panic!("expected Supplied");
+    };
+    assert_eq!(
+        submissions[0].syntax,
+        SyntaxStep::Rejected {
+            reason: "unrecognised".to_string(),
+            expected: None,
+        }
+    );
+}
+
+#[test]
+fn sections_projects_parsed_syntax_as_the_identifiers_display() {
+    let identifier = Identifier::Doi(doi("10.1039/c9cc02492"));
+    let evidence = evidence_with_input(IdentifierInput::Supplied {
+        submissions: vec![borax::evidence::Submission {
+            number: 1,
+            raw: "10.1039/c9cc02492".to_string(),
+            syntax: Ok(identifier.clone()),
+            outcome: Some(borax::evidence::SubmissionOutcome {
+                lookup: LookupEvidence::NotAttempted(Unattempted::NoRecord),
+                match_check: MatchCheck::NotAttempted(Unattempted::NoRecord),
+                record: None,
+                decision: CandidateDecision::NotAttempted(Unattempted::NoRecord),
+            }),
+        }],
+        used: None,
+    });
+    let sections = evidence.sections(Acceptance::Automatic);
+    let IdentifierInputStep::Supplied { submissions, .. } = &sections.identifier_input else {
+        panic!("expected Supplied");
+    };
+    assert_eq!(
+        submissions[0].syntax,
+        SyntaxStep::Parsed {
+            identifier: identifier.to_string()
+        }
+    );
+}
+
+/// A submission outcome for every `CandidateDecision`: `unparsed`,
+/// `no-record` with attempts kept, `rejected` with a record whose
+/// `record_retrieval` names the found attempt's service, and `no-move`.
+#[test]
+fn sections_projects_every_submission_outcome() {
+    let identifier = Identifier::Doi(doi("10.1000/x"));
+
+    // unparsed
+    let evidence = evidence_with_input(IdentifierInput::Supplied {
+        submissions: vec![borax::evidence::Submission {
+            number: 1,
+            raw: "garbage".to_string(),
+            syntax: Err(SuppliedError::Unrecognised),
+            outcome: Some(borax::evidence::SubmissionOutcome {
+                lookup: LookupEvidence::NotAttempted(Unattempted::Unparsed),
+                match_check: MatchCheck::NotAttempted(Unattempted::Unparsed),
+                record: None,
+                decision: CandidateDecision::NotAttempted(Unattempted::Unparsed),
+            }),
+        }],
+        used: None,
+    });
+    let sections = evidence.sections(Acceptance::Automatic);
+    let IdentifierInputStep::Supplied { submissions, .. } = &sections.identifier_input else {
+        panic!("expected Supplied");
+    };
+    assert_eq!(
+        submissions[0].outcome.as_ref().unwrap().acceptance,
+        SubmissionAcceptance::NotAttempted {
+            reason: "unparsed".to_string()
+        }
+    );
+    assert_eq!(
+        submissions[0].outcome.as_ref().unwrap().record_retrieval,
+        None
+    );
+
+    // no-record, attempts kept
+    let evidence = evidence_with_input(IdentifierInput::Supplied {
+        submissions: vec![borax::evidence::Submission {
+            number: 1,
+            raw: "10.1000/x".to_string(),
+            syntax: Ok(identifier.clone()),
+            outcome: Some(borax::evidence::SubmissionOutcome {
+                lookup: LookupEvidence::Attempted {
+                    identifier: identifier.clone(),
+                    origin: Origin::Operator,
+                    attempts: vec![ServiceAttempt {
+                        service: SourceName::Crossref,
+                        outcome: Err(SourceError::NotFound),
+                    }],
+                    earlier: vec![],
+                },
+                match_check: MatchCheck::NotAttempted(Unattempted::NoRecord),
+                record: None,
+                decision: CandidateDecision::NotAttempted(Unattempted::NoRecord),
+            }),
+        }],
+        used: None,
+    });
+    let sections = evidence.sections(Acceptance::Automatic);
+    let IdentifierInputStep::Supplied { submissions, .. } = &sections.identifier_input else {
+        panic!("expected Supplied");
+    };
+    let outcome = submissions[0].outcome.as_ref().unwrap();
+    let LookupStep::Attempted { attempts, .. } = &outcome.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        outcome.acceptance,
+        SubmissionAcceptance::NotAttempted {
+            reason: "no-record".to_string()
+        }
+    );
+
+    // rejected, with a record and its service
+    let evidence = evidence_with_input(IdentifierInput::Supplied {
+        submissions: vec![borax::evidence::Submission {
+            number: 1,
+            raw: "10.1000/x".to_string(),
+            syntax: Ok(identifier.clone()),
+            outcome: Some(borax::evidence::SubmissionOutcome {
+                lookup: LookupEvidence::Attempted {
+                    identifier: identifier.clone(),
+                    origin: Origin::Operator,
+                    attempts: vec![ServiceAttempt {
+                        service: SourceName::Crossref,
+                        outcome: Ok(Retrieval::Network { stored: None }),
+                    }],
+                    earlier: vec![],
+                },
+                match_check: MatchCheck::Agreed,
+                record: Some(record_with_doi("10.1000/x")),
+                decision: CandidateDecision::Rejected,
+            }),
+        }],
+        used: None,
+    });
+    let sections = evidence.sections(Acceptance::Automatic);
+    let IdentifierInputStep::Supplied { submissions, .. } = &sections.identifier_input else {
+        panic!("expected Supplied");
+    };
+    let outcome = submissions[0].outcome.as_ref().unwrap();
+    assert_eq!(outcome.acceptance, SubmissionAcceptance::Rejected);
+    assert_eq!(
+        outcome.record_retrieval,
+        Some(RetrievedFrom::Network {
+            service: "crossref".to_string()
+        })
+    );
+    assert!(outcome.record.is_some());
+
+    // no-move
+    let evidence = evidence_with_input(IdentifierInput::Supplied {
+        submissions: vec![borax::evidence::Submission {
+            number: 1,
+            raw: "10.1000/x".to_string(),
+            syntax: Ok(identifier.clone()),
+            outcome: Some(borax::evidence::SubmissionOutcome {
+                lookup: LookupEvidence::Attempted {
+                    identifier,
+                    origin: Origin::Operator,
+                    attempts: vec![ServiceAttempt {
+                        service: SourceName::Crossref,
+                        outcome: Ok(Retrieval::Network { stored: None }),
+                    }],
+                    earlier: vec![],
+                },
+                match_check: MatchCheck::Agreed,
+                record: Some(record_with_doi("10.1000/x")),
+                decision: CandidateDecision::NotAttempted(Unattempted::NoMove),
+            }),
+        }],
+        used: None,
+    });
+    let sections = evidence.sections(Acceptance::Automatic);
+    let IdentifierInputStep::Supplied { submissions, .. } = &sections.identifier_input else {
+        panic!("expected Supplied");
+    };
+    assert_eq!(
+        submissions[0].outcome.as_ref().unwrap().acceptance,
+        SubmissionAcceptance::NotAttempted {
+            reason: "no-move".to_string()
+        }
+    );
+}
+
+/// design D2: a `Displacement` gives `used` as its number and
+/// `displaced` with the file's own `lookup`, `record_retrieval` (from
+/// the `RecordRetrieval` it holds, any kind) and `match_check`, plus
+/// `record` when `Some`.
+#[test]
+fn sections_projects_the_used_entry_and_its_displaced_facts() {
+    let identifier = Identifier::Doi(doi("10.1000/used"));
+    let evidence = evidence_with_input(IdentifierInput::Supplied {
+        submissions: vec![borax::evidence::Submission {
+            number: 1,
+            raw: "10.1000/used".to_string(),
+            syntax: Ok(identifier),
+            outcome: None,
+        }],
+        used: Some(Displacement {
+            submission: 1,
+            displaced: borax::evidence::Displaced {
+                lookup: LookupEvidence::NotAttempted(Unattempted::ExtractionFailed),
+                retrieval: None,
+                match_check: MatchCheck::NotAttempted(Unattempted::ExtractionFailed),
+                record: None,
+            },
+        }),
+    });
+    let sections = evidence.sections(Acceptance::Pending);
+    let IdentifierInputStep::Supplied {
+        submissions,
+        used,
+        displaced,
+    } = &sections.identifier_input
+    else {
+        panic!("expected Supplied");
+    };
+    assert_eq!(*used, Some(1));
+    assert!(submissions[0].outcome.is_none());
+    let displaced = displaced.as_ref().unwrap();
+    assert_eq!(
+        displaced.lookup,
+        LookupStep::NotAttempted {
+            reason: "extraction-failed".to_string()
+        }
+    );
+    assert_eq!(displaced.record_retrieval, None);
+    assert_eq!(
+        displaced.match_check,
+        MatchCheckStep::NotAttempted {
+            reason: "extraction-failed".to_string()
+        }
+    );
+    assert!(displaced.record.is_none());
+
+    // A displaced record, with any `RecordRetrieval` kind.
+    let evidence = evidence_with_input(IdentifierInput::Supplied {
+        submissions: vec![borax::evidence::Submission {
+            number: 1,
+            raw: "10.1000/used".to_string(),
+            syntax: Ok(Identifier::Doi(doi("10.1000/used"))),
+            outcome: None,
+        }],
+        used: Some(Displacement {
+            submission: 1,
+            displaced: borax::evidence::Displaced {
+                lookup: LookupEvidence::Attempted {
+                    identifier: Identifier::Doi(doi("10.1000/own")),
+                    origin: Origin::Extracted(Tier::TextLayer),
+                    attempts: vec![ServiceAttempt {
+                        service: SourceName::Crossref,
+                        outcome: Ok(Retrieval::Network { stored: None }),
+                    }],
+                    earlier: vec![],
+                },
+                retrieval: Some(RecordRetrieval::Network {
+                    service: SourceName::Crossref,
+                }),
+                match_check: MatchCheck::Agreed,
+                record: Some(record_with_doi("10.1000/own")),
+            },
+        }),
+    });
+    let sections = evidence.sections(Acceptance::Pending);
+    let IdentifierInputStep::Supplied { displaced, .. } = &sections.identifier_input else {
+        panic!("expected Supplied");
+    };
+    let displaced = displaced.as_ref().unwrap();
+    assert_eq!(
+        displaced.record_retrieval,
+        Some(RetrievedFrom::Network {
+            service: "crossref".to_string()
+        })
+    );
+    assert!(displaced.record.is_some());
+}
+
+/// design D5: every reason string in any projected section equals some
+/// `Unattempted::as_str()`.
+#[test]
+fn the_four_new_unattempted_reasons_match_their_as_str() {
+    assert_eq!(Unattempted::NotAsked.as_str(), "not-asked");
+    assert_eq!(Unattempted::NotSupplied.as_str(), "not-supplied");
+    assert_eq!(Unattempted::Unparsed.as_str(), "unparsed");
+    assert_eq!(Unattempted::NoMove.as_str(), "no-move");
+}
+
+/// design D12: a `LookupEvidence::Attempted` with `earlier` holding a
+/// round with attempts and a round with none projects to D12's two
+/// round shapes, in order; the current round projects as before.
+#[test]
+fn sections_projects_earlier_rounds_in_order_and_the_current_round_unchanged() {
+    let identifier = Identifier::Doi(doi("10.1000/x"));
+    let evidence = evidence_with(
+        Consultation::NotConsulted(Unattempted::NoLibrary),
+        default_content_index(),
+        default_extraction(),
+        LookupEvidence::Attempted {
+            identifier: identifier.clone(),
+            origin: Origin::Extracted(Tier::TextLayer),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::OpenAlex,
+                outcome: Ok(Retrieval::Network { stored: None }),
+            }],
+            earlier: vec![
+                EvidenceLookupRound {
+                    attempts: vec![ServiceAttempt {
+                        service: SourceName::Crossref,
+                        outcome: Err(SourceError::Unavailable {
+                            message: "503".to_string(),
+                        }),
+                    }],
+                },
+                EvidenceLookupRound { attempts: vec![] },
+            ],
+        },
+        MatchCheck::NotAttempted(Unattempted::NoRecord),
+    );
+    let sections = evidence.sections(Acceptance::Automatic);
+    let LookupStep::Attempted {
+        identifier: looked_up,
+        attempts,
+        earlier,
+        ..
+    } = sections.lookup
+    else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(looked_up, identifier.to_string());
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        earlier,
+        vec![
+            LookupRound::Attempted {
+                attempts: vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Unavailable {
+                        message: "503".to_string()
+                    }
+                }]
+            },
+            LookupRound::NoEligibleService,
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -2527,6 +2976,7 @@ fn a_resolved_event_carries_the_whole_record() {
         ),
         hash: None,
         overridden: false,
+        accepted: false,
     };
 
     let Event::Resolved {
@@ -2556,6 +3006,7 @@ fn a_resolved_event_round_trips_its_record_through_json() {
             ),
             hash: None,
             overridden: false,
+            accepted: false,
         },
     );
 
@@ -3087,6 +3538,176 @@ fn title_check_over_titles_not_attempted_is_not_attempted_with_the_same_reason()
 // standing: Evidence on every verdict (design D2, D6, D9, task 6.1)
 // ---------------------------------------------------------------------
 
+/// design D5: through `standing`, every verdict's evidence has
+/// `identifier_input` `NotAttempted(NotAsked)`, except a content
+/// duplicate, which has `NotAttempted(ContentDuplicate)`. `resolve_file`
+/// gives the same for a network resolution.
+#[test]
+fn standing_defaults_identifier_input_to_not_asked_on_every_verdict_but_a_content_duplicate() {
+    // A network resolution.
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("defaults-network"),
+        pdf_with_embedded_doi("10.1000/defaults-network"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/defaults-network")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        None,
+    );
+    let file = resolved_outcome(result.verdict);
+    assert_eq!(
+        file.evidence.identifier_input,
+        IdentifierInput::NotAttempted(Unattempted::NotAsked)
+    );
+
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
+    let file = resolved_outcome(outcome);
+    assert_eq!(
+        file.evidence.identifier_input,
+        IdentifierInput::NotAttempted(Unattempted::NotAsked)
+    );
+
+    // A content-index hit.
+    let hit_hash = hash_for("defaults-content-index");
+    let hit_documents = FakeDocuments::new().with_open_error(
+        path,
+        hit_hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let hit_index = ContentIndex::new(MemoryCache::new());
+    let _ = hit_index.put(
+        &hit_hash,
+        &record_with_doi("10.1000/defaults-content-index"),
+    );
+    let no_sources: Vec<&dyn Source> = Vec::new();
+    let outcome = resolve_file(path, &hit_documents, &no_sources, &hit_index, &config(true));
+    let file = resolved_outcome(outcome);
+    assert_eq!(
+        file.evidence.identifier_input,
+        IdentifierInput::NotAttempted(Unattempted::NotAsked)
+    );
+
+    // Each extraction failure.
+    let no_text_layer = FakeDocuments::new().with_file(
+        path,
+        hash_for("defaults-extraction-failure"),
+        pdf_with_no_identifier(),
+    );
+    let empty_sources: Vec<&dyn Source> = vec![];
+    let index3 = ContentIndex::new(MemoryCache::new());
+    let result = standing(
+        path,
+        &no_text_layer,
+        &empty_sources,
+        &index3,
+        &config(true),
+        None,
+        None,
+    );
+    assert_eq!(
+        result.evidence.identifier_input,
+        IdentifierInput::NotAttempted(Unattempted::NotAsked)
+    );
+
+    // Unresolvable: no source holds the identifier.
+    let unresolvable = FakeDocuments::new().with_file(
+        path,
+        hash_for("defaults-unresolvable"),
+        pdf_with_embedded_doi("10.1000/defaults-unresolvable"),
+    );
+    let (miss, _calls) = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
+    let miss_sources: Vec<&dyn Source> = vec![&miss];
+    let index4 = ContentIndex::new(MemoryCache::new());
+    let result = standing(
+        path,
+        &unresolvable,
+        &miss_sources,
+        &index4,
+        &config(true),
+        None,
+        None,
+    );
+    assert_eq!(
+        result.evidence.identifier_input,
+        IdentifierInput::NotAttempted(Unattempted::NotAsked)
+    );
+
+    // A conflict skip.
+    let conflicting = FakeDocuments::new().with_file(
+        path,
+        hash_for("defaults-conflict"),
+        pdf_with_text_doi("10.1000/defaults-conflict").with_title("Old Extracted Title"),
+    );
+    let (conflict_source, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1000/defaults-conflict",
+            "A Completely Different Title",
+        )),
+    );
+    let conflict_sources: Vec<&dyn Source> = vec![&conflict_source];
+    let index5 = ContentIndex::new(MemoryCache::new());
+    let result = standing(
+        path,
+        &conflicting,
+        &conflict_sources,
+        &index5,
+        &config(true),
+        None,
+        None,
+    );
+    assert_eq!(
+        result.evidence.identifier_input,
+        IdentifierInput::NotAttempted(Unattempted::NotAsked)
+    );
+
+    // A content duplicate.
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let dup_path = root.join("incoming.pdf");
+    let hash = hash_for("defaults-content-duplicate");
+    let dup_documents = FakeDocuments::new().with_file(
+        &dup_path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/defaults-content-duplicate"),
+    );
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let dup_sources: Vec<&dyn Source> = vec![&panics];
+    let dup_index = ContentIndex::new(MemoryCache::new());
+    record_at(root, "archived/Smith2024.pdf", hash, None);
+    let stores = Stores::read(root);
+    let exists = |_: &Path| true;
+    let result = standing(
+        &dup_path,
+        &dup_documents,
+        &dup_sources,
+        &dup_index,
+        &config(true),
+        Some(&stores.account(&exists)),
+        None,
+    );
+    assert_eq!(
+        result.evidence.identifier_input,
+        IdentifierInput::NotAttempted(Unattempted::ContentDuplicate)
+    );
+}
+
 #[test]
 fn a_fresh_resolution_with_no_library_carries_the_whole_evidence() {
     let path = Path::new("paper.pdf");
@@ -3132,6 +3753,7 @@ fn a_fresh_resolution_with_no_library_carries_the_whole_evidence() {
             identifier,
             origin,
             attempts,
+            ..
         } => {
             assert_eq!(identifier.to_string(), "doi:10.1000/evidence-fresh");
             assert_eq!(origin, &Origin::Extracted(Tier::EmbeddedMetadata));
@@ -4086,6 +4708,7 @@ fn a_conflict_candidate_keeps_its_whole_evidence() {
             identifier,
             origin,
             attempts,
+            ..
         } => {
             assert_eq!(
                 identifier.to_string(),
@@ -4307,6 +4930,7 @@ fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) 
             }),
             titles: Titles::Read(Vec::new()),
         },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
         lookup: LookupEvidence::Attempted {
             identifier,
             origin: Origin::Extracted(tier),
@@ -4314,6 +4938,7 @@ fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) 
                 service,
                 outcome: Ok(Retrieval::Network { stored: None }),
             }],
+            earlier: vec![],
         },
         match_check: MatchCheck::Agreed,
     }
@@ -4332,6 +4957,7 @@ fn evidence_via_content_index_hit() -> Evidence {
             result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
             titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
         },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
         lookup: LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
         match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
     }
@@ -4365,6 +4991,7 @@ fn prior_content_index_hit() -> Evidence {
             result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
             titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
         },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
         lookup: LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
         match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
     }
@@ -4385,6 +5012,7 @@ fn prior_tracked(artifact: &str, item: &str) -> Evidence {
             result: ExtractionStep::NotAttempted(Unattempted::LibraryAnswered),
             titles: Titles::NotAttempted(Unattempted::LibraryAnswered),
         },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
         lookup: LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
         match_check: MatchCheck::NotAttempted(Unattempted::LibraryAnswered),
     }
@@ -4421,6 +5049,7 @@ fn resolve_supplied_on_a_file_with_no_identifier_fills_lookup_titles_and_match_c
             identifier: looked_up,
             origin,
             attempts,
+            ..
         } => {
             assert_eq!(looked_up, &identifier);
             assert_eq!(origin, &Origin::Operator);
@@ -4733,6 +5362,7 @@ fn unheld_evidence_sets_the_lookup_from_the_unresolved_attempts_in_order() {
             identifier: looked_up,
             origin,
             attempts,
+            ..
         } => {
             assert_eq!(looked_up, &identifier);
             assert_eq!(origin, &Origin::Extracted(Tier::TextLayer));
@@ -4879,6 +5509,396 @@ fn accept_over_a_resolved_record_leaves_its_evidence_unchanged() {
 
     assert!(!accepted.overridden);
     assert_eq!(accepted.evidence, before);
+}
+
+/// design D5: `accept` sets `accepted` on every record it is given,
+/// conflict or not.
+#[test]
+fn accept_sets_accepted_on_every_record() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("accept-sets-accepted"),
+        pdf_with_embedded_doi("10.1000/accept-sets-accepted"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/accept-sets-accepted")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
+    let file = resolved_outcome(outcome);
+    assert!(!file.accepted);
+
+    let accepted = accept(file);
+    assert!(accepted.accepted);
+}
+
+/// design D5's table: `FileRecord::acceptance` for every combination of
+/// `overridden`, `accepted` and the lookup's `origin`.
+#[test]
+fn file_record_acceptance_matches_the_design_table() {
+    let path = Path::new("paper.pdf");
+
+    // Origin::Operator, titles agree: Pending before accept, Accepted
+    // after.
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("acceptance-table-operator-agree"),
+        pdf_with_no_identifier(),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/acceptance-table-operator-agree"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/acceptance-table-operator-agree")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let prior = prior_of(path, &documents);
+    let file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap();
+    assert_eq!(file.acceptance(), Acceptance::Pending);
+    assert_eq!(accept(file).acceptance(), Acceptance::Accepted);
+
+    // Origin::Operator, titles conflict: Pending before, Overridden
+    // after (accept sets `overridden`).
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("acceptance-table-operator-conflict"),
+        pdf_with_text_doi("10.1000/acceptance-table-operator-conflict")
+            .with_title("Old Extracted Title"),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/acceptance-table-operator-conflict"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1000/acceptance-table-operator-conflict",
+            "A Completely Different Title",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let prior = prior_of(path, &documents);
+    let file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap();
+    assert_eq!(file.acceptance(), Acceptance::Pending);
+    assert_eq!(accept(file).acceptance(), Acceptance::Overridden);
+
+    // Origin::Extracted, titles agree: Automatic before and after
+    // accept (a retry stays the file's own lookup).
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("acceptance-table-extracted-agree"),
+        pdf_with_embedded_doi("10.1000/acceptance-table-extracted-agree"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/acceptance-table-extracted-agree")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let outcome = resolve_file(
+        path,
+        &documents,
+        &sources,
+        &ContentIndex::new(MemoryCache::new()),
+        &config(true),
+    );
+    let file = resolved_outcome(outcome);
+    assert_eq!(file.acceptance(), Acceptance::Automatic);
+    assert_eq!(accept(file).acceptance(), Acceptance::Automatic);
+
+    // Origin::Extracted, titles conflict: Automatic before accept,
+    // Overridden after.
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("acceptance-table-extracted-conflict"),
+        pdf_with_text_doi("10.1000/acceptance-table-extracted-conflict")
+            .with_title("Old Extracted Title"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi_and_title(
+            "10.1000/acceptance-table-extracted-conflict",
+            "A Completely Different Title",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &ContentIndex::new(MemoryCache::new()),
+        &config(true),
+        None,
+        None,
+    );
+    let refused = result
+        .refused
+        .unwrap_or_else(|| panic!("expected a refused candidate, got {:?}", result.verdict));
+    assert_eq!(refused.acceptance(), Acceptance::Automatic);
+    assert_eq!(accept(refused).acceptance(), Acceptance::Overridden);
+}
+
+/// design D5: `resolved_event` passes a pending supplied record's
+/// acceptance through unchanged.
+#[test]
+fn resolved_event_passes_a_pending_acceptance_through() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("resolved-event-pending"),
+        pdf_with_no_identifier(),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/resolved-event-pending"));
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/resolved-event-pending")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let prior = prior_of(path, &documents);
+    let file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &sources,
+        &prior,
+    )
+    .unwrap();
+    assert_eq!(file.acceptance(), Acceptance::Pending);
+
+    let event = resolved_event(Path::new("paper.pdf"), &file);
+    match event {
+        Event::Resolved { sections, .. } => {
+            assert_eq!(sections.acceptance, Acceptance::Pending);
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D12: rounds are carried forward across retries, and never
+/// inherited by an operator's own supplied identifier.
+#[test]
+fn unheld_evidence_and_resolve_supplied_carry_the_rounds_forward() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("rounds-carried-forward"),
+        pdf_with_no_identifier(),
+    );
+    let identifier = Identifier::Doi(doi("10.1000/rounds-carried-forward"));
+    let tier = Tier::TextLayer;
+
+    let (down, _calls) = fake_source(
+        SourceName::Crossref,
+        Err(SourceError::Unavailable {
+            message: "503".to_string(),
+        }),
+    );
+    let down_sources: Vec<&dyn Source> = vec![&down];
+    let prior = prior_of(path, &documents);
+    let first_outage = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Extracted(tier),
+        &documents,
+        &down_sources,
+        &prior,
+    )
+    .unwrap_err();
+    let after_first = unheld_evidence(&prior, &identifier, Origin::Extracted(tier), &first_outage);
+    let LookupEvidence::Attempted { earlier, .. } = &after_first.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(earlier, &Vec::<EvidenceLookupRound>::new());
+
+    // A second call over that result carries `after_first`'s one round
+    // forward as `earlier`.
+    let second_outage = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Extracted(tier),
+        &documents,
+        &down_sources,
+        &after_first,
+    )
+    .unwrap_err();
+    let after_second = unheld_evidence(
+        &after_first,
+        &identifier,
+        Origin::Extracted(tier),
+        &second_outage,
+    );
+    let LookupEvidence::Attempted { earlier, .. } = &after_second.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(earlier.len(), 1);
+
+    // resolve_supplied with the same prior and the extraction origin
+    // gives a found lookup with the same earlier.
+    let (found, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/rounds-carried-forward")),
+    );
+    let found_sources: Vec<&dyn Source> = vec![&found];
+    let found_file = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Extracted(tier),
+        &documents,
+        &found_sources,
+        &after_first,
+    )
+    .unwrap();
+    let LookupEvidence::Attempted { earlier, .. } = &found_file.evidence.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(earlier.len(), 1);
+
+    // With Origin::Operator, both give an empty earlier.
+    let operator_unheld =
+        unheld_evidence(&after_first, &identifier, Origin::Operator, &first_outage);
+    let LookupEvidence::Attempted { earlier, .. } = &operator_unheld.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(earlier, &Vec::<EvidenceLookupRound>::new());
+
+    let operator_found = resolve_supplied(
+        path,
+        &identifier,
+        Origin::Operator,
+        &documents,
+        &found_sources,
+        &after_first,
+    )
+    .unwrap();
+    let LookupEvidence::Attempted { earlier, .. } = &operator_found.evidence.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(earlier, &Vec::<EvidenceLookupRound>::new());
+
+    // A prior lookup of a different identifier gives an empty earlier.
+    let other_identifier = Identifier::Doi(doi("10.1000/a-different-identifier"));
+    let different_identifier = unheld_evidence(
+        &after_first,
+        &other_identifier,
+        Origin::Extracted(tier),
+        &first_outage,
+    );
+    let LookupEvidence::Attempted { earlier, .. } = &different_identifier.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(earlier, &Vec::<EvidenceLookupRound>::new());
+
+    // A prior lookup not attempted gives an empty earlier too.
+    let never_looked_up = prior_of(path, &documents);
+    let from_not_attempted = unheld_evidence(
+        &never_looked_up,
+        &identifier,
+        Origin::Extracted(tier),
+        &first_outage,
+    );
+    let LookupEvidence::Attempted { earlier, .. } = &from_not_attempted.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(earlier, &Vec::<EvidenceLookupRound>::new());
+}
+
+/// design D12: `standing` and `resolve_file` never give a lookup an
+/// `earlier` round.
+#[test]
+fn standing_and_resolve_file_never_give_an_earlier_round() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("standing-never-earlier"),
+        pdf_with_embedded_doi("10.1000/standing-never-earlier"),
+    );
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/standing-never-earlier")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
+    let file = resolved_outcome(outcome);
+    let LookupEvidence::Attempted { earlier, .. } = &file.evidence.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(earlier, &Vec::<EvidenceLookupRound>::new());
+
+    let result = standing(
+        path,
+        &documents,
+        &sources,
+        &ContentIndex::new(MemoryCache::new()),
+        &config(true),
+        None,
+        None,
+    );
+    let FileOutcome::Resolved(file) = result.verdict else {
+        panic!("expected a resolved verdict");
+    };
+    let LookupEvidence::Attempted { earlier, .. } = &file.evidence.lookup else {
+        panic!("expected an attempted lookup");
+    };
+    assert_eq!(earlier, &Vec::<EvidenceLookupRound>::new());
+}
+
+/// design D12: `is_conclusive` reads the current round only.
+#[test]
+fn is_conclusive_reads_the_current_round_and_ignores_earlier() {
+    let identifier = Identifier::Doi(doi("10.1000/is-conclusive-earlier"));
+
+    let conclusive_now_inconclusive_earlier = LookupEvidence::Attempted {
+        identifier: identifier.clone(),
+        origin: Origin::Extracted(Tier::TextLayer),
+        attempts: vec![ServiceAttempt {
+            service: SourceName::Crossref,
+            outcome: Err(SourceError::NotFound),
+        }],
+        earlier: vec![EvidenceLookupRound {
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Err(SourceError::Unavailable {
+                    message: "503".to_string(),
+                }),
+            }],
+        }],
+    };
+    assert!(conclusive_now_inconclusive_earlier.is_conclusive());
+
+    let inconclusive_now_conclusive_earlier = LookupEvidence::Attempted {
+        identifier,
+        origin: Origin::Extracted(Tier::TextLayer),
+        attempts: vec![ServiceAttempt {
+            service: SourceName::Crossref,
+            outcome: Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+        }],
+        earlier: vec![EvidenceLookupRound {
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Err(SourceError::NotFound),
+            }],
+        }],
+    };
+    assert!(!inconclusive_now_conclusive_earlier.is_conclusive());
 }
 
 // ---------------------------------------------------------------------

@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-03, at 0.8.0.
+Last reviewed: 2026-10-05, at 0.8.0.
 
 ## What is built
 
@@ -190,9 +190,10 @@ once, from the record that settled it; that is a longer hold than
 rather than contradicted. `supplied` is not an extraction tier —
 borax-pdf names passes over a file and knows nothing about operators —
 so `FileRecord` carries a borax-level `Provenance`. An abandoned
-candidate leaves nothing anywhere: not reported, not indexed, not
-cited, which the driver has to hold deliberately because the batch
-path cites every file it resolves. And the index write happens on
+candidate is never indexed or cited, which the driver has to hold
+deliberately because the batch path cites every file it resolves;
+since `operator-input-evidence` it is reported, as a rejected
+submission in the file's verdict and never as its resolution. And the index write happens on
 rename alone, because a mistyped identifier that resolved to the wrong
 paper must not be served for that file forever after.
 
@@ -365,7 +366,9 @@ about, the refused candidate's included. `Source::fetch` returns
 answering source, and `Cache::put`, `ContentIndex::put` and
 `pipeline::remember` return their write's result, which never fails a
 run. The interactive driver keeps the file's own evidence apart from a
-candidate's: a retry replaces it, a supply never does. A record an
+candidate's: a retry becomes its current lookup and, since
+`operator-input-evidence`, keeps the rounds before it; a supply never
+touches it. A record an
 operator reached, or accepted over its own conflict through
 `pipeline::accept`, records its content-index write as awaiting
 acceptance; the write itself is made at the move, and `remember`'s
@@ -402,9 +405,42 @@ record was retrieved (`… to "<title>" (<authors>, <year>) via
 `human_line`. The interactive description reads the sections: it
 states the titles' state where it used to say `nothing read`, and it
 shows the file's titles on a verdict whose extraction or lookup
-failed. One value is interim: a record an operator supplied with no
-conflict reports `acceptance` `automatic`, and change 10 replaces that
-with its own value before 0.9.0 ships.
+failed. The interim `acceptance` `automatic` it gave a record an
+operator supplied with no conflict is replaced by `accepted` in
+`operator-input-evidence`, before any release carried it.
+
+`operator-input-evidence` is implemented on top, as Phase 3's change
+10, and keeps schema 4: what it adds is additive, and the one change of
+meaning (`automatic` to `accepted` for a supplied record) lands before
+any release carries schema 4, which the `cli` requirement "JSON Lines
+output is first-class" now states as its rule. Every `resolved` event
+and resolution `skipped` event carries an eighth section,
+`identifier_input`, between `extraction` and `lookup`: `supplied`
+with every text typed at the identifier prompt, in order, or not
+attempted for `not-asked` (every batch run, and an interactive file
+settled without a question), `not-supplied` or `content-duplicate`.
+Each submission carries its `raw` text, its `syntax` (`parsed`, or
+`rejected` for `unrecognised`, `invalid` or `checksum` with the form
+it named, from `identifier::supplied`, which now returns
+`Result<Identifier, SuppliedError>`), and its own outcome, except the
+one `used` names, whose outcome is the event's own sections;
+`displaced` then holds the file's own lookup, retrieval, title check
+and record, so a correction no longer erases the file's own failed
+lookup. A truncated DOI is looked up as typed. A supplied record is
+`pending` until answered (only the event a description is rendered
+from carries it), then `accepted`, `overridden` over a conflict, or
+`rejected` on its submission when the operator skips or a later
+record takes its place on offer; the human line gains `; candidate
+rejected: <id>` and the description `candidate` and `rejected` lines.
+The driver restores the `rename` requirement that a supply leading
+nowhere leaves the file as it was: a candidate on offer stays on
+offer, and a later record with no move puts back what was on offer
+before it. A retry keeps the earlier rounds of the file's own lookup
+in `lookup.earlier`, oldest first; whether Retry is offered still
+reads the current round alone. `FileRecord` gained `accepted`, set by
+`pipeline::accept`, and `Unattempted` gained `not-asked`,
+`not-supplied`, `unparsed` and `no-move`. A rejected candidate is
+still never written to the content index.
 
 ## Not built yet
 
@@ -464,6 +500,15 @@ with its own value before 0.9.0 ships.
   and never edits.
 
 ## Known defects
+
+- **Retry is offered for an identifier no configured service
+  supports.** A lookup with no eligible service has no attempts, so
+  `LookupEvidence::is_conclusive` calls it inconclusive and the menu
+  offers `Try the services again` as it does after an outage, though
+  retrying cannot help: no service has been added in between. Each
+  retry adds another `no-eligible-service` round to `lookup.earlier`.
+  `operator-input-evidence` left when Retry is offered out of scope;
+  a fix is its own change.
 
 - **Adoption's `unreadable` and `unwritten` messages reach the terminal
   unescaped.** The `library-adoption` human line escapes its path, but

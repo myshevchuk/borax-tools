@@ -219,6 +219,10 @@ struct Ran {
     outcome: Outcome,
     /// Each line of stdout, parsed.
     events: Vec<Value>,
+    /// Each line of stdout, verbatim — a parsed `Value`'s map sorts
+    /// keys, so a wire-order assertion has to read these instead (task
+    /// 8.1).
+    raw_lines: Vec<String>,
     stderr: String,
     library: TempDir,
     state: TempDir,
@@ -254,6 +258,8 @@ impl Ran {
 struct Invocation {
     outcome: Outcome,
     events: Vec<Value>,
+    /// Each line of stdout, verbatim (task 8.1).
+    raw_lines: Vec<String>,
     stderr: String,
     urls: Vec<String>,
 }
@@ -320,9 +326,10 @@ fn invoke(
         },
     );
 
-    let events = String::from_utf8(out)
-        .unwrap()
-        .lines()
+    let stdout = String::from_utf8(out).unwrap();
+    let raw_lines: Vec<String> = stdout.lines().map(str::to_string).collect();
+    let events = raw_lines
+        .iter()
         .map(|line| {
             serde_json::from_str(line)
                 .unwrap_or_else(|error| panic!("stdout line is not JSON: {line:?} ({error})"))
@@ -332,6 +339,7 @@ fn invoke(
     Invocation {
         outcome,
         events,
+        raw_lines,
         stderr: String::from_utf8(err).unwrap(),
         urls: transport.seen(),
     }
@@ -353,6 +361,7 @@ fn run_the_batch() -> Ran {
     Ran {
         outcome: invocation.outcome,
         events: invocation.events,
+        raw_lines: invocation.raw_lines,
         stderr: invocation.stderr,
         library,
         state,
@@ -1310,6 +1319,22 @@ fn status_identify_over_the_real_backend_reports_every_fixture() {
 // the six removed fields.
 // ---------------------------------------------------------------------
 
+/// `serde_json::Value`'s map has no `preserve_order` here, so it sorts
+/// keys alphabetically: an order assertion has to read the raw text
+/// instead. True when each of `keys`, in turn, is found no earlier than
+/// the one before it.
+fn in_wire_order(text: &str, keys: &[&str]) -> bool {
+    let mut last = 0;
+    for key in keys {
+        let needle = format!("\"{key}\":");
+        match text.find(&needle) {
+            Some(pos) if pos >= last => last = pos,
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// design D3: over the real backend, every `resolved` event carries
 /// exactly the schema-4 key set, in pipeline order, and none of
 /// `found`, `cached`, `source`, `tier`, `claims` or `overrode` at the
@@ -1322,7 +1347,7 @@ fn resolve_and_rename_over_the_real_backend_carry_no_removed_field() {
 
     let mut saw_resolved = false;
     let mut saw_skipped = false;
-    for event in &ran.events {
+    for (event, line) in ran.events.iter().zip(ran.raw_lines.iter()) {
         match event["event"].as_str() {
             Some("resolved") => {
                 saw_resolved = true;
@@ -1337,6 +1362,7 @@ fn resolve_and_rename_over_the_real_backend_carry_no_removed_field() {
                     "library",
                     "content_index",
                     "extraction",
+                    "identifier_input",
                     "lookup",
                     "record_retrieval",
                     "match_check",
@@ -1347,6 +1373,22 @@ fn resolve_and_rename_over_the_real_backend_carry_no_removed_field() {
                         "resolved event is missing section {section:?}: {event}"
                     );
                 }
+                // design D1: a batch run asks no question, so
+                // `identifier_input` is `not-attempted` with reason
+                // `not-asked`, or `content-duplicate` on a content
+                // duplicate.
+                let reason = object["identifier_input"]["reason"].as_str();
+                assert!(
+                    matches!(reason, Some("not-asked") | Some("content-duplicate")),
+                    "resolved event's identifier_input has an unexpected reason: {event}"
+                );
+                // design D1: identifier_input sits between extraction
+                // and lookup — checked against the raw stdout line,
+                // since a parsed `Value`'s map sorts keys.
+                assert!(
+                    in_wire_order(line, &["extraction", "identifier_input", "lookup"]),
+                    "identifier_input is out of pipeline order: {line}"
+                );
             }
             Some("skipped") => {
                 saw_skipped = true;
@@ -1363,6 +1405,22 @@ fn resolve_and_rename_over_the_real_backend_carry_no_removed_field() {
                     assert!(
                         !reason.contains_key(removed),
                         "skipped event's reason still carries {removed:?}: {event}"
+                    );
+                }
+                // design D1: every resolution-verdict skip (one that
+                // carries sections, flattened onto the event itself —
+                // told apart from a non-resolution skip by `lookup`'s
+                // presence) carries identifier_input too.
+                let object = event.as_object().unwrap();
+                if object.contains_key("lookup") {
+                    assert!(
+                        object.contains_key("identifier_input"),
+                        "resolution skip is missing identifier_input: {event}"
+                    );
+                    let input_reason = object["identifier_input"]["reason"].as_str();
+                    assert!(
+                        matches!(input_reason, Some("not-asked") | Some("content-duplicate")),
+                        "skip's identifier_input has an unexpected reason: {event}"
                     );
                 }
             }

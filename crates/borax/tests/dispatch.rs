@@ -15,10 +15,11 @@ use borax::config::{
     ValueKindName, resolve,
 };
 use borax::event::{
-    Acceptance, Admission, Adoption, Condition, ContentIndexSection, Event, Extraction,
-    ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierOrigin, IndexReadStep, Level,
-    LibraryAnswer, LibraryStep, LookupStep, MatchCheckStep, Repair, RetrievedFrom, SCHEMA,
-    Sections, ServiceAnswer, ServiceOutcome, SkipReason, TitlesStep, WriteStep, human_line,
+    Acceptance, Admission, Adoption, Condition, ContentIndexSection, Displaced, Event, Extraction,
+    ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep, IdentifierOrigin,
+    IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep, MatchCheckStep,
+    Repair, RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Submission,
+    SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep, human_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -463,6 +464,9 @@ fn sections_for(identifier: &str, source: &str, tier: Option<&str>, cached: bool
                     result: ExtractionResultStep::NotAttempted { reason: reason() },
                     titles: TitlesStep::NotAttempted { reason: reason() },
                 },
+                identifier_input: IdentifierInputStep::NotAttempted {
+                    reason: "not-asked".to_string(),
+                },
                 lookup: LookupStep::NotAttempted { reason: reason() },
                 record_retrieval: Some(RetrievedFrom::ContentIndex),
                 match_check: MatchCheckStep::NotAttempted { reason: reason() },
@@ -480,6 +484,37 @@ fn sections_for(identifier: &str, source: &str, tier: Option<&str>, cached: bool
             } else {
                 tier.to_string()
             };
+            // design D2, D9: the `tier: Some("supplied")` arm has no
+            // caller at a62839b (design D11); it is given D2's shape
+            // here, a bare used submission with the file's own lookup
+            // displaced, so a future caller finds it ready.
+            let identifier_input = if tier == "supplied" {
+                IdentifierInputStep::Supplied {
+                    submissions: vec![Submission {
+                        submission: 1,
+                        raw: identifier.to_string(),
+                        syntax: SyntaxStep::Parsed {
+                            identifier: identifier.to_string(),
+                        },
+                        outcome: None,
+                    }],
+                    used: Some(1),
+                    displaced: Some(Box::new(Displaced {
+                        lookup: LookupStep::NotAttempted {
+                            reason: "extraction-failed".to_string(),
+                        },
+                        record_retrieval: None,
+                        match_check: MatchCheckStep::NotAttempted {
+                            reason: "extraction-failed".to_string(),
+                        },
+                        record: None,
+                    })),
+                }
+            } else {
+                IdentifierInputStep::NotAttempted {
+                    reason: "not-asked".to_string(),
+                }
+            };
             Sections {
                 library: LibraryStep::NotAttempted {
                     reason: "no-library".to_string(),
@@ -495,6 +530,7 @@ fn sections_for(identifier: &str, source: &str, tier: Option<&str>, cached: bool
                     },
                     titles: TitlesStep::Read { claims: Vec::new() },
                 },
+                identifier_input,
                 lookup: LookupStep::Attempted {
                     identifier: identifier.to_string(),
                     origin,
@@ -507,6 +543,7 @@ fn sections_for(identifier: &str, source: &str, tier: Option<&str>, cached: bool
                             }),
                         },
                     }],
+                    earlier: vec![],
                 },
                 record_retrieval: Some(RetrievedFrom::Network {
                     service: source.to_string(),
@@ -556,6 +593,9 @@ fn text_without_identifier_skip(path: PathBuf) -> Event {
             extraction: ExtractionSection {
                 result: ExtractionResultStep::TextWithoutIdentifier,
                 titles: TitlesStep::Read { claims: Vec::new() },
+            },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
             },
             lookup: LookupStep::NotAttempted { reason: reason() },
             record_retrieval: None,
@@ -5941,6 +5981,70 @@ fn a_supplied_identifier_resolving_into_the_files_own_current_name_reports_and_r
     );
 }
 
+/// design D4: a supplied record that leads to no move (renders the
+/// file's current name) is reported now: the final skip's submission
+/// is not attempted for `no-move`.
+#[test]
+fn a_no_move_submission_is_reported_not_attempted_for_no_move() {
+    let path = PathBuf::from("/lib/Smith2024.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("d4-no-move-reported"),
+        pdf_with_no_identifier(),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/d4-no-move-reported",
+        record_by("Smith", 2024, "10.1000/d4-no-move-reported"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/d4-no-move-reported".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
+    {
+        Some(Event::Skipped {
+            sections: Some(sections),
+            ..
+        }) => match &sections.identifier_input {
+            IdentifierInputStep::Supplied { submissions, .. } => {
+                assert_eq!(
+                    submissions[0].outcome.as_ref().unwrap().acceptance,
+                    SubmissionAcceptance::NotAttempted {
+                        reason: "no-move".to_string()
+                    }
+                );
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected a resolution skip, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------
 // task 4.2: the remaining abandonment cases — quitting after a supply,
 // and declining an override
@@ -6701,6 +6805,322 @@ fn a_supplied_record_the_library_already_holds_says_so_and_asks_again() {
             .iter()
             .all(|record| record.item.as_ref() == Some(&item)),
         "both records must name the one item: got {records:?}"
+    );
+}
+
+/// design D4 ("A collision notice is `pending` → `pending`"), task 5.1:
+/// after the collision notice, Rename accepts the candidate: `acceptance`
+/// is `accepted` and `used` is 1.
+#[test]
+fn a_collision_notice_then_rename_accepts_the_candidate() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    seed_sibling_artifact(
+        &root,
+        "sibling-original.pdf",
+        "Smith",
+        2024,
+        "10.1000/collision-rename",
+        b"the copy already admitted, rename case",
+    );
+
+    let path = write_real_file(&root, "incoming.pdf", b"collision rename incoming bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"collision rename incoming bytes"),
+        pdf_with_no_identifier(),
+    );
+    let mut held = record_by("Smith", 2024, "10.1000/collision-rename");
+    held.doi = Doi::parse("10.1000/collision-rename").ok();
+    let crossref =
+        KeyedSource::new(SourceName::Crossref).answering("doi:10.1000/collision-rename", held);
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename, Answer::Rename])
+        .with_texts(vec![Some("10.1000/collision-rename".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    // design D4, D7: the question put again after the collision notice
+    // still describes the candidate as pending, since nothing is
+    // settled until the second answer.
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 3, "got {questions:?}");
+    assert!(
+        questions[2]
+            .description
+            .contains(&"candidate   pending; skipping leaves the file as it was".to_string()),
+        "got {:?}",
+        questions[2].description
+    );
+
+    let resolved = events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if p == &path))
+        .unwrap_or_else(|| panic!("expected a resolved event: got {events:?}"));
+    match resolved {
+        Event::Resolved { sections, .. } => {
+            assert_eq!(sections.acceptance, Acceptance::Accepted);
+            match &sections.identifier_input {
+                IdentifierInputStep::Supplied { used, .. } => assert_eq!(*used, Some(1)),
+                other => panic!("expected Supplied, got {other:?}"),
+            }
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4, task 5.1: after the collision notice, Skip rejects the
+/// candidate, and the file is reported with its own verdict.
+#[test]
+fn a_collision_notice_then_skip_rejects_the_candidate() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    seed_sibling_artifact(
+        &root,
+        "sibling-original.pdf",
+        "Smith",
+        2024,
+        "10.1000/collision-skip",
+        b"the copy already admitted, skip case",
+    );
+
+    let path = write_real_file(&root, "incoming.pdf", b"collision skip incoming bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"collision skip incoming bytes"),
+        pdf_with_no_identifier(),
+    );
+    let mut held = record_by("Smith", 2024, "10.1000/collision-skip");
+    held.doi = Doi::parse("10.1000/collision-skip").ok();
+    let crossref =
+        KeyedSource::new(SourceName::Crossref).answering("doi:10.1000/collision-skip", held);
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename, Answer::Skip])
+        .with_texts(vec![Some("10.1000/collision-skip".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    // The file has no identifier of its own, so Skip replays its own
+    // `text-without-identifier` skip, carrying the candidate rejected.
+    let skipped = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event,
+                Event::Skipped {
+                    path: p,
+                    reason: SkipReason::TextWithoutIdentifier,
+                    sections: Some(_),
+                    ..
+                } if p == &path
+            )
+        })
+        .unwrap_or_else(|| panic!("expected the file's own skip: got {events:?}"));
+    match skipped {
+        Event::Skipped {
+            sections: Some(sections),
+            ..
+        } => match &sections.identifier_input {
+            IdentifierInputStep::Supplied { submissions, .. } => {
+                assert_eq!(
+                    submissions[0].outcome.as_ref().unwrap().acceptance,
+                    SubmissionAcceptance::Rejected
+                );
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected a resolution skip, got {other:?}"),
+    }
+}
+
+/// design D4, task 5.1: a later submission that reaches a record
+/// rejects the first candidate the collision notice left pending.
+#[test]
+fn a_collision_notice_then_a_second_supply_rejects_the_first_and_accepts_the_second() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    seed_sibling_artifact(
+        &root,
+        "sibling-original.pdf",
+        "Smith",
+        2024,
+        "10.1000/collision-second-a",
+        b"the copy already admitted, second-supply case",
+    );
+
+    let path = write_real_file(&root, "incoming.pdf", b"collision second supply bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"collision second supply bytes"),
+        pdf_with_no_identifier(),
+    );
+    let mut held = record_by("Smith", 2024, "10.1000/collision-second-a");
+    held.doi = Doi::parse("10.1000/collision-second-a").ok();
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering("doi:10.1000/collision-second-a", held)
+        .answering(
+            "doi:10.1000/collision-second-b",
+            record_by("Jones", 2025, "10.1000/collision-second-b"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![
+        Answer::Supply,
+        Answer::Rename,
+        Answer::Supply,
+        Answer::Rename,
+    ])
+    .with_texts(vec![
+        Some("10.1000/collision-second-a".to_string()),
+        Some("10.1000/collision-second-b".to_string()),
+    ]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let resolved = events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if p == &path))
+        .unwrap_or_else(|| panic!("expected a resolved event: got {events:?}"));
+    match resolved {
+        Event::Resolved { sections, .. } => match &sections.identifier_input {
+            IdentifierInputStep::Supplied {
+                submissions, used, ..
+            } => {
+                assert_eq!(
+                    submissions[0].outcome.as_ref().unwrap().acceptance,
+                    SubmissionAcceptance::Rejected
+                );
+                assert_eq!(*used, Some(2));
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4, D5: Quit at a candidate the collision notice left pending
+/// reports nothing about the file.
+#[test]
+fn a_collision_notice_then_quit_reports_nothing() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    seed_sibling_artifact(
+        &root,
+        "sibling-original.pdf",
+        "Smith",
+        2024,
+        "10.1000/collision-quit",
+        b"the copy already admitted, quit case",
+    );
+
+    let path = write_real_file(&root, "incoming.pdf", b"collision quit incoming bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"collision quit incoming bytes"),
+        pdf_with_no_identifier(),
+    );
+    let mut held = record_by("Smith", 2024, "10.1000/collision-quit");
+    held.doi = Doi::parse("10.1000/collision-quit").ok();
+    let crossref =
+        KeyedSource::new(SourceName::Crossref).answering("doi:10.1000/collision-quit", held);
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename, Answer::Quit])
+        .with_texts(vec![Some("10.1000/collision-quit".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Resolved { path: p, .. } | Event::Skipped { path: p, .. }
+                if p == &path
+        )),
+        "a file quit at reports nothing: got {events:?}"
+    );
+    let records = library::ArtifactStore::read(&root);
+    assert_eq!(
+        records.len(),
+        1,
+        "the index must hold nothing new for the file quit at: got {records:?}"
     );
 }
 
@@ -17156,4 +17576,1450 @@ fn reaching_the_librarys_own_file_still_writes_the_artifact_store_warning() {
         stderr.contains("artifact record"),
         "a run that reached the library's own file must warn about its fault: got {stderr:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// operator-input-evidence (design D1-D8, D12; task 5.1): every event
+// the interactive driver builds carries the operator's submissions,
+// and candidate decisions follow D4's rule.
+// ---------------------------------------------------------------------
+
+/// A [`Source`] wrapping another, recording every identifier it is
+/// asked about, in order — `KeyedSource` keeps no log of its own.
+struct LoggingSource<'a> {
+    inner: &'a dyn Source,
+    asked: Mutex<Vec<String>>,
+}
+
+impl<'a> LoggingSource<'a> {
+    fn new(inner: &'a dyn Source) -> LoggingSource<'a> {
+        LoggingSource {
+            inner,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+impl Source for LoggingSource<'_> {
+    fn name(&self) -> SourceName {
+        self.inner.name()
+    }
+
+    fn supports(&self, identifier: &Identifier) -> bool {
+        self.inner.supports(identifier)
+    }
+
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
+        self.asked.lock().unwrap().push(identifier.to_string());
+        self.inner.fetch(identifier)
+    }
+}
+
+/// design D1-D4, D6: the round-two session. The operator types a
+/// refused text, a truncated DOI no service holds, and the published
+/// DOI, which Crossref returns; then answers Skip. The skip's
+/// `identifier_input` matches design.md's first illustrative line,
+/// submission for submission, and each DOI is asked exactly once.
+#[test]
+fn the_round_two_session_reports_every_submission_on_the_final_skip() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("round-two-session"),
+        pdf_with_no_identifier(),
+    ));
+    let crossref_keyed = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1039/c9cc02492a",
+        record_by("Smith", 2024, "10.1039/c9cc02492a"),
+    );
+    let openalex_keyed = KeyedSource::new(SourceName::OpenAlex);
+    let crossref = LoggingSource::new(&crossref_keyed);
+    let openalex = LoggingSource::new(&openalex_keyed);
+    let sources: Vec<&dyn Source> = vec![&crossref, &openalex];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Skip])
+        .with_texts(vec![
+            Some("not-an-identifier".to_string()),
+            Some("10.1039/c9cc02492".to_string()),
+            Some("10.1039/c9cc02492a".to_string()),
+        ]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let skipped = events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == fixture.path))
+        .unwrap_or_else(|| panic!("expected a skip: got {events:?}"));
+    match skipped {
+        Event::Skipped {
+            reason,
+            sections: Some(sections),
+            ..
+        } => {
+            assert_eq!(*reason, SkipReason::TextWithoutIdentifier);
+            match &sections.identifier_input {
+                IdentifierInputStep::Supplied {
+                    submissions,
+                    used,
+                    displaced,
+                } => {
+                    assert_eq!(submissions.len(), 3);
+                    assert_eq!(submissions[0].submission, 1);
+                    assert_eq!(submissions[0].raw, "not-an-identifier");
+                    assert_eq!(
+                        submissions[0].syntax,
+                        SyntaxStep::Rejected {
+                            reason: "unrecognised".to_string(),
+                            expected: None
+                        }
+                    );
+                    assert_eq!(submissions[1].submission, 2);
+                    assert_eq!(
+                        submissions[1].syntax,
+                        SyntaxStep::Parsed {
+                            identifier: "doi:10.1039/c9cc02492".to_string()
+                        }
+                    );
+                    assert_eq!(submissions[2].submission, 3);
+                    assert_eq!(
+                        submissions[2].syntax,
+                        SyntaxStep::Parsed {
+                            identifier: "doi:10.1039/c9cc02492a".to_string()
+                        }
+                    );
+                    assert_eq!(
+                        submissions[2].outcome.as_ref().unwrap().acceptance,
+                        SubmissionAcceptance::Rejected
+                    );
+                    assert_eq!(*used, None);
+                    assert!(displaced.is_none());
+                }
+                other => panic!("expected Supplied, got {other:?}"),
+            }
+        }
+        other => panic!("expected a resolution skip, got {other:?}"),
+    }
+    assert_eq!(
+        crossref.asked(),
+        vec![
+            "doi:10.1039/c9cc02492".to_string(),
+            "doi:10.1039/c9cc02492a".to_string()
+        ]
+    );
+    assert_eq!(openalex.asked(), vec!["doi:10.1039/c9cc02492".to_string()]);
+    assert_eq!(
+        human_line(skipped).unwrap(),
+        "/lib/paper.pdf: skipped, no identifier found in its metadata or the pages read; \
+candidate rejected: doi:10.1039/c9cc02492a"
+    );
+}
+
+/// design D4: accepting a supplied candidate whose titles agree reports
+/// `accepted`, and the stream follows with `renamed` and
+/// `content-index-write`.
+#[test]
+fn accepting_a_supplied_candidate_with_agreeing_titles_reports_accepted() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("accept-supplied-candidate"),
+        pdf_with_no_identifier(),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/accept-supplied-candidate",
+        record_by("Smith", 2024, "10.1000/accept-supplied-candidate"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/accept-supplied-candidate".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let resolved_index = events
+        .iter()
+        .position(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+        .unwrap_or_else(|| panic!("expected a resolved event: got {events:?}"));
+    match &events[resolved_index] {
+        Event::Resolved { sections, .. } => {
+            assert_eq!(sections.acceptance, Acceptance::Accepted);
+            assert!(matches!(
+                sections.lookup,
+                LookupStep::Attempted {
+                    origin: IdentifierOrigin::Operator,
+                    ..
+                }
+            ));
+            match &sections.identifier_input {
+                IdentifierInputStep::Supplied {
+                    submissions, used, ..
+                } => {
+                    assert_eq!(*used, Some(1));
+                    assert!(submissions[0].outcome.is_none());
+                }
+                other => panic!("expected Supplied, got {other:?}"),
+            }
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+    assert!(matches!(events[resolved_index + 1], Event::Renamed { .. }));
+    assert!(matches!(
+        events[resolved_index + 2],
+        Event::ContentIndexWrite { .. }
+    ));
+}
+
+/// design D4: accepting a supplied candidate over its conflict reports
+/// `overridden`.
+#[test]
+fn accepting_a_supplied_candidate_over_its_conflict_reports_overridden() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("accept-supplied-conflict"),
+        pdf_with_no_identifier().with_title("Title the File Claims"),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/accept-supplied-conflict",
+        record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/accept-supplied-conflict",
+            "A Completely Different Title",
+        ),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Override])
+        .with_texts(vec![Some("10.1000/accept-supplied-conflict".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(sections.acceptance, Acceptance::Overridden);
+            assert!(matches!(
+                sections.match_check,
+                MatchCheckStep::Conflict { .. }
+            ));
+            match &sections.identifier_input {
+                IdentifierInputStep::Supplied { used, .. } => assert_eq!(*used, Some(1)),
+                other => panic!("expected Supplied, got {other:?}"),
+            }
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4: overriding the file's own conflict, nothing supplied,
+/// still reports `overridden`, and `identifier_input` is not attempted
+/// for `not-supplied`.
+#[test]
+fn overriding_the_files_own_conflict_with_nothing_supplied_is_not_supplied() {
+    let fixture = SupplyFixture::new(
+        FakeDocuments::new().with_file(
+            "/lib/paper.pdf",
+            hash_for("own-conflict-not-supplied"),
+            pdf_with_embedded_doi("10.1000/own-conflict-not-supplied")
+                .with_title("Old Extracted Title"),
+        ),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/own-conflict-not-supplied",
+        record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/own-conflict-not-supplied",
+            "A Completely Different Title",
+        ),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Override]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(sections.acceptance, Acceptance::Overridden);
+            assert_eq!(
+                sections.identifier_input,
+                IdentifierInputStep::NotAttempted {
+                    reason: "not-supplied".to_string()
+                }
+            );
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D2: a correction keeps the file's own failed lookup in
+/// `displaced`, with origin `extracted` and its `not-found` attempts,
+/// and `record_retrieval` `null`.
+#[test]
+fn a_correction_keeps_the_files_own_failed_lookup_in_displaced() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("correction-keeps-failed-lookup"),
+        FakePdf::new().with_pages(vec![Ok(
+            "see doi:10.1021/jacs.4c01234.author for details".to_string(),
+        )]),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1021/jacs.4c01234",
+        record_by("Smith", 2024, "10.1021/jacs.4c01234"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1021/jacs.4c01234".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Resolved { sections, .. }) => match &sections.identifier_input {
+            IdentifierInputStep::Supplied { displaced, .. } => {
+                let displaced = displaced.as_ref().unwrap();
+                assert!(matches!(
+                    displaced.lookup,
+                    LookupStep::Attempted {
+                        origin: IdentifierOrigin::Extracted,
+                        ..
+                    }
+                ));
+                assert_eq!(displaced.record_retrieval, None);
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D2 ("A reference's DOI caught"): when the file's own
+/// resolution reached a record and a supplied one replaces it,
+/// `displaced.record` is the file's own record, and its
+/// `record_retrieval` names its service.
+#[test]
+fn a_references_doi_caught_keeps_the_files_own_record_in_displaced() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("reference-doi-caught"),
+        pdf_with_embedded_doi("10.1000/wrong-reference"),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/wrong-reference",
+            record_by("Jones", 2020, "10.1000/wrong-reference"),
+        )
+        .answering(
+            "doi:10.1000/the-actual-paper",
+            record_by("Smith", 2024, "10.1000/the-actual-paper"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/the-actual-paper".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Resolved { sections, .. }) => match &sections.identifier_input {
+            IdentifierInputStep::Supplied { displaced, .. } => {
+                let displaced = displaced.as_ref().unwrap();
+                assert!(displaced.record.is_some());
+                assert!(matches!(
+                    displaced.record_retrieval,
+                    Some(RetrievedFrom::Network { .. })
+                ));
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D2, D4: a candidate reached and then replaced by a later
+/// submission is `rejected` with its record, and the later one is
+/// `used`.
+#[test]
+fn a_candidate_replaced_by_another_is_rejected_with_its_record() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("candidate-replaced"),
+        pdf_with_no_identifier(),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/candidate-replaced-a",
+            record_by("Smith", 2024, "10.1000/candidate-replaced-a"),
+        )
+        .answering(
+            "doi:10.1000/candidate-replaced-b",
+            record_by("Jones", 2025, "10.1000/candidate-replaced-b"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Rename])
+        .with_texts(vec![
+            Some("10.1000/candidate-replaced-a".to_string()),
+            Some("10.1000/candidate-replaced-b".to_string()),
+        ]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Resolved { sections, .. }) => match &sections.identifier_input {
+            IdentifierInputStep::Supplied {
+                submissions, used, ..
+            } => {
+                assert_eq!(
+                    submissions[0].outcome.as_ref().unwrap().acceptance,
+                    SubmissionAcceptance::Rejected
+                );
+                assert!(submissions[0].outcome.as_ref().unwrap().record.is_some());
+                assert_eq!(*used, Some(2));
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4 ("Restored"): a candidate found, then a supply that leads
+/// nowhere, leaves the candidate on offer and pending; Rename then
+/// accepts it.
+#[test]
+fn an_unheld_supply_keeps_the_candidate_on_offer_and_rename_accepts_it() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("unheld-supply-keeps-candidate"),
+        pdf_with_no_identifier(),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/unheld-keeps-a",
+        record_by("Smith", 2024, "10.1000/unheld-keeps-a"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Rename])
+        .with_texts(vec![
+            Some("10.1000/unheld-keeps-a".to_string()),
+            Some("10.1000/unheld-keeps-b".to_string()),
+        ]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 3, "got {questions:?}");
+    assert!(
+        questions[2].description.join("\n").contains("pending"),
+        "the candidate must still be on offer and pending: got {:?}",
+        questions[2].description
+    );
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(sections.acceptance, Acceptance::Accepted);
+            match &sections.identifier_input {
+                IdentifierInputStep::Supplied {
+                    submissions, used, ..
+                } => {
+                    assert_eq!(*used, Some(1));
+                    assert_eq!(
+                        submissions[1].outcome.as_ref().unwrap().acceptance,
+                        SubmissionAcceptance::NotAttempted {
+                            reason: "no-record".to_string()
+                        }
+                    );
+                }
+                other => panic!("expected Supplied, got {other:?}"),
+            }
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Renamed { .. })),
+        "got {events:?}"
+    );
+}
+
+/// design D4: "A found, B found" — a later record on offer rejects the
+/// earlier one; the final skip (Skip) reports both as `rejected`.
+#[test]
+fn a_found_and_b_found_both_end_up_rejected_on_the_final_skip() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("a-found-b-found"),
+        pdf_with_no_identifier(),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/a-found-b-found-a",
+            record_by("Smith", 2024, "10.1000/a-found-b-found-a"),
+        )
+        .answering(
+            "doi:10.1000/a-found-b-found-b",
+            record_by("Jones", 2025, "10.1000/a-found-b-found-b"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Skip])
+        .with_texts(vec![
+            Some("10.1000/a-found-b-found-a".to_string()),
+            Some("10.1000/a-found-b-found-b".to_string()),
+        ]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 3, "got {questions:?}");
+    assert!(
+        questions[2].description.join("\n").contains("rejected"),
+        "the third question must name A as rejected: got {:?}",
+        questions[2].description
+    );
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Skipped {
+            sections: Some(sections),
+            ..
+        }) => match &sections.identifier_input {
+            IdentifierInputStep::Supplied { submissions, .. } => {
+                assert_eq!(
+                    submissions[0].outcome.as_ref().unwrap().acceptance,
+                    SubmissionAcceptance::Rejected
+                );
+                assert_eq!(
+                    submissions[1].outcome.as_ref().unwrap().acceptance,
+                    SubmissionAcceptance::Rejected
+                );
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected a resolution skip, got {other:?}"),
+    }
+}
+
+/// design D4 ("decided here"): a later supply whose record leads to no
+/// move keeps the earlier candidate on offer.
+#[test]
+fn a_no_move_candidate_keeps_the_earlier_one_on_offer() {
+    let mut fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("no-move-keeps-a"),
+        pdf_with_no_identifier(),
+    ));
+    // B's rendered name, "Doe2023.pdf", is already taken by an
+    // unrelated file, so B leads to no move.
+    fixture.filesystem =
+        FakeFilesystem::new().with_existing("/lib", [("Doe2023.pdf", Some("unrelated-hash"))]);
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/no-move-keeps-a",
+            record_by("Smith", 2024, "10.1000/no-move-keeps-a"),
+        )
+        .answering(
+            "doi:10.1000/no-move-keeps-b",
+            record_by("Doe", 2023, "10.1000/no-move-keeps-b"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.rename = Some(RenameLayer {
+            collision: Some("skip".to_string()),
+            batch: None,
+            skip_named: None,
+        });
+    });
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Rename])
+        .with_texts(vec![
+            Some("10.1000/no-move-keeps-a".to_string()),
+            Some("10.1000/no-move-keeps-b".to_string()),
+        ]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Resolved { sections, .. }) => match &sections.identifier_input {
+            IdentifierInputStep::Supplied {
+                submissions, used, ..
+            } => {
+                assert_eq!(*used, Some(1));
+                assert_eq!(
+                    submissions[1].outcome.as_ref().unwrap().acceptance,
+                    SubmissionAcceptance::NotAttempted {
+                        reason: "no-move".to_string()
+                    }
+                );
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4: Retry finds a record whose title conflicts with the
+/// file's, and Override accepts it: `acceptance` `overridden`, `lookup`
+/// origin `extracted` with one `earlier` round, `identifier_input` not
+/// attempted for `not-supplied`.
+#[test]
+fn retry_that_finds_a_conflict_is_overridden_on_override() {
+    let path = PathBuf::from("/lib/retry-conflict-override.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("retry-conflict-override"),
+        pdf_with_embedded_doi("10.1000/retry-conflict-override")
+            .with_title("Title the File Claims"),
+    );
+    let crossref = FlakySource::new(
+        SourceName::Crossref,
+        1,
+        record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/retry-conflict-override",
+            "A Completely Different Resolved Title",
+        ),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Override]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+    {
+        Some(Event::Resolved { sections, .. }) => {
+            assert!(matches!(
+                sections.match_check,
+                MatchCheckStep::Conflict { .. }
+            ));
+            assert_eq!(sections.acceptance, Acceptance::Overridden);
+            assert!(matches!(
+                sections.lookup,
+                LookupStep::Attempted {
+                    origin: IdentifierOrigin::Extracted,
+                    ..
+                }
+            ));
+            let LookupStep::Attempted { earlier, .. } = &sections.lookup else {
+                panic!("expected an attempted lookup");
+            };
+            assert_eq!(earlier.len(), 1);
+            assert_eq!(
+                sections.identifier_input,
+                IdentifierInputStep::NotAttempted {
+                    reason: "not-supplied".to_string()
+                }
+            );
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4: a refused text after a candidate is on offer leaves the
+/// candidate pending, and the refused submission follows it as
+/// `unparsed`.
+#[test]
+fn a_refused_text_after_a_candidate_leaves_it_pending() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("refused-after-candidate"),
+        pdf_with_no_identifier(),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/refused-after-candidate",
+        record_by("Smith", 2024, "10.1000/refused-after-candidate"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Rename])
+        .with_texts(vec![
+            Some("10.1000/refused-after-candidate".to_string()),
+            Some("garbage".to_string()),
+            None,
+        ]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Resolved { sections, .. }) => match &sections.identifier_input {
+            IdentifierInputStep::Supplied {
+                submissions, used, ..
+            } => {
+                assert_eq!(*used, Some(1));
+                assert_eq!(
+                    submissions[1].outcome.as_ref().unwrap().acceptance,
+                    SubmissionAcceptance::NotAttempted {
+                        reason: "unparsed".to_string()
+                    }
+                );
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D4: Skip with a candidate on offer leaves the file's own
+/// resolved event carrying the candidate rejected, followed by a
+/// `declined` skip with no sections.
+#[test]
+fn skip_after_a_candidate_reports_the_files_own_record_then_a_bare_declined_skip() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("skip-after-candidate-own-resolved"),
+        pdf_with_embedded_doi("10.1000/skip-after-candidate-own-resolved"),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/skip-after-candidate-own-resolved",
+            record_by("Smith", 2024, "10.1000/skip-after-candidate-own-resolved"),
+        )
+        .answering(
+            "doi:10.1000/skip-after-candidate-other",
+            record_by("Jones", 2025, "10.1000/skip-after-candidate-other"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/skip-after-candidate-other".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let own_resolved = events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+        .unwrap_or_else(|| panic!("expected the file's own resolved event: got {events:?}"));
+    match own_resolved {
+        Event::Resolved { sections, .. } => match &sections.identifier_input {
+            IdentifierInputStep::Supplied { submissions, .. } => {
+                assert_eq!(
+                    submissions[0].outcome.as_ref().unwrap().acceptance,
+                    SubmissionAcceptance::Rejected
+                );
+            }
+            other => panic!("expected Supplied, got {other:?}"),
+        },
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: p,
+                reason: SkipReason::Declined,
+                sections: None,
+                ..
+            } if *p == fixture.path
+        )),
+        "got {events:?}"
+    );
+}
+
+/// design D1: at least one question was put and nothing was submitted —
+/// `identifier_input` is not attempted for `not-supplied`.
+#[test]
+fn a_prompt_abandoned_with_no_text_is_not_supplied() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("prompt-abandoned-not-supplied"),
+        pdf_with_no_identifier(),
+    ));
+    let sources: Vec<&dyn Source> = Vec::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip]).with_texts(vec![None]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Skipped {
+            sections: Some(sections),
+            ..
+        }) => {
+            assert_eq!(
+                sections.identifier_input,
+                IdentifierInputStep::NotAttempted {
+                    reason: "not-supplied".to_string()
+                }
+            );
+        }
+        other => panic!("expected a resolution skip, got {other:?}"),
+    }
+}
+
+/// design D1: a file passed over under `rename.skip-named`, and a batch
+/// `rename --apply`, both carry `not-asked`.
+#[test]
+fn passed_over_and_batch_files_carry_not_asked() {
+    let path = PathBuf::from("/lib/batch-not-asked.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("batch-not-asked"),
+        pdf_with_embedded_doi("10.1000/batch-not-asked"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/batch-not-asked")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+    {
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(
+                sections.identifier_input,
+                IdentifierInputStep::NotAttempted {
+                    reason: "not-asked".to_string()
+                }
+            );
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D1: a rejected candidate is never written to the content
+/// index: after the round-two session, the index holds nothing for the
+/// file; after a candidate replaced by another, the index holds only
+/// the accepted record.
+#[test]
+fn a_rejected_candidate_is_never_written_to_the_content_index() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+
+    let hash = hash_bytes(b"round two content index bytes");
+    let path = write_real_file(&root, "round-two.pdf", b"round two content index bytes");
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
+    let crossref_keyed = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1039/rejected-content-index-a",
+        record_by("Smith", 2024, "10.1039/rejected-content-index-a"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref_keyed];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1039/rejected-content-index-a".to_string())]);
+
+    events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        0,
+        "a candidate the operator skipped must never reach the content index"
+    );
+    assert_eq!(
+        index.get(&hash),
+        None,
+        "a candidate the operator skipped must leave the content index unchanged"
+    );
+
+    // A candidate replaced by another: A is rejected, B is accepted.
+    // A's record must never reach the content index under the file's
+    // hash — only B's does.
+    let hash_b = hash_bytes(b"candidate replaced content index bytes");
+    let path_b = write_real_file(
+        &root,
+        "candidate-replaced.pdf",
+        b"candidate replaced content index bytes",
+    );
+    let documents_b =
+        FakeDocuments::new().with_file(&path_b, hash_b.clone(), pdf_with_no_identifier());
+    let record_a = record_by("Smith", 2024, "10.1039/rejected-content-index-replaced-a");
+    let record_b = record_by("Jones", 2025, "10.1039/rejected-content-index-replaced-b");
+    let crossref_b = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1039/rejected-content-index-replaced-a",
+            record_a.clone(),
+        )
+        .answering(
+            "doi:10.1039/rejected-content-index-replaced-b",
+            record_b.clone(),
+        );
+    let sources_b: Vec<&dyn Source> = vec![&crossref_b];
+    let index_b = ContentIndex::new(MemoryCache::new());
+    let bib_files_b = FakeBibFiles::new();
+    let effective_b = effective_with_default_template("[auth][year]");
+    let adapters_b = Adapters {
+        documents: &documents_b,
+        sources: &sources_b,
+        index: &index_b,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files_b,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker_b = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Rename])
+        .with_texts(vec![
+            Some("10.1039/rejected-content-index-replaced-a".to_string()),
+            Some("10.1039/rejected-content-index-replaced-b".to_string()),
+        ]);
+
+    events_for(
+        &Command::rename(vec![path_b.clone()], false),
+        &Configs::uniform(effective_b),
+        &adapters_b,
+        &mut Session::interactive(&mut asker_b),
+    )
+    .unwrap();
+
+    assert_eq!(
+        index_b.get(&hash_b),
+        Some(record_b),
+        "the accepted record must be written under the file's hash"
+    );
+    assert_ne!(
+        index_b.get(&hash_b),
+        Some(record_a),
+        "the rejected candidate's record must never reach the content index"
+    );
+}
+
+/// design D4, D5: Quit at a candidate reports nothing about the file,
+/// and the content index holds nothing new.
+#[test]
+fn quitting_at_a_candidate_reports_nothing() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("quit-at-candidate"),
+        pdf_with_no_identifier(),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/quit-at-candidate",
+        record_by("Smith", 2024, "10.1000/quit-at-candidate"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Quit])
+        .with_texts(vec![Some("10.1000/quit-at-candidate".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Resolved { path: p, .. } | Event::Skipped { path: p, .. }
+                if *p == fixture.path
+        )),
+        "got {events:?}"
+    );
+}
+
+/// design D4, D7: the description for a pending candidate is rendered
+/// from an event whose `acceptance` is `pending`.
+#[test]
+fn the_described_event_for_an_agreeing_candidate_is_pending() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("described-pending"),
+        pdf_with_no_identifier(),
+    ));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/described-pending",
+        record_by("Smith", 2024, "10.1000/described-pending"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
+        .with_texts(vec![Some("10.1000/described-pending".to_string())]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert!(
+        questions[1]
+            .description
+            .iter()
+            .any(|line| line.contains("pending")),
+        "got {:?}",
+        questions[1].description
+    );
+}
+
+/// design D12: an outage, then a retry that finds the record, keeps
+/// the outage as one `earlier` round on the `resolved` event.
+#[test]
+fn outage_then_retry_found_keeps_one_earlier_round() {
+    let path = PathBuf::from("/lib/outage-retry-found.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("outage-retry-found"),
+        pdf_with_embedded_doi("10.1000/outage-retry-found"),
+    );
+    let crossref = FlakySource::new(
+        SourceName::Crossref,
+        1,
+        record_by("Smith", 2024, "10.1000/outage-retry-found"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+    {
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(sections.acceptance, Acceptance::Automatic);
+            let LookupStep::Attempted {
+                origin, earlier, ..
+            } = &sections.lookup
+            else {
+                panic!("expected an attempted lookup");
+            };
+            assert_eq!(*origin, IdentifierOrigin::Extracted);
+            assert_eq!(earlier.len(), 1);
+            assert!(matches!(earlier[0], LookupRound::Attempted { .. }));
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D12: an outage, then every retry not found, keeps the outage
+/// as one `earlier` round on the final `unresolvable` skip.
+#[test]
+fn outage_then_retry_all_not_found_keeps_one_earlier_round_on_the_skip() {
+    let path = PathBuf::from("/lib/outage-retry-not-found-rounds.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("outage-retry-not-found-rounds"),
+        pdf_with_embedded_doi("10.1000/outage-retry-not-found-rounds"),
+    );
+    let crossref = SequencedSource::new(
+        SourceName::Crossref,
+        vec![
+            Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+            Err(SourceError::NotFound),
+        ],
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions[1].choices,
+        vec![Answer::Supply, Answer::Skip, Answer::Quit],
+        "got {:?}",
+        questions[1].choices
+    );
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
+    {
+        Some(Event::Skipped {
+            sections: Some(sections),
+            ..
+        }) => {
+            let LookupStep::Attempted {
+                attempts, earlier, ..
+            } = &sections.lookup
+            else {
+                panic!("expected an attempted lookup");
+            };
+            assert!(
+                attempts
+                    .iter()
+                    .all(|a| matches!(a.outcome, ServiceOutcome::NotFound)),
+                "got {attempts:?}"
+            );
+            assert_eq!(earlier.len(), 1);
+            assert!(matches!(earlier[0], LookupRound::Attempted { .. }));
+        }
+        other => panic!("expected a resolution skip, got {other:?}"),
+    }
+}
+
+/// design D12: two outages, two retries, then not-found: `earlier`
+/// holds both outage rounds, oldest first.
+#[test]
+fn two_retries_accumulate_both_rounds_oldest_first() {
+    let path = PathBuf::from("/lib/two-retries-accumulate.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("two-retries-accumulate"),
+        pdf_with_embedded_doi("10.1000/two-retries-accumulate"),
+    );
+    let crossref = SequencedSource::new(
+        SourceName::Crossref,
+        vec![
+            Err(SourceError::Unavailable {
+                message: "first outage".to_string(),
+            }),
+            Err(SourceError::Unavailable {
+                message: "second outage".to_string(),
+            }),
+            Err(SourceError::NotFound),
+        ],
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Retry, Answer::Skip]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Skipped { path: p, .. } if *p == path))
+    {
+        Some(Event::Skipped {
+            sections: Some(sections),
+            ..
+        }) => {
+            let LookupStep::Attempted { earlier, .. } = &sections.lookup else {
+                panic!("expected an attempted lookup");
+            };
+            assert_eq!(earlier.len(), 2);
+            match (&earlier[0], &earlier[1]) {
+                (
+                    LookupRound::Attempted { attempts: first },
+                    LookupRound::Attempted { attempts: second },
+                ) => {
+                    assert!(matches!(
+                        first[0].outcome,
+                        ServiceOutcome::Unavailable { ref message } if message == "first outage"
+                    ));
+                    assert!(matches!(
+                        second[0].outcome,
+                        ServiceOutcome::Unavailable { ref message } if message == "second outage"
+                    ));
+                }
+                other => panic!("expected two attempted rounds, got {other:?}"),
+            }
+        }
+        other => panic!("expected a resolution skip, got {other:?}"),
+    }
+}
+
+/// design D12: an outage, a retry that is still unavailable, then a
+/// correction. `displaced.lookup.earlier` holds the first round, and
+/// the event's own `lookup` (origin `operator`) has no `earlier`.
+#[test]
+fn a_retry_then_a_correction_moves_the_round_into_displaced() {
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash_for("retry-then-correction"),
+        pdf_with_embedded_doi("10.1000/retry-then-correction"),
+    ));
+    let crossref = SequencedSource::new(
+        SourceName::Crossref,
+        vec![
+            Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+            Err(SourceError::Unavailable {
+                message: "503".to_string(),
+            }),
+            Ok(record_by(
+                "Smith",
+                2024,
+                "10.1000/retry-then-correction-corrected",
+            )),
+        ],
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some(
+            "10.1000/retry-then-correction-corrected".to_string(),
+        )]);
+
+    let events = events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == fixture.path))
+    {
+        Some(Event::Resolved { sections, .. }) => {
+            assert!(matches!(
+                sections.lookup,
+                LookupStep::Attempted {
+                    origin: IdentifierOrigin::Operator,
+                    ..
+                }
+            ));
+            let LookupStep::Attempted { earlier, .. } = &sections.lookup else {
+                panic!("expected an attempted lookup");
+            };
+            assert_eq!(
+                earlier.len(),
+                0,
+                "an operator's own lookup inherits no rounds"
+            );
+            match &sections.identifier_input {
+                IdentifierInputStep::Supplied { displaced, .. } => {
+                    let displaced = displaced.as_ref().unwrap();
+                    let LookupStep::Attempted { earlier, .. } = &displaced.lookup else {
+                        panic!("expected the file's own lookup to be attempted");
+                    };
+                    assert_eq!(earlier.len(), 1);
+                }
+                other => panic!("expected Supplied, got {other:?}"),
+            }
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
 }

@@ -13,6 +13,8 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-01 Thu 22:19] -- library conditions and adoption
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-03 Sat 13:19] -- sectioned resolution events
 #+AI_PASS: fact-check claude-opus-5-5 [2026-10-03 Sat] -- model line and example file name restored; content-duplicate shape and unreachable prompt line corrected after review
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-05 Mon 04:20] -- operator input evidence
+#+AI_PASS: fact-check claude-opus-5-5 [2026-10-05 Mon] -- supplied identifiers are looked up normalised, not as typed
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -328,6 +330,13 @@ how to install it, and a handful of examples.
     offers that name without a suffix. A name is claimed only after you
     accept its move.
 
+    If a supplied candidate is on offer, skipping still reports the
+    file's own reason. The human line ends with ~; candidate rejected:
+    <identifier>~, or ~; candidates rejected: <a>, <b>~ when you set
+    aside more than one candidate. If the file's own record resolved,
+    its ~resolved~ line carries this clause and ~skipped, declined~
+    follows.
+
     The choices depend on what borax knows. The first choice is what
     Enter selects:
 
@@ -360,7 +369,9 @@ how to install it, and a handful of examples.
     reads ~no source was asked~. ~Try the services again~ appears only
     when the services were unavailable, rate-limited, or returned
     unusable data. It does not appear when every service confirmed that
-    it did not hold the identifier.
+    it did not hold the identifier. This choice depends only on the
+    latest attempt. The run log keeps every earlier attempt in
+    ~lookup.earlier~.
 
     *Supplying an identifier.* Choose ~Supply an identifier~ when you
     know what the file is but borax did not find the right identifier.
@@ -379,14 +390,32 @@ how to install it, and a handful of examples.
     If the input contains no accepted identifier, borax names the
     accepted forms and asks again without contacting a service. An
     empty line, Esc, or Ctrl-C abandons the input and returns to the
-    file's menu without changing it.
+    file's menu without changing it. When the file is reported, each
+    refused text remains in its verdict as a submission. Its ~syntax~ is
+    ~rejected~, with reason ~unrecognised~, ~invalid~, or ~checksum~. An
+    ~invalid~ or ~checksum~ result also names the expected form: ~doi~,
+    ~arxiv~, ~pmid~, or ~isbn~.
 
-    borax looks up an accepted identifier through the usual services.
-    If it resolves and produces a move, borax shows the record and asks
-    about that move. If it does not resolve or produces no move, borax
-    reports what happened and returns to the file's own menu. A file
-    that already had a usable record keeps it while you try other
-    identifiers.
+    borax looks up an accepted identifier through the usual services in
+    its normalised form: surrounding whitespace, trailing punctuation
+    and a ~doi:~ or resolver prefix such as ~https://doi.org/~ are
+    removed, and a DOI is lowercased. Nothing is added: a well-formed
+    identifier, including a truncated DOI, is never completed or
+    repaired. If it resolves and
+    produces a move, borax shows the record with ~candidate   pending;
+    skipping leaves the file as it was~ until you answer. A conflicting
+    candidate also shows its ~conflict~ line while it is pending.
+
+    If a later identifier does not resolve or its record produces no
+    move, borax reports what happened and returns to whatever was on
+    offer before that supply. A supplied candidate already on offer
+    therefore stays on offer and pending. Only a later identifier whose
+    record leads to a move replaces it and marks it rejected. Later
+    questions name each such candidate on a ~rejected~ line. A rename
+    answered with the notice that the library already holds a copy of
+    the work settles nothing; the candidate stays pending until your
+    next answer. A file that already had a usable record keeps it while
+    you try other identifiers.
 
     borax compares the file's titles with a supplied record. If they
     disagree, it shows both titles and their similarity. You may then
@@ -414,7 +443,10 @@ how to install it, and a handful of examples.
     borax writes this entry only when you accept the rename. Supplying
     an identifier and then skipping stores no candidate record and
     produces no sidecar or master-bibliography entry for that candidate.
-    A record the content index already held for the file remains there.
+    The file's verdict still reports the candidate as a submission with
+    ~acceptance~ ~rejected~ and includes the record it reached. It never
+    reports that candidate as the file's resolution. A record the
+    content index already held for the file remains there.
 
     The verdict's ~content_index.write~ first reads ~not-attempted~ with
     reason ~awaiting-acceptance~. When borax makes the write, its JSONL
@@ -1497,14 +1529,16 @@ how to install it, and a handful of examples.
   looked up is in ~lookup~. The removed ~found~, ~cached~, ~source~,
   ~tier~, ~claims~, and ~overrode~ fields have no aliases.
 
-  Seven sections follow the record in pipeline order: ~library~,
-  ~content_index~, ~extraction~, ~lookup~, ~record_retrieval~,
-  ~match_check~, and ~acceptance~. A step that did not run is always
+  Eight sections follow the record in pipeline order: ~library~,
+  ~content_index~, ~extraction~, ~identifier_input~, ~lookup~,
+  ~record_retrieval~, ~match_check~, and ~acceptance~. A step that did
+  not run is always
   ~{"status":"not-attempted","reason":"<reason>"}~. The reasons are
   ~no-library~, ~outside-library~, ~content-duplicate~,
   ~library-answered~, ~content-index-hit~, ~extraction-failed~,
-  ~no-record~, ~refused~, ~unhashable~, ~awaiting-acceptance~, and
-  ~cache-bypassed~.
+  ~no-record~, ~refused~, ~unhashable~, ~awaiting-acceptance~,
+  ~cache-bypassed~, ~not-asked~, ~not-supplied~, ~unparsed~, and
+  ~no-move~.
 
   ~library~ is ~consulted~ with its former kind-tagged answer nested
   under ~answer~, or ~not-attempted~ with reason ~no-library~,
@@ -1548,6 +1582,51 @@ how to install it, and a handful of examples.
   ~read~ claim list may be empty; unlike the former flat list, that state
   means borax opened the file and found no title in its metadata.
 
+  ~identifier_input~ is ~supplied~ with ~submissions~, ~used~, and
+  ~displaced~, or it is ~not-attempted~. The latter has reason
+  ~not-asked~ for every batch run, ~resolve~, ~bib~, and an interactive
+  file settled without a question; ~not-supplied~ when a question was
+  asked but you typed nothing; or ~content-duplicate~.
+
+  Each submission is numbered from 1 within the file. It carries ~raw~
+  text as typed and ~syntax~: either ~parsed~ with its ~identifier~, or
+  ~rejected~ with reason ~unrecognised~, ~invalid~, or ~checksum~.
+  Rejections for ~invalid~ and ~checksum~ also carry ~expected~. Every
+  submission except the one ~used~ names carries its own ~lookup~,
+  ~record_retrieval~, ~match_check~, ~acceptance~, and the ~record~ when
+  one was reached. An unparsed entry's later steps are not attempted for
+  ~unparsed~; other entries can end with ~no-record~ or ~no-move~, or
+  with ~acceptance~ ~rejected~.
+
+  The entry named by ~used~ carries only ~submission~, ~raw~, and
+  ~syntax~, because its outcome is in the event's own later sections.
+  ~used~ is otherwise ~null~. ~displaced~ is non-null exactly when
+  ~used~ is non-null and keeps the file's own ~lookup~,
+  ~record_retrieval~, ~match_check~, and any record. This abbreviated
+  excerpt is the ~identifier_input~ section after the round-two
+  session's final skip:
+
+  #+begin_example
+    {"status":"supplied","submissions":[
+      {"submission":1,"raw":"not-an-identifier","syntax":{"status":"rejected","reason":"unrecognised"},
+       "lookup":{"status":"not-attempted","reason":"unparsed"},"record_retrieval":null,
+       "match_check":{"status":"not-attempted","reason":"unparsed"},
+       "acceptance":{"status":"not-attempted","reason":"unparsed"}},
+      {"submission":2,"raw":"10.1039/c9cc02492","syntax":{"status":"parsed","identifier":"doi:10.1039/c9cc02492"},
+       "lookup":{"status":"attempted","identifier":"doi:10.1039/c9cc02492","origin":"operator",
+                 "attempts":[{"service":"crossref","outcome":{"status":"not-found"}},
+                             {"service":"openalex","outcome":{"status":"not-found"}}]},
+       "record_retrieval":null,"match_check":{"status":"not-attempted","reason":"no-record"},
+       "acceptance":{"status":"not-attempted","reason":"no-record"}},
+      {"submission":3,"raw":"10.1039/c9cc02492a","syntax":{"status":"parsed","identifier":"doi:10.1039/c9cc02492a"},
+       "lookup":{"status":"attempted","identifier":"doi:10.1039/c9cc02492a","origin":"operator",
+                 "attempts":[{"service":"crossref","outcome":{"status":"found","retrieval":"network","stored":{"status":"written"}}}]},
+       "record_retrieval":{"kind":"network","service":"crossref"},
+       "match_check":{"status":"insufficient-evidence","reason":"no-titles"},
+       "acceptance":{"status":"rejected"},"record":{…}}],
+     "used":null,"displaced":null}
+  #+end_example
+
   ~lookup~ is ~attempted~ with the identifier, its ~extracted~ or
   ~operator~ origin, and every service attempt in order. It is
   ~no-eligible-service~ when no configured service supports the
@@ -1556,7 +1635,12 @@ how to install it, and a handful of examples.
   ~rate-limited~, or ~malformed~. A found outcome says whether the
   response cache or network supplied it. A network outcome also reports
   whether the response-cache write was made, failed, or bypassed.
-  Failed attempts before a success remain in the array.
+  Failed attempts before a success remain in the array. When you ask
+  borax to try the file's own lookup again, ~earlier~ keeps the rounds
+  before the latest one, oldest first. Each round is ~attempted~ with
+  its ~attempts~, or ~no-eligible-service~. ~earlier~ is absent when
+  there is no earlier round and from every supplied identifier's
+  lookup; the rest of ~lookup~ describes the latest round.
 
   ~record_retrieval~ says where the record came from: ~library~ with the
   artifact and item, ~content-index~, ~service-cache~ with the service,
@@ -1564,10 +1648,17 @@ how to install it, and a handful of examples.
   The service that supplied each record field remains in
   ~record.borax.provenance~. ~match_check~ is ~agreed~, ~conflict~ with
   both values and their similarity, ~insufficient-evidence~, or
-  ~not-attempted~. ~acceptance~ is ~automatic~, ~overridden~, or
-  ~not-applicable~.
+  ~not-attempted~. ~acceptance~ is ~automatic~, ~overridden~,
+  ~accepted~, ~pending~, or ~not-applicable~. ~accepted~ means you
+  renamed from a supplied record without overriding a conflict.
+  ~pending~ means a supplied record is still on offer; it appears only
+  on the event used to render an open question, never on a reported
+  verdict. A supplied record is therefore no longer ~automatic~.
+  ~overridden~ also covers a supplied record accepted over its conflict.
+  A retried record is ~automatic~, or ~overridden~ when you accept it
+  over a conflict.
 
-  Resolution-verdict ~skipped~ events carry the same seven sections.
+  Resolution-verdict ~skipped~ events carry the same eight sections.
   Their reason kind is ~no-text-layer~, ~text-without-identifier~,
   ~encrypted~, ~unreadable~, ~unresolvable~, ~conflict~, or ~duplicate~.
   Only ~unreadable~ keeps a message in its reason; duplicate reasons keep
@@ -1577,10 +1668,10 @@ how to install it, and a handful of examples.
   example ~no source had a record for doi:... (crossref: not found;
   openalex: not found)~. A conflict skip also carries the refused record
   as ~candidate~. A content duplicate's ~library~, ~content_index~,
-  ~extraction~, ~lookup~ and ~match_check~ steps are not-attempted with
-  reason ~content-duplicate~, its ~record_retrieval~ is ~null~, and its
-  ~acceptance~ is ~not-applicable~. Work duplicates carry the record's
-  evidence.
+  ~extraction~, ~identifier_input~, ~lookup~ and ~match_check~ steps are
+  not-attempted with reason ~content-duplicate~, its
+  ~record_retrieval~ is ~null~, and its ~acceptance~ is
+  ~not-applicable~. Work duplicates carry the record's evidence.
 
   A ~content-index-write~ event reports the rename-time write for a
   record you supplied, retried, or accepted over a conflict. It follows
@@ -1596,7 +1687,9 @@ how to install it, and a handful of examples.
   and the counts include ~named~. An interactive run waits until you
   settle a file before it emits that file's outcome, so a supplied
   identifier does not produce a second verdict. Questions are not
-  events. Resolution and skip evidence use the schema-4 sections above.
+  events, and neither are answers. What you typed is instead carried by
+  the file's verdict in ~identifier_input~. Resolution and skip evidence
+  use the schema-4 sections above.
 
   Schema 4 keeps the library events unchanged in shape.
   ~status --identify~ emits one

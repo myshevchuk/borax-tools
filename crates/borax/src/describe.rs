@@ -18,7 +18,7 @@ use borax_core::record::{DateParts, EntryType, Name, Record};
 use crate::event::{
     Acceptance, Claim, ClaimOrigin, Event, ExtractionResultStep, IdentifierOrigin, LibraryAnswer,
     LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, SkipReason, TitlesStep,
-    services_of, why_unanswered,
+    rejected_identifiers, services_of, why_unanswered,
 };
 
 /// The move a description is about: where the file would go, and the
@@ -87,15 +87,19 @@ const NAMED_AUTHORS: usize = 3;
 /// authors, date of issue and container; what the file's own titles
 /// say — each title with where it was read, or that it claims none,
 /// could not be opened, or was not read and why; the conflict an
-/// operator accepted the record over, where they did; and the name the
-/// file would take, with a line saying which rendered name was taken
-/// when a suffix moved it aside.
+/// operator accepted the record over, or that a pending candidate
+/// carries; a `rejected` line for each candidate the operator rejected,
+/// in submission order, its identifier written whole; the `candidate`
+/// line, while the record is an operator's candidate pending an answer;
+/// and the name the file would take, with a line saying which rendered
+/// name was taken when a suffix moved it aside.
 ///
 /// The lines of a skip, after `name`: why the verdict got no further
 /// (the extraction failure, the lookup and what each service answered,
 /// or the two titles of a conflict), what the file's own titles say
-/// wherever the verdict is not a conflict, and then why the library
-/// could not answer, where it could not.
+/// wherever the verdict is not a conflict, why the library could not
+/// answer, where it could not, and then a `rejected` line for each
+/// candidate the operator rejected.
 ///
 /// The rule fills `width`; values wrap within it, under a hanging
 /// indent as wide as the label column. The identifier is the exception
@@ -134,6 +138,9 @@ pub fn describe(
                     .as_deref()
                     .and_then(|sections| sections.library.answer()),
             );
+            if let Some(sections) = sections {
+                rejected(&mut description, sections);
+            }
             return description.lines;
         }
         return Vec::new();
@@ -171,13 +178,17 @@ pub fn describe(
     }
     file_says(&mut description, &sections.extraction.titles);
     if let (
-        Acceptance::Overridden,
+        Acceptance::Overridden | Acceptance::Pending,
         MatchCheckStep::Conflict {
             field, similarity, ..
         },
     ) = (sections.acceptance, &sections.match_check)
     {
         description.field("conflict", &alike(field, *similarity));
+    }
+    rejected(&mut description, sections);
+    if sections.acceptance == Acceptance::Pending {
+        description.field("candidate", "pending; skipping leaves the file as it was");
     }
     if let Some(proposal) = proposal {
         description.field("new name", &proposal.target);
@@ -310,7 +321,9 @@ fn looked_up(sections: &Sections) -> Option<String> {
         LookupStep::Attempted {
             identifier, origin, ..
         }
-        | LookupStep::NoEligibleService { identifier, origin } => (identifier, *origin),
+        | LookupStep::NoEligibleService {
+            identifier, origin, ..
+        } => (identifier, *origin),
         LookupStep::NotAttempted { .. } => return None,
     };
     let whence = match (origin, &sections.extraction.result) {
@@ -455,12 +468,20 @@ fn no_record(description: &mut Description, attempts: &[ServiceAnswer]) {
     }
 }
 
+/// A `rejected` line for each candidate `sections` says the operator
+/// rejected, in submission order, each identifier written whole.
+fn rejected(description: &mut Description, sections: &Sections) {
+    for identifier in rejected_identifiers(sections) {
+        description.whole("rejected", identifier);
+    }
+}
+
 /// What became of a record an identifier the operator gave led to.
 ///
-/// Every one of these is about a candidate rather than about the file,
-/// and a candidate the file's decision did not settle on reaches
-/// nobody through the event stream. The question put again
-/// is where the operator is told, and [`reported`] is what it says.
+/// Every one of these is about a candidate rather than about the file.
+/// The question put again is where the operator is told, and
+/// [`reported`] is what it says; the file's verdict carries the same
+/// outcome as evidence, in its `identifier_input`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Candidate<'a> {
     /// No service held the identifier: what each of them answered.

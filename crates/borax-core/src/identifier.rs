@@ -442,6 +442,88 @@ impl From<Isbn> for String {
     }
 }
 
+/// One of the four forms of identifier borax resolves from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IdentifierKind {
+    Doi,
+    Arxiv,
+    Pmid,
+    Isbn,
+}
+
+impl IdentifierKind {
+    /// The form's name in the event stream: `doi`, `arxiv`, `pmid` or
+    /// `isbn`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdentifierKind::Doi => "doi",
+            IdentifierKind::Arxiv => "arxiv",
+            IdentifierKind::Pmid => "pmid",
+            IdentifierKind::Isbn => "isbn",
+        }
+    }
+}
+
+impl fmt::Display for IdentifierKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Why text a person typed names no identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuppliedError {
+    /// The text names none of the forms: no DOI marker, no `arXiv:`,
+    /// `pmid:` or `isbn:` prefix, no leading `10.`, and it is not a
+    /// bare arXiv identifier.
+    Unrecognised,
+    /// The text names the form `kind` and fails that form's syntax.
+    Invalid { kind: IdentifierKind },
+    /// The text is a well-formed identifier of the form `kind` (an
+    /// ISBN) whose check digit fails.
+    Checksum { kind: IdentifierKind },
+}
+
+impl SuppliedError {
+    /// The refusal's reason in the event stream: `unrecognised`,
+    /// `invalid` or `checksum`.
+    pub fn reason(self) -> &'static str {
+        match self {
+            SuppliedError::Unrecognised => "unrecognised",
+            SuppliedError::Invalid { .. } => "invalid",
+            SuppliedError::Checksum { .. } => "checksum",
+        }
+    }
+
+    /// The form the text named, or `None` when it named none.
+    pub fn expected(self) -> Option<IdentifierKind> {
+        match self {
+            SuppliedError::Unrecognised => None,
+            SuppliedError::Invalid { kind } | SuppliedError::Checksum { kind } => Some(kind),
+        }
+    }
+}
+
+impl fmt::Display for SuppliedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SuppliedError::Unrecognised => f.write_str("names no identifier"),
+            SuppliedError::Invalid { kind } => write!(f, "not a valid {kind}"),
+            SuppliedError::Checksum { kind } => write!(f, "{kind} checksum failed"),
+        }
+    }
+}
+
+impl std::error::Error for SuppliedError {}
+
+/// The form an identifier error was raised for.
+fn refusal(kind: IdentifierKind, error: IdentifierError) -> SuppliedError {
+    match error {
+        IdentifierError::Invalid { .. } => SuppliedError::Invalid { kind },
+        IdentifierError::Checksum { .. } => SuppliedError::Checksum { kind },
+    }
+}
+
 /// The identifier `input` names, as a person types one.
 ///
 /// Tried in order: a DOI in any form extraction accepts, including a
@@ -449,31 +531,67 @@ impl From<Isbn> for String {
 /// identifier, old style or new; and — only behind a `pmid:` or
 /// `isbn:` prefix — a PMID or an ISBN. The last two need the prefix
 /// because a bare run of digits is both, and guessing which would be
-/// the one guess this tool does not make.
+/// the one guess this tool does not make. A well-formed identifier is
+/// returned as typed, normalised and never completed or extended.
 ///
-/// Returns `None` for text that is none of those, which is the
-/// caller's cue to say so and ask again rather than to send it to a
-/// service.
-pub fn supplied(input: &str) -> Option<Identifier> {
+/// # Errors
+///
+/// Text that is none of those is refused with the form it names, if
+/// any, decided by the first match of: a DOI marker (`doi:` or a
+/// `doi.org` resolver address), `arXiv:`, `pmid:`, `isbn:` (or
+/// `isbn-10:`, `isbn-13:`), and a body beginning `10.`. Each prefix is
+/// matched without regard to case. Text naming a form that fails its
+/// syntax is [`SuppliedError::Invalid`], an ISBN failing its check
+/// digit is [`SuppliedError::Checksum`], and text naming no form,
+/// blank text and a bare run of digits included, is
+/// [`SuppliedError::Unrecognised`].
+pub fn supplied(input: &str) -> Result<Identifier, SuppliedError> {
     if let Ok(doi) = Doi::parse(input) {
-        return Some(Identifier::Doi(doi));
+        return Ok(Identifier::Doi(doi));
     }
     if let Ok(arxiv) = ArxivId::parse(input) {
-        return Some(Identifier::Arxiv(arxiv));
+        return Ok(Identifier::Arxiv(arxiv));
     }
 
     let body = input.trim();
-    if strip_prefix_ci(body, "pmid:").is_some() {
-        return Pmid::parse(body).ok().map(Identifier::Pmid);
+    let has_prefix = |prefixes: &[&str]| {
+        prefixes
+            .iter()
+            .any(|prefix| strip_prefix_ci(body, prefix).is_some())
+    };
+    if has_prefix(&[
+        "doi:",
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+    ]) {
+        return Err(SuppliedError::Invalid {
+            kind: IdentifierKind::Doi,
+        });
+    }
+    if has_prefix(&["arxiv:"]) {
+        return Err(SuppliedError::Invalid {
+            kind: IdentifierKind::Arxiv,
+        });
+    }
+    if has_prefix(&["pmid:"]) {
+        return Pmid::parse(body)
+            .map(Identifier::Pmid)
+            .map_err(|error| refusal(IdentifierKind::Pmid, error));
     }
     // Every prefix `Isbn::parse` takes, since somebody typing one is as
     // likely to name the length as not.
-    if ["isbn:", "isbn-10:", "isbn-13:"]
-        .iter()
-        .any(|prefix| strip_prefix_ci(body, prefix).is_some())
-    {
-        return Isbn::parse(body).ok().map(Identifier::Isbn);
+    if has_prefix(&["isbn:", "isbn-10:", "isbn-13:"]) {
+        return Isbn::parse(body)
+            .map(Identifier::Isbn)
+            .map_err(|error| refusal(IdentifierKind::Isbn, error));
+    }
+    if body.starts_with("10.") {
+        return Err(SuppliedError::Invalid {
+            kind: IdentifierKind::Doi,
+        });
     }
 
-    None
+    Err(SuppliedError::Unrecognised)
 }

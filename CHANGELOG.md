@@ -11,11 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **BREAKING:** JSONL events now use schema 4. `resolved` events remove
   `found`, `cached`, `source`, `tier`, `claims`, and `overrode` and replace
-  them with the ordered `library`, `content_index`, `extraction`, `lookup`,
-  `record_retrieval`, `match_check`, and `acceptance` sections. A step that
-  did not run has a `not-attempted` status and a reason. Per-field source
-  attribution remains in `record.borax.provenance`. Resolution-verdict
-  `skipped` events carry the same sections and distinguish
+  them with the ordered `library`, `content_index`, `extraction`,
+  `identifier_input`, `lookup`, `record_retrieval`, `match_check`, and
+  `acceptance` sections. `identifier_input` retains every text submitted at
+  the interactive identifier prompt, its syntax result and outcome, the
+  submission used by the verdict, and the file's own resolution evidence
+  that it displaced. A step that did not run has a `not-attempted` status
+  and a reason. Per-field source attribution remains in
+  `record.borax.provenance`. Resolution-verdict `skipped` events carry the
+  same sections and distinguish
   `no-text-layer`, `text-without-identifier`, `encrypted`, and `unreadable`;
   their reasons no longer duplicate the identifier, attempts, or conflict
   details held in those sections. A conflict skip carries its refused
@@ -26,14 +30,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   services that supplied its fields, and whether the library, content
   index, response cache, or network supplied the record. Human `resolved`,
   `skipped`, and `content-index-write` clauses now escape control
-  characters. In the `borax` crate, the `FileRecord::source`, `tier`,
-  `found`, `claims`, and `cached` methods, `event_for`,
-  `pipeline::unresolvable`, `Provenance`, `event::Attempt`, and
-  `event::Overridden` are removed. `FileRecord::overrode` becomes the
-  `overridden` Boolean field, and `FileRecord::conflict` now returns
-  `Option<&Conflict>`. The crate adds `Evidence::sections`,
-  `pipeline::resolution_skip`, `FileRecord::acceptance`,
-  `SkipReason::is_resolution_verdict`, and `Unattempted::CacheBypassed`.
+  characters. Human resolution lines append a rejected-candidate clause
+  when applicable, and interactive descriptions show `candidate` and
+  `rejected` lines. Retried lookups keep earlier rounds in `lookup.earlier`,
+  oldest first. `acceptance` adds `accepted` for a supplied record renamed
+  without a conflict and `pending` for a supplied record still on offer;
+  `pending` is rendered for an open question but is not emitted in a
+  verdict. In the `borax` crate, the `FileRecord::source`, `tier`, `found`,
+  `claims`, and `cached` methods, `event_for`, `pipeline::unresolvable`,
+  `Provenance`, `event::Attempt`, and `event::Overridden` are removed.
+  `FileRecord::overrode` becomes the `overridden` Boolean field, and
+  `FileRecord::conflict` now returns `Option<&Conflict>`. The crate adds
+  `Evidence::sections`, `pipeline::resolution_skip`,
+  `FileRecord::acceptance`, `FileRecord::accepted`,
+  `Evidence::identifier_input` and its supporting types,
+  `SkipReason::is_resolution_verdict`,
+  `Unattempted::{CacheBypassed, NotAsked, NotSupplied, Unparsed, NoMove}`,
+  `earlier` on `LookupEvidence::Attempted` and
+  `LookupStep::{Attempted, NoEligibleService}`, `LookupRound`, and
+  `Acceptance::{Pending, Accepted}`. In `borax-core`,
+  `identifier::supplied` now returns `Result<Identifier, SuppliedError>`,
+  with the new `IdentifierKind` and `SuppliedError` types.
+
+- Interactive rename now keeps every earlier lookup when you retry the
+  file's own identifier. A later supplied identifier that finds no record or
+  produces no move leaves an existing candidate on offer. A reported
+  verdict retains text refused at the identifier prompt with an
+  `unrecognised`, `invalid`, or `checksum` reason.
 
 - Resolution now retains per-file evidence internally: ordered service
   attempts with structured outcomes, including failures before a

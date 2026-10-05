@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borax_core::content::{ContentHash, hash_bytes};
-use borax_core::identifier::{Identifier, supplied};
+use borax_core::identifier::{Identifier, SuppliedError, supplied};
 use borax_core::library::ArtifactRecord;
 use borax_core::record::{EntryType, Record};
 use borax_core::tables::{LookupTables, Lookups, Table, TableSpec};
@@ -46,7 +46,10 @@ use crate::event::{
     Admission, Counts, Diagnostic, Event, Format, Level, Sections, SkipReason, Summary, TableUsed,
     human_summary, render,
 };
-use crate::evidence::{IndexWrite, LookupEvidence, Origin as LookupOrigin};
+use crate::evidence::{
+    CandidateDecision, Displaced, Displacement, Evidence, IdentifierInput, IndexWrite,
+    LookupEvidence, MatchCheck, Origin as LookupOrigin, Submission, SubmissionOutcome, Unattempted,
+};
 use crate::library::Account;
 use crate::pipeline::{
     Documents, Duplicated, FileOutcome, FileRecord, RealDocuments, ResolveConfig, Standing,
@@ -1725,11 +1728,11 @@ enum Settled {
     /// identified has none.
     ///
     /// `sections` and `candidate` are the held verdict's where the skip
-    /// is the file's resolution verdict, replayed exactly as
-    /// [`crate::pipeline::verdict_event`] or
-    /// [`crate::pipeline::resolution_skip`] built them, and `None` for a
-    /// skip of a file that resolved, whose `resolved` event already
-    /// carries its evidence.
+    /// is the file's resolution verdict, as
+    /// [`crate::pipeline::resolution_skip`] builds them from the file's
+    /// own evidence and what the operator typed, and `None` for a skip
+    /// of a file that resolved, whose `resolved` event already carries
+    /// its evidence.
     Skip {
         file: Option<FileRecord>,
         reason: SkipReason,
@@ -1826,9 +1829,16 @@ enum Situation {
 /// the identifier is resolved, the record it reaches is described, and
 /// the file's situation becomes whatever that record puts it in. A
 /// candidate that leads nowhere leaves the file exactly as it was,
-/// with the record and the choices it already had, and what became of
-/// it is reported in the description of the question put again — the
-/// only channel left, since a candidate reaches no event stream.
+/// with the record and the choices it already had — a candidate on
+/// offer before it included — and what became of it is reported in the
+/// description of the question put again.
+///
+/// Every text typed at the identifier prompt is a submission, and every
+/// event built for the file carries them as they stand
+/// ([`Typed::input`]). A candidate is rejected when the operator skips
+/// while it is on offer, or when a later submission's record takes its
+/// place there; a rejected candidate is evidence in the file's verdict,
+/// and never its resolution.
 ///
 /// A run whose mode says to ask and that has nowhere to ask stops
 /// rather than carrying on, since a move nobody was asked about is the
@@ -1847,7 +1857,8 @@ fn asked<C: Cache>(
     let mut held = crate::pipeline::verdict_event(about.path, &standing);
     // `evidence` is the file's own: what its held verdict reports, and
     // what decides whether asking the services again is offered. A
-    // retry is the file's own lookup and replaces it; a supplied
+    // retry is the file's own lookup made again, and becomes its
+    // current round with the rounds before it kept; a supplied
     // identifier is a candidate's, whose evidence travels on the record
     // it reached and never touches this.
     let Standing {
@@ -1871,9 +1882,20 @@ fn asked<C: Cache>(
         (FileOutcome::Skipped(_), None) => None,
     };
     // What is on offer now: the file's own record, or one a supplied
-    // identifier reached in its place.
+    // identifier reached in its place, which `typed.open` then names.
     let mut offer = own.clone();
-    let mut candidate = false;
+    // What the operator has typed for the file, and whether they were
+    // asked about it at all.
+    let mut typed = Typed {
+        submissions: Vec::new(),
+        asked: false,
+        open: None,
+    };
+    // What was on offer before the last supplied identifier reached a
+    // record, until the loop learns whether that record leads to a
+    // move: if it does, a candidate among these is rejected, and if it
+    // does not, these are put back on offer.
+    let mut before: Option<(Option<Offer>, Option<u32>)> = None;
     // The work the library already holds a file for, while the file is
     // still to be filed as another artifact of it. Taken when the
     // operator files, which is what keeps the question to one asking:
@@ -1888,8 +1910,7 @@ fn asked<C: Cache>(
 
     let width = session.width;
     // What became of the last candidate, or the work this file is a
-    // second file of, prepended to the description of the question and
-    // reported nowhere else.
+    // second file of, prepended to the description of the question.
     let mut report: Vec<String> = match (&filing, account) {
         (Some(duplicated), Some(library)) => describe::archived(
             library.root,
@@ -1914,14 +1935,25 @@ fn asked<C: Cache>(
         let decision = proposal.as_ref().map(|proposed| &proposed.decision);
 
         // A candidate there is no moving to is no offer at all: what
-        // became of it is reported, and the file's own situation — the
-        // one its own record left it in — is put again (design D1's
-        // second table).
-        if candidate && !matches!(decision, Some(PlannedRename::Rename { .. })) {
+        // became of it is reported, and the situation before it — the
+        // one the record on offer before the supply left the file in —
+        // is put again (design D1's second table).
+        if typed.open.is_some() && !matches!(decision, Some(PlannedRename::Rename { .. })) {
             report = elsewhere(offer.as_ref(), decision, width);
-            offer = own.clone();
-            candidate = false;
+            if let (Some(number), Some(on)) = (typed.open, offer.as_ref()) {
+                typed.close(
+                    number,
+                    on,
+                    CandidateDecision::NotAttempted(Unattempted::NoMove),
+                );
+            }
+            (offer, typed.open) = before.take().unwrap_or((own.clone(), None));
             continue;
+        }
+        // The record on offer leads to a move, so a candidate it took
+        // the place of is set aside.
+        if let Some((Some(replaced), Some(number))) = before.take() {
+            typed.close(number, &replaced, CandidateDecision::Rejected);
         }
 
         let choices = match situation(
@@ -1937,19 +1969,20 @@ fn asked<C: Cache>(
             Situation::Settle => {
                 return match (offer, proposal) {
                     (Some(on), Some(proposed)) => Settled::CarryOut {
-                        file: on.file,
+                        file: typed.carried(on.file, None, &evidence, own.as_ref()),
                         decision: proposed.decision,
                         // Nothing reaches here with a move on offer, so
                         // there is no acceptance to keep: an operator
                         // who was asked nothing has accepted nothing.
                         remember: false,
                     },
-                    _ => skipped(own, &held),
+                    _ => typed.skipped(about.path, own, &held, &evidence),
                 };
             }
-            Situation::Report => return skipped(own, &held),
+            Situation::Report => return typed.skipped(about.path, own, &held, &evidence),
         };
 
+        typed.asked = true;
         let answer = asker.choose(&Question {
             path: about.path.to_path_buf(),
             // Where the file would go, as the operator is shown it. A
@@ -1970,8 +2003,10 @@ fn asked<C: Cache>(
                     &described(
                         about.path,
                         offer.as_ref(),
-                        candidate,
+                        &typed,
                         &held,
+                        &evidence,
+                        own.as_ref(),
                         filing.as_ref(),
                     ),
                     &name,
@@ -1984,7 +2019,12 @@ fn asked<C: Cache>(
 
         match answer {
             Answer::Quit => return Settled::Stop,
-            Answer::Skip => return skipped(own, &held),
+            Answer::Skip => {
+                if let (Some(number), Some(on)) = (typed.open, offer.as_ref()) {
+                    typed.close(number, on, CandidateDecision::Rejected);
+                }
+                return typed.skipped(about.path, own, &held, &evidence);
+            }
             // Accepting a work duplicate returns the file to planning,
             // where the ordinary question about its move is put: the
             // answer settles whether this file is admitted at all, and
@@ -2002,14 +2042,14 @@ fn asked<C: Cache>(
                     kept: true,
                 });
                 offer = own.clone();
-                candidate = false;
+                typed.open = None;
                 report.clear();
             }
             // The three answers that act on the record in hand, none
             // of which is offered without a decision to carry out.
             Answer::Rename | Answer::Override | Answer::Keep => {
                 let (Some(on), Some(proposed)) = (offer.as_ref(), proposal.as_ref()) else {
-                    return skipped(own, &held);
+                    return typed.skipped(about.path, own, &held, &evidence);
                 };
                 // A record the run resolved on its own was checked as
                 // it resolved. One the operator reached — supplied,
@@ -2037,18 +2077,22 @@ fn asked<C: Cache>(
                     continue;
                 }
                 return Settled::CarryOut {
-                    file: accepted(on),
+                    file: typed.carried(accepted(on), typed.open, &evidence, own.as_ref()),
                     decision: proposed.decision.clone(),
                     remember: !on.kept,
                 };
             }
             Answer::Supply => {
-                let Some(identifier) = supplied_identifier(asker) else {
-                    // Abandoned: nothing happened, so nothing is
-                    // reported and the question is put again exactly
-                    // as it was.
+                let entered = supplied_identifier(asker);
+                for (raw, refusal) in entered.refused {
+                    typed.refused(raw, refusal);
+                }
+                let Some((raw, identifier)) = entered.parsed else {
+                    // Abandoned: nothing was looked up, so the question
+                    // is put again exactly as it was.
                     continue;
                 };
+                let number = typed.next();
                 // Resolved on top of the file's own evidence, so what
                 // the library said about the file stands whatever the
                 // operator makes of it.
@@ -2061,8 +2105,15 @@ fn asked<C: Cache>(
                     &evidence,
                 ) {
                     Ok(file) => {
+                        typed.submissions.push(Submission {
+                            number,
+                            raw,
+                            syntax: Ok(identifier),
+                            outcome: None,
+                        });
+                        before = Some((offer.take(), typed.open));
                         offer = Some(Offer { file, kept: false });
-                        candidate = true;
+                        typed.open = Some(number);
                         // The record itself is what the next question
                         // describes; there is nothing left to report.
                         report.clear();
@@ -2076,8 +2127,26 @@ fn asked<C: Cache>(
                             },
                             width,
                         );
-                        offer = own.clone();
-                        candidate = false;
+                        let reason = Unattempted::NoRecord;
+                        typed.submissions.push(Submission {
+                            number,
+                            raw,
+                            outcome: Some(SubmissionOutcome {
+                                lookup: crate::pipeline::unheld_evidence(
+                                    &evidence,
+                                    &identifier,
+                                    LookupOrigin::Operator,
+                                    &unheld,
+                                )
+                                .lookup,
+                                match_check: MatchCheck::NotAttempted(reason),
+                                record: None,
+                                decision: CandidateDecision::NotAttempted(reason),
+                            }),
+                            syntax: Ok(identifier),
+                        });
+                        // The record on offer, a candidate or the
+                        // file's own, stays on offer.
                     }
                 }
             }
@@ -2116,7 +2185,7 @@ fn asked<C: Cache>(
                         evidence = file.evidence.clone();
                         own = Some(Offer { file, kept: false });
                         offer = own.clone();
-                        candidate = false;
+                        typed.open = None;
                         report.clear();
                     }
                     Err(unheld) => {
@@ -2130,7 +2199,8 @@ fn asked<C: Cache>(
                         );
                         // A retry is the file's own resolution rather
                         // than a candidate, so what it came to is the
-                        // verdict the run now holds for it.
+                        // verdict the run now holds for it: its current
+                        // round, with the rounds before it kept.
                         evidence = crate::pipeline::unheld_evidence(
                             &evidence,
                             &identifier,
@@ -2141,7 +2211,7 @@ fn asked<C: Cache>(
                             resolution_skip(about.path, SkipReason::Unresolvable, &evidence, None);
                         own = None;
                         offer = None;
-                        candidate = false;
+                        typed.open = None;
                     }
                 }
             }
@@ -2278,8 +2348,10 @@ fn situation(
 /// what was declined is the move that was on offer — so it is
 /// `declined`, and its record still stands and is still cited.
 ///
-/// A candidate the operator supplied is nowhere in either answer. It
-/// was never the file's resolution and is not reported as one.
+/// A candidate the operator supplied is never reported as either
+/// answer: it was never the file's resolution. What became of it is in
+/// the verdict's `identifier_input`, which the caller puts there
+/// ([`Typed::skipped`]).
 fn skipped(own: Option<Offer>, held: &Event) -> Settled {
     match held {
         Event::Skipped {
@@ -2303,20 +2375,22 @@ fn skipped(own: Option<Offer>, held: &Event) -> Settled {
 }
 
 /// `offer`'s record as accepting it makes it ([`crate::pipeline::accept`]):
-/// marked as overridden where its title check concluded a conflict, and
-/// unchanged where the record cleared the check on its own.
+/// marked as accepted, and as overridden where its title check
+/// concluded a conflict.
 fn accepted(offer: &Offer) -> FileRecord {
     crate::pipeline::accept(offer.file.clone())
 }
 
-/// The event a question's description renders.
+/// The event a question's description renders, carrying what the
+/// operator has typed for the file so far.
 ///
 /// The verdict the run is holding, which is the whole of what it knows
 /// about the file — or, while a candidate is on offer, the `resolved`
-/// event that candidate would produce were the operator to accept it,
-/// conflict and all. A candidate has no verdict of its own, and what
-/// the operator is shown before deciding is what the stream carries
-/// after.
+/// event that candidate would produce, conflict and all, with
+/// `acceptance` [`crate::event::Acceptance::Pending`]. A candidate has
+/// no verdict of its own, and what the operator is shown before
+/// deciding is what the stream carries after, but for `acceptance`,
+/// which the answer settles.
 ///
 /// A file waiting to be filed as another artifact is shown the record
 /// it resolved to rather than the duplicate its verdict is. The verdict
@@ -2327,14 +2401,167 @@ fn accepted(offer: &Offer) -> FileRecord {
 fn described(
     path: &Path,
     offer: Option<&Offer>,
-    candidate: bool,
+    typed: &Typed,
     held: &Event,
+    evidence: &Evidence,
+    own: Option<&Offer>,
     filing: Option<&Duplicated>,
 ) -> Event {
-    match (filing, offer) {
-        (Some(filing), _) => resolved_event(path, &filing.file),
-        (None, Some(offer)) if candidate => resolved_event(path, &accepted(offer)),
-        _ => held.clone(),
+    match (filing, offer, typed.open) {
+        (Some(filing), _, _) => resolved_event(
+            path,
+            &typed.carried(filing.file.clone(), None, evidence, own),
+        ),
+        (None, Some(offer), Some(open)) => resolved_event(
+            path,
+            &typed.carried(offer.file.clone(), Some(open), evidence, own),
+        ),
+        _ => typed.held(path, own, held, evidence),
+    }
+}
+
+/// What an operator has typed at the identifier prompt for one file,
+/// and whether they were asked about it at all.
+struct Typed {
+    /// Every text submitted, in order and numbered from 1. The one
+    /// `open` names has no outcome yet.
+    submissions: Vec<Submission>,
+    /// Whether a question has been put about the file.
+    asked: bool,
+    /// The submission whose record is on offer, while one is.
+    open: Option<u32>,
+}
+
+impl Typed {
+    /// The number the next submission takes.
+    fn next(&self) -> u32 {
+        u32::try_from(self.submissions.len()).map_or(u32::MAX, |count| count + 1)
+    }
+
+    /// Record `raw`, a text that named no identifier, as a submission
+    /// whose every step is not attempted for [`Unattempted::Unparsed`].
+    fn refused(&mut self, raw: String, refusal: SuppliedError) {
+        let reason = Unattempted::Unparsed;
+        let number = self.next();
+        self.submissions.push(Submission {
+            number,
+            raw,
+            syntax: Err(refusal),
+            outcome: Some(SubmissionOutcome {
+                lookup: LookupEvidence::NotAttempted(reason),
+                match_check: MatchCheck::NotAttempted(reason),
+                record: None,
+                decision: CandidateDecision::NotAttempted(reason),
+            }),
+        });
+    }
+
+    /// Close submission `number` with `decision`, its outcome taken from
+    /// `on`, the record it reached. A submission closed is no longer on
+    /// offer.
+    fn close(&mut self, number: u32, on: &Offer, decision: CandidateDecision) {
+        if let Some(submission) = self
+            .submissions
+            .iter_mut()
+            .find(|submission| submission.number == number)
+        {
+            submission.outcome = Some(SubmissionOutcome {
+                lookup: on.file.evidence.lookup.clone(),
+                match_check: on.file.evidence.match_check.clone(),
+                record: Some(on.file.record.clone()),
+                decision,
+            });
+        }
+        if self.open == Some(number) {
+            self.open = None;
+        }
+    }
+
+    /// The operator's input as an event reports it, for a record reached
+    /// from submission `used`, or from the file's own passes when
+    /// `None`.
+    ///
+    /// `Supplied` once anything was submitted, with `used`'s
+    /// displacement holding the file's own lookup, retrieval, title
+    /// check and record — `evidence` and `own`'s. Otherwise not
+    /// supplied where a question was put, and `evidence`'s own input,
+    /// the pipeline's, where none was.
+    fn input(
+        &self,
+        used: Option<u32>,
+        evidence: &Evidence,
+        own: Option<&Offer>,
+    ) -> IdentifierInput {
+        if self.submissions.is_empty() {
+            return match self.asked {
+                true => IdentifierInput::NotAttempted(Unattempted::NotSupplied),
+                false => evidence.identifier_input.clone(),
+            };
+        }
+        IdentifierInput::Supplied {
+            submissions: self.submissions.clone(),
+            used: used.map(|submission| Displacement {
+                submission,
+                displaced: Displaced {
+                    lookup: evidence.lookup.clone(),
+                    retrieval: own.and(evidence.retrieval()),
+                    match_check: evidence.match_check.clone(),
+                    record: own.map(|own| own.file.record.clone()),
+                },
+            }),
+        }
+    }
+
+    /// `file` carrying the operator's input, its record reached from
+    /// submission `used` or from the file's own passes.
+    fn carried(
+        &self,
+        mut file: FileRecord,
+        used: Option<u32>,
+        evidence: &Evidence,
+        own: Option<&Offer>,
+    ) -> FileRecord {
+        file.evidence.identifier_input = self.input(used, evidence, own);
+        file
+    }
+
+    /// `held`, the verdict the run holds for the file at `path`, rebuilt
+    /// from the file's own `evidence` and record `own` with the
+    /// operator's input.
+    fn held(&self, path: &Path, own: Option<&Offer>, held: &Event, evidence: &Evidence) -> Event {
+        match held {
+            Event::Skipped {
+                reason, candidate, ..
+            } => {
+                let mut evidence = evidence.clone();
+                evidence.identifier_input = self.input(None, &evidence, own);
+                resolution_skip(path, reason.clone(), &evidence, candidate.as_deref())
+            }
+            _ => match own {
+                Some(own) => resolved_event(
+                    path,
+                    &self.carried(own.file.clone(), None, evidence, Some(own)),
+                ),
+                None => held.clone(),
+            },
+        }
+    }
+
+    /// What a skip of the file at `path` reports ([`skipped`]), with
+    /// the held verdict and the file's own record carrying the
+    /// operator's input.
+    fn skipped(
+        &self,
+        path: &Path,
+        own: Option<Offer>,
+        held: &Event,
+        evidence: &Evidence,
+    ) -> Settled {
+        let own = own.map(|mut on| {
+            on.file = self.carried(on.file, None, evidence, None);
+            on
+        });
+        skipped(own.clone(), &self.held(path, own.as_ref(), held, evidence))
     }
 }
 
@@ -2376,10 +2603,22 @@ fn elsewhere(offer: Option<&Offer>, decision: Option<&PlannedRename>, width: usi
     describe::reported("supplied", &identifier, &outcome, width)
 }
 
-/// The identifier the operator types when asked for one, parsed.
+/// What the operator typed at one asking for an identifier.
+struct Entered {
+    /// Every text refused before the prompt was answered or abandoned,
+    /// in order, with why it named no identifier.
+    refused: Vec<(String, SuppliedError)>,
+    /// The text that parsed and the identifier it names, or `None` when
+    /// the operator declined to answer.
+    parsed: Option<(String, Identifier)>,
+}
+
+/// The identifier the operator types when asked for one, parsed, and
+/// every text refused on the way to it.
 ///
-/// `None` is their declining to answer — an escape, or an empty line —
-/// which leaves the file exactly as the question found it.
+/// No parsed text is their declining to answer — an escape, or an empty
+/// line — which leaves the file as the question found it, but for the
+/// refused texts.
 ///
 /// Input that names no identifier is refused where it was typed and
 /// asked for again, without the choice menu being reopened: somebody
@@ -2387,21 +2626,31 @@ fn elsewhere(offer: Option<&Offer>, decision: Option<&PlannedRename>, width: usi
 /// their mind. The refusal quotes what was typed and names the forms
 /// that are taken, and nothing reaches any service until something
 /// parses.
-fn supplied_identifier(asker: &mut dyn Asker) -> Option<Identifier> {
-    let mut refused: Option<String> = None;
-    loop {
-        let input = asker.text(&TextPrompt {
-            asking: ASKING.to_string(),
-            refused: refused.take(),
-        })?;
-        if let Some(identifier) = supplied(&input) {
-            return Some(identifier);
+fn supplied_identifier(asker: &mut dyn Asker) -> Entered {
+    let mut entered = Entered {
+        refused: Vec::new(),
+        parsed: None,
+    };
+    let mut refusal: Option<String> = None;
+    while let Some(input) = asker.text(&TextPrompt {
+        asking: ASKING.to_string(),
+        refused: refusal.take(),
+    }) {
+        match supplied(&input) {
+            Ok(identifier) => {
+                entered.parsed = Some((input, identifier));
+                break;
+            }
+            Err(error) => {
+                refusal = Some(format!(
+                    "\"{}\" is not a DOI, an arXiv identifier, or a pmid: or isbn: number.",
+                    crate::describe::escaped(input.trim())
+                ));
+                entered.refused.push((input, error));
+            }
         }
-        refused = Some(format!(
-            "\"{}\" is not a DOI, an arXiv identifier, or a pmid: or isbn: number.",
-            crate::describe::escaped(input.trim())
-        ));
     }
+    entered
 }
 
 /// The one line the prompt for an identifier asks with.
