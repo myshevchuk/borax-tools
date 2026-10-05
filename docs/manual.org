@@ -14,6 +14,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-03 Sat 13:19] -- sectioned resolution events
 #+AI_PASS: fact-check claude-opus-5-5 [2026-10-03 Sat] -- model line and example file name restored; content-duplicate shape and unreachable prompt line corrected after review
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-05 Mon 04:20] -- operator input evidence
+#+AI_PASS: fact-check claude-opus-5-5 [2026-10-05 Mon] -- supplied identifiers are looked up normalised, not as typed
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -395,9 +396,12 @@ how to install it, and a handful of examples.
     ~invalid~ or ~checksum~ result also names the expected form: ~doi~,
     ~arxiv~, ~pmid~, or ~isbn~.
 
-    borax looks up an accepted identifier through the usual services,
-    exactly as you typed it. A well-formed identifier, including a
-    truncated DOI, is never completed or repaired. If it resolves and
+    borax looks up an accepted identifier through the usual services in
+    its normalised form: surrounding whitespace, trailing punctuation
+    and a ~doi:~ or resolver prefix such as ~https://doi.org/~ are
+    removed, and a DOI is lowercased. Nothing is added: a well-formed
+    identifier, including a truncated DOI, is never completed or
+    repaired. If it resolves and
     produces a move, borax shows the record with ~candidate   pending;
     skipping leaves the file as it was~ until you answer. A conflicting
     candidate also shows its ~conflict~ line while it is pending.
