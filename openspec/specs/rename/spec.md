@@ -385,9 +385,12 @@ The description SHALL show nothing about the resolution that the file's
 `resolved` event does not carry, so that a reader of the stream and the
 operator at the terminal are told the same things about a file. What
 belongs to the question rather than to the resolution — the file's
-position in the run, the proposed name, and the note saying which
-rendered name a collision suffix stepped around — is the question's to
-show and is not held to that.
+position in the run, the proposed name, the note saying which
+rendered name a collision suffix stepped around, and that a record
+reached from an identifier the operator supplied is still pending their
+answer — is the question's to show and is not held to that. A pending
+record is a fact about the question being put: the verdict reported
+after the answer says what the answer made of it.
 
 The identifier the description names SHALL be the one the run looked
 up, with the pass that found it. A record may carry identifiers that
@@ -460,6 +463,13 @@ change which questions are put or what their answers do.
 - **THEN** the description names the record's identifier without saying
   where it was found, and says the record comes from an earlier run
 
+#### Scenario: A candidate is described as pending
+- **WHEN** an interactive run describes the record a supplied DOI
+  reached, before the operator answers
+- **THEN** the description says the record is pending, although the
+  file's `resolved` event, once the operator renames from it, reports
+  it as accepted
+
 ### Requirement: An interactive run asks about files it could not settle
 An interactive rename run SHALL put a question to the operator, in addition to the questions for proposed moves, for each file whose content hash is known and which: had no identifier found in it; had an identifier no service holds; could not be read as a PDF or is encrypted; resolved to a record its claimed titles conflict with; or resolved to an identifier an item already in the library carries.
 
@@ -528,14 +538,22 @@ Skipping any of these files SHALL leave it untouched and report it with
 the reason a batch run would have given, not as `declined`. A file that
 had a move on offer and was skipped after a supplied identifier led
 nowhere SHALL be reported `declined`, since a move is what was
-declined.
+declined. Either way, the file's resolution event — its
+`skipped` verdict, or the `resolved` event reported before a `declined`
+skip — SHALL carry every identifier the operator supplied for it, as the
+requirement "A file's verdict keeps every identifier its operator
+supplied" states.
 
 A supplied identifier that resolves SHALL leave the file in whatever
 situation its new record puts it: a move to offer, a target taken, a
 name that renders empty, or a file already named. A supplied
 identifier that does not resolve, and an input the operator abandons,
 SHALL leave the file exactly as it was, with the record and the choices
-it already had.
+it already had. Where the record on offer was one an earlier supplied
+identifier reached, that record stays on offer, still awaiting the
+operator's answer. The one thing that does change: the identifier that
+did not resolve is kept among the file's submissions, with what its
+lookup came to. An abandoned input submitted nothing and adds none.
 
 #### Scenario: Supplying an identifier for an unidentified file
 - **WHEN** an interactive run finds no identifier in an author manuscript
@@ -584,6 +602,13 @@ it already had.
   artifact record's history
 - **THEN** it is reported a content duplicate and no question is put
 
+#### Scenario: Skipping after a supplied identifier led nowhere
+- **WHEN** the operator supplies a DOI for a file with no identifier, no
+  service holds it, and the operator then skips the file
+- **THEN** the file is reported skipped with the reason its extraction
+  gave, and its `skipped` event carries the DOI as a submission with
+  each service's answer
+
 ### Requirement: A file's verdict follows the operator's decision
 In an interactive run, the events reporting a file's resolution and fate SHALL be emitted once the operator's decisions about that file are made, and SHALL describe the outcome of those decisions: a file SHALL NOT be reported both skipped and renamed, and a record the operator abandoned for another identifier SHALL NOT be reported as the file's resolution.
 
@@ -617,12 +642,26 @@ Only the record a file's decision settled on SHALL reach any of those.
 A file whose own resolution stands is cited from that record as it
 would be in a batch run, whatever candidates were shown along the way.
 
+Where an abandoned record is reported at all, it SHALL be reported only
+as evidence: in full, as the outcome of the submission that reached it,
+inside the resolution event of the file it was offered for, with that
+submission's `acceptance` `rejected`. A run that quits reports nothing
+about the file it quit at, and so nothing about that file's candidates.
+
 #### Scenario: A wrong identifier is not written beside the file
 - **WHEN** the operator supplies an identifier, sees a record for
   another paper, and supplies a different one instead
 - **THEN** no sidecar and no bibliography entry is written from the
   abandoned record, and the file's own sidecar, when it is written,
   carries the record the operator accepted
+
+#### Scenario: A skipped candidate is evidence, not a resolution
+- **WHEN** the operator supplies an identifier, sees its record, and
+  skips the file
+- **THEN** the record appears only in that identifier's submission,
+  with `acceptance` `rejected`; no `resolved` event reports it, the
+  content index holds nothing new for the file, and no sidecar or
+  bibliography entry is written from it
 
 ### Requirement: An interactive question says whether the library answered
 The description an interactive run shows before a question SHALL say when the file's record is its library item's, and SHALL state what the library could not answer for when it could not.
@@ -722,4 +761,150 @@ section, and none is worked out anew.
   encrypted under a user password
 - **THEN** the description says the file is encrypted, and that its
   titles could not be read, with the reason
+
+### Requirement: A file's verdict keeps every identifier its operator supplied
+An interactive run SHALL report, in the resolution event of each file it settles, every identifier its operator supplied for that file and what each came to, so that the file's final verdict is told apart from the outcomes of the candidates before it.
+
+A file skipped after a candidate SHALL be reported with its own verdict:
+its own reason and its own sections. The candidate SHALL appear in its
+submission, as the operator's rejection, and never as the file's
+record.
+
+A file renamed from a record a supplied identifier reached SHALL be
+reported with that record and its submission named as `used`. Its
+`acceptance` SHALL be `accepted`, or `overridden` where the rename went
+over the record's title conflict.
+
+A record a supplied identifier reached SHALL stay on offer, awaiting the
+operator's answer, until one of these:
+
+- the operator renames from it;
+- the operator skips the file;
+- a later supplied identifier reaches a record that takes its place on
+  offer;
+- the operator quits.
+
+A later identifier that reaches no record, or a record that leads to no
+move, SHALL leave it on offer. So SHALL a rename the run answers by
+saying the library already holds a file of the record's work, as the
+requirement "An interactive run asks about files it could not settle"
+requires. The answer given after that notice is the one that settles
+the record.
+
+A file renamed from its own record SHALL report its submissions, if
+any, beside that record's evidence.
+
+Nothing the operator typed SHALL be reported for a file the run quit
+at, since nothing at all is reported for it.
+
+#### Scenario: A correction and a skip
+- **WHEN** an interactive run finds no identifier in a file whose pages
+  hold text, and the operator:
+  - supplies `not-an-identifier`, which is refused;
+  - supplies `10.1039/c9cc02492`, which no service holds;
+  - supplies `10.1039/c9cc02492a`, for which Crossref returns a record;
+  - answers skip
+- **THEN** the file is reported `skipped` with reason
+  `text-without-identifier` and its own sections;
+- **AND** its `identifier_input` lists three submissions in order:
+  - the first, `syntax` `rejected` as `unrecognised`, with nothing
+    looked up;
+  - the second, looked up as `doi:10.1039/c9cc02492` with each service
+    answering `not-found`;
+  - the third, with Crossref's record and `acceptance` `rejected`;
+- **AND** it names none as `used`, and its human line ends
+  `; candidate rejected: doi:10.1039/c9cc02492a`
+
+#### Scenario: Accepting a supplied candidate
+- **WHEN** the operator supplies a DOI whose record's title agrees with
+  the file's, is shown that record as pending, and answers rename
+- **THEN** the file's `resolved` event reports that record with
+  `acceptance` `accepted` and the DOI's submission as `used`, followed by
+  its `renamed` and `content-index-write` events
+
+#### Scenario: Accepting a supplied candidate over its conflict
+- **WHEN** the operator supplies a DOI whose record's title conflicts
+  with the file's, and renames the file to that record's name anyway
+- **THEN** the file's `resolved` event carries `match_check` `conflict`,
+  `acceptance` `overridden`, and the DOI's submission as `used`
+
+#### Scenario: Overriding the file's own conflict
+- **WHEN** the file's own record conflicts with its title, and the
+  operator renames the file anyway without supplying anything
+- **THEN** the file's `resolved` event carries `acceptance` `overridden`
+  and `identifier_input` not attempted with reason `not-supplied`
+
+#### Scenario: A candidate replaced by another
+- **WHEN** the operator supplies a DOI, sees its record, supplies a
+  second DOI, and renames the file from the second record
+- **THEN** the first submission carries its record with `acceptance`
+  `rejected`, and the second is `used`
+
+#### Scenario: A supply nobody holds keeps the candidate on offer
+- **WHEN** the operator supplies a DOI whose record is offered as a
+  move, then supplies a second DOI that no service holds
+- **THEN** the services' answers about the second DOI are shown, the
+  question put again still offers the move to the first record's name,
+  and that record is still pending; answering rename then reports it
+  with `acceptance` `accepted` and the first DOI's submission as `used`,
+  and the second submission with `acceptance` not attempted for
+  `no-record`
+
+#### Scenario: A second candidate takes the first one's place
+- **WHEN** the operator supplies a DOI whose record is offered as a
+  move, then supplies a second DOI whose record is also offered as a
+  move
+- **THEN** the first submission is `rejected` with its record, and the
+  question put next describes the second record as pending
+
+#### Scenario: A collision notice keeps the candidate pending
+- **WHEN** the operator supplies a DOI whose work the library already
+  holds a file of, and answers rename
+- **THEN** the run names the item and the recorded path, puts the
+  question again, and the record is still described as pending; a
+  second rename moves the file and reports `acceptance` `accepted`, a
+  skip reports the submission `rejected`, a further supply that reaches
+  a record on offer rejects it, and a quit reports nothing about the
+  file
+
+#### Scenario: Quitting at a candidate
+- **WHEN** the operator supplies a DOI, sees its record, and quits
+- **THEN** no event reports the file, and the content index holds
+  nothing new for it
+
+### Requirement: An interactive description says what became of the operator's candidates
+The description an interactive run shows before a question SHALL say when the record it describes is a candidate pending the operator's answer, and SHALL name each candidate the operator has rejected for the file.
+
+A record whose `acceptance` is `pending` SHALL be described with a line
+labelled `candidate` reading `pending; skipping leaves the file as it
+was`. Its title conflict, where it has one, SHALL be shown on the
+`conflict` line before the operator answers, as it is shown for a
+record accepted over one.
+
+Each submission whose `acceptance` is `rejected` SHALL be named on a
+line labelled `rejected`, in submission order. The line carries the
+submission's identifier whole, as the `identifier` line carries one.
+
+Both SHALL be read from the event the description renders, and every
+value SHALL be escaped as every description value is. A file with no
+rejected submission and no pending record SHALL be described as it is
+without them.
+
+#### Scenario: A candidate on offer
+- **WHEN** the operator supplies a DOI and the record it reaches is
+  described
+- **THEN** the description carries a `candidate` line saying the record
+  is pending and that skipping leaves the file as it was
+
+#### Scenario: A pending candidate's conflict
+- **WHEN** the record a supplied DOI reaches has a title the file's own
+  title conflicts with
+- **THEN** its description shows the `conflict` line before the
+  operator answers
+
+#### Scenario: A rejected candidate named in the next question
+- **WHEN** a supplied DOI's record is on offer, and the operator
+  supplies a second DOI whose record is offered in its place
+- **THEN** the question about the second record carries a `rejected`
+  line naming the first DOI
 

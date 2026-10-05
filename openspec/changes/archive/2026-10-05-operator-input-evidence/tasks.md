@@ -67,7 +67,7 @@ is returned exactly as given.
 
 ## 1. The parser's reasons
 
-- [ ] 1.1 Red, in `crates/borax-core/tests/identifier.rs`:
+- [x] 1.1 Red, in `crates/borax-core/tests/identifier.rs`:
       - Every row of design D3's example table: each text gives exactly
         the `SuppliedError` or `Identifier` the table names.
         `SuppliedError::reason()` and `expected()` give the D8 strings.
@@ -96,7 +96,7 @@ is returned exactly as given.
 
 ## 2. The event vocabulary
 
-- [ ] 2.1 Red, in `crates/borax/tests/event.rs`:
+- [x] 2.1 Red, in `crates/borax/tests/event.rs`:
       - **Key set and order**: a `resolved` event and every resolution
         `skipped` event carry `identifier_input`, after `extraction`
         and before `lookup`.
@@ -150,7 +150,7 @@ is returned exactly as given.
 
 ## 3. Evidence and its projection
 
-- [ ] 3.1 Red, in `crates/borax/tests/pipeline.rs` (the `sections`
+- [x] 3.1 Red, in `crates/borax/tests/pipeline.rs` (the `sections`
       block). Build `Evidence` values directly and assert
       `Evidence::sections`:
       - **The not-attempted input**:
@@ -193,7 +193,7 @@ is returned exactly as given.
 
 ## 4. Defaults and acceptance in the engine
 
-- [ ] 4.1 Red, in `crates/borax/tests/pipeline.rs`:
+- [x] 4.1 Red, in `crates/borax/tests/pipeline.rs`:
       - **Defaults**: through `standing`, every verdict's evidence has
         `identifier_input` `NotAttempted(NotAsked)`. Check a network
         resolution, a content-index hit, a library answer, each
@@ -248,7 +248,7 @@ is returned exactly as given.
 
 ## 5. The interactive driver
 
-- [ ] 5.1 Red, in `crates/borax/tests/dispatch.rs`, on the JSON stream
+- [x] 5.1 Red, in `crates/borax/tests/dispatch.rs`, on the JSON stream
       of interactive runs through the harness:
       - **The round-two session.** A file with text and no identifier.
         Crossref and OpenAlex both say they do not hold
@@ -413,7 +413,7 @@ is returned exactly as given.
 
 ## 6. Human lines
 
-- [ ] 6.1 Red, in `crates/borax/tests/event.rs` (`human_line`) and in
+- [x] 6.1 Red, in `crates/borax/tests/event.rs` (`human_line`) and in
       `dispatch.rs` (human output of an interactive run):
       - **The round-two final skip**: its line equals the D6 string.
       - **Two rejected candidates**: the line ends `; candidates
@@ -436,7 +436,7 @@ is returned exactly as given.
 
 ## 7. The interactive description
 
-- [ ] 7.1 Red, in `crates/borax/tests/describe.rs`:
+- [x] 7.1 Red, in `crates/borax/tests/describe.rs`:
       - **A pending event**: the `candidate` line reads exactly
         `candidate   pending; skipping leaves the file as it was`. It
         sits before `new name` and after any `rejected` lines.
@@ -465,7 +465,7 @@ is returned exactly as given.
 
 ## 8. The real binary
 
-- [ ] 8.1 Red, in `crates/borax/tests/end_to_end.rs`: extend
+- [x] 8.1 Red, in `crates/borax/tests/end_to_end.rs`: extend
       `resolve_and_rename_over_the_real_backend_carry_no_removed_field`
       (near line 1340). Every `resolved` event and every resolution
       `skipped` event carries `identifier_input`. In these batch runs it
@@ -480,7 +480,7 @@ is returned exactly as given.
 
 - [x] 9.1 Audit every edit to a pre-existing test against the preamble's
       rules and D11. Report any test that needed anything else.
-- [ ] 9.2 Run `cargo test --workspace`, `cargo clippy --workspace
+- [x] 9.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`.
 - [x] 9.3 Search `crates/borax/src/` for what this change makes false.
       Each search must find nothing, or a hit the report justifies:
@@ -490,7 +490,7 @@ is returned exactly as given.
         origin is `Operator`.
 - [x] 9.4 Run `openspec validate operator-input-evidence --strict` and
       `python3 scripts/check-spec-deltas.py`.
-- [ ] 9.5 By hand, run an interactive `borax rename` through a pty over
+- [x] 9.5 By hand, run an interactive `borax rename` through a pty over
       one file of the real-PDF corpus, which lives outside the
       repository. Repeat the round-two session there, and check:
       - the `candidate` line;
@@ -501,7 +501,7 @@ is returned exactly as given.
 
 ## 10. Documents and state
 
-- [ ] 10.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
+- [x] 10.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
       (Org, for CLI users). This is not the implementer's. Sources:
       this change's design.md (D1–D4, D6–D8 and the illustrative
       lines), proposal.md, and the implemented `human_line` and
@@ -543,7 +543,7 @@ is returned exactly as given.
       - `*** The interactive session`, the paragraph on ~Try the
         services again~: whether it is offered depends on the latest
         attempt only, and the run log keeps every attempt.
-- [ ] 10.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
+- [x] 10.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
       (Markdown, Keep a Changelog). Sources: proposal.md and this
       change's design.md. Changes:
       - amend the Unreleased schema-4 entry: eight sections, the
@@ -562,7 +562,7 @@ is returned exactly as given.
 
       Schema 4 is unreleased, so no entry describes the interim
       `automatic`.
-- [ ] 10.3 Orchestrator: read both diffs against the sources. Check for
+- [x] 10.3 Orchestrator: read both diffs against the sources. Check for
       anything invented, and for anything dropped from the old text.
       Answer or remove every `TODO(docs)`.
 - [x] 10.4 Implementer, in `openspec/STATE.md`:
