@@ -6860,6 +6860,19 @@ fn a_collision_notice_then_rename_accepts_the_candidate() {
     )
     .unwrap();
 
+    // design D4, D7: the question put again after the collision notice
+    // still describes the candidate as pending, since nothing is
+    // settled until the second answer.
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 3, "got {questions:?}");
+    assert!(
+        questions[2]
+            .description
+            .contains(&"candidate   pending; skipping leaves the file as it was".to_string()),
+        "got {:?}",
+        questions[2].description
+    );
+
     let resolved = events
         .iter()
         .find(|event| matches!(event, Event::Resolved { path: p, .. } if p == &path))
@@ -18533,12 +18546,9 @@ fn a_rejected_candidate_is_never_written_to_the_content_index() {
     let library = real_library();
     let root = library.path().to_path_buf();
 
+    let hash = hash_bytes(b"round two content index bytes");
     let path = write_real_file(&root, "round-two.pdf", b"round two content index bytes");
-    let documents = FakeDocuments::new().with_file(
-        &path,
-        hash_bytes(b"round two content index bytes"),
-        pdf_with_no_identifier(),
-    );
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
     let crossref_keyed = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1039/rejected-content-index-a",
         record_by("Smith", 2024, "10.1039/rejected-content-index-a"),
@@ -18573,6 +18583,73 @@ fn a_rejected_candidate_is_never_written_to_the_content_index() {
         library::ArtifactStore::read(&root).len(),
         0,
         "a candidate the operator skipped must never reach the content index"
+    );
+    assert_eq!(
+        index.get(&hash),
+        None,
+        "a candidate the operator skipped must leave the content index unchanged"
+    );
+
+    // A candidate replaced by another: A is rejected, B is accepted.
+    // A's record must never reach the content index under the file's
+    // hash — only B's does.
+    let hash_b = hash_bytes(b"candidate replaced content index bytes");
+    let path_b = write_real_file(
+        &root,
+        "candidate-replaced.pdf",
+        b"candidate replaced content index bytes",
+    );
+    let documents_b =
+        FakeDocuments::new().with_file(&path_b, hash_b.clone(), pdf_with_no_identifier());
+    let record_a = record_by("Smith", 2024, "10.1039/rejected-content-index-replaced-a");
+    let record_b = record_by("Jones", 2025, "10.1039/rejected-content-index-replaced-b");
+    let crossref_b = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1039/rejected-content-index-replaced-a",
+            record_a.clone(),
+        )
+        .answering(
+            "doi:10.1039/rejected-content-index-replaced-b",
+            record_b.clone(),
+        );
+    let sources_b: Vec<&dyn Source> = vec![&crossref_b];
+    let index_b = ContentIndex::new(MemoryCache::new());
+    let bib_files_b = FakeBibFiles::new();
+    let effective_b = effective_with_default_template("[auth][year]");
+    let adapters_b = Adapters {
+        documents: &documents_b,
+        sources: &sources_b,
+        index: &index_b,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files_b,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker_b = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Rename])
+        .with_texts(vec![
+            Some("10.1039/rejected-content-index-replaced-a".to_string()),
+            Some("10.1039/rejected-content-index-replaced-b".to_string()),
+        ]);
+
+    events_for(
+        &Command::rename(vec![path_b.clone()], false),
+        &Configs::uniform(effective_b),
+        &adapters_b,
+        &mut Session::interactive(&mut asker_b),
+    )
+    .unwrap();
+
+    assert_eq!(
+        index_b.get(&hash_b),
+        Some(record_b),
+        "the accepted record must be written under the file's hash"
+    );
+    assert_ne!(
+        index_b.get(&hash_b),
+        Some(record_a),
+        "the rejected candidate's record must never reach the content index"
     );
 }
 
