@@ -4991,6 +4991,7 @@ fn prior_content_index_hit() -> Evidence {
             result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
             titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
         },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
         lookup: LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
         match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
     }
@@ -5011,6 +5012,7 @@ fn prior_tracked(artifact: &str, item: &str) -> Evidence {
             result: ExtractionStep::NotAttempted(Unattempted::LibraryAnswered),
             titles: Titles::NotAttempted(Unattempted::LibraryAnswered),
         },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
         lookup: LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
         match_check: MatchCheck::NotAttempted(Unattempted::LibraryAnswered),
     }
@@ -5723,7 +5725,8 @@ fn unheld_evidence_and_resolve_supplied_carry_the_rounds_forward() {
     };
     assert_eq!(earlier, &Vec::<EvidenceLookupRound>::new());
 
-    // A second call over that result gives two rounds, oldest first.
+    // A second call over that result carries `after_first`'s one round
+    // forward as `earlier`.
     let second_outage = resolve_supplied(
         path,
         &identifier,
@@ -5742,7 +5745,7 @@ fn unheld_evidence_and_resolve_supplied_carry_the_rounds_forward() {
     let LookupEvidence::Attempted { earlier, .. } = &after_second.lookup else {
         panic!("expected an attempted lookup");
     };
-    assert_eq!(earlier.len(), 2);
+    assert_eq!(earlier.len(), 1);
 
     // resolve_supplied with the same prior and the extraction origin
     // gives a found lookup with the same earlier.
@@ -5842,7 +5845,7 @@ fn standing_and_resolve_file_never_give_an_earlier_round() {
         path,
         &documents,
         &sources,
-        &index,
+        &ContentIndex::new(MemoryCache::new()),
         &config(true),
         None,
         None,

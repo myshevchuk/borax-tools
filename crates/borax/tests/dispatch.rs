@@ -6927,23 +6927,27 @@ fn a_collision_notice_then_skip_rejects_the_candidate() {
     )
     .unwrap();
 
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            Event::Skipped {
-                path: p,
-                reason: SkipReason::Declined,
-                ..
-            } if p == &path
-        )),
-        "expected a declined skip: got {events:?}"
-    );
-    let resolved = events
+    // The file has no identifier of its own, so Skip replays its own
+    // `text-without-identifier` skip, carrying the candidate rejected.
+    let skipped = events
         .iter()
-        .find(|event| matches!(event, Event::Resolved { path: p, .. } if p == &path))
-        .unwrap_or_else(|| panic!("expected the file's own resolved event: got {events:?}"));
-    match resolved {
-        Event::Resolved { sections, .. } => match &sections.identifier_input {
+        .find(|event| {
+            matches!(
+                event,
+                Event::Skipped {
+                    path: p,
+                    reason: SkipReason::TextWithoutIdentifier,
+                    sections: Some(_),
+                    ..
+                } if p == &path
+            )
+        })
+        .unwrap_or_else(|| panic!("expected the file's own skip: got {events:?}"));
+    match skipped {
+        Event::Skipped {
+            sections: Some(sections),
+            ..
+        } => match &sections.identifier_input {
             IdentifierInputStep::Supplied { submissions, .. } => {
                 assert_eq!(
                     submissions[0].outcome.as_ref().unwrap().acceptance,
@@ -6952,7 +6956,7 @@ fn a_collision_notice_then_skip_rejects_the_candidate() {
             }
             other => panic!("expected Supplied, got {other:?}"),
         },
-        other => panic!("expected Event::Resolved, got {other:?}"),
+        other => panic!("expected a resolution skip, got {other:?}"),
     }
 }
 
@@ -17773,7 +17777,7 @@ fn accepting_a_supplied_candidate_over_its_conflict_reports_overridden() {
     let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("accept-supplied-conflict"),
-        pdf_with_no_identifier(),
+        pdf_with_no_identifier().with_title("Title the File Claims"),
     ));
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/accept-supplied-conflict",
@@ -18163,11 +18167,15 @@ fn a_found_and_b_found_both_end_up_rejected_on_the_final_skip() {
 /// move keeps the earlier candidate on offer.
 #[test]
 fn a_no_move_candidate_keeps_the_earlier_one_on_offer() {
-    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+    let mut fixture = SupplyFixture::new(FakeDocuments::new().with_file(
         "/lib/paper.pdf",
         hash_for("no-move-keeps-a"),
         pdf_with_no_identifier(),
     ));
+    // B's rendered name, "Doe2023.pdf", is already taken by an
+    // unrelated file, so B leads to no move.
+    fixture.filesystem =
+        FakeFilesystem::new().with_existing("/lib", [("Doe2023.pdf", Some("unrelated-hash"))]);
     let crossref = KeyedSource::new(SourceName::Crossref)
         .answering(
             "doi:10.1000/no-move-keeps-a",
@@ -18175,10 +18183,20 @@ fn a_no_move_candidate_keeps_the_earlier_one_on_offer() {
         )
         .answering(
             "doi:10.1000/no-move-keeps-b",
-            record_by("Smith", 2024, "10.1000/no-move-keeps-a"),
+            record_by("Doe", 2023, "10.1000/no-move-keeps-b"),
         );
     let sources: Vec<&dyn Source> = vec![&crossref];
-    let effective = effective_with_default_template("[auth][year]");
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.rename = Some(RenameLayer {
+            collision: Some("skip".to_string()),
+            batch: None,
+            skip_named: None,
+        });
+    });
     let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Rename])
         .with_texts(vec![
             Some("10.1000/no-move-keeps-a".to_string()),
@@ -18316,6 +18334,7 @@ fn a_refused_text_after_a_candidate_leaves_it_pending() {
         .with_texts(vec![
             Some("10.1000/refused-after-candidate".to_string()),
             Some("garbage".to_string()),
+            None,
         ]);
 
     let events = events_for(

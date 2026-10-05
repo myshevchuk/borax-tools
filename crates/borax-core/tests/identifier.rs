@@ -482,7 +482,7 @@ fn supplied_parses_a_truncated_doi_exactly_as_typed_with_no_repair() {
         identifier,
         Identifier::Doi(Doi::parse("10.1039/c9cc02492").unwrap())
     );
-    assert_eq!(identifier.to_string(), "10.1039/c9cc02492");
+    assert_eq!(identifier.to_string(), "doi:10.1039/c9cc02492");
 }
 
 #[test]

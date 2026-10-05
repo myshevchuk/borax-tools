@@ -1399,6 +1399,22 @@ fn identifier_input_not_attempted_serializes_status_and_reason_only() {
     }
 }
 
+/// `serde_json::Value`'s map has no `preserve_order` here, so it sorts
+/// keys alphabetically: an order assertion has to read the raw text
+/// instead. True when each of `keys`, in turn, is found no earlier
+/// than the one before it.
+fn in_wire_order(text: &str, keys: &[&str]) -> bool {
+    let mut last = 0;
+    for key in keys {
+        let needle = format!("\"{key}\":");
+        match text.find(&needle) {
+            Some(pos) if pos >= last => last = pos,
+            _ => return false,
+        }
+    }
+    true
+}
+
 #[test]
 fn identifier_input_supplied_serializes_status_submissions_used_displaced_in_order() {
     let step = IdentifierInputStep::Supplied {
@@ -1419,11 +1435,14 @@ fn identifier_input_supplied_serializes_status_submissions_used_displaced_in_ord
             record: None,
         })),
     };
-    let value = serde_json::to_value(&step).unwrap();
-    let object = value.as_object().unwrap();
-    let keys: Vec<&str> = object.keys().map(String::as_str).collect();
-    assert_eq!(keys, vec!["status", "submissions", "used", "displaced"]);
-    assert_eq!(object["used"], Value::from(1));
+    let text = serde_json::to_string(&step).unwrap();
+    let value: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 4, "got {text}");
+    assert!(
+        in_wire_order(&text, &["status", "submissions", "used", "displaced"]),
+        "got {text}"
+    );
+    assert_eq!(value["used"], Value::from(1));
 }
 
 #[test]
@@ -1441,31 +1460,37 @@ fn identifier_input_supplied_serializes_null_used_and_displaced_when_none() {
 #[test]
 fn a_submission_with_an_outcome_serializes_its_flattened_keys_and_the_record() {
     let submission = rejected_submission(1, "10.1039/c9cc02492a", "doi:10.1039/c9cc02492a");
-    let value = serde_json::to_value(&submission).unwrap();
-    let object = value.as_object().unwrap();
-    let keys: Vec<&str> = object.keys().map(String::as_str).collect();
-    assert_eq!(
-        keys,
-        vec![
-            "submission",
-            "raw",
-            "syntax",
-            "lookup",
-            "record_retrieval",
-            "match_check",
-            "acceptance",
-            "record",
-        ]
+    let text = serde_json::to_string(&submission).unwrap();
+    let value: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 8, "got {text}");
+    assert!(
+        in_wire_order(
+            &text,
+            &[
+                "submission",
+                "raw",
+                "syntax",
+                "lookup",
+                "record_retrieval",
+                "match_check",
+                "acceptance",
+                "record",
+            ]
+        ),
+        "got {text}"
     );
 }
 
 #[test]
 fn the_used_submission_serializes_submission_raw_and_syntax_only() {
     let submission = used_submission(1, "10.1039/c9cc02492a", "doi:10.1039/c9cc02492a");
-    let value = serde_json::to_value(&submission).unwrap();
-    let object = value.as_object().unwrap();
-    let keys: Vec<&str> = object.keys().map(String::as_str).collect();
-    assert_eq!(keys, vec!["submission", "raw", "syntax"]);
+    let text = serde_json::to_string(&submission).unwrap();
+    let value: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 3, "got {text}");
+    assert!(
+        in_wire_order(&text, &["submission", "raw", "syntax"]),
+        "got {text}"
+    );
 }
 
 #[test]
@@ -1889,16 +1914,9 @@ fn no_eligible_service_lookup_serializes_earlier_after_origin() {
         origin: IdentifierOrigin::Extracted,
         earlier: vec![LookupRound::NoEligibleService],
     };
-    let value = serde_json::to_value(&step).unwrap();
-    let keys: Vec<&str> = value
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    let origin_pos = keys.iter().position(|k| *k == "origin").unwrap();
-    let earlier_pos = keys.iter().position(|k| *k == "earlier").unwrap();
-    assert!(origin_pos < earlier_pos, "got {keys:?}");
+    let text = serde_json::to_string(&step).unwrap();
+    let value: Value = serde_json::from_str(&text).unwrap();
+    assert!(in_wire_order(&text, &["origin", "earlier"]), "got {text}");
     assert_eq!(
         value["earlier"],
         serde_json::json!([{"status": "no-eligible-service"}])
