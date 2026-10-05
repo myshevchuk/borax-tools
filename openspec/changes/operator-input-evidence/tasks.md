@@ -83,7 +83,7 @@ is returned exactly as given.
         `ArXiv:12345` are `Invalid` with `Doi` and `Arxiv`.
       - Kind (b): the four `supplied(...).is_none()` tests assert
         `Err(SuppliedError::Unrecognised)`.
-- [ ] 1.2 Green, in `crates/borax-core/src/identifier.rs`:
+- [x] 1.2 Green, in `crates/borax-core/src/identifier.rs`:
       - add `IdentifierKind` and `SuppliedError`, with `Display` and
         `Error`;
       - make `supplied` return `Result<Identifier, SuppliedError>`,
@@ -138,7 +138,7 @@ is returned exactly as given.
       - Kind (b): the key-set and key-order tests near lines 619–720,
         and every exact schema-4 JSON text, per D11. Kind (a): the
         `LookupStep` literals take `earlier: vec![]`.
-- [ ] 2.2 Green, in `crates/borax/src/event.rs`:
+- [x] 2.2 Green, in `crates/borax/src/event.rs`:
       - add `Sections::identifier_input`, the D9 types, and the two
         `Acceptance` variants;
       - add `earlier` to `LookupStep::Attempted` and `NoEligibleService`,
@@ -181,7 +181,7 @@ is returned exactly as given.
         before.
       - Kind (a): `Evidence` and `LookupEvidence::Attempted` literals
         take `identifier_input` and `earlier`.
-- [ ] 3.2 Green, in `crates/borax/src/evidence.rs`:
+- [x] 3.2 Green, in `crates/borax/src/evidence.rs`:
       - add `Evidence::identifier_input` and the D9 engine types;
       - add `earlier` to `LookupEvidence::Attempted`, and add
         `LookupRound`;
@@ -236,7 +236,7 @@ is returned exactly as given.
         `Unavailable` is conclusive. One whose current round is
         `Unavailable` and whose earlier round is all `NotFound` is not.
       - Kind (a): `FileRecord` literals take `accepted: false`.
-- [ ] 4.2 Green, in `crates/borax/src/pipeline.rs`:
+- [x] 4.2 Green, in `crates/borax/src/pipeline.rs`:
       - set the defaults (D5);
       - carry the rounds forward in `resolve_supplied` and
         `unheld_evidence`, through `found_lookup` and `unheld_lookup`
@@ -395,7 +395,7 @@ is returned exactly as given.
         `displaced.lookup.earlier` holds the first round, and the
         event's own `lookup` (origin `operator`) has no `earlier`.
       - Kind (b): the `sections_for` helper per D11.
-- [ ] 5.2 Green, in `crates/borax/src/run.rs`:
+- [x] 5.2 Green, in `crates/borax/src/run.rs`:
       - the driver records submissions (D5), including refused texts
         from `supplied_identifier`;
       - it marks candidates `Rejected` only when a later record takes
@@ -431,7 +431,7 @@ is returned exactly as given.
         `lookup` has an `earlier` round of `unavailable` answers gives
         exactly the line it gives without `earlier`. Expected to pass at
         once; it pins behaviour.
-- [ ] 6.2 Green, in `event.rs`: append the clause in `human_line`'s
+- [x] 6.2 Green, in `event.rs`: append the clause in `human_line`'s
       `resolved` and `skipped` arms, inside the escaped text.
 
 ## 7. The interactive description
@@ -460,7 +460,7 @@ is returned exactly as given.
         candidate is replaced on offer by a second DOI's record, the
         question about the second record carries `rejected` naming the
         first DOI. This shares its setup with 5.1's "A found, B found".
-- [ ] 7.2 Green, in `describe.rs`: add the two lines and the conflict
+- [x] 7.2 Green, in `describe.rs`: add the two lines and the conflict
       condition, and update `describe`'s docstring list of lines.
 
 ## 8. The real binary
@@ -472,23 +472,23 @@ is returned exactly as given.
       is `not-attempted` with reason `not-asked`, or `content-duplicate`
       on a content duplicate. A line's raw text places it after
       `extraction` and before `lookup`.
-- [ ] 8.2 Green: nothing beyond groups 1–7 is expected. If something is
+- [x] 8.2 Green: nothing beyond groups 1–7 is expected. If something is
       needed, the fix goes in the group that owns it, and the report
       says so.
 
 ## 9. Audit and verification
 
-- [ ] 9.1 Audit every edit to a pre-existing test against the preamble's
+- [x] 9.1 Audit every edit to a pre-existing test against the preamble's
       rules and D11. Report any test that needed anything else.
 - [ ] 9.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`.
-- [ ] 9.3 Search `crates/borax/src/` for what this change makes false.
+- [x] 9.3 Search `crates/borax/src/` for what this change makes false.
       Each search must find nothing, or a hit the report justifies:
       - "reaches no event stream" and "nowhere in either answer";
       - `accept(` called from `described`;
       - `Acceptance::Automatic` produced for a record whose lookup
         origin is `Operator`.
-- [ ] 9.4 Run `openspec validate operator-input-evidence --strict` and
+- [x] 9.4 Run `openspec validate operator-input-evidence --strict` and
       `python3 scripts/check-spec-deltas.py`.
 - [ ] 9.5 By hand, run an interactive `borax rename` through a pty over
       one file of the real-PDF corpus, which lives outside the
@@ -565,7 +565,7 @@ is returned exactly as given.
 - [ ] 10.3 Orchestrator: read both diffs against the sources. Check for
       anything invented, and for anything dropped from the old text.
       Answer or remove every `TODO(docs)`.
-- [ ] 10.4 Implementer, in `openspec/STATE.md`:
+- [x] 10.4 Implementer, in `openspec/STATE.md`:
       - add a paragraph for this change;
       - close the sentence at the end of the `sectioned-resolved-event`
         paragraph that calls `automatic` interim;

@@ -33,8 +33,9 @@ use crate::event::{
     SkipReason,
 };
 use crate::evidence::{
-    Consultation, Evidence, ExtractionEvidence, ExtractionStep, IndexEvidence, IndexRead,
-    IndexWrite, LookupEvidence, MatchCheck, Origin, ServiceAttempt, Titles, Unattempted,
+    Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
+    IndexRead, IndexWrite, LookupEvidence, LookupRound, MatchCheck, Origin, ServiceAttempt, Titles,
+    Unattempted,
 };
 use crate::library::{Account, Consulted, Stores, WorkDuplicate};
 
@@ -79,6 +80,10 @@ pub struct FileRecord {
     /// skips every conflict it finds, so a record that reaches a caller
     /// from there has nothing to have overridden.
     pub overridden: bool,
+    /// Whether an operator accepted `record`. Set by [`accept`] alone,
+    /// so it is `false` on every record the batch path reaches; only a
+    /// record an operator supplied reads it.
+    pub accepted: bool,
 }
 
 impl FileRecord {
@@ -105,13 +110,28 @@ impl FileRecord {
         }
     }
 
-    /// Whether the record was used as it stands or over an overridden
-    /// conflict: [`Acceptance::Overridden`] when [`FileRecord::overridden`]
-    /// is set, and [`Acceptance::Automatic`] otherwise.
+    /// How the record was used, or is on offer to be:
+    ///
+    /// - [`Acceptance::Overridden`] when [`FileRecord::overridden`] is
+    ///   set, whatever the record's origin;
+    /// - for a record whose lookup an operator supplied,
+    ///   [`Acceptance::Accepted`] once [`FileRecord::accepted`] is set
+    ///   and [`Acceptance::Pending`] until then;
+    /// - [`Acceptance::Automatic`] for any other record: the file's own
+    ///   lookup, retried or not, or none.
     pub fn acceptance(&self) -> Acceptance {
-        match self.overridden {
-            true => Acceptance::Overridden,
-            false => Acceptance::Automatic,
+        let supplied = matches!(
+            self.evidence.lookup,
+            LookupEvidence::Attempted {
+                origin: Origin::Operator,
+                ..
+            }
+        );
+        match (self.overridden, supplied, self.accepted) {
+            (true, _, _) => Acceptance::Overridden,
+            (false, true, true) => Acceptance::Accepted,
+            (false, true, false) => Acceptance::Pending,
+            (false, false, _) => Acceptance::Automatic,
         }
     }
 }
@@ -196,11 +216,13 @@ fn indexed_record(record: Record, hash: Option<ContentHash>, library: Consultati
                 read: IndexRead::Hit,
                 write: IndexWrite::NotAttempted(reason),
             },
+            identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
             ..Evidence::not_attempted(reason)
         },
         // A record served from the index was accepted by whatever run
         // put it there, not by this one.
         overridden: false,
+        accepted: false,
     }
 }
 
@@ -216,12 +238,14 @@ fn library_record(record: Record, hash: Option<ContentHash>, answer: LibraryAnsw
         hash,
         evidence: Evidence {
             library: Consultation::Consulted(answer),
+            identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
             ..Evidence::not_attempted(Unattempted::LibraryAnswered)
         },
         // A library item is past the point of a conflict check: it was
         // admitted, adopted or corrected, and nothing was overridden
         // here to reach it.
         overridden: false,
+        accepted: false,
     }
 }
 
@@ -650,6 +674,7 @@ fn beyond_library<C: Cache>(
                     write: IndexWrite::NotAttempted(reason),
                 },
                 extraction,
+                identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
                 lookup: LookupEvidence::NotAttempted(reason),
                 match_check: MatchCheck::NotAttempted(reason),
             };
@@ -670,7 +695,8 @@ fn beyond_library<C: Cache>(
                     write: IndexWrite::NotAttempted(reason),
                 },
                 extraction,
-                lookup: unheld_lookup(&looked_up, origin, &unresolved),
+                identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
+                lookup: unheld_lookup(&looked_up, origin, &unresolved, Vec::new()),
                 match_check: MatchCheck::NotAttempted(reason),
             };
             return Standing::skipped(SkipReason::Unresolvable, hash, evidence);
@@ -692,7 +718,8 @@ fn beyond_library<C: Cache>(
             library,
             content_index: IndexEvidence { read, write },
             extraction,
-            lookup: found_lookup(looked_up, origin, &resolved),
+            identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
+            lookup: found_lookup(looked_up, origin, &resolved, Vec::new()),
             match_check,
         },
         record: resolved.record,
@@ -700,6 +727,7 @@ fn beyond_library<C: Cache>(
         // passed, or this record is refused below and whoever accepts
         // it records that it did.
         overridden: false,
+        accepted: false,
     };
 
     if file.conflict().is_some() {
@@ -774,8 +802,14 @@ pub fn titles_of(path: &Path, documents: &dyn Documents) -> Titles {
 /// lookup, with every attempt; the titles, read now; the title check
 /// over them; and the content-index write, which waits for acceptance
 /// ([`Unattempted::AwaitingAcceptance`]). What the library said, what
-/// the index read came to and what extraction found stay as `prior`
-/// has them.
+/// the index read came to, what extraction found and the operator's
+/// input stay as `prior` has them.
+///
+/// A lookup of the file's own identifier made again — an
+/// [`Origin::Extracted`] origin over a `prior` whose lookup of the same
+/// identifier was attempted — keeps `prior`'s rounds: its `earlier` is
+/// `prior`'s earlier rounds followed by `prior`'s current one. Any
+/// other lookup, every operator's included, has no earlier rounds.
 ///
 /// Nothing is written to the content index here. A record reached this
 /// way is a candidate until somebody accepts it, and [`remember`] is
@@ -814,13 +848,20 @@ pub fn resolve_supplied(
                 result: prior.extraction.result.clone(),
                 titles,
             },
-            lookup: found_lookup(identifier.clone(), origin, &resolved),
+            identifier_input: prior.identifier_input.clone(),
+            lookup: found_lookup(
+                identifier.clone(),
+                origin,
+                &resolved,
+                rounds_before(prior, identifier, origin),
+            ),
             match_check,
         },
         record: resolved.record,
-        // Nothing has been overridden yet. Accepting this record over a
-        // conflict is the caller's decision, and [`accept`] records it.
+        // Nothing has been overridden or accepted yet. Accepting this
+        // record is the caller's decision, and [`accept`] records it.
         overridden: false,
+        accepted: false,
     })
 }
 
@@ -829,6 +870,10 @@ pub fn resolve_supplied(
 /// `unresolved`'s attempts, in order, and the title check and the
 /// content-index write not attempted because there is no record
 /// ([`Unattempted::NoRecord`]). Every other section is `prior`'s.
+///
+/// The lookup keeps `prior`'s rounds exactly as [`resolve_supplied`]'s
+/// does: only a lookup of the file's own identifier made again has
+/// earlier rounds.
 pub fn unheld_evidence(
     prior: &Evidence,
     identifier: &Identifier,
@@ -843,15 +888,47 @@ pub fn unheld_evidence(
             write: IndexWrite::NotAttempted(reason),
         },
         extraction: prior.extraction.clone(),
-        lookup: unheld_lookup(identifier, origin, unresolved),
+        identifier_input: prior.identifier_input.clone(),
+        lookup: unheld_lookup(
+            identifier,
+            origin,
+            unresolved,
+            rounds_before(prior, identifier, origin),
+        ),
         match_check: MatchCheck::NotAttempted(reason),
+    }
+}
+
+/// The rounds a new lookup of `identifier` from `origin` follows: every
+/// round of `prior`'s lookup, oldest first, when `origin` is an
+/// extraction pass and `prior` looked up the same identifier, and none
+/// otherwise.
+fn rounds_before(prior: &Evidence, identifier: &Identifier, origin: Origin) -> Vec<LookupRound> {
+    match (&prior.lookup, origin) {
+        (
+            LookupEvidence::Attempted {
+                identifier: before,
+                attempts,
+                earlier,
+                ..
+            },
+            Origin::Extracted(_),
+        ) if before == identifier => earlier
+            .iter()
+            .cloned()
+            .chain([LookupRound {
+                attempts: attempts.clone(),
+            }])
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
 /// `file` as an operator's accepting it makes it.
 ///
-/// [`FileRecord::overridden`] is set when the title check concluded a
-/// conflict, which stays in the evidence as it was. A content-index
+/// [`FileRecord::accepted`] is set, and [`FileRecord::overridden`] is
+/// set when the title check concluded a conflict, which stays in the
+/// evidence as it was. A content-index
 /// write held back because the record was
 /// refused ([`Unattempted::Refused`]) now waits for the move instead
 /// ([`Unattempted::AwaitingAcceptance`]). Nothing else changes: the
@@ -859,7 +936,11 @@ pub fn unheld_evidence(
 /// were.
 pub fn accept(file: FileRecord) -> FileRecord {
     let overridden = file.conflict().is_some();
-    let mut accepted = FileRecord { overridden, ..file };
+    let mut accepted = FileRecord {
+        overridden,
+        accepted: true,
+        ..file
+    };
     let write = &mut accepted.evidence.content_index.write;
     if *write == IndexWrite::NotAttempted(Unattempted::Refused) {
         *write = IndexWrite::NotAttempted(Unattempted::AwaitingAcceptance);
@@ -891,8 +972,13 @@ pub fn remember<C: Cache>(
 
 /// The lookup of `identifier`, which came from `origin`, that reached
 /// `resolved`: every service that failed first, then the one that
-/// answered.
-fn found_lookup(identifier: Identifier, origin: Origin, resolved: &Resolved) -> LookupEvidence {
+/// answered, following the rounds `earlier`.
+fn found_lookup(
+    identifier: Identifier,
+    origin: Origin,
+    resolved: &Resolved,
+    earlier: Vec<LookupRound>,
+) -> LookupEvidence {
     let failed = resolved
         .failures
         .iter()
@@ -908,15 +994,18 @@ fn found_lookup(identifier: Identifier, origin: Origin, resolved: &Resolved) -> 
         identifier,
         origin,
         attempts: failed.chain([found]).collect(),
+        earlier,
     }
 }
 
 /// The lookup of `identifier`, which came from `origin`, that no
-/// service answered: `unresolved`'s attempts, in order.
+/// service answered: `unresolved`'s attempts, in order, following the
+/// rounds `earlier`.
 fn unheld_lookup(
     identifier: &Identifier,
     origin: Origin,
     unresolved: &Unresolved,
+    earlier: Vec<LookupRound>,
 ) -> LookupEvidence {
     LookupEvidence::Attempted {
         identifier: identifier.clone(),
@@ -929,6 +1018,7 @@ fn unheld_lookup(
                 outcome: Err(error.clone()),
             })
             .collect(),
+        earlier,
     }
 }
 
@@ -1009,7 +1099,8 @@ fn skipped_for(error: &ExtractionError) -> SkipReason {
 ///
 /// For a caller showing a failed lookup rather than reporting it: an
 /// identifier the operator supplied and nobody held is a candidate's
-/// outcome and not the file's verdict, so it reaches no event.
+/// outcome and not the file's verdict, which carries it only as a
+/// submission.
 pub fn attempts_of(unresolved: &Unresolved) -> Vec<ServiceAnswer> {
     unresolved
         .attempts

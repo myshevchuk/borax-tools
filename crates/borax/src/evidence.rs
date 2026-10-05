@@ -1,10 +1,10 @@
 //! What a resolution found out about a file, step by step.
 //!
 //! Each step of a resolution — the library, the content index,
-//! extraction, the lookup, the title check — either ran and has an
-//! answer here, or did not run and says why in one shared vocabulary,
-//! [`Unattempted`]. A step that did not run is never recorded as one
-//! that ran and found nothing.
+//! extraction, an operator's input, the lookup, the title check —
+//! either ran and has an answer here, or did not run and says why in
+//! one shared vocabulary, [`Unattempted`]. A step that did not run is
+//! never recorded as one that ran and found nothing.
 //!
 //! [`Evidence`] is held by [`crate::pipeline::FileRecord`] and
 //! [`crate::pipeline::Standing`]. None of these types is serialised:
@@ -12,16 +12,20 @@
 //! carries is [`Evidence::sections`], the evidence projected onto the
 //! stream's own types in [`crate::event`].
 
-use borax_core::identifier::Identifier;
+use borax_core::identifier::{Identifier, SuppliedError};
+use borax_core::record::Record;
 use borax_pdf::tiered::Tier;
 use borax_sources::cache::CacheWrite;
 use borax_sources::conflict::{Conflict, Insufficient};
 use borax_sources::source::{Retrieval, SourceError, SourceName};
 
 use crate::event::{
-    Acceptance, Claim, ContentIndexSection, Extraction, ExtractionResultStep, ExtractionSection,
-    FetchedFrom, IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep, LookupStep,
-    MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, TitlesStep, WriteStep,
+    Acceptance, Claim, ContentIndexSection, Displaced as DisplacedStep, Extraction,
+    ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep, IdentifierOrigin,
+    IndexReadStep, LibraryAnswer, LibraryStep, LookupRound as LookupRoundStep, LookupStep,
+    MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome,
+    Submission as SubmissionStep, SubmissionAcceptance, SubmissionOutcome as SubmissionOutcomeStep,
+    SyntaxStep, TitlesStep, WriteStep,
 };
 
 /// Everything a resolution retained about one file, one section per
@@ -35,7 +39,12 @@ pub struct Evidence {
     pub content_index: IndexEvidence,
     /// What extraction found, and the titles the file claims.
     pub extraction: ExtractionEvidence,
-    /// The identifier looked up and every service asked about it.
+    /// Every text an operator typed at the identifier prompt for the
+    /// file, or why none was taken.
+    pub identifier_input: IdentifierInput,
+    /// The identifier looked up and every service asked about it. When
+    /// `identifier_input` names a used submission, this is that
+    /// submission's lookup.
     pub lookup: LookupEvidence,
     /// What the title check concluded about the record reached.
     pub match_check: MatchCheck,
@@ -43,8 +52,8 @@ pub struct Evidence {
 
 impl Evidence {
     /// The evidence of a verdict reached before any step ran: every
-    /// section is not attempted for `reason`, and the library is not
-    /// consulted for it.
+    /// section, the operator's input included, is not attempted for
+    /// `reason`, and the library is not consulted for it.
     pub fn not_attempted(reason: Unattempted) -> Evidence {
         Evidence {
             library: Consultation::NotConsulted(reason),
@@ -56,6 +65,7 @@ impl Evidence {
                 result: ExtractionStep::NotAttempted(reason),
                 titles: Titles::NotAttempted(reason),
             },
+            identifier_input: IdentifierInput::NotAttempted(reason),
             lookup: LookupEvidence::NotAttempted(reason),
             match_check: MatchCheck::NotAttempted(reason),
         }
@@ -68,7 +78,10 @@ impl Evidence {
     /// is not attempted with its reason's [`Unattempted::as_str`] name.
     /// `record_retrieval` is [`Evidence::retrieval`]. A lookup attempted
     /// with no attempts is no eligible service, and the origin carries
-    /// no tier, since `extraction`'s result states the pass. A found
+    /// no tier, since `extraction`'s result states the pass; each of its
+    /// earlier rounds is attempted, or no eligible service when it has
+    /// no attempts. A submission's `record_retrieval` is the service of
+    /// its lookup's found attempt, or `null`. A found
     /// attempt answered over the network with no response cache in
     /// front of the service reports its `stored` write not attempted
     /// for [`Unattempted::CacheBypassed`]; one answered from the
@@ -132,60 +145,10 @@ impl Evidence {
                     },
                 },
             },
-            lookup: match &self.lookup {
-                LookupEvidence::Attempted {
-                    identifier,
-                    origin,
-                    attempts,
-                } if attempts.is_empty() => LookupStep::NoEligibleService {
-                    identifier: identifier.to_string(),
-                    origin: origin.identifier_origin(),
-                },
-                LookupEvidence::Attempted {
-                    identifier,
-                    origin,
-                    attempts,
-                } => LookupStep::Attempted {
-                    identifier: identifier.to_string(),
-                    origin: origin.identifier_origin(),
-                    attempts: attempts.iter().map(ServiceAttempt::answer).collect(),
-                },
-                LookupEvidence::NotAttempted(reason) => LookupStep::NotAttempted {
-                    reason: reason.as_str().to_string(),
-                },
-            },
-            record_retrieval: self.retrieval().map(|retrieval| match retrieval {
-                RecordRetrieval::Library { artifact, item } => {
-                    RetrievedFrom::Library { artifact, item }
-                }
-                RecordRetrieval::ContentIndex => RetrievedFrom::ContentIndex,
-                RecordRetrieval::ServiceCache { service } => RetrievedFrom::ServiceCache {
-                    service: service.as_str().to_string(),
-                },
-                RecordRetrieval::Network { service } => RetrievedFrom::Network {
-                    service: service.as_str().to_string(),
-                },
-            }),
-            match_check: match &self.match_check {
-                MatchCheck::Agreed => MatchCheckStep::Agreed,
-                MatchCheck::Conflict(conflict) => MatchCheckStep::Conflict {
-                    field: conflict.field.to_string(),
-                    extracted: conflict.extracted.clone(),
-                    resolved: conflict.resolved.clone(),
-                    similarity: conflict.similarity,
-                },
-                MatchCheck::Insufficient(insufficient) => MatchCheckStep::InsufficientEvidence {
-                    reason: match insufficient {
-                        Insufficient::RecordUntitled => "record-untitled",
-                        Insufficient::NoTitles => "no-titles",
-                        Insufficient::NoEvidence => "no-evidence",
-                    }
-                    .to_string(),
-                },
-                MatchCheck::NotAttempted(reason) => MatchCheckStep::NotAttempted {
-                    reason: reason.as_str().to_string(),
-                },
-            },
+            identifier_input: self.identifier_input.step(),
+            lookup: self.lookup.step(),
+            record_retrieval: self.retrieval().map(RecordRetrieval::retrieved_from),
+            match_check: self.match_check.step(),
             acceptance,
         }
     }
@@ -206,14 +169,7 @@ impl Evidence {
     /// and the record it reached came from the service.
     pub fn retrieval(&self) -> Option<RecordRetrieval> {
         if let Some(found) = self.lookup.found() {
-            return Some(match found.outcome {
-                Ok(Retrieval::ServiceCache) => RecordRetrieval::ServiceCache {
-                    service: found.service,
-                },
-                _ => RecordRetrieval::Network {
-                    service: found.service,
-                },
-            });
+            return Some(RecordRetrieval::from_attempt(found));
         }
 
         if let (
@@ -330,23 +286,221 @@ impl Titles {
     }
 }
 
+/// What an operator typed at the identifier prompt for a file.
+// Held once per file, inside evidence that is itself cloned whole; a
+// box would put an allocation on every supplied file to shrink a value
+// nothing keeps in bulk.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum IdentifierInput {
+    /// At least one text was submitted. `submissions` are every one, in
+    /// the order typed and numbered from 1. `used` is `Some` exactly
+    /// when the evidence's own lookup is a submission's: it names that
+    /// submission, whose `outcome` is then `None`, and holds the file's
+    /// own steps its outcome displaced.
+    Supplied {
+        submissions: Vec<Submission>,
+        used: Option<Displacement>,
+    },
+    /// Nothing was submitted, for this reason: `NotAsked`,
+    /// `NotSupplied` or `ContentDuplicate`.
+    NotAttempted(Unattempted),
+}
+
+impl IdentifierInput {
+    /// This input as a resolution event carries it.
+    fn step(&self) -> IdentifierInputStep {
+        match self {
+            IdentifierInput::Supplied { submissions, used } => IdentifierInputStep::Supplied {
+                submissions: submissions.iter().map(Submission::step).collect(),
+                used: used.as_ref().map(|used| used.submission),
+                displaced: used.as_ref().map(|used| Box::new(used.displaced.step())),
+            },
+            IdentifierInput::NotAttempted(reason) => IdentifierInputStep::NotAttempted {
+                reason: reason.as_str().to_string(),
+            },
+        }
+    }
+}
+
+/// One text an operator submitted at the identifier prompt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Submission {
+    /// Its number, counting from 1 within the file.
+    pub number: u32,
+    /// The text as the prompt returned it.
+    pub raw: String,
+    /// The identifier it parsed to, or why it named none.
+    pub syntax: Result<Identifier, SuppliedError>,
+    /// What it came to. `None` exactly for the submission `used` names,
+    /// whose outcome is the evidence's own sections.
+    pub outcome: Option<SubmissionOutcome>,
+}
+
+impl Submission {
+    /// This submission as a resolution event carries it.
+    fn step(&self) -> SubmissionStep {
+        SubmissionStep {
+            submission: self.number,
+            raw: self.raw.clone(),
+            syntax: match &self.syntax {
+                Ok(identifier) => SyntaxStep::Parsed {
+                    identifier: identifier.to_string(),
+                },
+                Err(error) => SyntaxStep::Rejected {
+                    reason: error.reason().to_string(),
+                    expected: error.expected().map(|kind| kind.as_str().to_string()),
+                },
+            },
+            outcome: self.outcome.as_ref().map(|outcome| {
+                Box::new(SubmissionOutcomeStep {
+                    lookup: outcome.lookup.step(),
+                    record_retrieval: outcome
+                        .lookup
+                        .found()
+                        .map(|found| RecordRetrieval::from_attempt(found).retrieved_from()),
+                    match_check: outcome.match_check.step(),
+                    acceptance: match outcome.decision {
+                        CandidateDecision::Rejected => SubmissionAcceptance::Rejected,
+                        CandidateDecision::NotAttempted(reason) => {
+                            SubmissionAcceptance::NotAttempted {
+                                reason: reason.as_str().to_string(),
+                            }
+                        }
+                    },
+                    record: outcome.record.clone().map(Box::new),
+                })
+            }),
+        }
+    }
+}
+
+/// What a submission that was not used came to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubmissionOutcome {
+    /// The lookup of the identifier it parsed to, with
+    /// [`Origin::Operator`], or not attempted for
+    /// [`Unattempted::Unparsed`].
+    pub lookup: LookupEvidence,
+    /// What the title check concluded about its record.
+    pub match_check: MatchCheck,
+    /// The record it reached, if any.
+    pub record: Option<Record>,
+    /// What the operator decided about that record.
+    pub decision: CandidateDecision,
+}
+
+/// What an operator decided about the record a submission reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateDecision {
+    /// Its record was on offer and stopped being: the operator answered
+    /// Skip, or a later submission's record took its place.
+    Rejected,
+    /// It reached nothing to decide about, for this reason:
+    /// [`Unattempted::Unparsed`], [`Unattempted::NoRecord`] or
+    /// [`Unattempted::NoMove`].
+    NotAttempted(Unattempted),
+}
+
+/// The submission whose record the evidence reports, and the file's
+/// own steps that record displaced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Displacement {
+    /// The used submission's number.
+    pub submission: u32,
+    /// The file's own steps the used submission's outcome replaced.
+    pub displaced: Displaced,
+}
+
+/// The file's own lookup, retrieval, title check and record, as they
+/// stood before an operator's submission replaced them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Displaced {
+    /// The file's own lookup, every round of it.
+    pub lookup: LookupEvidence,
+    /// Where the file's own record came from, or `None` when its own
+    /// resolution reached none.
+    pub retrieval: Option<RecordRetrieval>,
+    /// The file's own title check.
+    pub match_check: MatchCheck,
+    /// The file's own record, resolved or refused.
+    pub record: Option<Record>,
+}
+
+impl Displaced {
+    /// These facts as a resolution event carries them.
+    fn step(&self) -> DisplacedStep {
+        DisplacedStep {
+            lookup: self.lookup.step(),
+            record_retrieval: self.retrieval.clone().map(RecordRetrieval::retrieved_from),
+            match_check: self.match_check.step(),
+            record: self.record.clone().map(Box::new),
+        }
+    }
+}
+
 /// The lookup made for a file, or why none was made.
+///
+/// The variant and its fields describe the current round, the one that
+/// decides what the lookup found and whether it is conclusive.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LookupEvidence {
     /// `identifier`, which came from `origin`, was looked up, and
     /// `attempts` are the services asked, in order. A found attempt is
     /// always the last. No attempts means no configured service
-    /// supports the identifier.
+    /// supports the identifier. `earlier` holds the rounds of the same
+    /// lookup made before this one, oldest first, when an operator
+    /// asked for the file's own identifier to be looked up again; it is
+    /// empty otherwise.
     Attempted {
         identifier: Identifier,
         origin: Origin,
         attempts: Vec<ServiceAttempt>,
+        earlier: Vec<LookupRound>,
     },
     /// No lookup was made, for this reason.
     NotAttempted(Unattempted),
 }
 
+/// One earlier round of a file's own lookup; no attempts means no
+/// configured service supported it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LookupRound {
+    /// The services asked in that round, in order.
+    pub attempts: Vec<ServiceAttempt>,
+}
+
 impl LookupEvidence {
+    /// This lookup as a resolution event carries it.
+    fn step(&self) -> LookupStep {
+        match self {
+            LookupEvidence::Attempted {
+                identifier,
+                origin,
+                attempts,
+                earlier,
+            } if attempts.is_empty() => LookupStep::NoEligibleService {
+                identifier: identifier.to_string(),
+                origin: origin.identifier_origin(),
+                earlier: earlier.iter().map(LookupRound::step).collect(),
+            },
+            LookupEvidence::Attempted {
+                identifier,
+                origin,
+                attempts,
+                earlier,
+            } => LookupStep::Attempted {
+                identifier: identifier.to_string(),
+                origin: origin.identifier_origin(),
+                attempts: attempts.iter().map(ServiceAttempt::answer).collect(),
+                earlier: earlier.iter().map(LookupRound::step).collect(),
+            },
+            LookupEvidence::NotAttempted(reason) => LookupStep::NotAttempted {
+                reason: reason.as_str().to_string(),
+            },
+        }
+    }
+
     /// The identifier looked up and the extraction pass that read it,
     /// or `None` when nothing was looked up or an operator supplied the
     /// identifier.
@@ -361,12 +515,14 @@ impl LookupEvidence {
         }
     }
 
-    /// Whether the lookup ended in a confirmed absence: there were
-    /// attempts and every one was [`SourceError::NotFound`].
+    /// Whether the current round ended in a confirmed absence: there
+    /// were attempts and every one was [`SourceError::NotFound`].
+    /// Earlier rounds play no part.
     ///
     /// `false` once any service found the record, when any failed to
     /// answer, when no service could be asked, and when no lookup was
-    /// made. Only an inconclusive lookup is worth making again.
+    /// made. Only a lookup whose current round is inconclusive is worth
+    /// making again.
     pub fn is_conclusive(&self) -> bool {
         match self {
             LookupEvidence::Attempted { attempts, .. } => {
@@ -380,18 +536,30 @@ impl LookupEvidence {
     }
 
     /// Whether a lookup was made that no configured service could be
-    /// asked about: attempted, with no attempts.
+    /// asked about in its current round: attempted, with no attempts.
     pub fn no_eligible_service(&self) -> bool {
         matches!(self, LookupEvidence::Attempted { attempts, .. } if attempts.is_empty())
     }
 
-    /// The attempt that found the record, if any.
+    /// The current round's attempt that found the record, if any.
     fn found(&self) -> Option<&ServiceAttempt> {
         match self {
             LookupEvidence::Attempted { attempts, .. } => {
                 attempts.iter().find(|attempt| attempt.outcome.is_ok())
             }
             LookupEvidence::NotAttempted(_) => None,
+        }
+    }
+}
+
+impl LookupRound {
+    /// This round as a resolution event carries it.
+    fn step(&self) -> LookupRoundStep {
+        match self.attempts.is_empty() {
+            true => LookupRoundStep::NoEligibleService,
+            false => LookupRoundStep::Attempted {
+                attempts: self.attempts.iter().map(ServiceAttempt::answer).collect(),
+            },
         }
     }
 }
@@ -487,6 +655,37 @@ pub enum RecordRetrieval {
     Network { service: SourceName },
 }
 
+impl RecordRetrieval {
+    /// Where `found`, an attempt that found its record, retrieved it
+    /// from: the service's response cache, or the network.
+    fn from_attempt(found: &ServiceAttempt) -> RecordRetrieval {
+        match found.outcome {
+            Ok(Retrieval::ServiceCache) => RecordRetrieval::ServiceCache {
+                service: found.service,
+            },
+            _ => RecordRetrieval::Network {
+                service: found.service,
+            },
+        }
+    }
+
+    /// This retrieval as a resolution event carries it.
+    fn retrieved_from(self) -> RetrievedFrom {
+        match self {
+            RecordRetrieval::Library { artifact, item } => {
+                RetrievedFrom::Library { artifact, item }
+            }
+            RecordRetrieval::ContentIndex => RetrievedFrom::ContentIndex,
+            RecordRetrieval::ServiceCache { service } => RetrievedFrom::ServiceCache {
+                service: service.as_str().to_string(),
+            },
+            RecordRetrieval::Network { service } => RetrievedFrom::Network {
+                service: service.as_str().to_string(),
+            },
+        }
+    }
+}
+
 /// What the title check concluded about the record reached.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchCheck {
@@ -498,6 +697,32 @@ pub enum MatchCheck {
     Insufficient(Insufficient),
     /// The check was not made, for this reason.
     NotAttempted(Unattempted),
+}
+
+impl MatchCheck {
+    /// This check as a resolution event carries it.
+    fn step(&self) -> MatchCheckStep {
+        match self {
+            MatchCheck::Agreed => MatchCheckStep::Agreed,
+            MatchCheck::Conflict(conflict) => MatchCheckStep::Conflict {
+                field: conflict.field.to_string(),
+                extracted: conflict.extracted.clone(),
+                resolved: conflict.resolved.clone(),
+                similarity: conflict.similarity,
+            },
+            MatchCheck::Insufficient(insufficient) => MatchCheckStep::InsufficientEvidence {
+                reason: match insufficient {
+                    Insufficient::RecordUntitled => "record-untitled",
+                    Insufficient::NoTitles => "no-titles",
+                    Insufficient::NoEvidence => "no-evidence",
+                }
+                .to_string(),
+            },
+            MatchCheck::NotAttempted(reason) => MatchCheckStep::NotAttempted {
+                reason: reason.as_str().to_string(),
+            },
+        }
+    }
 }
 
 /// Why a step of a resolution was not taken.
@@ -533,6 +758,16 @@ pub enum Unattempted {
     /// this reason, for a network answer's `stored` write; no section
     /// of the evidence itself holds it.
     CacheBypassed,
+    /// No question was put to an operator about the file.
+    NotAsked,
+    /// An operator was asked about the file and submitted no text.
+    NotSupplied,
+    /// The text an operator submitted named no identifier.
+    Unparsed,
+    /// The record a submission reached leads to no move: its target is
+    /// taken, it renders no name, or it renders the file's current
+    /// name.
+    NoMove,
 }
 
 impl Unattempted {
@@ -550,6 +785,10 @@ impl Unattempted {
             Unattempted::Unhashable => "unhashable",
             Unattempted::AwaitingAcceptance => "awaiting-acceptance",
             Unattempted::CacheBypassed => "cache-bypassed",
+            Unattempted::NotAsked => "not-asked",
+            Unattempted::NotSupplied => "not-supplied",
+            Unattempted::Unparsed => "unparsed",
+            Unattempted::NoMove => "no-move",
         }
     }
 }
