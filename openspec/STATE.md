@@ -90,9 +90,10 @@ instead of accepted and ignored. The open decision below is unchanged
 — what would put the flag back on `rename` is an answer about ordering,
 not about the flag.
 
-Tests run green on Linux, macOS and Windows, including integration
-tests over real PDFs and Windows coverage of the path shapes discovery
-and run-log placement depend on. A scheduled job exercises the real
+Tests ran green on Linux, macOS and Windows as of 0.4.0, including
+integration tests over real PDFs and Windows coverage of the path
+shapes discovery and run-log placement depend on; CI now checks Linux
+alone (see Live risks). A scheduled job exercises the real
 APIs, so schema drift at a source surfaces without a user finding it
 first.
 
@@ -623,12 +624,15 @@ still never written to the content index.
 
 ## Live risks
 
-- **CI runs on Linux alone.** The matrix in `.github/workflows/ci.yml`
-  was cut to `ubuntu-latest` during 0.5.0; the other two are commented
-  out a line above, so restoring them is one edit. macOS and Windows
-  are still supported targets and nothing was done to stop supporting
-  them — they are simply no longer checked, so a platform-specific
-  break will now reach a user rather than a run. The first push of the
+- **CI runs and releases on Linux alone.** The test matrix in
+  `.github/workflows/ci.yml` was cut to `ubuntu-latest` during 0.5.0,
+  and after 0.9.0 the release build was cut to the Linux musl target
+  too; the macOS and Windows entries of both are commented out, so
+  restoring them is uncommenting. 0.9.0 is the last release with macOS
+  and Windows binaries. Nothing was done to stop the code supporting
+  them — they are simply neither checked nor shipped, so a
+  platform-specific break will reach a user building from source rather
+  than a run. The first push of the
   interactive work found exactly one such break, a test that wrote a
   rendered path with a slash where Windows spells it with a backslash,
   and that class of mistake is the one to watch for: compare `PathBuf`

@@ -91,10 +91,10 @@ jobs:
             exit 1
           }
 
-  # One binary per platform. Building and publishing are separate jobs
-  # on purpose: four matrix jobs racing to create the same release is a
-  # race, so they only upload artifacts, and one job afterwards makes
-  # the release from all four.
+  # One binary per target. Building and publishing are separate jobs
+  # on purpose: several matrix jobs racing to create the same release is
+  # a race, so they only upload artifacts, and one job afterwards makes
+  # the release from all of them.
   #
   # Gated on the tests and the version check, so nothing is published
   # from a tree that does not build or whose tag disagrees with its
@@ -111,12 +111,16 @@ jobs:
           # to match the runner's.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          # Linux only for now, as in the test matrix. The macOS and
+          # Windows targets are commented out rather than deleted so
+          # that restoring them is uncommenting these lines; the
+          # packaging step below still handles both.
+          # - os: macos-latest
+          #   target: aarch64-apple-darwin
+          # - os: macos-latest
+          #   target: x86_64-apple-darwin
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -131,8 +135,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release --locked -p borax --target ${{ matrix.target }}
 
-      # The archive is named after the target, so the four of them can
-      # sit in one release without colliding.
+      # The archive is named after the target, so archives for several
+      # targets can sit in one release without colliding.
       - name: Package the binary
         shell: bash
         run: |
