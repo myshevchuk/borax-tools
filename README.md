@@ -115,11 +115,13 @@ into another program.
 
 ## Installation
 
-Each [release][releases] includes prebuilt binaries for Linux (static,
-musl), macOS (Apple silicon and Intel), and Windows. Download and unpack
-the archive for your platform, then put `borax` on your `PATH`.
+Each [release][releases] after 0.9.0 includes a prebuilt binary for Linux
+(static, musl) only. Download and unpack the archive, then put `borax` on
+your `PATH`.
+Release 0.9.0 was the last to include binaries for macOS (Apple silicon
+and Intel) and Windows.
 
-To install from source with Cargo:
+On macOS and Windows, install from source with Cargo:
 
 ```console
 $ cargo install --git https://github.com/myshevchuk/borax-tools borax
