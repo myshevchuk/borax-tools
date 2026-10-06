@@ -1,0 +1,188 @@
+## MODIFIED Requirements
+
+### Requirement: Duplicate detection operates at two levels with distinct reasons
+The pipeline SHALL check each incoming file against the library's
+artifact store twice and report the two outcomes distinctly: a content
+duplicate (the file's hash appears in the hash history of some artifact
+record other than the incoming file's own) is reported as "same bytes
+already archived" naming the recorded path; a work duplicate (no record
+holds that hash, but a resolved identifier is carried by an item the
+library holds *and* that item has an artifact whose recorded path still
+holds a file) is reported as "same work already archived (different
+file)" naming that artifact's path. The content check SHALL run after
+hashing and before any resolution, so byte-identical re-downloads cost
+no network access.
+
+An item with no artifact recorded against it, and one whose every
+recorded artifact names a path holding no file, SHALL NOT make an
+incoming file a work duplicate. A duplicate report names the file the
+incoming one duplicates, so a work with no file present is a work there
+is nothing to duplicate: the incoming file is that item's first
+artifact and is admitted as one, which is the case an item existing
+without an artifact is for. The `library` capability states the
+admission side.
+
+A work duplicate SHALL divert to the skip queue in a batch run, and
+SHALL be put to the operator in an interactive one, where accepting it
+files the file as another artifact of that item. borax cannot tell a
+second manifestation of a work — a scan beside the published PDF,
+supplementary information beside the paper — from an unwanted second
+copy of it, because the two differ in the operator's intention and not
+in the bytes. So the run that has an operator asks, and the run that
+has none takes the conservative branch: the file is left exactly where
+it is, named for what it matched. The `rename` capability specifies the
+question.
+
+Matching a hash anywhere in a record's history, and not only its current
+hash, SHALL be what the content check means. A file annotated since it
+was admitted is recognised as the artifact it is rather than as a new
+one, and a byte-identical copy of what an artifact used to be is
+recognised as a copy of it.
+
+An artifact record whose recorded path is the incoming file's own path
+SHALL NOT make that file a duplicate at either level, and an item that
+the incoming file's own artifact record already links to SHALL NOT make
+it a work duplicate. Such a record records the file itself, not another
+copy of it, and such an item is the file's own item, not one it is
+being added to. The second rule is load-bearing rather than tidy:
+without it every artifact of a multi-artifact item would meet its
+siblings as a work duplicate on every run, and a batch run would skip
+each of them for belonging to the item it belongs to.
+
+The item that record answers with for the incoming file's bytes, as
+the `resolution` capability defines it, SHALL NOT make the file a work
+duplicate either. An earlier version restored at its path answers with
+the item it was accepted under, and is that item's file as surely as
+the record's link makes it the link's. The incoming file's hash is in
+hand before either check, so this costs nothing.
+
+The other side of the check, the artifacts an item already has, SHALL
+remain the records linked to it. Whether another record's file holds
+bytes that answer with a different item could only be learned by
+hashing that file, and the checks deliberately ask no more of a
+recorded path than whether it holds a file. So an incoming file of
+item Y can be reported a work duplicate of a recorded path whose record
+links Y while that path holds an earlier version answering with another
+item. That report is the conservative branch: nothing is moved or
+destroyed, and an interactive run asks.
+
+The lookup SHALL pass over that record and go on, rather than the
+result being discarded once found: a file whose own record is the first
+answer would otherwise hide a second copy recorded elsewhere in the
+library.
+
+Paths SHALL be compared as the library builds them — the record's
+library-relative path under the library root against the incoming path
+made absolute — normalised lexically and matched the way the platform
+matches file names. Symlinks SHALL NOT be resolved.
+
+The library the checks answer from SHALL be the library as the run has
+left it so far, not as it stood when the run began. A file the run
+admits SHALL be, for every later file of the same run, an artifact
+record carrying that file's hash and path and linked to its item; and a
+recorded artifact the run moves SHALL be found at the path it moved to.
+A byte-identical pair reached in one run is therefore one artifact and
+one content duplicate, whether or not either was recorded before, and a
+record whose artifact this run moved is not a stale path for having
+moved. A preview SHALL learn what it would admit in the same way,
+without writing it, so that it reports what the same run with `--apply`
+would do; a run whose checks are off learns nothing, having nothing to
+check against. A preview SHALL treat every path it plans to move a file
+away from as holding nothing, unless it plans to move another file
+there, exactly as the applying run finds it. A record left at the path
+a separated file vacated is then a stale path in the preview as it is
+in the apply, and a later copy of that record's bytes is decided the
+same way in both.
+
+#### Scenario: Re-downloaded identical file
+- **WHEN** an incoming file's hash appears in another artifact record's
+  hash history
+- **THEN** it is reported as a content duplicate of that record's path
+  and no source is queried for it
+
+#### Scenario: Second PDF of an archived paper
+- **WHEN** an incoming file's hash is in no record's history but its
+  resolved DOI is carried by an item the library holds
+- **THEN** a batch run reports it a work duplicate naming the path of an
+  artifact linked to that item, and an interactive run puts the question
+  that offers to file it as another artifact of that item
+
+#### Scenario: The first PDF of a work the library only cited
+- **WHEN** an incoming file resolves to an identifier carried by an item
+  that has no artifact recorded against it
+- **THEN** it is not reported a duplicate at either level, no question
+  is put about it, and an applying run records it as that item's first
+  artifact
+
+#### Scenario: An item whose artifacts are all absent
+- **WHEN** an incoming file resolves to an identifier carried by an item
+  whose every artifact record names a path that no longer holds a file
+- **THEN** it is not reported a work duplicate, since there is no file
+  for it to duplicate, and the run reports that the library has paths to
+  reconcile
+
+#### Scenario: Re-running over an admitted file
+- **WHEN** a file an applied run renamed and recorded is reached again
+  at the path its artifact record names
+- **THEN** it is not reported as a duplicate, and with its record in the
+  content index it is reported already named without any source being
+  queried
+
+#### Scenario: An admitted file annotated afterwards
+- **WHEN** a file at its recorded path has changed bytes and resolves to
+  an identifier its own item carries
+- **THEN** it is not reported a work duplicate of itself, no question is
+  put about it, and its earlier hash is still in its record's history
+
+#### Scenario: A sibling artifact is not a duplicate of its own item
+- **WHEN** a batch run reaches each of the three recorded artifacts of
+  one item in turn
+- **THEN** none of them is reported a work duplicate, and none is
+  skipped for belonging to the item all three already belong to
+
+#### Scenario: A restored version is not a duplicate of its own work
+- **WHEN** a batch run reaches a recorded file whose bytes are an
+  earlier entry accepted under item X, while its record links item Y and
+  another recorded artifact of X holds a file
+- **THEN** the file is not reported a work duplicate of that artifact
+
+#### Scenario: Another file of the link's work meets a restored version
+- **WHEN** a batch run reaches an incoming PDF of item Y, while Y's only
+  recorded artifact is the file of the previous scenario
+- **THEN** the incoming PDF is reported a work duplicate naming that
+  file's path and left where it is
+
+#### Scenario: A preview agrees about a separated record's bytes
+- **WHEN** a record names `P` and holds bytes A, `P` now holds unrelated
+  bytes B, and a batch rename moves B away from `P`, separating it, and
+  then reaches a copy of A elsewhere
+- **THEN** the copy of A is decided the same way by a preview and by
+  the applying run: neither reports it a content duplicate of `P`, and
+  both report that the library has paths to reconcile
+
+#### Scenario: A byte-identical pair in one run
+- **WHEN** an applying run reaches two byte-identical files, neither of
+  them recorded before the run
+- **THEN** the first is recorded and the second is reported a content
+  duplicate naming the path the first now has, and a preview of the
+  same run reports the same
+
+#### Scenario: A copy of an artifact the run has just moved
+- **WHEN** an applying run moves a recorded artifact and then reaches a
+  byte-identical copy of it
+- **THEN** the copy is reported a content duplicate naming the moved
+  artifact's new path, and the run does not report that the library has
+  paths to reconcile
+
+#### Scenario: Two files of one work in one batch
+- **WHEN** a batch run reaches two different files resolving to one DOI
+  that no item carried before the run
+- **THEN** the first is recorded against a new item and the second is
+  reported a work duplicate naming the first's path
+
+#### Scenario: A file's own entry does not hide a copy
+- **WHEN** a file at its recorded path is reached again and a
+  byte-identical copy of it sits elsewhere in the library under its own
+  artifact record
+- **THEN** the incoming file is reported a content duplicate of that
+  other copy, not passed as new
