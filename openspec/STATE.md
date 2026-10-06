@@ -6,7 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-05, at 0.8.0.
+Last reviewed: 2026-10-06, at 0.9.0.
 
 ## What is built
 
@@ -344,8 +344,8 @@ healthy states and a missing record never clears, so scripts read the
 stream; an opt-in failure flag is the deferred route. Schema 3 is
 kept.
 
-`expose-resolution-attempts` is implemented on top and opens Phase 3
-as its change 8. It is engine-only: no event, human line, count or
+`expose-resolution-attempts` is implemented on top, ships in 0.9.0,
+and opens Phase 3 as its change 8. It is engine-only: no event, human line, count or
 exit status changes, and schema 3 is kept. `FileRecord` and `Standing`
 each carry an `Evidence` (`crates/borax/src/evidence.rs`) with one
 section per step: the library consultation, the content index's read
@@ -375,8 +375,8 @@ acceptance; the write itself is made at the move, and `remember`'s
 result is held beside the move's outcome. `sectioned-resolved-event`
 renders all of it.
 
-`sectioned-resolved-event` is implemented on top, as Phase 3's change
-9 with change 3 folded in, and makes the single bump: the event
+`sectioned-resolved-event` is implemented on top, ships in 0.9.0, as
+Phase 3's change 9 with change 3 folded in, and makes the single bump: the event
 schema version is 4. `resolved` no longer carries `found`, `cached`,
 `source`, `tier`, `claims` or `overrode`. It and every `skipped` event
 that is a resolution verdict carry seven sections in pipeline order —
@@ -409,9 +409,10 @@ failed. The interim `acceptance` `automatic` it gave a record an
 operator supplied with no conflict is replaced by `accepted` in
 `operator-input-evidence`, before any release carried it.
 
-`operator-input-evidence` is implemented on top, as Phase 3's change
-10, and keeps schema 4: what it adds is additive, and the one change of
-meaning (`automatic` to `accepted` for a supplied record) lands before
+`operator-input-evidence` is implemented on top, ships in 0.9.0 and
+closes Phase 3 as its change 10, and keeps schema 4: what it adds is
+additive, and the one change of meaning (`automatic` to `accepted` for
+a supplied record) lands before
 any release carries schema 4, which the `cli` requirement "JSON Lines
 output is first-class" now states as its rule. Every `resolved` event
 and resolution `skipped` event carries an eighth section,
