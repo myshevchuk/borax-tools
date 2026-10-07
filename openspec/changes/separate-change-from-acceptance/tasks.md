@@ -144,7 +144,7 @@ audits every edit to an existing test.
         `[A(X), B(Y)]` whose `item` field the caller has already set to
         X, with `link_as_read` Y and A appended, gives
         `[A(X), B(Y), A]` with no restatement.
-- [ ] 1.2 Green: `HashEntry::item`, `ArtifactRecord::item_for` and
+- [x] 1.2 Green: `HashEntry::item`, `ArtifactRecord::item_for` and
       `ArtifactRecord::append` (D6, D11).
 
 ## 2. Identifier comparison and the gate
@@ -172,7 +172,7 @@ audits every edit to an existing test.
       - `accepted_by_is_none_for_a_record_linking_no_item`.
       - `accepted_by_is_none_when_no_item_file_carries_the_linked_identity`.
       - `accepted_by_is_none_when_two_item_files_carry_the_linked_identity`.
-- [ ] 2.2 Green: `carries`, `extracted_identifier`, `accepted_by` (D2,
+- [x] 2.2 Green: `carries`, `extracted_identifier`, `accepted_by` (D2,
       D11).
 
 ## 3. The event vocabulary
@@ -232,7 +232,7 @@ audits every edit to an existing test.
       - `human_line_of_a_stranding_skip_names_rehash_and_accept`.
 
       Every expected string is D10's, exactly.
-- [ ] 3.2 Green: the `event.rs` types and human lines (D9, D10, D11).
+- [x] 3.2 Green: the `event.rs` types and human lines (D9, D10, D11).
 
 ## 4. Reconciliation
 
@@ -304,7 +304,7 @@ audits every edit to an existing test.
       - `a_record_written_before_entries_named_items_is_confirmed_without_being_rewritten`:
         literal 0.9.0-shaped record text, and the file is byte-identical
         after a reconcile that confirms it by hash.
-- [ ] 4.2 Green: `Reconciling`, `reconcile`, `Decided::Pending`,
+- [x] 4.2 Green: `Reconciling`, `reconcile`, `Decided::Pending`,
       `history_table` and `reconciliation_events` (D3, D4, D11).
 
 ## 5. Resolution from the library
@@ -351,7 +351,7 @@ audits every edit to an existing test.
         The `library` section is `tracked` with `item` Y and
         `accepted_under` X, `record_retrieval` is `library` with `item`
         X and no `accepted_under`, and the record's title is X's item's.
-- [ ] 5.2 Green: `Stores::consult` checks the link, then answers
+- [x] 5.2 Green: `Stores::consult` checks the link, then answers
       through `item_for` (D6, D9), and `Evidence::retrieval`
       (`crates/borax/src/evidence.rs`) builds `RecordRetrieval::Library`
       with the item answered with.
@@ -413,7 +413,7 @@ audits every edit to an existing test.
       - `work_duplicate_passes_over_the_item_the_own_record_answers_with_for_the_incoming_bytes`;
       - `work_duplicate_with_no_hash_passes_over_only_the_link`;
       - `work_duplicate_still_finds_a_recorded_path_of_the_link_item_holding_a_restored_version`.
-- [ ] 6.2 Green: `admit` and `Stores::take_in` append on D6's terms
+- [x] 6.2 Green: `admit` and `Stores::take_in` append on D6's terms
       through `ArtifactRecord::append`, each capturing the link as read
       before assigning the new one, and `Account::work_duplicate`
       and `pipeline::second_copy` take the hash.
@@ -490,7 +490,7 @@ audits every edit to an existing test.
         first probes that a file cannot be created in the read-only
         directory, and returns early, saying why, when it can (running as
         root). `admit`'s own failing-`write` case is task 6.1's.
-- [ ] 7.2 Green: the rename driver settles the gate before the move,
+- [x] 7.2 Green: the rename driver settles the gate before the move,
       separates or reports pending, emits the admission events in D9's
       order, releases a pending admission through the hold, and the
       preview foresees the same and treats the paths it moves files away
@@ -528,7 +528,7 @@ audits every edit to an existing test.
       - `status_over_a_library_with_a_pending_change_opens_and_names_nothing`:
         `FakeDocuments::with_open_error` on the changed file, and no
         event names it.
-- [ ] 8.3 Green: `Command::Reconcile` gains `extraction` and `accept`,
+- [x] 8.3 Green: `Command::Reconcile` gains `extraction` and `accept`,
       plus `Command::reconcile_accepting`, the settings wiring, and
       `reconcile_events` passing the documents, the run's extraction
       settings and the accepted paths, and emitting one `skipped` per
@@ -540,18 +540,18 @@ audits every edit to an existing test.
       - `validate_reports_no_finding_for_an_entry_naming_no_item`.
       - `validate_reports_no_finding_for_an_entry_naming_an_item_the_library_does_not_hold`.
       - `validate_reports_a_record_whose_entry_item_is_not_a_canonical_uuid_as_unreadable`.
-- [ ] 9.2 Green: nothing beyond group 1 is expected. If something is
+- [x] 9.2 Green: nothing beyond group 1 is expected. If something is
       needed, the fix goes in the group that owns it, and the report
       says so.
 
 ## 10. Audit and verification
 
-- [ ] 10.1 Audit every edit to a pre-existing test against the
+- [x] 10.1 Audit every edit to a pre-existing test against the
       preamble's rules and D13. Report any test that needed anything
       else.
 - [ ] 10.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`.
-- [ ] 10.3 Search `crates/borax/src/` and `crates/borax-core/src/` for
+- [x] 10.3 Search `crates/borax/src/` and `crates/borax-core/src/` for
       what this change makes false. Each search must find nothing, or a
       hit the report justifies:
       - "edited in place" and "Edited in place" in docstrings and
@@ -560,9 +560,9 @@ audits every edit to an existing test.
       - "interim" in `library.rs`;
       - "links the item" in `LibraryAnswer`'s docs where the item
         answered with is meant.
-- [ ] 10.4 Run `openspec validate separate-change-from-acceptance
+- [x] 10.4 Run `openspec validate separate-change-from-acceptance
       --strict` and `python3 scripts/check-spec-deltas.py`.
-- [ ] 10.5 By hand, over a copy of a library made from the real-PDF
+- [x] 10.5 By hand, over a copy of a library made from the real-PDF
       corpus, which lives outside the repository:
       - replace one recorded PDF with an unrelated one, run `borax
         reconcile` (pending), and run it again (pending again);
@@ -618,7 +618,7 @@ audits every edit to an existing test.
       anything invented and for anything dropped from the old text.
       Check the `#+AI_PASS` line the doc writer adds. Answer or remove
       every `TODO(docs)`.
-- [ ] 11.4 Implementer, in `openspec/STATE.md`:
+- [x] 11.4 Implementer, in `openspec/STATE.md`:
       - add a paragraph for this change;
       - close the sentences at the end of the `consult-library-first`
         paragraph beginning "Still open, and handed to the roadmap's

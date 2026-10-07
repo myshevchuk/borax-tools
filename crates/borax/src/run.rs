@@ -43,14 +43,15 @@ use crate::config::{
 };
 use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
-    Admission, Counts, Diagnostic, Event, Format, Level, Sections, SkipReason, Summary, TableUsed,
-    human_summary, render,
+    AcceptedBy, Admission, Counts, Diagnostic, Event, Format, Level, Sections, SkipReason, Summary,
+    TableUsed, human_summary, render,
 };
 use crate::evidence::{
-    CandidateDecision, Displaced, Displacement, Evidence, IdentifierInput, IndexWrite,
-    LookupEvidence, MatchCheck, Origin as LookupOrigin, Submission, SubmissionOutcome, Unattempted,
+    CandidateDecision, Displaced, Displacement, Evidence, ExtractionStep, IdentifierInput,
+    IndexWrite, LookupEvidence, MatchCheck, Origin as LookupOrigin, Submission, SubmissionOutcome,
+    Unattempted,
 };
-use crate::library::Account;
+use crate::library::{Account, ItemStore};
 use crate::pipeline::{
     Documents, Duplicated, FileOutcome, FileRecord, RealDocuments, ResolveConfig, Standing,
     resolution_skip, resolve_batch, resolved_event,
@@ -1053,8 +1054,8 @@ pub fn emit_events<C: Cache>(
             validation_events(command, adapters, sink);
             Aftermath::default()
         }
-        (Command::Reconcile { rehash, .. }, _) => {
-            reconcile_events(command, *rehash, adapters, sink);
+        (Command::Reconcile { rehash, accept, .. }, _) => {
+            reconcile_events(command, *rehash, accept, configs, adapters, sink);
             Aftermath::default()
         }
         (
@@ -1319,14 +1320,20 @@ fn rename_events<C: Cache>(
     // Both are compared normalised: a path the account asks about is
     // resolved against the stores' root, which is normalised, and one
     // `foreseen` names is resolved against the run's, which may not be.
+    //
+    // For the same reason the paths a preview would have moved a file
+    // away from still hold it on disk, and are what `vacated` holds:
+    // each counts as holding nothing unless the preview would move
+    // another file there, exactly as the applying run finds it.
     let foreseen_at: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+    let vacated: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
     let exists = |path: &Path| {
         let asked = crate::paths::lexical(path);
-        let present = foreseen_at
-            .borrow()
-            .iter()
-            .any(|at| Some(at) == asked.as_ref())
-            || is_present(adapters.filesystem, path);
+        let named = |paths: &RefCell<Vec<PathBuf>>| {
+            paths.borrow().iter().any(|at| Some(at) == asked.as_ref())
+        };
+        let present =
+            named(&foreseen_at) || (!named(&vacated) && is_present(adapters.filesystem, path));
         stale.set(stale.get() || !present);
         present
     };
@@ -1467,6 +1474,34 @@ fn rename_events<C: Cache>(
                 // matching nothing. The target is not claimed, so it stays
                 // free for the files after this one.
                 let settled = refused(settled, configs.run().config().record, held.as_ref());
+                // Whether the record holds the file's bytes, and when it
+                // does not, whether it accepts them: settled before the
+                // move, where `held` is, and only by a run that keeps a
+                // record. An applying run reads the items afresh, as
+                // `admit` does; a preview asks its account.
+                let change = match &settled {
+                    Settled::CarryOut { file, .. } if configs.run().config().record => {
+                        held.as_ref().and_then(|held| {
+                            let fresh;
+                            let items = match (carrying_out, account.as_ref()) {
+                                (false, Some(account)) => account.items,
+                                _ => {
+                                    fresh = library.map(ItemStore::read).unwrap_or_default();
+                                    &fresh
+                                }
+                            };
+                            change(
+                                path,
+                                file,
+                                held,
+                                items,
+                                adapters.documents,
+                                &resolving(effective.config()).extraction,
+                            )
+                        })
+                    }
+                    _ => None,
+                };
 
                 let (file, event) = match settled {
                     // This file and every file after it are left as they
@@ -1539,12 +1574,18 @@ fn rename_events<C: Cache>(
                         // passed over is passed over with its admission —
                         // unless the admission is a record that could not
                         // be written, which is shown whatever the hold.
-                        let admission = match recording {
+                        if let Event::Planned { path, .. } = &event {
+                            vacated
+                                .borrow_mut()
+                                .push(crate::paths::lexical(path).unwrap_or_else(|| path.clone()));
+                        }
+                        let admissions = match recording {
                             true => recorded(
                                 library,
                                 &event,
                                 &file,
                                 held.as_ref(),
+                                change.as_ref(),
                                 || {
                                     crate::bib::citation_key(
                                         &file.record,
@@ -1558,28 +1599,38 @@ fn rename_events<C: Cache>(
                             ),
                             false => {
                                 if let Some(stores) = stores.as_mut()
-                                    && let Some(learned) =
-                                        foreseen(library, &event, &file, held.as_ref(), &at, stores)
+                                    && let Some(learned) = foreseen(
+                                        library,
+                                        &event,
+                                        &file,
+                                        held.as_ref(),
+                                        change.as_ref(),
+                                        &at,
+                                        stores,
+                                    )
                                 {
                                     foreseen_at
                                         .borrow_mut()
                                         .push(crate::paths::lexical(&learned).unwrap_or(learned));
                                 }
-                                None
+                                Vec::new()
                             }
                         };
-                        let unwritten = matches!(
-                            admission,
-                            Some(Event::LibraryAdmission {
-                                admission: Admission::Unwritten { .. },
-                                ..
-                            })
-                        );
-                        if let Some(admission) = admission {
+                        let shown = admissions.iter().any(|admission| {
+                            matches!(
+                                admission,
+                                Event::LibraryAdmission {
+                                    admission: Admission::Unwritten { .. }
+                                        | Admission::Pending { .. },
+                                    ..
+                                }
+                            )
+                        });
+                        for admission in admissions {
                             sink.emit(admission);
                         }
                         if named {
-                            match unwritten {
+                            match shown {
                                 true => sink.release(),
                                 false => sink.withhold(),
                             }
@@ -2064,7 +2115,14 @@ fn asked<C: Cache>(
                 // answer they give knowing it is the answer that
                 // stands.
                 let held_work = (!on.kept && !told)
-                    .then(|| crate::pipeline::second_copy(about.path, &on.file.record, account))
+                    .then(|| {
+                        crate::pipeline::second_copy(
+                            about.path,
+                            on.file.hash.as_ref(),
+                            &on.file.record,
+                            account,
+                        )
+                    })
                     .flatten();
                 if let (Some(work), Some(library)) = (held_work, account) {
                     told = true;
@@ -2963,42 +3021,64 @@ fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Set
 /// a conflict has re-identified the file. The hash entry written is
 /// stamped with `at` as both the run and the timestamp.
 ///
+/// `change` is what [`change`] made of bytes `held` does not hold.
+/// Accepted bytes are admitted under `held`, and reported as
+/// [`Admission::Changed`] before anything [`crate::library::admission_event`]
+/// reports. Unaccepted bytes the run moved are recorded as a new
+/// artifact, `held` left exactly as it was, and reported as
+/// [`Admission::Separated`]; unaccepted bytes left where they are write
+/// nothing and are reported as [`Admission::Pending`]. A write that
+/// fails is reported as [`Admission::Unwritten`] alone, since nothing
+/// was accepted.
+///
 /// An admission that was written is learned into `stores`
 /// ([`crate::library::Stores::learn`]), so the run's later files are
 /// checked against it; one that was not teaches them nothing.
 ///
-/// The event is [`crate::library::admission_event`]'s: `None` for an
-/// ordinary admission.
+/// The events are in the order they are to be reported, and none for
+/// an ordinary admission.
+#[allow(clippy::too_many_arguments)]
 fn recorded(
     library: Option<&Path>,
     event: &Event,
     file: &FileRecord,
     held: Option<&ArtifactRecord>,
+    change: Option<&Change>,
     key: impl FnOnce() -> Option<String>,
     at: &str,
     stores: Option<&mut crate::library::Stores>,
-) -> Option<Event> {
+) -> Vec<Event> {
     let current = match event {
         Event::Renamed { target, .. } => target,
         Event::AlreadyNamed { path } => path,
-        _ => return None,
+        _ => return Vec::new(),
     };
-    let library = library?;
-    let hash = file.hash.as_ref()?;
+    let (Some(library), Some(hash)) = (library, file.hash.as_ref()) else {
+        return Vec::new();
+    };
+    let reported = |admission: Admission| Event::LibraryAdmission {
+        path: current.clone(),
+        admission,
+    };
 
     if !admissible(library, current) {
-        return Some(Event::LibraryAdmission {
-            path: current.clone(),
-            admission: Admission::Outside,
-        });
+        return vec![reported(Admission::Outside)];
+    }
+    let moved = matches!(event, Event::Renamed { .. });
+    if let (Some(Change::Unaccepted), Some(held), false) = (change, held, moved) {
+        return vec![reported(Admission::Pending {
+            id: held.id.to_string(),
+            hash: hash.to_string(),
+        })];
     }
 
     let key = key();
+    let separated = matches!(change, Some(Change::Unaccepted));
     let admitting = crate::library::Admitting {
         path: current,
         record: &file.record,
         hash,
-        held,
+        held: held.filter(|_| !separated),
         reidentified: reidentified(file),
         key: key.as_deref(),
         run: borax_core::library::RunId::new(at),
@@ -3009,7 +3089,84 @@ fn recorded(
     if let (Ok(admitted), Some(stores)) = (&admitted, stores) {
         stores.learn(&admitting, admitted);
     }
-    crate::library::admission_event(current, &admitted)
+    let mut events = Vec::new();
+    if let Ok(admitted) = &admitted {
+        match (change, held) {
+            (Some(Change::Accepted(accepted)), _) => events.push(reported(Admission::Changed {
+                id: admitted.artifact.to_string(),
+                hash: hash.to_string(),
+                accepted: accepted.clone(),
+            })),
+            (Some(Change::Unaccepted), Some(held)) => {
+                events.push(reported(Admission::Separated {
+                    id: admitted.artifact.to_string(),
+                    item: admitted.item.to_string(),
+                    from: held.id.to_string(),
+                }));
+                return events;
+            }
+            _ => {}
+        }
+    }
+    events.extend(crate::library::admission_event(current, &admitted));
+    events
+}
+
+/// What an applying run's gate made of a file at its record's path
+/// whose bytes that record's history does not hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Change {
+    /// The bytes are accepted as the record's artifact, on this basis.
+    Accepted(AcceptedBy),
+    /// The bytes are not accepted: the file is separated from the
+    /// record when the run moves it, and its change is pending when it
+    /// stays where it is.
+    Unaccepted,
+}
+
+/// What the gate makes of `file`, at `path`, against `held`, the
+/// record naming that path; `None` when there is no change to decide:
+/// the file's hash is unknown, or `held`'s history holds it.
+///
+/// The identifier extracted from the file is the one its resolution
+/// extracted, or, where extraction did not run because the content
+/// index or the library answered, what [`crate::pipeline::extraction`]
+/// makes of it under `extraction`: only a file whose bytes changed at a
+/// recorded path is opened for the gate. The identifier supplied is the
+/// one the file's lookup used when the operator supplied it. Whether
+/// the item `held` links carries either is asked of `items`
+/// ([`crate::library::accepted_by`]).
+fn change(
+    path: &Path,
+    file: &FileRecord,
+    held: &ArtifactRecord,
+    items: &ItemStore,
+    documents: &dyn Documents,
+    extraction: &ExtractionConfig,
+) -> Option<Change> {
+    let hash = file.hash.as_ref()?;
+    if held.holds(hash) {
+        return None;
+    }
+    let extracted = match &file.evidence.extraction.result {
+        ExtractionStep::Ran(result) => result.clone(),
+        ExtractionStep::NotAttempted(_) => crate::pipeline::extraction(path, documents, extraction),
+    };
+    let supplied = match &file.evidence.lookup {
+        LookupEvidence::Attempted {
+            identifier,
+            origin: LookupOrigin::Operator,
+            ..
+        } => Some(identifier),
+        _ => None,
+    };
+    let accepted = crate::library::accepted_by(
+        items,
+        held,
+        crate::library::extracted_identifier(&extracted).as_ref(),
+        supplied,
+    );
+    Some(accepted.map_or(Change::Unaccepted, Change::Accepted))
 }
 
 /// Learn into `stores` what [`recorded`] would record for `file` after
@@ -3017,8 +3174,11 @@ fn recorded(
 /// learned record names — the target of a `planned` event, or where
 /// the file already is for an `already-named` one.
 ///
-/// `held` is the account's record of the file's current path. `None`,
-/// learning nothing, for every other outcome, for a run with no
+/// `held` is the account's record of the file's current path, and
+/// `change` what [`change`] made of bytes it does not hold: a file
+/// whose bytes it would separate is foreseen as a mint, and one whose
+/// change would stay pending teaches the run nothing. `None`, learning
+/// nothing, for that, for every other outcome, for a run with no
 /// library, for a file whose content hash is unknown, and for one
 /// [`recorded`] would report outside the library.
 fn foreseen(
@@ -3026,6 +3186,7 @@ fn foreseen(
     event: &Event,
     file: &FileRecord,
     held: Option<&ArtifactRecord>,
+    change: Option<&Change>,
     at: &str,
     stores: &mut crate::library::Stores,
 ) -> Option<PathBuf> {
@@ -3039,12 +3200,16 @@ fn foreseen(
     if !admissible(library, current) {
         return None;
     }
+    let separated = matches!(change, Some(Change::Unaccepted));
+    if separated && matches!(event, Event::AlreadyNamed { .. }) {
+        return None;
+    }
 
     stores.foresee(&crate::library::Admitting {
         path: current,
         record: &file.record,
         hash,
-        held,
+        held: held.filter(|_| !separated),
         reidentified: reidentified(file),
         key: None,
         run: borax_core::library::RunId::new(at),
@@ -3666,8 +3831,13 @@ fn validation_events<C: Cache>(command: &Command, adapters: &Adapters<'_, C>, si
 }
 
 /// Write `reconcile`'s events into `sink`: one per record the run had
-/// something to say about, then the totals
-/// ([`crate::library::reconciliation_events`]).
+/// something to say about, then one `skipped` event with the reason
+/// `not-pending` per `--accept` path at which nothing was pending, then
+/// the totals ([`crate::library::reconciliation_events`]).
+///
+/// A changed file is read through [`crate::pipeline::extraction`] under
+/// the run's own extraction settings, as `status --identify` reads one,
+/// and only a file whose bytes changed at a recorded path is opened.
 ///
 /// The run's timestamp is both the identifier a hash appended by this
 /// run is filed under and the time recorded against it, as an applying
@@ -3676,19 +3846,40 @@ fn validation_events<C: Cache>(command: &Command, adapters: &Adapters<'_, C>, si
 fn reconcile_events<C: Cache>(
     command: &Command,
     rehash: bool,
+    accept: &[PathBuf],
+    configs: &Configs,
     adapters: &Adapters<'_, C>,
     sink: &mut dyn Sink,
 ) {
     let at = (adapters.now)();
+    let extraction = resolving(configs.run().config()).extraction;
+    let extract = |path: &Path| crate::pipeline::extraction(path, adapters.documents, &extraction);
     let reconciliation = crate::library::reconcile(
         &reported_root(command, adapters),
-        rehash,
-        borax_core::library::RunId::new(&at),
-        &at,
-        env!("CARGO_PKG_VERSION"),
+        &crate::library::Reconciling {
+            rehash,
+            accept,
+            extract: &extract,
+            run: borax_core::library::RunId::new(&at),
+            timestamp: &at,
+            tool_version: env!("CARGO_PKG_VERSION"),
+        },
     );
-    for event in crate::library::reconciliation_events(&reconciliation) {
+    let mut events = crate::library::reconciliation_events(&reconciliation);
+    let totals = events.pop();
+    for event in events {
         sink.emit(event);
+    }
+    for path in &reconciliation.not_pending {
+        sink.emit(Event::Skipped {
+            path: path.clone(),
+            reason: SkipReason::NotPending,
+            sections: None,
+            candidate: None,
+        });
+    }
+    if let Some(totals) = totals {
+        sink.emit(totals);
     }
 }
 
@@ -4010,10 +4201,14 @@ fn expanded(command: &Command) -> Command {
         Command::Reconcile {
             path,
             rehash,
+            accept,
+            extraction,
             run_log,
         } => Command::Reconcile {
             path: Some(library_directory(path.as_deref())),
             rehash: *rehash,
+            accept: accept.clone(),
+            extraction: extraction.clone(),
             run_log: run_log.clone(),
         },
         Command::Adopt { path, run_log } => Command::Adopt {

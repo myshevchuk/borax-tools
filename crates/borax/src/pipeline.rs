@@ -538,12 +538,16 @@ fn content_duplicate(
 /// and an interactive one offers to file; a record the operator reached
 /// is the operator saying what the file is, so the collision is
 /// reported to them rather than deciding anything.
+///
+/// `hash` is the file's content hash, so the item its own record
+/// answers with for those bytes is passed over as its link is.
 pub fn second_copy(
     path: &Path,
+    hash: Option<&ContentHash>,
     record: &Record,
     account: Option<&Account<'_>>,
 ) -> Option<WorkDuplicate> {
-    account?.work_duplicate(path, &identifiers_of(record))
+    account?.work_duplicate(path, hash, &identifiers_of(record))
 }
 
 /// The skip reporting the file at `existing` as a duplicate of
@@ -756,7 +760,9 @@ fn admissible(
     file: FileRecord,
     account: Option<&Account<'_>>,
 ) -> (FileOutcome, Option<Duplicated>) {
-    match account.and_then(|account| account.work_duplicate(path, &identifiers_of(&file.record))) {
+    let identifiers = identifiers_of(&file.record);
+    match account.and_then(|account| account.work_duplicate(path, file.hash.as_ref(), &identifiers))
+    {
         Some(work) => (
             FileOutcome::Skipped(duplicate(DuplicateReason::Work, &work.existing)),
             Some(Duplicated { file, work }),

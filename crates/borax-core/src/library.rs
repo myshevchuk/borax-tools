@@ -350,8 +350,8 @@ impl Item {
     }
 }
 
-/// One moment in an artifact's hash history: the bytes, and who
-/// recorded them when.
+/// One moment in an artifact's hash history: the bytes, who recorded
+/// them when, and the item they were accepted under.
 ///
 /// `timestamp` and `tool_version` are rendered by the caller and stored
 /// verbatim; nothing here parses or reformats them.
@@ -363,6 +363,11 @@ pub struct HashEntry {
     pub timestamp: String,
     /// The version of borax that recorded the hash.
     pub tool_version: String,
+    /// The item these bytes were accepted under. `None` for an entry
+    /// written before entries named items, which is not written with an
+    /// `item` key and reads back as it was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<ItemId>,
 }
 
 /// Authoritative state about one artifact, under the artifact's
@@ -422,6 +427,57 @@ impl ArtifactRecord {
     /// bytes now, or bytes it had before it was edited.
     pub fn holds(&self, hash: &ContentHash) -> bool {
         self.history.iter().any(|entry| &entry.hash == hash)
+    }
+
+    /// The item the record answers with for the bytes `hash` names.
+    ///
+    /// The newest entry's bytes answer with the record's link, so a link
+    /// corrected by hand decides for the artifact as it stands. Other
+    /// bytes answer with the item named by the newest entry holding
+    /// them, or with the link when that entry names none.
+    ///
+    /// `None` when the history does not hold `hash`, or when the answer
+    /// is the link and the record links no item.
+    pub fn item_for(&self, hash: &ContentHash) -> Option<&ItemId> {
+        if self.current_hash() == Some(hash) {
+            return self.item.as_ref();
+        }
+        let entry = self
+            .history
+            .iter()
+            .rev()
+            .find(|entry| &entry.hash == hash)?;
+        entry.item.as_ref().or(self.item.as_ref())
+    }
+
+    /// Push `entry` onto the history, first restating the newest bytes
+    /// under the link a person may have corrected by hand.
+    ///
+    /// `link_as_read` is the record's link as it was read, before the
+    /// caller assigned any new one. When `entry` is for bytes other than
+    /// the newest entry's, `link_as_read` is `Some(L)`, and the newest
+    /// entry names an item other than `L` or none, a restatement of the
+    /// newest hash under `L` is pushed first, stamped with `entry`'s run,
+    /// timestamp and tool version. So a link corrected while those bytes
+    /// were newest keeps answering for them once later bytes are newest.
+    ///
+    /// Whether an entry is to be appended at all is the caller's
+    /// decision; this never declines to push `entry`.
+    pub fn append(&mut self, entry: HashEntry, link_as_read: Option<&ItemId>) {
+        if let (Some(newest), Some(link)) = (self.history.last(), link_as_read)
+            && newest.hash != entry.hash
+            && newest.item.as_ref() != Some(link)
+        {
+            let restatement = HashEntry {
+                hash: newest.hash.clone(),
+                run: entry.run.clone(),
+                timestamp: entry.timestamp.clone(),
+                tool_version: entry.tool_version.clone(),
+                item: Some(link.clone()),
+            };
+            self.history.push(restatement);
+        }
+        self.history.push(entry);
     }
 }
 

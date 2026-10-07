@@ -159,7 +159,10 @@ impl Evidence {
     /// 1. The lookup has an attempt that found the record: that
     ///    service, from its response cache or over the network.
     /// 2. The lookup was not attempted because the library answered,
-    ///    and the library tracks the file: its artifact and item.
+    ///    and the library tracks the file: its artifact, and the item
+    ///    whose record was returned — the item the file's bytes were
+    ///    accepted under when the answer names one, and the record's
+    ///    link otherwise.
     /// 3. The content index answered.
     ///
     /// `None` when none holds, which is evidence of no record.
@@ -174,12 +177,16 @@ impl Evidence {
 
         if let (
             LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
-            Consultation::Consulted(LibraryAnswer::Tracked { artifact, item }),
+            Consultation::Consulted(LibraryAnswer::Tracked {
+                artifact,
+                item,
+                accepted_under,
+            }),
         ) = (&self.lookup, &self.library)
         {
             return Some(RecordRetrieval::Library {
                 artifact: artifact.clone(),
-                item: item.clone(),
+                item: accepted_under.as_ref().unwrap_or(item).clone(),
             });
         }
 
