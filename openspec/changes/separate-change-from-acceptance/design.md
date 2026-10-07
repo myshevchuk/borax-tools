@@ -314,6 +314,12 @@ today, and `hash` the file's hash.
 | not held, unaccepted, the run moved the file | a new artifact record at the target, with the item a mint selects; `held` is untouched | `separated`, naming the new record, its item, and `held` |
 | not held, unaccepted, the file stays at its path (already named, or Keep) | nothing | `pending`, naming `held` and the hash |
 
+A supplied identifier never reaches the last row. The interactive
+driver sets aside a supplied candidate that leads to no move (the
+`operator-input-evidence` restoration: a later record with no move puts
+back what was on offer before it), so a supplied identifier either
+accepts the file or, when the operator renames it, separates it.
+
 The rest of the decision:
 
 - **Where the gate's identifier comes from.** The extracted identifier

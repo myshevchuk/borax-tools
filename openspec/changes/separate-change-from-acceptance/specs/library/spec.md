@@ -77,9 +77,10 @@ run's extraction settings, and queries no service.
 - **WHEN** an interactive run reaches a changed scan of a book at its
   recorded path, from which nothing can be extracted, the operator
   supplies the book's ISBN-10 while its item carries only its ISBN-13,
-  and the file keeps its name
-- **THEN** the change is not accepted, nothing is written, and it is
-  reported as pending
+  and the operator renames the file
+- **THEN** the change is not accepted: the renamed file is recorded as
+  a new artifact, and the record that did not accept the bytes keeps
+  its path, its history and its link
 
 #### Scenario: A record that links no item
 - **WHEN** the record whose path holds the changed bytes links no item
