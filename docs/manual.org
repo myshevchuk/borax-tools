@@ -15,6 +15,7 @@
 #+AI_PASS: fact-check claude-opus-5-5 [2026-10-03 Sat] -- model line and example file name restored; content-duplicate shape and unreachable prompt line corrected after review
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-05 Mon 04:20] -- operator input evidence
 #+AI_PASS: fact-check claude-opus-5-5 [2026-10-05 Mon] -- supplied identifiers are looked up normalised, not as typed
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-07 Wed] -- gated change acceptance
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -33,9 +34,10 @@ how to install it, and a handful of examples.
      opened, so borax knows which file it is looking at whatever the
      file is currently called.
   2. *Ask the library.* If the run's library tracks this path and these
-     bytes, its linked item's record is the answer. borax does not open
-     the file, extract anything, ask a service or either cache, compare
-     titles, or update the content index for that file.
+     bytes, the item the artifact record answers with supplies the
+     record. borax does not open the file, extract anything, ask a
+     service or either cache, compare titles, or update the content
+     index for that file.
   3. *Otherwise, extract an identifier.* borax first asks the content
      index unless you used ~--no-cache~. On a miss, the cheap passes run
      and the first hit wins: the PDF's embedded metadata — the XMP
@@ -66,18 +68,24 @@ how to install it, and a handful of examples.
   file's normalized path contains its content hash anywhere in its hash
   history, and that record links to an identity carried by exactly one
   item file. Relative paths and spellings that contain ~.~ or ~..~ are
-  compared as the same path. Every history entry counts. This means
-  restored older bytes resolve from the currently linked item, including
-  bytes recorded before the artifact was re-linked to another item.
-  A byte-identical copy at another path, or a file moved without
-  ~borax reconcile~, is untracked and follows the ordinary resolution
-  path.
+  compared as the same path. Every history entry counts. The record's
+  link decides for its newest bytes, so a link corrected by hand still
+  decides. Restored older bytes resolve from the item named by the newest
+  history entry that holds them: the item they were accepted under. An
+  entry written by an earlier borax release names no item, so the
+  record's current link decides for those bytes. borax checks that link
+  before an older entry's item; a damaged link is therefore reported as
+  before, whichever version of the file is present. A pending change is
+  not in the history and resolves as unrecognised content. A
+  byte-identical copy at another path, or a file moved without ~borax
+  reconcile~, is untracked and follows the ordinary resolution path.
 
   The library may fail to answer because records at the path do not hold
-  these bytes, several records match, the matching record has no usable
-  item, a recorded file cannot be hashed, or no readable record names
-  the path and the artifact store could not be read completely. borax
-  reports that problem with the file, then resolves it through the
+  these bytes, several records match, the matching record's link has no
+  usable item, the item restored bytes were accepted under is
+  unavailable, a recorded file cannot be hashed, or no readable record
+  names the path and the artifact store could not be read completely.
+  borax reports that problem with the file, then resolves it through the
   content index, extraction, services, and conflict check as if it were
   untracked. The problem is not itself a skip or finding and does not
   change the exit status.
@@ -216,6 +224,20 @@ how to install it, and a handful of examples.
    file it moves or finds already named, and links that record to an
    item for the resolved work. A preview writes neither kind of record.
 
+   With recording enabled, when an applying run finds unrecorded bytes
+   at an artifact record's own path, it accepts them only when their
+   extracted identifier, or an identifier you supplied, is carried by
+   the record's linked item. It appends accepted bytes to that artifact's
+   history and reports ~changed~. If the bytes are not accepted and the
+   run moves the file, it records them as a new artifact and reports
+   ~separated~. The old record remains at the path the file left and
+   becomes missing. If the file stays put because it is already named or
+   you chose Keep, borax writes nothing and reports ~pending~. It reports
+   this pending change even when it would otherwise pass over an
+   already-named file. A supplied identifier never leaves the file
+   pending in place: borax sets aside a supplied candidate that would
+   produce no move.
+
    With recording enabled, duplicate checks use the library as the run
    has left it so far. Of two byte-identical files in one run, an
    applying run admits the first and a preview plans it; both report the
@@ -225,13 +247,17 @@ how to install it, and a handful of examples.
    A file's own artifact record never makes it a duplicate of itself:
    borax passes over that record and keeps looking, so a genuine second
    copy recorded elsewhere in the library is still reported. Nor is a
-   file a work duplicate of the item its own record already links to,
-   so the several artifacts of one item never skip each other.
+   file a work duplicate of the item its own record already links to, or
+   of the item that record answers with for the file's bytes. The several
+   artifacts or restored versions of one item therefore do not skip
+   themselves.
    ~--no-record~ disables both checks and writes no artifact record or
    item. It does not stop ~rename~ from asking the start-of-run library
    what a tracked file is. If moving a changed artifact without updating
-   its record would strand that record, borax refuses the move and tells
-   you to run ~borax reconcile --rehash~ first.
+   its record would strand that record, borax refuses the move. Its
+   message names ~borax reconcile --rehash~, which records accepted
+   bytes or reports them pending, and ~borax reconcile --accept~, which
+   accepts a pending change.
 
    It works one file at a time, so that a file's verdict and its fate
    stay adjacent in the stream. That is why it takes no
@@ -680,8 +706,8 @@ how to install it, and a handful of examples.
 ** borax reconcile
 
    #+begin_src sh
-     borax reconcile [PATH]
-     borax reconcile --rehash [PATH]
+     borax reconcile [--rehash] [--page-limit N] [PATH]
+     borax reconcile --accept PATH [--accept PATH ...] [PATH]
    #+end_src
 
    Repairs artifact records after files have been moved or edited
@@ -693,9 +719,32 @@ how to install it, and a handful of examples.
    Reconciliation completes four steps in order across the library. It
    first settles records whose own paths still hold their artifacts.
    It then repairs stale paths by matching any hash in each record's
-   history, preferring the current hash. Next it treats an unmatched
-   file at a record's own path as an in-place edit and appends its new
-   hash. Finally, it leaves unresolved records unchanged.
+   history, preferring the current hash. Next it handles files changed
+   in place: bytes at a record's path that no record's history holds.
+   Finally, it leaves unresolved records unchanged. The order has not
+   changed, so two files that swapped paths still both repair in the
+   second step.
+
+   A changed-in-place file is accepted automatically only when borax
+   extracts an identifier carried by the record's linked item. The
+   comparison recognizes DOIs; arXiv identifiers without regard to
+   version; PMIDs; and ISBNs. It does not convert between ISBN-10 and
+   ISBN-13. Extraction itself finds only DOIs and arXiv identifiers, and
+   only changed files at their recorded paths are opened for extraction.
+   Accepted bytes are appended to the record's history and reported as
+   ~changed~. Otherwise, the change is ~pending~. A pending change writes
+   nothing, including the record's size and modification time, and is
+   reported again on every reconcile. ~status~ and ~validate~ do not
+   report pending changes because neither command hashes files.
+
+   Use repeatable ~--accept PATH~ to accept a pending change under its
+   record's current link. borax hashes a named path even when its size
+   and modification time match the record. If the record already holds
+   those bytes, it reports nothing, so repeating the command is harmless.
+   Otherwise, a named path with no pending change produces a ~skipped~ event
+   with reason ~not-pending~ and the partial-success exit code, 2.
+   ~--page-limit N~ limits how many pages extraction reads from each
+   changed file.
 
    A record with more than one candidate is ambiguous, and so is a
    file two records both match. borax reports every candidate and
@@ -798,9 +847,16 @@ how to install it, and a handful of examples.
    ~.borax/artifacts/<uuid>.toml~ and records its own identity, its item
    link, its last-known library-relative path, its size and modification
    time, and its hash history. Each hash entry names the run, timestamp,
-   and borax version that recorded it. A citation sidecar is optional
-   derived output, not a library record: borax reads neither a sidecar
-   nor a retired ledger file to reconstruct the library.
+   borax version, and item under which its bytes were accepted. Entries
+   written by an earlier release name no item and are never rewritten.
+   The history remains append-only. If someone corrects the record's
+   link by hand and it differs from the newest entry's item, borax
+   restates those newest bytes under the corrected link before it appends
+   different bytes. An ordinary run over bytes the history already holds
+   appends nothing; an explicit operator re-identification appends one
+   entry. A citation sidecar is optional derived output, not a library
+   record: borax reads neither a sidecar nor a retired ledger file to
+   reconstruct the library.
 
 ** The settings
 
@@ -1546,9 +1602,12 @@ how to install it, and a handful of examples.
   has no library; ~outside-library~ also covers a file in an excluded
   subtree. A non-resolution skip such as ~target-taken~, ~declined~, or
   ~stranding~ has no ~library~ section because it carries only ~path~ and
-  ~reason~. In a consulted answer, ~tracked~ carries the artifact and
-  item identities, and ~untracked~ carries no further evidence. The
-  other answer kinds explain why the library could not answer:
+  ~reason~. In a consulted answer, ~tracked~ carries the artifact identity
+  and the item to which the artifact record links. It also carries
+  ~accepted_under~ when older bytes resolve from a different item; the
+  key is absent when the link answers. ~untracked~ carries no further
+  evidence. The other answer kinds explain why the library could not
+  answer:
 
   - ~unrecognised-content~ :: Records name the path, but none holds the
     file's bytes. It carries those artifact identities.
@@ -1563,6 +1622,11 @@ how to install it, and a handful of examples.
     error to the artifact and item identities.
   - ~ambiguous-item~ :: Several item files carry the linked identity. It
     carries the artifact and item identities and those file paths.
+  - ~accepted-item-unavailable~ :: The link is usable, but restored older
+    bytes were accepted under an item that cannot answer. It carries the
+    artifact, the link as ~item~, ~accepted_under~, and a ~cause~ of
+    ~dangling~; ~unreadable~ with ~path~ and ~message~; or ~ambiguous~
+    with ~files~.
   - ~unhashable~ :: Records name the path, but the file could not be
     hashed. It carries their artifact identities.
   - ~unreadable-records~ :: No readable record names the path, but the
@@ -1643,8 +1707,11 @@ how to install it, and a handful of examples.
   lookup; the rest of ~lookup~ describes the latest round.
 
   ~record_retrieval~ says where the record came from: ~library~ with the
-  artifact and item, ~content-index~, ~service-cache~ with the service,
-  or ~network~ with the service. It is ~null~ when no record was reached.
+  artifact and the item whose record was returned, ~content-index~,
+  ~service-cache~ with the service, or ~network~ with the service. For
+  restored bytes, the library item is the item they were accepted under,
+  not necessarily the artifact record's link. It is ~null~ when no record
+  was reached.
   The service that supplied each record field remains in
   ~record.borax.provenance~. ~match_check~ is ~agreed~, ~conflict~ with
   both values and their similarity, ~insufficient-evidence~, or
@@ -1691,8 +1758,7 @@ how to install it, and a handful of examples.
   the file's verdict in ~identifier_input~. Resolution and skip evidence
   use the schema-4 sections above.
 
-  Schema 4 keeps the library events unchanged in shape.
-  ~status --identify~ emits one
+  These additions keep the schema at 4. ~status --identify~ emits one
   ~library-extraction~ event for each surveyed artifact as its
   extraction finishes, in survey order. Its ~path~ is library-relative
   and ~/~ separated. Its ~extraction~ object is tagged by ~kind~:
@@ -1745,12 +1811,20 @@ how to install it, and a handful of examples.
   ~orphans~, ~nested~, and ~identifiable~. ~library-finding~ carries
   ~path~ and ~finding~, and ~library-validated~ carries ~root~,
   ~findings~, ~orphans~, ~missing~, and ~unlinked~. ~library-repair~
-  carries ~id~, ~path~, and ~repair~; ~library-reconciled~ carries
-  ~root~, ~records~, ~confirmed~, ~repaired~, ~changed~, ~ambiguous~,
-  ~missing~, and ~hashed~.
+  carries ~id~, ~path~, and ~repair~. A ~changed~ repair carries ~hash~
+  and ~accepted~. The latter is tagged by ~by~: ~extracted~ carries its
+  ~identifier~, while ~operator~ names acceptance through ~--accept~. A
+  ~pending~ repair carries ~hash~, the optional linked ~item~, and
+  ~extraction~. ~library-reconciled~ carries ~root~, ~records~,
+  ~confirmed~, ~repaired~, ~changed~, ~pending~, ~ambiguous~, ~missing~,
+  and ~hashed~; ~pending~ follows ~changed~.
 
   An applying rename may emit ~library-admission~ with ~path~ and an
-  ~admission~ whose ~kind~ is ~relinked~, ~outside~, or ~unwritten~.
+  ~admission~. In addition to ~relinked~, ~outside~, and ~unwritten~, its
+  kind may be ~changed~ with ~id~, ~hash~, and ~accepted~; ~pending~ with
+  ~id~ and ~hash~; or ~separated~ with the new artifact's ~id~ and ~item~
+  plus the old record as ~from~. Admission acceptance is ~extracted~ or
+  ~supplied~, and carries the identifier.
   Adoption emits one ~library-adoption~ event per orphan, with ~path~ and
   an ~adoption~ whose ~kind~ is ~recorded~, ~held~, ~unreadable~,
   ~unwritten~, or ~unindexed~. A consumer that counts these events
@@ -1758,7 +1832,8 @@ how to install it, and a handful of examples.
   ~library-adopted~ with ~root~, ~adopted~, and ~orphans~; its ~orphans~
   count equals the number of adoption events whose kind is not
   ~recorded~. The ~ledger-rebuilt~ event is gone. A ~skipped~ event may
-  now carry the reason kind ~stranding~.
+  carry the reason kind ~stranding~ or ~not-pending~. The latter carries
+  only ~kind~ in its reason and is not a resolution verdict.
 
 ** Recovering the names a run replaced
 
