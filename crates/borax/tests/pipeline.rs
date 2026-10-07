@@ -1111,6 +1111,7 @@ fn sections_projects_every_consultation() {
         LibraryAnswer::Tracked {
             artifact: "a".to_string(),
             item: "i".to_string(),
+            accepted_under: None,
         },
         LibraryAnswer::Untracked,
         LibraryAnswer::UnrecognisedContent {
@@ -1574,6 +1575,7 @@ fn sections_projects_record_retrieval_for_every_place_and_none() {
         Consultation::Consulted(LibraryAnswer::Tracked {
             artifact: "a".to_string(),
             item: "i".to_string(),
+            accepted_under: None,
         }),
         IndexEvidence {
             read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
@@ -3052,6 +3054,7 @@ fn record_at(root: &Path, relative: &str, hash: ContentHash, item: Option<ItemId
             run: LibraryRunId::new("earlier-run"),
             timestamp: "2026-08-01T00:00:00Z".to_string(),
             tool_version: "0.2.0-test".to_string(),
+            item: None,
         }],
     };
     let dir = root.join(".borax").join("artifacts");
@@ -5003,6 +5006,7 @@ fn prior_tracked(artifact: &str, item: &str) -> Evidence {
         library: Consultation::Consulted(LibraryAnswer::Tracked {
             artifact: artifact.to_string(),
             item: item.to_string(),
+            accepted_under: None,
         }),
         content_index: IndexEvidence {
             read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
@@ -5239,6 +5243,7 @@ fn resolve_supplied_on_a_tracked_file_keeps_the_library_answer() {
         Some(&LibraryAnswer::Tracked {
             artifact: "artifact-id".to_string(),
             item: "item-id".to_string(),
+            accepted_under: None,
         })
     );
     assert!(matches!(
@@ -6092,6 +6097,7 @@ fn a_tracked_file_resolves_from_its_item_with_no_extraction_no_source_and_no_ind
                     Some(LibraryAnswer::Tracked {
                         artifact: file_artifact_id(&stores, &path, &hash),
                         item: item.id.to_string(),
+                        accepted_under: None,
                     }),
                     "cache={cache}"
                 );

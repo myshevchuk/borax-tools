@@ -11,15 +11,16 @@ use borax::bib::{BibFiles, citation_key, sidecar_path};
 use borax::cache::{cleared_event, inspect, status_event};
 use borax::cli::{Cli, Command};
 use borax::config::{
-    BibLayer, Effective, KeyColumns, Layer, NetworkLayer, Origin, RenameLayer, TableDeclaration,
-    ValueKindName, resolve,
+    BibLayer, Effective, ExtractionLayer, KeyColumns, Layer, NetworkLayer, Origin, RenameLayer,
+    TableDeclaration, ValueKindName, resolve,
 };
 use borax::event::{
-    Acceptance, Admission, Adoption, Condition, ContentIndexSection, Displaced, Event, Extraction,
-    ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep, IdentifierOrigin,
-    IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep, MatchCheckStep,
-    Repair, RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Submission,
-    SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep, human_line,
+    Acceptance, AcceptedBy, AcceptedItemCause, Admission, Adoption, Condition, ContentIndexSection,
+    Displaced, Event, Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom,
+    IdentifierInputStep, IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep,
+    LookupRound, LookupStep, MatchCheckStep, Repair, RetrievedFrom, SCHEMA, Sections,
+    ServiceAnswer, ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SyntaxStep,
+    TitlesStep, WriteStep, human_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -29,7 +30,7 @@ use borax::runlog::RUNS_DIR;
 use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
-use borax_core::identifier::{Doi, Identifier};
+use borax_core::identifier::{Doi, Identifier, Isbn};
 use borax_core::library::{
     ArtifactId, ArtifactRecord, DuplicateReason, HashEntry, Item, ItemId, RunId as LibraryRunId,
 };
@@ -3574,8 +3575,22 @@ fn an_accepted_interactive_rename_is_recorded_exactly_as_an_apply_run_records_it
     assert_eq!(accepted.path, "Smith2024.pdf", "got {accepted:?}");
     assert_eq!(accepted.path, applied.path);
     assert_eq!(accepted.size, applied.size);
+    // Each run mints its own item, so the histories no longer compare
+    // equal as a whole: compare them with each entry's item set aside,
+    // and separately check that every entry names that run's own item.
+    let without_items = |history: &[HashEntry]| -> Vec<HashEntry> {
+        history
+            .iter()
+            .cloned()
+            .map(|entry| HashEntry {
+                item: None,
+                ..entry
+            })
+            .collect()
+    };
     assert_eq!(
-        accepted.history, applied.history,
+        without_items(&accepted.history),
+        without_items(&applied.history),
         "an accepted interactive rename must record exactly the history an apply run records"
     );
     assert_eq!(
@@ -3587,6 +3602,22 @@ fn an_accepted_interactive_rename_is_recorded_exactly_as_an_apply_run_records_it
     assert!(
         accepted.item.is_some() && applied.item.is_some(),
         "both must link the record to the item minted for the work"
+    );
+    assert!(
+        accepted
+            .history
+            .iter()
+            .all(|entry| entry.item == accepted.item),
+        "every entry must name this run's own item, got {:?}",
+        accepted.history
+    );
+    assert!(
+        applied
+            .history
+            .iter()
+            .all(|entry| entry.item == applied.item),
+        "every entry must name this run's own item, got {:?}",
+        applied.history
     );
 }
 
@@ -7153,6 +7184,7 @@ fn lib_hash_entry(seed: &str, run: &str) -> HashEntry {
         run: LibraryRunId::new(run),
         timestamp: "2026-01-01T00:00:00Z".to_string(),
         tool_version: "0.6.0-test".to_string(),
+        item: None,
     }
 }
 
@@ -9672,6 +9704,7 @@ fn reconcile_emits_one_repair_event_then_the_totals() {
             confirmed: 0,
             repaired: 1,
             changed: 0,
+            pending: 0,
             ambiguous: 0,
             missing: 0,
             hashed: 1,
@@ -9740,6 +9773,7 @@ fn reconcile_over_a_clean_library_emits_only_the_totals() {
             confirmed: 1,
             repaired: 0,
             changed: 0,
+            pending: 0,
             ambiguous: 0,
             missing: 0,
             hashed: 0,
@@ -9764,9 +9798,18 @@ fn reconcile_rehash_flag_reaches_the_library() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
+    let item = Item {
+        id: lib_item_id(LIB_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/rehash"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
     let record = ArtifactRecord {
         id: lib_artifact_id(LIB_UUID_A),
-        item: None,
+        item: Some(item.id.clone()),
         path: "paper.pdf".to_string(),
         size: metadata.len(),
         modified_millis,
@@ -9783,7 +9826,11 @@ fn reconcile_rehash_flag_reaches_the_library() {
         .set_modified(modified)
         .unwrap();
 
-    let documents = FakeDocuments::new();
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(&edited),
+        pdf_with_embedded_doi("10.1000/rehash"),
+    );
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
     let filesystem = FakeFilesystem::new();
@@ -9817,6 +9864,7 @@ fn reconcile_rehash_flag_reaches_the_library() {
             confirmed: 1,
             repaired: 0,
             changed: 0,
+            pending: 0,
             ambiguous: 0,
             missing: 0,
             hashed: 0,
@@ -9840,7 +9888,10 @@ fn reconcile_rehash_flag_reaches_the_library() {
             id: LIB_UUID_A.to_string(),
             path: "paper.pdf".to_string(),
             repair: Repair::Changed {
-                hash: new_hash.to_string()
+                hash: new_hash.to_string(),
+                accepted: AcceptedBy::Extracted {
+                    identifier: "doi:10.1000/rehash".to_string(),
+                },
             },
         },
         "got {:?}",
@@ -9854,12 +9905,464 @@ fn reconcile_rehash_flag_reaches_the_library() {
             confirmed: 0,
             repaired: 0,
             changed: 1,
+            pending: 0,
             ambiguous: 0,
             missing: 0,
             hashed: 1,
         },
         "got {:?}",
         rehashed[1]
+    );
+}
+
+// ---------------------------------------------------------------------
+// 8: the reconcile command — the gate, pending and --accept (design
+// D3, D4, D11)
+// ---------------------------------------------------------------------
+
+/// design D3: an unrelated replacement is reported pending, and the
+/// totals carry it.
+#[test]
+fn reconcile_reports_a_pending_change_and_its_totals() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let path = root.join("paper.pdf");
+    fs::write(&path, b"replacement bytes").unwrap();
+    let item = Item {
+        id: lib_item_id(LIB_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/reconcile-pending-orig"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: Some(item.id.clone()),
+        path: "paper.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("original bytes", "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"replacement bytes"),
+        pdf_with_embedded_doi("10.1000/reconcile-pending-other"),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(events.len(), 2, "got {events:?}");
+    assert_eq!(
+        events[0],
+        Event::LibraryRepair {
+            id: LIB_UUID_A.to_string(),
+            path: "paper.pdf".to_string(),
+            repair: Repair::Pending {
+                hash: hash_bytes(b"replacement bytes").to_string(),
+                item: Some(LIB_UUID_B.to_string()),
+                extraction: Extraction::Found {
+                    identifier: "doi:10.1000/reconcile-pending-other".to_string(),
+                    tier: "embedded-metadata".to_string(),
+                },
+            },
+        },
+        "got {:?}",
+        events[0]
+    );
+    assert_eq!(
+        events[1],
+        Event::LibraryReconciled {
+            root: root.clone(),
+            records: 1,
+            confirmed: 0,
+            repaired: 0,
+            changed: 0,
+            pending: 1,
+            ambiguous: 0,
+            missing: 0,
+            hashed: 1,
+        },
+        "got {:?}",
+        events[1]
+    );
+}
+
+/// design D4: `--accept` turns a pending change into a `changed` repair
+/// accepted by the operator.
+#[test]
+fn reconcile_accept_accepts_a_pending_change() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let path = root.join("paper.pdf");
+    fs::write(&path, b"replacement bytes").unwrap();
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("original bytes", "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::reconcile_accepting(Some(root.clone()), false, vec![path.clone()]),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryRepair {
+                repair: Repair::Changed {
+                    accepted: AcceptedBy::Operator,
+                    ..
+                },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+}
+
+/// design D4: `--accept` naming a path with nothing pending is a
+/// `not-pending` skip, and the run exits partial success.
+#[test]
+fn reconcile_accept_of_a_path_with_nothing_pending_skips_it_and_exits_partial() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let path = root.join("typo.pdf");
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(
+            Command::reconcile_accepting(Some(root.clone()), false, vec![path.clone()]),
+            false,
+        ),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.lines()
+            .any(|line| line.contains("no change is pending here")),
+        "got {text:?}"
+    );
+}
+
+/// design D4/D2: `reconcile`'s own `--page-limit` reaches the gate's
+/// extraction: a page 3 identifier is missed at `--page-limit 2` and
+/// found at the default.
+#[test]
+fn reconcile_page_limit_reaches_the_extraction() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let path = root.join("paper.pdf");
+    fs::write(&path, b"replacement bytes").unwrap();
+    let item = Item {
+        id: lib_item_id(LIB_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/page-limit"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: Some(item.id.clone()),
+        path: "paper.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("original bytes", "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let pdf = FakePdf::new().with_pages(vec![
+        Ok("nothing here".to_string()),
+        Ok("nothing here either".to_string()),
+        Ok("see doi:10.1000/page-limit for details".to_string()),
+    ]);
+    let documents = FakeDocuments::new().with_file(&path, hash_bytes(b"replacement bytes"), pdf);
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let limited_effective = effective_with(|layer| {
+        layer.extraction = Some(ExtractionLayer {
+            page_limit: Some(2),
+        });
+    });
+    let limited = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(limited_effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        limited.iter().any(|event| matches!(
+            event,
+            Event::LibraryRepair {
+                repair: Repair::Pending { .. },
+                ..
+            }
+        )),
+        "--page-limit 2 must not reach page 3: got {limited:?}"
+    );
+
+    let default_events = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        default_events.iter().any(|event| matches!(
+            event,
+            Event::LibraryRepair {
+                repair: Repair::Changed { .. },
+                ..
+            }
+        )),
+        "the default page limit must reach page 3: got {default_events:?}"
+    );
+}
+
+/// design D10: the human rendering of a pending repair names the
+/// pending change, and the totals line counts it.
+#[test]
+fn reconcile_human_output_names_the_pending_change_and_counts_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let path = root.join("paper.pdf");
+    fs::write(&path, b"replacement bytes").unwrap();
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("original bytes", "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"replacement bytes"),
+        pdf_with_no_identifier(),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::reconcile(Some(root.clone()), false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.lines()
+            .any(|line| line.contains("the change is pending")),
+        "got {text:?}"
+    );
+    assert!(
+        text.lines().last().unwrap().contains("1 pending"),
+        "got {text:?}"
+    );
+}
+
+/// design D3: `status` opens nothing and names nothing about a pending
+/// change — the file at the record's path differs from every recorded
+/// hash, and `status` must neither hash it nor open it to find out.
+#[test]
+fn status_over_a_library_with_a_pending_change_opens_and_names_nothing() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"replacement bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_C),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/status-pending"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "paper.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("original bytes", "run-0")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents = FakeDocuments::new().with_open_error(
+        &path,
+        hash_bytes(b"replacement bytes"),
+        ExtractionError::Unreadable {
+            message: "status must never open an artifact".to_string(),
+        },
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            Event::LibraryRepair { .. } | Event::LibraryReconciled { .. }
+        )),
+        "status must never run reconciliation or name a pending change: got {events:?}"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&Event::LibraryStatus {
+            root: root.clone(),
+            artifacts: 1,
+            items: 1,
+            records: 1,
+            orphans: 0,
+            nested: Vec::new(),
+            identifiable: None,
+        }),
+        "got {events:?}"
     );
 }
 
@@ -10028,6 +10531,9 @@ fn an_applying_rename_over_a_library_with_a_finding_proceeds() {
 const G7_UUID_A: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef5";
 const G7_UUID_B: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef6";
 const G7_UUID_C: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef7";
+/// A fourth distinct identity for group-7 tests needing one, distinct
+/// from the local `G7_UUID_D` task 9.5's own fixtures already declare.
+const G7_UUID_E: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef9";
 
 /// A fresh tempdir marked as a library root (`.borax.toml` at its top).
 fn real_library() -> tempfile::TempDir {
@@ -10087,6 +10593,7 @@ fn hash_entry_for(hash: ContentHash, run: &str) -> HashEntry {
         run: LibraryRunId::new(run),
         timestamp: "2026-01-01T00:00:00Z".to_string(),
         tool_version: "0.6.0-test".to_string(),
+        item: None,
     }
 }
 
@@ -11078,10 +11585,16 @@ fn no_record_moves_an_artifact_whose_history_holds_its_hash_leaving_a_stale_path
 
     library::reconcile(
         &root,
-        false,
-        LibraryRunId::new("reconcile-1"),
-        "2026-01-01T00:00:00Z",
-        "0.6.0-test",
+        &library::Reconciling {
+            rehash: false,
+            accept: &[],
+            extract: &|path: &Path| {
+                panic!("step 2 repairs by hash alone and should not reach step 3: {path:?}")
+            },
+            run: LibraryRunId::new("reconcile-1"),
+            timestamp: "2026-01-01T00:00:00Z",
+            tool_version: "0.6.0-test",
+        },
     );
 
     let repaired = library::ArtifactStore::read(&root)
@@ -11117,9 +11630,18 @@ fn no_record_refuses_a_move_when_the_edit_in_place_hash_is_stale() {
     let path = write_real_file(&root, "original.pdf", original);
     let recorded_hash = hash_bytes(original);
     let (size, modified_millis) = real_stat(&path);
+    let item = Item {
+        id: lib_item_id(G7_UUID_C),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-7.3a-refusal"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
     let held = ArtifactRecord {
         id: lib_artifact_id(G7_UUID_A),
-        item: None,
+        item: Some(item.id.clone()),
         path: "original.pdf".to_string(),
         size,
         modified_millis,
@@ -11222,6 +11744,1581 @@ fn no_record_refuses_a_move_when_the_edit_in_place_hash_is_stale() {
         recorded.history.last().map(|entry| &entry.hash),
         Some(&current_hash),
         "the file's current hash must be written into the history"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 7: the applying rename — the gate, separation and pending (design
+// D1, D2, D5, D6, D9)
+// ---------------------------------------------------------------------
+
+/// design D1, D5: an annotated file whose text still carries its
+/// item's DOI is accepted on extraction, and the admission is reported
+/// `changed`/`extracted`.
+#[test]
+fn an_annotated_file_renamed_is_accepted_on_its_extracted_doi() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"annotated bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-annotated"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"annotated bytes"),
+        pdf_with_embedded_doi("10.1000/task-g7-annotated"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/task-g7-annotated")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Changed {
+                    accepted: AcceptedBy::Extracted { .. },
+                    ..
+                },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+
+    let after = library::ArtifactStore::read(&root)
+        .by_id(&lib_artifact_id(G7_UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.path, "Smith2024.pdf");
+    assert_eq!(after.history.last().unwrap().item, Some(item.id));
+}
+
+/// design D1, D5: an unrelated replacement that is renamed (moved) is
+/// recorded as a new artifact of its own item, and the record that did
+/// not accept it is left byte-identical.
+#[test]
+fn an_unrelated_replacement_renamed_is_recorded_as_a_new_artifact() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"hplc guide bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-klykov"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("klykov bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+    let held_path = root
+        .join(STATE_DIR)
+        .join(ARTIFACT_STORE)
+        .join(format!("{G7_UUID_A}.toml"));
+    let held_text = fs::read_to_string(&held_path).unwrap();
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"hplc guide bytes"),
+        pdf_with_embedded_doi("10.1000/task-g7-hplc-guide"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Guide", 2021, "10.1000/task-g7-hplc-guide")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let separated = events.iter().find_map(|event| match event {
+        Event::LibraryAdmission {
+            admission: Admission::Separated { id, item, from },
+            ..
+        } => Some((id.clone(), item.clone(), from.clone())),
+        _ => None,
+    });
+    let (new_id, new_item, from) =
+        separated.unwrap_or_else(|| panic!("expected a separated admission, got {events:?}"));
+    assert_eq!(from, G7_UUID_A.to_string());
+
+    let held_after = fs::read_to_string(&held_path).unwrap();
+    assert_eq!(
+        held_after, held_text,
+        "the record that did not accept the bytes must be byte-identical"
+    );
+
+    let records = library::ArtifactStore::read(&root);
+    let new_record = records.by_id(&ArtifactId::parse(&new_id).unwrap()).unwrap();
+    assert_eq!(new_record.history.len(), 1, "got {:?}", new_record.history);
+    assert_eq!(
+        new_record.history[0].item,
+        Some(ItemId::parse(&new_item).unwrap())
+    );
+}
+
+/// design D5: once the replacement's bytes are moved to the new
+/// artifact, the separated record's own path holds nothing, and the
+/// next reconcile reports it missing.
+#[test]
+fn the_next_reconcile_reports_the_separated_record_missing() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"hplc guide bytes 2");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-klykov-2"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("klykov bytes 2", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"hplc guide bytes 2"),
+        pdf_with_embedded_doi("10.1000/task-g7-hplc-guide-2"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Guide", 2022, "10.1000/task-g7-hplc-guide-2")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let _ = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let extractor = |_: &Path| Extraction::Unreadable {
+        message: "not opened in this test".to_string(),
+    };
+    let result = library::reconcile(
+        &root,
+        &library::Reconciling {
+            rehash: false,
+            accept: &[],
+            extract: &extractor,
+            run: LibraryRunId::new("reconcile-1"),
+            timestamp: "2026-01-01T00:00:00Z",
+            tool_version: "0.6.0-test",
+        },
+    );
+
+    assert!(
+        result
+            .repairs
+            .iter()
+            .any(|(id, _, repair)| id == &lib_artifact_id(G7_UUID_A)
+                && matches!(repair, Repair::Missing)),
+        "got {:?}",
+        result.repairs
+    );
+}
+
+/// design D5: an unrelated replacement left at its own, already-named
+/// path writes nothing and is reported pending — `.borax/` and
+/// `items/` byte-identical.
+#[test]
+fn an_unrelated_replacement_already_named_writes_nothing_and_is_reported_pending() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "Guide2021.pdf", b"hplc guide bytes 3");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-klykov-3"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "Guide2021.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("klykov bytes 3", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+    let before = snapshot(&root);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"hplc guide bytes 3"),
+        pdf_with_embedded_doi("10.1000/task-g7-hplc-guide-3"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Guide", 2021, "10.1000/task-g7-hplc-guide-3")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Pending { .. },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+    assert_eq!(
+        snapshot(&root),
+        before,
+        ".borax/ and items/ must be byte-identical"
+    );
+}
+
+/// design D5: a pending, already-named file passed over by
+/// `skip-named` is still shown — the hold never hides a pending
+/// admission.
+#[test]
+fn a_pending_already_named_file_passed_over_is_still_shown() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "Guide2021.pdf", b"pending bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-pending-shown"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "Guide2021.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"pending bytes"),
+        pdf_with_embedded_doi("10.1000/task-g7-pending-shown-other"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "Guide",
+            2021,
+            "10.1000/task-g7-pending-shown-other",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_skipping_named("[auth][year]", true);
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(Vec::new());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![path.clone()], false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("Guide2021.pdf"),
+        "a pending already-named file must still be shown: {text:?}"
+    );
+}
+
+/// design D1, D5: an operator-supplied identifier the linked item
+/// carries accepts a scan whose own text yields nothing.
+#[test]
+fn a_supplied_identifier_the_linked_item_carries_accepts_a_scan() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"scan bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-scan"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_bytes(b"scan bytes"), pdf_with_no_identifier());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("doi:10.1000/task-g7-scan".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Changed {
+                    accepted: AcceptedBy::Supplied { .. },
+                    ..
+                },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+}
+
+/// design D2: a supplied ISBN-10 is not accepted for an item holding
+/// the ISBN-13, so the file keeps its name and the change is pending.
+#[test]
+fn a_supplied_isbn_10_for_an_item_holding_the_isbn_13_is_not_accepted() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"isbn scan bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.isbn = Some(Isbn::parse("9780306406157").unwrap());
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"isbn scan bytes"),
+        pdf_with_no_identifier(),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Quit])
+        .with_texts(vec![Some("isbn:0306406152".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Pending { .. },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+    assert_eq!(
+        library::ArtifactStore::read(&root)
+            .by_id(&lib_artifact_id(G7_UUID_A))
+            .unwrap()
+            .path,
+        "original.pdf",
+        "the file must keep its name"
+    );
+}
+
+/// design D1: a supplied identifier naming another work entirely
+/// separates the file, and never relinks the record that did not
+/// accept it.
+#[test]
+fn a_supplied_identifier_for_another_work_separates_the_file() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"other work bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-sep-orig"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+    let held_path = root
+        .join(STATE_DIR)
+        .join(ARTIFACT_STORE)
+        .join(format!("{G7_UUID_A}.toml"));
+    let held_text = fs::read_to_string(&held_path).unwrap();
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"other work bytes"),
+        pdf_with_no_identifier(),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Other", 2022, "10.1000/task-g7-sep-other")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("doi:10.1000/task-g7-sep-other".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Separated { .. },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Relinked { .. },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+    let held_after = fs::read_to_string(&held_path).unwrap();
+    assert_eq!(held_after, held_text);
+}
+
+/// design D1: a content-index answer at a recorded path whose bytes
+/// have changed is gated on extraction, not taken as acceptance by
+/// itself.
+#[test]
+fn a_content_index_answer_at_a_recorded_path_with_changed_bytes_is_gated_on_extraction() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"content index gate bytes");
+    let hash = hash_bytes(b"content index gate bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-index-gate"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/task-g7-index-gate"),
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put(&hash, &record_by("Cached", 2020, "10.1000/task-g7-cached"));
+    let sources: Vec<&dyn Source> = Vec::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Changed {
+                    accepted: AcceptedBy::Extracted { .. },
+                    ..
+                },
+                ..
+            }
+        )),
+        "the content-index hit must not bypass the gate: got {events:?}"
+    );
+}
+
+/// design D5: a content-index answer for a file no record names opens
+/// nothing to decide a gate that does not apply to it.
+#[test]
+fn an_untracked_file_answered_by_the_content_index_is_not_opened_for_the_gate() {
+    let path = PathBuf::from("/lib/untracked.pdf");
+    let hash = hash_for("untracked-index-hit");
+    let documents = FakeDocuments::new().with_open_error(
+        &path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must not be opened: no record holds this path".to_string(),
+        },
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put(
+        &hash,
+        &record_by("Cached", 2020, "10.1000/task-g7-untracked"),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Renamed { .. })),
+        "a file no record holds must still resolve and rename from the content index: \
+         got {events:?}"
+    );
+}
+
+/// design D5: a preview of a replacement foresees a new artifact of
+/// its own, and a byte-identical copy later in the same preview meets
+/// it as a content duplicate — all without writing anything.
+#[test]
+fn a_preview_of_a_replacement_foresees_a_new_artifact_and_writes_nothing() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"replacement bytes");
+    let copy_path = write_real_file(&root, "copy.pdf", b"replacement bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-preview-orig"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+    let before = snapshot(&root);
+
+    let documents = FakeDocuments::new()
+        .with_file(
+            &path,
+            hash_bytes(b"replacement bytes"),
+            pdf_with_embedded_doi("10.1000/task-g7-preview-new"),
+        )
+        .with_file(
+            &copy_path,
+            hash_bytes(b"replacement bytes"),
+            pdf_with_embedded_doi("10.1000/task-g7-preview-new"),
+        );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("New", 2023, "10.1000/task-g7-preview-new")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone(), copy_path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: p,
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Content,
+                    ..
+                },
+                ..
+            } if p == &copy_path
+        )),
+        "the copy must be foreseen as a content duplicate of the new artifact: got {events:?}"
+    );
+    assert_eq!(snapshot(&root), before, "a preview must write nothing");
+}
+
+/// design D5: a preview of a pending file learns nothing, so a
+/// byte-identical copy later in the same preview is not a content
+/// duplicate of it.
+#[test]
+fn a_preview_of_a_pending_file_learns_nothing() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"pending preview bytes");
+    let copy_path = write_real_file(&root, "copy.pdf", b"pending preview bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-preview-pending-orig"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents = FakeDocuments::new()
+        .with_file(
+            &path,
+            hash_bytes(b"pending preview bytes"),
+            pdf_with_no_identifier(),
+        )
+        .with_file(
+            &copy_path,
+            hash_bytes(b"pending preview bytes"),
+            pdf_with_no_identifier(),
+        );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone(), copy_path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                path: p,
+                reason: SkipReason::Duplicate { .. },
+                ..
+            } if p == &copy_path
+        )),
+        "a pending file is not learned, so the copy must not meet it as a content \
+         duplicate: got {events:?}"
+    );
+}
+
+/// design D5: a preview and an applying run agree about a later copy
+/// of a separated record's old bytes — neither reports it a content
+/// duplicate of the vacated path, and both warn that the library has
+/// paths to reconcile.
+#[test]
+fn a_preview_and_an_apply_agree_on_a_later_copy_of_the_separated_records_old_bytes() {
+    for apply in [false, true] {
+        let library = real_library();
+        let root = library.path().to_path_buf();
+        let path = write_real_file(&root, "original.pdf", b"replacement content");
+        let item = Item {
+            id: lib_item_id(G7_UUID_B),
+            record: {
+                let mut record = lib_minimal_record(EntryType::Article);
+                record.doi = Some(doi("10.1000/task-g7-agree-orig"));
+                record
+            },
+        };
+        write_lib_item(&root, "item", &item);
+        let held = ArtifactRecord {
+            id: lib_artifact_id(G7_UUID_A),
+            item: Some(item.id.clone()),
+            path: "original.pdf".to_string(),
+            size: 999_999,
+            modified_millis: 0,
+            history: vec![lib_hash_entry("held content", "earlier-run")],
+        };
+        write_lib_artifact_record(&root, &held);
+        let copy_path = write_real_file(&root, "later/copy.pdf", b"held content");
+
+        let documents = FakeDocuments::new()
+            .with_file(
+                &path,
+                hash_bytes(b"replacement content"),
+                pdf_with_embedded_doi("10.1000/task-g7-agree-new"),
+            )
+            .with_file(
+                &copy_path,
+                hash_bytes(b"held content"),
+                pdf_with_embedded_doi("10.1000/task-g7-agree-orig"),
+            );
+        let crossref = KeyedSource::new(SourceName::Crossref)
+            .answering(
+                "doi:10.1000/task-g7-agree-new",
+                record_by("New", 2023, "10.1000/task-g7-agree-new"),
+            )
+            .answering("doi:10.1000/task-g7-agree-orig", item.record.clone());
+        let sources: Vec<&dyn Source> = vec![&crossref];
+        let index = ContentIndex::new(MemoryCache::new());
+        let bib_files = FakeBibFiles::new();
+        let adapters = Adapters {
+            documents: &documents,
+            sources: &sources,
+            index: &index,
+            filesystem: &RealFilesystem,
+            bib_files: &bib_files,
+            cache_root: None,
+            now: fixed_now,
+            collection_root: Some(root.clone()),
+            state_root: None,
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        dispatch(
+            &cli(
+                Command::rename(vec![path.clone(), copy_path.clone()], apply),
+                true,
+            ),
+            &Configs::uniform(effective_with_default_template("[auth][year]")),
+            &adapters,
+            &mut Session::batch(),
+            &mut Streams {
+                out: &mut out,
+                err: &mut err,
+            },
+        );
+
+        let out_text = String::from_utf8(out).unwrap();
+        assert!(
+            !out_text.contains("\"kind\":\"content\""),
+            "apply={apply}: the copy of the old bytes must not be reported a content \
+             duplicate of the separated record's vacated path: got {out_text:?}"
+        );
+        let err_text = String::from_utf8(err).unwrap();
+        assert!(
+            err_text.contains("paths to reconcile"),
+            "apply={apply}: both must warn that the library has paths to reconcile: \
+             got {err_text:?}"
+        );
+    }
+}
+
+/// design D6: a batch rerun over a restored version does not skip it
+/// as a work duplicate of its own item's other recorded artifact.
+#[test]
+fn a_batch_rerun_over_a_restored_version_does_not_skip_it_as_a_work_duplicate() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"bytes x");
+    let x_item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-batch-x"));
+            record
+        },
+    };
+    write_lib_item(&root, "x", &x_item);
+    let y_item_id = lib_item_id(G7_UUID_C);
+    let mut entry_x = lib_hash_entry("bytes x", "run-0");
+    entry_x.item = Some(x_item.id.clone());
+    let mut entry_y = lib_hash_entry("bytes y", "run-1");
+    entry_y.item = Some(y_item_id.clone());
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(y_item_id),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![entry_x, entry_y],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    write_real_file(&root, "sibling.pdf", b"sibling bytes of x");
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(G7_UUID_E),
+            item: Some(x_item.id.clone()),
+            path: "sibling.pdf".to_string(),
+            size: 1,
+            modified_millis: 0,
+            history: vec![lib_hash_entry("sibling bytes of x", "run-0")],
+        },
+    );
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"bytes x"),
+        pdf_with_embedded_doi("10.1000/task-g7-batch-x"),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Skipped {
+                reason: SkipReason::Duplicate {
+                    reason: DuplicateReason::Work,
+                    ..
+                },
+                ..
+            }
+        )),
+        "the restored x bytes must not be skipped as a work duplicate of x's own sibling: \
+         got {events:?}"
+    );
+}
+
+/// design D6: restored bytes renamed by an ordinary run append nothing
+/// to the record's history, and still resolve from the item they were
+/// accepted under.
+#[test]
+fn restored_bytes_renamed_by_an_ordinary_run_append_nothing_and_still_resolve_from_their_item() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"bytes x");
+    let x_item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-restored-x"));
+            record
+        },
+    };
+    write_lib_item(&root, "x", &x_item);
+    let y_item_id = lib_item_id(G7_UUID_C);
+    let mut entry_x = lib_hash_entry("bytes x", "run-0");
+    entry_x.item = Some(x_item.id.clone());
+    let mut entry_y = lib_hash_entry("bytes y", "run-1");
+    entry_y.item = Some(y_item_id.clone());
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(y_item_id),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![entry_x.clone(), entry_y.clone()],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"bytes x"),
+        pdf_with_embedded_doi("10.1000/task-g7-restored-x"),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let _ = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let after = library::ArtifactStore::read(&root)
+        .by_id(&lib_artifact_id(G7_UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after.history,
+        vec![entry_x.clone(), entry_y],
+        "got {:?}",
+        after.history
+    );
+    assert_eq!(after.item_for(&entry_x.hash), Some(&x_item.id));
+}
+
+/// design D6: re-identifying a restored version appends an entry under
+/// the new item, as transition (a) pins through `admit` directly.
+#[test]
+fn a_reidentified_restored_version_gains_an_entry_under_the_new_item() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"bytes x");
+    let x_item_id = lib_item_id(G7_UUID_B);
+    let mut entry_x = lib_hash_entry("bytes x", "run-0");
+    entry_x.item = Some(x_item_id.clone());
+    let y_item_id = lib_item_id(G7_UUID_C);
+    let mut entry_y = lib_hash_entry("bytes y", "run-1");
+    entry_y.item = Some(y_item_id.clone());
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(y_item_id),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![entry_x.clone(), entry_y],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_bytes(b"bytes x"), pdf_with_no_identifier());
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/task-g7-reidentify-z",
+        record_by("Z", 2020, "10.1000/task-g7-reidentify-z"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/task-g7-reidentify-z".to_string())]);
+
+    let _ = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let after = library::ArtifactStore::read(&root)
+        .by_id(&lib_artifact_id(G7_UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[2].hash, entry_x.hash);
+}
+
+/// design D6: re-identifying the newest version moves the link and
+/// appends nothing.
+#[test]
+fn a_reidentified_newest_version_moves_the_link_and_appends_nothing() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"bytes a");
+    let x_item_id = lib_item_id(G7_UUID_B);
+    let mut entry_a = lib_hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x_item_id.clone());
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(x_item_id),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![entry_a.clone()],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_bytes(b"bytes a"), pdf_with_no_identifier());
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/task-g7-reidentify-newest",
+        record_by("New", 2021, "10.1000/task-g7-reidentify-newest"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/task-g7-reidentify-newest".to_string())]);
+
+    let _ = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let after = library::ArtifactStore::read(&root)
+        .by_id(&lib_artifact_id(G7_UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history, vec![entry_a], "got {:?}", after.history);
+}
+
+/// design D5: an interactive Keep of a replacement reports it pending
+/// and writes nothing.
+#[test]
+fn interactive_keep_of_a_replacement_reports_pending_and_writes_nothing() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"replacement bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-keep-orig"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+    let before = snapshot(&root);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"replacement bytes"),
+        pdf_with_no_identifier(),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Keep]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Pending { .. },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+    assert_eq!(
+        snapshot(&root),
+        before,
+        ".borax/ and items/ must be byte-identical"
+    );
+}
+
+/// design D5, D9: an admission that both accepts a change and relinks
+/// the record reports `changed`, then `relinked`, in that order.
+#[test]
+fn an_accepted_change_that_is_also_relinked_reports_changed_then_relinked() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"changed and relinked bytes");
+    let y_item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-changed-y"));
+            record
+        },
+    };
+    write_lib_item(&root, "y", &y_item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(y_item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"changed and relinked bytes"),
+        pdf_with_embedded_doi("10.1000/task-g7-changed-y").with_title("A Title About Z"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/task-g7-changed-y",
+            record_by_with_title(
+                "Y",
+                2020,
+                "10.1000/task-g7-changed-y",
+                "A Completely Different Title About Y",
+            ),
+        )
+        .answering(
+            "doi:10.1000/task-g7-changed-z",
+            record_by("Z", 2021, "10.1000/task-g7-changed-z"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/task-g7-changed-z".to_string())]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let admissions: Vec<&Admission> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::LibraryAdmission { admission, .. } => Some(admission),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(admissions.first(), Some(Admission::Changed { .. })),
+        "got {admissions:?}"
+    );
+    assert!(
+        matches!(admissions.get(1), Some(Admission::Relinked { .. })),
+        "changed must be reported before relinked: got {admissions:?}"
+    );
+}
+
+/// design D9: a write that fails after an accepted change reports
+/// `unwritten` alone, since nothing was accepted.
+#[cfg(unix)]
+#[test]
+fn a_failed_write_after_an_accepted_change_reports_unwritten_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"accepted then unwritten bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: {
+            let mut record = lib_minimal_record(EntryType::Article);
+            record.doi = Some(doi("10.1000/task-g7-unwritten"));
+            record
+        },
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+    let held_path = root
+        .join(STATE_DIR)
+        .join(ARTIFACT_STORE)
+        .join(format!("{G7_UUID_A}.toml"));
+    let held_text = fs::read_to_string(&held_path).unwrap();
+
+    let records_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::set_permissions(&records_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let probe = records_dir.join("probe.tmp");
+    if fs::write(&probe, b"x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&records_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping a_failed_write_after_an_accepted_change_reports_unwritten_alone: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"accepted then unwritten bytes"),
+        pdf_with_embedded_doi("10.1000/task-g7-unwritten"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Unwritten", 2020, "10.1000/task-g7-unwritten")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    fs::set_permissions(&records_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Unwritten { .. },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Changed { .. },
+                ..
+            }
+        )),
+        "a write that fails must report unwritten alone, not changed too: got {events:?}"
+    );
+    let held_after = fs::read_to_string(&held_path).unwrap();
+    assert_eq!(
+        held_after, held_text,
+        "the record file must be byte-identical"
     );
 }
 
@@ -13121,10 +15218,16 @@ fn adopt_holds_an_orphan_whose_bytes_a_record_already_holds() {
 
     library::reconcile(
         &root,
-        false,
-        LibraryRunId::new("run-reconcile"),
-        "2026-01-02T00:00:00Z",
-        "0.6.0-test",
+        &library::Reconciling {
+            rehash: false,
+            accept: &[],
+            extract: &|path: &Path| {
+                panic!("step 2 repairs by hash alone and should not reach step 3: {path:?}")
+            },
+            run: LibraryRunId::new("run-reconcile"),
+            timestamp: "2026-01-02T00:00:00Z",
+            tool_version: "0.6.0-test",
+        },
     );
     let records = library::ArtifactStore::read(&root);
     let repaired = records.by_id(&lib_artifact_id(G7_UUID_B)).unwrap();
@@ -14400,7 +16503,8 @@ fn reconcile_human_mode_ends_on_its_own_totals_line_with_no_summary() {
     let text = String::from_utf8(out).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     let expected_last = format!(
-        "{}: 0 records, 0 confirmed, 0 repaired, 0 changed, 0 ambiguous, 0 missing, 0 hashed",
+        "{}: 0 records, 0 confirmed, 0 repaired, 0 changed, 0 pending, 0 ambiguous, 0 missing, \
+         0 hashed",
         root.display()
     );
 
@@ -14981,6 +17085,7 @@ fn seed_tracked_file(root: &Path, relative: &str, hash: ContentHash, record: Rec
             run: LibraryRunId::new("earlier-run"),
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             tool_version: "0.6.0-test".to_string(),
+            item: None,
         }],
     };
     let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
@@ -15491,6 +17596,115 @@ fn resolve_human_mode_line_ends_with_from_the_library() {
     );
 }
 
+/// design D6, D9: a file restored to an earlier version resolves from
+/// the item that version was accepted under, not the record's current
+/// link — the library answer carries both, and the record retrieved is
+/// the restored item's.
+#[test]
+fn resolve_answers_restored_bytes_from_the_item_they_were_accepted_under() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"bytes x");
+
+    let x_record = record_by("Author X", 2020, "10.1000/x");
+    let x_item = Item {
+        id: ItemId::from_uuid(uuid::Uuid::now_v7()),
+        record: x_record.clone(),
+    };
+    let y_item = Item {
+        id: ItemId::from_uuid(uuid::Uuid::now_v7()),
+        record: record_by("Author Y", 2021, "10.1000/y"),
+    };
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    fs::write(items.join(format!("{}.toml", x_item.id)), x_item.to_toml()).unwrap();
+    fs::write(items.join(format!("{}.toml", y_item.id)), y_item.to_toml()).unwrap();
+
+    let entry_x = HashEntry {
+        hash: hash_bytes(b"bytes x"),
+        run: LibraryRunId::new("run-0"),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        tool_version: "0.6.0-test".to_string(),
+        item: Some(x_item.id.clone()),
+    };
+    let entry_y = HashEntry {
+        hash: hash_bytes(b"bytes y"),
+        run: LibraryRunId::new("run-1"),
+        timestamp: "2026-01-02T00:00:00Z".to_string(),
+        tool_version: "0.6.0-test".to_string(),
+        item: Some(y_item.id.clone()),
+    };
+    let artifact = ArtifactRecord {
+        id: ArtifactId::from_uuid(uuid::Uuid::now_v7()),
+        item: Some(y_item.id.clone()),
+        path: "paper.pdf".to_string(),
+        size: 100,
+        modified_millis: 0,
+        history: vec![entry_x, entry_y],
+    };
+    let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records).unwrap();
+    fs::write(
+        records.join(format!("{}.toml", artifact.id)),
+        artifact.to_toml(),
+    )
+    .unwrap();
+
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_bytes(b"bytes x"), pdf_with_no_identifier());
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::resolve(vec![path.clone()]),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let resolved = events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { .. }))
+        .unwrap_or_else(|| panic!("expected a resolved event, got {events:?}"));
+    let (record, sections) = match resolved {
+        Event::Resolved {
+            record, sections, ..
+        } => (record, sections),
+        _ => unreachable!(),
+    };
+
+    assert_eq!(
+        sections.library.answer(),
+        Some(&LibraryAnswer::Tracked {
+            artifact: artifact.id.to_string(),
+            item: y_item.id.to_string(),
+            accepted_under: Some(x_item.id.to_string()),
+        })
+    );
+    assert_eq!(
+        sections.record_retrieval,
+        Some(RetrievedFrom::Library {
+            artifact: artifact.id.to_string(),
+            item: x_item.id.to_string(),
+        })
+    );
+    assert_eq!(record.title, x_record.title, "got {record:?}");
+}
+
 // ---------------------------------------------------------------------
 // consult-library-first, task 5.1/5.3: `rename` reads the library under
 // every `record` setting, and the consultation travels through a
@@ -15512,6 +17726,7 @@ fn seed_artifact_record(root: &Path, relative: &str, hash: ContentHash, item: Op
             run: LibraryRunId::new("earlier-run"),
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             tool_version: "0.6.0-test".to_string(),
+            item: None,
         }],
     };
     let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
