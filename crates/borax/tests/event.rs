@@ -474,6 +474,7 @@ fn library_admission(path: &str, admission: Admission) -> Event {
 }
 
 /// design D9, D11: one `library-reconciled` totals event.
+#[allow(clippy::too_many_arguments)]
 fn library_reconciled(
     root: &str,
     records: usize,

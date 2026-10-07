@@ -15,12 +15,11 @@ use borax::config::{
     TableDeclaration, ValueKindName, resolve,
 };
 use borax::event::{
-    Acceptance, AcceptedBy, AcceptedItemCause, Admission, Adoption, Condition, ContentIndexSection,
-    Displaced, Event, Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom,
-    IdentifierInputStep, IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep,
-    LookupRound, LookupStep, MatchCheckStep, Repair, RetrievedFrom, SCHEMA, Sections,
-    ServiceAnswer, ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SyntaxStep,
-    TitlesStep, WriteStep, human_line,
+    Acceptance, AcceptedBy, Admission, Adoption, Condition, ContentIndexSection, Displaced, Event,
+    Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep,
+    IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
+    MatchCheckStep, Repair, RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome,
+    SkipReason, Submission, SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep, human_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -12158,8 +12157,11 @@ fn a_pending_already_named_file_passed_over_is_still_shown() {
 
     let text = String::from_utf8(out).unwrap();
     assert!(
-        text.contains("Guide2021.pdf"),
-        "a pending already-named file must still be shown: {text:?}"
+        text.lines().any(|line| line.contains("Guide2021.pdf")
+            && line.contains(&format!(
+                "artifact {G7_UUID_A} has not accepted these bytes"
+            ))),
+        "a pending already-named file must still be shown as pending: {text:?}"
     );
 }
 
@@ -12191,7 +12193,11 @@ fn a_supplied_identifier_the_linked_item_carries_accepts_a_scan() {
 
     let documents =
         FakeDocuments::new().with_file(&path, hash_bytes(b"scan bytes"), pdf_with_no_identifier());
-    let sources: Vec<&dyn Source> = Vec::new();
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Scan", 2020, "10.1000/task-g7-scan")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
@@ -12232,7 +12238,7 @@ fn a_supplied_identifier_the_linked_item_carries_accepts_a_scan() {
 }
 
 /// design D2: a supplied ISBN-10 is not accepted for an item holding
-/// the ISBN-13, so the file keeps its name and the change is pending.
+/// the ISBN-13, so the renamed file is separated from the record.
 #[test]
 fn a_supplied_isbn_10_for_an_item_holding_the_isbn_13_is_not_accepted() {
     let library = real_library();
@@ -12262,7 +12268,13 @@ fn a_supplied_isbn_10_for_an_item_holding_the_isbn_13_is_not_accepted() {
         hash_bytes(b"isbn scan bytes"),
         pdf_with_no_identifier(),
     );
-    let sources: Vec<&dyn Source> = Vec::new();
+    let openalex = fake_source(SourceName::OpenAlex, {
+        let mut book = record_by("Book", 2020, "10.1000/task-g7-book");
+        book.doi = None;
+        book.isbn = Some(Isbn::parse("0306406152").unwrap());
+        Ok(book)
+    });
+    let sources: Vec<&dyn Source> = vec![&openalex];
     let index = ContentIndex::new(MemoryCache::new());
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
@@ -12276,7 +12288,7 @@ fn a_supplied_isbn_10_for_an_item_holding_the_isbn_13_is_not_accepted() {
         collection_root: Some(root.clone()),
         state_root: None,
     };
-    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Quit])
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
         .with_texts(vec![Some("isbn:0306406152".to_string())]);
 
     let events = events_for(
@@ -12291,7 +12303,7 @@ fn a_supplied_isbn_10_for_an_item_holding_the_isbn_13_is_not_accepted() {
         events.iter().any(|event| matches!(
             event,
             Event::LibraryAdmission {
-                admission: Admission::Pending { .. },
+                admission: Admission::Separated { .. },
                 ..
             }
         )),
@@ -12303,7 +12315,7 @@ fn a_supplied_isbn_10_for_an_item_holding_the_isbn_13_is_not_accepted() {
             .unwrap()
             .path,
         "original.pdf",
-        "the file must keep its name"
+        "the record that did not accept the bytes keeps naming the path they left"
     );
 }
 
@@ -13059,7 +13071,7 @@ fn a_reidentified_newest_version_moves_the_link_and_appends_nothing() {
 fn interactive_keep_of_a_replacement_reports_pending_and_writes_nothing() {
     let library = real_library();
     let root = library.path().to_path_buf();
-    let path = write_real_file(&root, "original.pdf", b"replacement bytes");
+    let path = write_real_file(&root, "Guide2021.pdf", b"replacement bytes");
     let item = Item {
         id: lib_item_id(G7_UUID_B),
         record: {
@@ -13072,7 +13084,7 @@ fn interactive_keep_of_a_replacement_reports_pending_and_writes_nothing() {
     let held = ArtifactRecord {
         id: lib_artifact_id(G7_UUID_A),
         item: Some(item.id.clone()),
-        path: "original.pdf".to_string(),
+        path: "Guide2021.pdf".to_string(),
         size: 999_999,
         modified_millis: 0,
         history: vec![lib_hash_entry("earlier bytes", "earlier-run")],
@@ -13083,9 +13095,13 @@ fn interactive_keep_of_a_replacement_reports_pending_and_writes_nothing() {
     let documents = FakeDocuments::new().with_file(
         &path,
         hash_bytes(b"replacement bytes"),
-        pdf_with_no_identifier(),
+        pdf_with_embedded_doi("10.1000/task-g7-keep-other"),
     );
-    let sources: Vec<&dyn Source> = Vec::new();
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Guide", 2021, "10.1000/task-g7-keep-other")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
@@ -13103,7 +13119,7 @@ fn interactive_keep_of_a_replacement_reports_pending_and_writes_nothing() {
 
     let events = events_for(
         &Command::rename(vec![path.clone()], false),
-        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &Configs::uniform(effective_skipping_named("[auth][year]", false)),
         &adapters,
         &mut Session::interactive(&mut asker),
     )

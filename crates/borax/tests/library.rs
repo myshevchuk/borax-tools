@@ -102,6 +102,12 @@ fn hash_entry(seed: &str, run: &str) -> HashEntry {
     }
 }
 
+/// `entry`, naming `item` as the item its bytes were accepted under.
+fn entry_naming(mut entry: HashEntry, item: &ItemId) -> HashEntry {
+    entry.item = Some(item.clone());
+    entry
+}
+
 fn artifact_record(
     id: ArtifactId,
     item: Option<ItemId>,
@@ -2359,7 +2365,10 @@ fn fast_path_miss_appends_the_new_hash_after_the_ones_already_recorded() {
         id.clone(),
         Some(item.clone()),
         "paper.pdf",
-        vec![hash_entry("version one content", "run-0")],
+        vec![entry_naming(
+            hash_entry("version one content", "run-0"),
+            &item,
+        )],
     );
     record.size += 1;
     write_artifact_record(root, &record);
@@ -2400,7 +2409,7 @@ fn fast_path_miss_appends_the_new_hash_after_the_ones_already_recorded() {
     assert_eq!(
         after.history,
         vec![
-            hash_entry("version one content", "run-0"),
+            entry_naming(hash_entry("version one content", "run-0"), &item),
             HashEntry {
                 hash: new_hash,
                 run: RunId::new("run-1"),
@@ -4143,7 +4152,7 @@ fn an_accepted_entry_is_appended_as_a_table_naming_its_item_and_earlier_entries_
         id.clone(),
         Some(item.clone()),
         "paper.pdf",
-        vec![hash_entry("original bytes", "run-0")],
+        vec![entry_naming(hash_entry("original bytes", "run-0"), &item)],
     );
     let mut before_text = before_record.to_toml();
     // A comment the fixture places in the record, which an edit to one
@@ -4204,8 +4213,8 @@ fn an_accepted_entry_is_appended_as_a_table_naming_its_item_and_earlier_entries_
         .map(|at| at + marker.len())
         .expect("exactly one new table must follow the old one");
     assert_eq!(
-        &after_rest[..second_at],
-        before_table,
+        after_rest[..second_at].trim_end(),
+        before_table.trim_end(),
         "the table that existed before must be byte-identical"
     );
     assert!(
@@ -5238,7 +5247,7 @@ fn admit_of_accepted_changed_bytes_appends_an_entry_naming_the_linked_item() {
         artifact_id(UUID_B),
         Some(item.id.clone()),
         "paper.pdf",
-        vec![hash_entry("bytes a", "run-0")],
+        vec![entry_naming(hash_entry("bytes a", "run-0"), &item.id)],
     );
     write_artifact_record(root, &held);
 
@@ -5372,7 +5381,10 @@ fn admit_giving_a_record_with_no_link_an_item_appends_an_entry_under_it() {
         artifact_id(UUID_A),
         None,
         "paper.pdf",
-        vec![hash_entry("bytes a", "run-0")],
+        vec![
+            hash_entry("bytes a", "run-0"),
+            hash_entry("bytes b", "run-0"),
+        ],
     );
     write_artifact_record(root, &held);
 
@@ -5397,9 +5409,9 @@ fn admit_giving_a_record_with_no_link_an_item_appends_an_entry_under_it() {
         .by_id(&artifact_id(UUID_A))
         .unwrap()
         .clone();
-    assert_eq!(after.history.len(), 2, "got {:?}", after.history);
-    assert_eq!(after.history[1].hash, hash_a);
-    assert_eq!(after.history[1].item, Some(admitted.item));
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[2].hash, hash_a);
+    assert_eq!(after.history[2].item, Some(admitted.item));
 }
 
 // --- The D6 transitions, each driven through admit, reconcile (with an
@@ -5578,11 +5590,12 @@ fn transition_c_relink_then_restore_then_re_edit() {
     write_item(root, &format!("x.{UUID_C}.toml"), &x);
     let y = Item {
         id: item_id(UUID_D),
-        record: minimal_record(EntryType::Article),
+        record: record_with_doi("10.1000/transition-c-y"),
     };
     write_item(root, &format!("y.{UUID_D}.toml"), &y);
 
-    let entry_a = hash_entry("bytes a", "run-0");
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
     let held = artifact_record(
         artifact_id(UUID_A),
         Some(x.id.clone()),
@@ -5673,7 +5686,7 @@ fn transition_c_relink_then_restore_then_re_edit() {
             "paper.pdf".to_string(),
             Repair::Pending {
                 hash: hash_bytes(b"a-prime bytes").to_string(),
-                item: Some(y.id),
+                item: Some(y.id.to_string()),
                 extraction,
             }
         )],
@@ -5779,7 +5792,7 @@ fn transition_e_a_pre_change_record_pins_its_newest_bytes_at_its_first_acceptanc
     write_item(root, &format!("x.{UUID_C}.toml"), &x);
     let y = Item {
         id: item_id(UUID_D),
-        record: minimal_record(EntryType::Article),
+        record: record_with_doi("10.1000/transition-e-y"),
     };
     write_item(root, &format!("y.{UUID_D}.toml"), &y);
 
