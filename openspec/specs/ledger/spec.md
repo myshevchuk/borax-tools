@@ -52,6 +52,23 @@ without it every artifact of a multi-artifact item would meet its
 siblings as a work duplicate on every run, and a batch run would skip
 each of them for belonging to the item it belongs to.
 
+The item that record answers with for the incoming file's bytes, as
+the `resolution` capability defines it, SHALL NOT make the file a work
+duplicate either. An earlier version restored at its path answers with
+the item it was accepted under, and is that item's file as surely as
+the record's link makes it the link's. The incoming file's hash is in
+hand before either check, so this costs nothing.
+
+The other side of the check, the artifacts an item already has, SHALL
+remain the records linked to it. Whether another record's file holds
+bytes that answer with a different item could only be learned by
+hashing that file, and the checks deliberately ask no more of a
+recorded path than whether it holds a file. So an incoming file of
+item Y can be reported a work duplicate of a recorded path whose record
+links Y while that path holds an earlier version answering with another
+item. That report is the conservative branch: nothing is moved or
+destroyed, and an interactive run asks.
+
 The lookup SHALL pass over that record and go on, rather than the
 result being discarded once found: a file whose own record is the first
 answer would otherwise hide a second copy recorded elsewhere in the
@@ -73,7 +90,12 @@ record whose artifact this run moved is not a stale path for having
 moved. A preview SHALL learn what it would admit in the same way,
 without writing it, so that it reports what the same run with `--apply`
 would do; a run whose checks are off learns nothing, having nothing to
-check against.
+check against. A preview SHALL treat every path it plans to move a file
+away from as holding nothing, unless it plans to move another file
+there, exactly as the applying run finds it. A record left at the path
+a separated file vacated is then a stale path in the preview as it is
+in the apply, and a later copy of that record's bytes is decided the
+same way in both.
 
 #### Scenario: Re-downloaded identical file
 - **WHEN** an incoming file's hash appears in another artifact record's
@@ -120,6 +142,26 @@ check against.
   one item in turn
 - **THEN** none of them is reported a work duplicate, and none is
   skipped for belonging to the item all three already belong to
+
+#### Scenario: A restored version is not a duplicate of its own work
+- **WHEN** a batch run reaches a recorded file whose bytes are an
+  earlier entry accepted under item X, while its record links item Y and
+  another recorded artifact of X holds a file
+- **THEN** the file is not reported a work duplicate of that artifact
+
+#### Scenario: Another file of the link's work meets a restored version
+- **WHEN** a batch run reaches an incoming PDF of item Y, while Y's only
+  recorded artifact is the file of the previous scenario
+- **THEN** the incoming PDF is reported a work duplicate naming that
+  file's path and left where it is
+
+#### Scenario: A preview agrees about a separated record's bytes
+- **WHEN** a record names `P` and holds bytes A, `P` now holds unrelated
+  bytes B, and a batch rename moves B away from `P`, separating it, and
+  then reaches a copy of A elsewhere
+- **THEN** the copy of A is decided the same way by a preview and by
+  the applying run: neither reports it a content duplicate of `P`, and
+  both report that the library has paths to reconcile
 
 #### Scenario: A byte-identical pair in one run
 - **WHEN** an applying run reaches two byte-identical files, neither of

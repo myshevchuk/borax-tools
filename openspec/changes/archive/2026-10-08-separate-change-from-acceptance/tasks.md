@@ -114,7 +114,7 @@ audits every edit to an existing test.
 
 ## 1. History entries name their item
 
-- [ ] 1.1 Red, in `crates/borax-core/tests/library.rs`. Edit (a) the
+- [x] 1.1 Red, in `crates/borax-core/tests/library.rs`. Edit (a) the
       `hash_entry` helper to take `item: None`. New tests:
       - `hash_entry_item_round_trips_through_toml`: a record whose entry
         names an item reads back with that item.
@@ -149,7 +149,7 @@ audits every edit to an existing test.
 
 ## 2. Identifier comparison and the gate
 
-- [ ] 2.1 Red, in `crates/borax/tests/library.rs`:
+- [x] 2.1 Red, in `crates/borax/tests/library.rs`:
       - `carries_a_doi_the_item_record_holds`.
       - `carries_compares_only_the_field_of_the_identifiers_own_kind`: a
         record whose DOI field holds a value does not carry an arXiv
@@ -177,7 +177,7 @@ audits every edit to an existing test.
 
 ## 3. The event vocabulary
 
-- [ ] 3.1 Red, in `crates/borax/tests/event.rs`. Extend `all_events`
+- [x] 3.1 Red, in `crates/borax/tests/event.rs`. Extend `all_events`
       with:
       - a `changed` repair of each basis;
       - a `pending` repair with and without an item;
@@ -236,7 +236,7 @@ audits every edit to an existing test.
 
 ## 4. Reconciliation
 
-- [ ] 4.1 Red, in `crates/borax/tests/library.rs`. These are the D13
+- [x] 4.1 Red, in `crates/borax/tests/library.rs`. These are the D13
       edits:
       - (a) every `reconcile(root, …)` call goes through the new
         helper;
@@ -309,7 +309,7 @@ audits every edit to an existing test.
 
 ## 5. Resolution from the library
 
-- [ ] 5.1 Red, in `crates/borax/tests/library.rs`. Edit
+- [x] 5.1 Red, in `crates/borax/tests/library.rs`. Edit
       `consult_reports_tracked_for_a_rollback_to_an_older_history_entry_interim_policy`'s
       docstring and message only (D13). New tests:
       - `consult_answers_restored_bytes_with_the_item_their_entry_names`.
@@ -358,7 +358,7 @@ audits every edit to an existing test.
 
 ## 6. Admission
 
-- [ ] 6.1 Red, in `crates/borax/tests/library.rs`:
+- [x] 6.1 Red, in `crates/borax/tests/library.rs`:
       - `admit_mints_a_record_whose_entry_names_its_item`.
       - `admit_of_bytes_already_held_appends_nothing`: the history is
         `[A, B]`, the file holds A, and the run is ordinary. The history
@@ -420,7 +420,7 @@ audits every edit to an existing test.
 
 ## 7. The applying rename
 
-- [ ] 7.1 Red, in `crates/borax/tests/dispatch.rs`, all through
+- [x] 7.1 Red, in `crates/borax/tests/dispatch.rs`, all through
       `events_for` or `dispatch`. Edit (b)
       `no_record_refuses_a_move_when_the_edit_in_place_hash_is_stale`
       and (b)
@@ -498,7 +498,7 @@ audits every edit to an existing test.
 
 ## 8. The reconcile command
 
-- [ ] 8.1 Red, in `crates/borax/tests/cli.rs`:
+- [x] 8.1 Red, in `crates/borax/tests/cli.rs`:
       - (c) delete `reconcile_refuses_page_limit_as_an_unknown_argument`.
       - `reconcile_accepts_page_limit`.
       - `reconcile_accept_is_repeatable_and_keeps_the_order_given`.
@@ -508,7 +508,7 @@ audits every edit to an existing test.
       In `crates/borax/tests/config.rs`:
       - `accept_is_not_a_configuration_key`: config load fails naming
         it.
-- [ ] 8.2 Red, in `crates/borax/tests/dispatch.rs`. Make the D13 edits:
+- [x] 8.2 Red, in `crates/borax/tests/dispatch.rs`. Make the D13 edits:
       - (b) `reconcile_rehash_flag_reaches_the_library`;
       - (b) the human totals line near line 14403;
       - (a) the `LibraryReconciled` literals;
@@ -536,7 +536,7 @@ audits every edit to an existing test.
 
 ## 9. Validation
 
-- [ ] 9.1 Red, in `crates/borax/tests/library.rs`:
+- [x] 9.1 Red, in `crates/borax/tests/library.rs`:
       - `validate_reports_no_finding_for_an_entry_naming_no_item`.
       - `validate_reports_no_finding_for_an_entry_naming_an_item_the_library_does_not_hold`.
       - `validate_reports_a_record_whose_entry_item_is_not_a_canonical_uuid_as_unreadable`.
@@ -549,7 +549,7 @@ audits every edit to an existing test.
 - [x] 10.1 Audit every edit to a pre-existing test against the
       preamble's rules and D13. Report any test that needed anything
       else.
-- [ ] 10.2 Run `cargo test --workspace`, `cargo clippy --workspace
+- [x] 10.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`.
 - [x] 10.3 Search `crates/borax/src/` and `crates/borax-core/src/` for
       what this change makes false. Each search must find nothing, or a
@@ -574,7 +574,7 @@ audits every edit to an existing test.
 
 ## 11. Documents and state
 
-- [ ] 11.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
+- [x] 11.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
       (Org, for CLI users). This is not the implementer's. Keep every
       existing example name. Sources: this change's design.md (D1–D7,
       D9, D10 and the illustrative lines), proposal.md, and the
@@ -605,7 +605,7 @@ audits every edit to an existing test.
           `pending` and `separated`;
         - the `skipped` reasons gain `not-pending`;
         - the jq example for reconcile may add `.pending`.
-- [ ] 11.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
+- [x] 11.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
       (Markdown, Keep a Changelog). Write the Unreleased entry from
       proposal.md and design.md. It covers:
       - the gate;
@@ -614,7 +614,7 @@ audits every edit to an existing test.
       - entries' `item`;
       - the restored-bytes fix;
       - the additions to schema 4, with the version unchanged.
-- [ ] 11.3 Orchestrator: read both diffs against the sources, for
+- [x] 11.3 Orchestrator: read both diffs against the sources, for
       anything invented and for anything dropped from the old text.
       Check the `#+AI_PASS` line the doc writer adds. Answer or remove
       every `TODO(docs)`.
