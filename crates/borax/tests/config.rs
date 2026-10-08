@@ -357,6 +357,21 @@ fn layer_from_toml_rejects_rehash_as_an_unknown_key() {
     }
 }
 
+/// design D4: `--accept` is a selector, like `--identify` and
+/// `--rehash`, not a configurable setting.
+#[test]
+fn accept_is_not_a_configuration_key() {
+    let err = layer_from_toml("accept = [\"a.pdf\"]", Path::new("/accept.toml")).unwrap_err();
+
+    match err {
+        ConfigError::Unreadable { message, .. } => {
+            assert!(message.contains("accept"), "got {message:?}");
+            assert!(message.contains("unknown field"), "got {message:?}");
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
 /// A typo of one of the two keys this change adds is still an unknown
 /// key, the same as any other misspelled setting.
 #[test]

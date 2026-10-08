@@ -1829,6 +1829,7 @@ fn tracked_answer() -> LibraryAnswer {
     LibraryAnswer::Tracked {
         artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
         item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
+        accepted_under: None,
     }
 }
 
@@ -1836,7 +1837,7 @@ fn tracked_answer() -> LibraryAnswer {
 /// the shape of the resolved event a library answer actually produces:
 /// `tier: "library"`, `cached: false`, `claims: []`.
 fn library_resolved_event(fixture: &Fixture, answer: LibraryAnswer) -> Event {
-    let LibraryAnswer::Tracked { artifact, item } = &answer else {
+    let LibraryAnswer::Tracked { artifact, item, .. } = &answer else {
         unreachable!("library_resolved_event is only called with a Tracked answer")
     };
     let not_attempted = || "library-answered".to_string();

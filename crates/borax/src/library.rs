@@ -23,7 +23,7 @@ use std::path::{Components, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use borax_core::content::ContentHash;
-use borax_core::identifier::Identifier;
+use borax_core::identifier::{Identifier, supplied};
 use borax_core::library::{
     ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, RunId, is_library_relative,
     is_well_formed_hash, name_uuid,
@@ -36,8 +36,8 @@ use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
 use crate::event::{
-    Admission, Adoption, Condition, Diagnostic, Event, Extraction, Finding, Level, LibraryAnswer,
-    Repair,
+    AcceptedBy, AcceptedItemCause, Admission, Adoption, Condition, Diagnostic, Event, Extraction,
+    Finding, Level, LibraryAnswer, Repair,
 };
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
@@ -344,6 +344,62 @@ fn identifier_of(record: &Record, wanted: &Identifier) -> Option<Identifier> {
     }
 }
 
+/// Whether `record` carries `identifier`: the field of `identifier`'s
+/// own kind holds an identifier equal to it.
+///
+/// Both sides are in the parser's normal form, so a DOI compares
+/// lowercased and without its resolver prefix, a PMID as an integer,
+/// and an ISBN compact. An arXiv identifier is compared without its
+/// version, since the record holds the version newest when it was
+/// looked up and a file holds its own. An ISBN-10 and an ISBN-13 are
+/// never taken for each other.
+pub fn carries(record: &Record, identifier: &Identifier) -> bool {
+    match (identifier, identifier_of(record, identifier)) {
+        (Identifier::Arxiv(wanted), Some(Identifier::Arxiv(held))) => wanted.id() == held.id(),
+        (_, held) => held.as_ref() == Some(identifier),
+    }
+}
+
+/// The identifier an [`Extraction::Found`] names, read back from the
+/// text it carries; `None` for every failure, and for text no
+/// identifier parses from.
+pub fn extracted_identifier(extraction: &Extraction) -> Option<Identifier> {
+    match extraction {
+        Extraction::Found { identifier, .. } => supplied(identifier).ok(),
+        _ => None,
+    }
+}
+
+/// What the changed bytes at `held`'s path are accepted on, or `None`
+/// when they are not accepted.
+///
+/// [`AcceptedBy::Extracted`] when the item `held` links carries
+/// `extracted`, the identifier extraction found in the bytes; else
+/// [`AcceptedBy::Supplied`] when it carries `supplied`, the identifier
+/// the operator supplied for the file. The linked item is the one
+/// exactly one item of `items` carries: a record linking no item, or
+/// an item no item or several items carry, carries nothing, so nothing
+/// is accepted on its strength.
+pub fn accepted_by(
+    items: &ItemStore,
+    held: &ArtifactRecord,
+    extracted: Option<&Identifier>,
+    supplied: Option<&Identifier>,
+) -> Option<AcceptedBy> {
+    let link = held.item.as_ref()?;
+    let [(_, item)] = items.carrying(link).as_slice() else {
+        return None;
+    };
+    let carried = |identifier: Option<&Identifier>| {
+        identifier
+            .filter(|identifier| carries(&item.record, identifier))
+            .map(|identifier| identifier.to_string())
+    };
+    carried(extracted)
+        .map(|identifier| AcceptedBy::Extracted { identifier })
+        .or_else(|| carried(supplied).map(|identifier| AcceptedBy::Supplied { identifier }))
+}
+
 /// A library's items, as read.
 ///
 /// Every `.toml` file directly under the library's [`ITEM_STORE`] that
@@ -452,6 +508,16 @@ impl ItemStore {
     /// Every item read, in the order they were read.
     pub fn iter(&self) -> impl Iterator<Item = &Item> {
         self.entries.iter().map(|(_, item)| item)
+    }
+
+    /// Every item of identity `id`, each beside the file it came from
+    /// (`None` for an item a preview learned it would mint), in the
+    /// order they were read.
+    fn carrying(&self, id: &ItemId) -> Vec<&(Option<PathBuf>, Item)> {
+        self.entries
+            .iter()
+            .filter(|(_, held)| &held.id == id)
+            .collect()
     }
 
     /// Every item read, each beside the file it came from, in the order
@@ -652,7 +718,8 @@ impl Account<'_> {
     ///
     /// The one record neither check may report, since it records the
     /// file rather than another copy of it — and, through its item
-    /// link, the one item the work check may not report either.
+    /// link and the item it answers with for the file's bytes, the
+    /// items the work check may not report either.
     pub fn own_record(&self, incoming: &Path) -> Option<&ArtifactRecord> {
         self.records
             .iter()
@@ -714,23 +781,35 @@ impl Account<'_> {
     /// passed over, and so is that record itself. Without the first
     /// rule every artifact of a multi-artifact item would meet its
     /// siblings as a duplicate of the item it belongs to, on every
-    /// run, and a batch run would skip each of them.
+    /// run, and a batch run would skip each of them. With `hash`, the
+    /// incoming file's content hash, the item that record answers with
+    /// for those bytes ([`ArtifactRecord::item_for`]) is passed over
+    /// too: an earlier version restored at its path is that item's
+    /// file. With `None`, only the link is.
+    ///
+    /// The artifacts an item has are the records linked to it, whatever
+    /// bytes their files now hold, so a recorded path holding a
+    /// restored version that answers with another item is still one of
+    /// its link's artifacts.
     ///
     /// Answerable only once a record is in hand, which is the earliest
     /// a second PDF of one paper can be recognised at all.
     pub fn work_duplicate(
         &self,
         incoming: &Path,
+        hash: Option<&ContentHash>,
         identifiers: &[Identifier],
     ) -> Option<WorkDuplicate> {
-        let own = self
-            .own_record(incoming)
-            .and_then(|record| record.item.clone());
+        let own = self.own_record(incoming);
+        let link = own.and_then(|record| record.item.as_ref());
+        let answered = own
+            .zip(hash)
+            .and_then(|(record, hash)| record.item_for(hash));
         identifiers.iter().find_map(|identifier| {
             self.items
                 .iter()
                 .filter(|item| identifier_of(&item.record, identifier).as_ref() == Some(identifier))
-                .filter(|item| own.as_ref() != Some(&item.id))
+                .filter(|item| link != Some(&item.id) && answered != Some(&item.id))
                 .find_map(|item| self.second_artifact_of(item, incoming))
         })
     }
@@ -833,7 +912,18 @@ impl Stores {
     ///    could not be read, and [`LibraryAnswer::DanglingItem`]
     ///    otherwise.
     /// 7. Several item files carry it: [`LibraryAnswer::AmbiguousItem`].
-    /// 8. Exactly one does: [`LibraryAnswer::Tracked`], with that item.
+    /// 8. Exactly one does, and the item the record answers with for
+    ///    `hash` ([`ArtifactRecord::item_for`]) is the link:
+    ///    [`LibraryAnswer::Tracked`], with that item.
+    /// 9. It answers with another item, which the bytes were accepted
+    ///    under: [`LibraryAnswer::Tracked`] naming it as
+    ///    `accepted_under`, with that item, when exactly one item file
+    ///    carries it, and [`LibraryAnswer::AcceptedItemUnavailable`]
+    ///    otherwise.
+    ///
+    /// Steps 5 to 7 are about the link whichever entry of the history
+    /// the file's bytes are, so a damaged link is reported as damaged
+    /// even where an earlier entry's item could have answered.
     ///
     /// Reads nothing from disk beyond what [`excludes`] asks about
     /// nested libraries: the answer is the stores as they were read.
@@ -888,35 +978,76 @@ impl Stores {
         };
         let item = linked.to_string();
 
-        let carrying: Vec<&(Option<PathBuf>, Item)> = self
-            .items
-            .entries
-            .iter()
-            .filter(|(_, held)| &held.id == linked)
-            .collect();
-        match carrying.as_slice() {
-            [] => answer(match self.item_fault(linked) {
-                Some(fault) => LibraryAnswer::UnreadableItem {
+        let files = |several: &[&(Option<PathBuf>, Item)]| -> Vec<PathBuf> {
+            several
+                .iter()
+                .filter_map(|(file, _)| file.clone())
+                .collect()
+        };
+
+        let held = match self.items.carrying(linked).as_slice() {
+            [] => {
+                return answer(match self.item_fault(linked) {
+                    Some(fault) => LibraryAnswer::UnreadableItem {
+                        artifact,
+                        item,
+                        path: fault.path.clone(),
+                        message: fault.message.clone(),
+                    },
+                    None => LibraryAnswer::DanglingItem { artifact, item },
+                });
+            }
+            [(_, held)] => held.clone(),
+            several => {
+                return answer(LibraryAnswer::AmbiguousItem {
                     artifact,
                     item,
+                    files: files(several),
+                });
+            }
+        };
+        let accepted = match record.item_for(hash) {
+            Some(accepted) if accepted != linked => accepted,
+            _ => {
+                return Some(Consulted {
+                    answer: LibraryAnswer::Tracked {
+                        artifact,
+                        item,
+                        accepted_under: None,
+                    },
+                    item: Some(held),
+                });
+            }
+        };
+        let accepted_under = accepted.to_string();
+        let cause = match self.items.carrying(accepted).as_slice() {
+            [(_, held)] => {
+                return Some(Consulted {
+                    answer: LibraryAnswer::Tracked {
+                        artifact,
+                        item,
+                        accepted_under: Some(accepted_under),
+                    },
+                    item: Some(held.clone()),
+                });
+            }
+            [] => match self.item_fault(accepted) {
+                Some(fault) => AcceptedItemCause::Unreadable {
                     path: fault.path.clone(),
                     message: fault.message.clone(),
                 },
-                None => LibraryAnswer::DanglingItem { artifact, item },
-            }),
-            [(_, held)] => Some(Consulted {
-                answer: LibraryAnswer::Tracked { artifact, item },
-                item: Some(held.clone()),
-            }),
-            several => answer(LibraryAnswer::AmbiguousItem {
-                artifact,
-                item,
-                files: several
-                    .iter()
-                    .filter_map(|(file, _)| file.clone())
-                    .collect(),
-            }),
-        }
+                None => AcceptedItemCause::Dangling,
+            },
+            several => AcceptedItemCause::Ambiguous {
+                files: files(several),
+            },
+        };
+        answer(LibraryAnswer::AcceptedItemUnavailable {
+            artifact,
+            item,
+            accepted_under,
+            cause,
+        })
     }
 
     /// Whether the file at `path` is one [`Stores::consult`] answers
@@ -976,10 +1107,10 @@ impl Stores {
     ///
     /// The artifact record of identity `admitted.artifact` names
     /// `admitting.path`, links to `admitted.item`, and holds
-    /// `admitting.hash` as its newest hash, on top of the history
-    /// `admitting.held` had: it replaces the record of that identity
-    /// wherever it stood, which is what finds a moved artifact at its
-    /// new path and no longer at its old one. An item the stores do not
+    /// `admitting.hash` in its history, appended on top of the history
+    /// `admitting.held` had on [`admit`]'s terms: it replaces the record
+    /// of that identity wherever it stood, which is what finds a moved
+    /// artifact at its new path and no longer at its old one. An item the stores do not
     /// hold is taken as the one `admit` minted, carrying
     /// `admitting.record` and held in the file `admit` named for it.
     ///
@@ -1068,17 +1199,11 @@ impl Stores {
             modified_millis: 0,
             history: Vec::new(),
         });
+        let link_as_read = record.item.clone();
         record.id = admitted.artifact.clone();
         record.item = Some(admitted.item.clone());
         record.path = relative;
-        if record.current_hash() != Some(admitting.hash) {
-            record.history.push(HashEntry {
-                hash: admitting.hash.clone(),
-                run: admitting.run.clone(),
-                timestamp: admitting.timestamp.to_string(),
-                tool_version: admitting.tool_version.to_string(),
-            });
-        }
+        settle_history(&mut record, admitting, link_as_read.as_ref());
 
         match self
             .records
@@ -1099,12 +1224,49 @@ impl Stores {
     }
 }
 
+/// Append `admitting.hash` to `record`'s history where the admission
+/// decides something about those bytes, after `record`'s link has been
+/// set to the item it links once the admission is made.
+///
+/// `link_as_read` is the link the record carried as it was read,
+/// before the admission assigned one. Bytes the history already holds
+/// are appended only when the admission decided which item they belong
+/// to, and they do not already answer with it as the newest entry: a
+/// re-identification of restored bytes, or a record that linked no
+/// item gaining one. Bytes the history does not hold are always
+/// appended, the caller having accepted them. The entry names the
+/// record's link, and [`ArtifactRecord::append`] restates the newest
+/// bytes first where the link as read was corrected by hand.
+fn settle_history(
+    record: &mut ArtifactRecord,
+    admitting: &Admitting<'_>,
+    link_as_read: Option<&ItemId>,
+) {
+    let held = record.holds(admitting.hash);
+    let decided = admitting.reidentified || link_as_read.is_none();
+    let answered = record.current_hash() == Some(admitting.hash)
+        && record.item_for(admitting.hash) == record.item.as_ref();
+    if held && (!decided || answered) {
+        return;
+    }
+    let entry = HashEntry {
+        hash: admitting.hash.clone(),
+        run: admitting.run.clone(),
+        timestamp: admitting.timestamp.to_string(),
+        tool_version: admitting.tool_version.to_string(),
+        item: record.item.clone(),
+    };
+    record.append(entry, link_as_read);
+}
+
 /// What a library said about one file, and the item it answered with.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Consulted {
     pub answer: LibraryAnswer,
     /// The item answered with: `Some` exactly when `answer` is
-    /// [`LibraryAnswer::Tracked`].
+    /// [`LibraryAnswer::Tracked`]. That is the item named as its
+    /// `accepted_under` when it names one, and the linked item
+    /// otherwise.
     pub item: Option<Item>,
 }
 
@@ -1650,12 +1812,16 @@ fn describes(record: &ArtifactRecord, path: &Path) -> bool {
 }
 
 /// `entry` as the table an artifact record writes a history entry as.
+/// An entry naming no item is written with no `item` key.
 fn history_table(entry: &HashEntry) -> Table {
     let mut table = Table::new();
     table["hash"] = value(entry.hash.as_str());
     table["run"] = value(entry.run.as_str());
     table["timestamp"] = value(entry.timestamp.as_str());
     table["tool_version"] = value(entry.tool_version.as_str());
+    if let Some(item) = &entry.item {
+        table["item"] = value(item.to_string());
+    }
     table
 }
 
@@ -1810,11 +1976,44 @@ enum Decided {
     Confirmed { refreshed: bool },
     /// The artifact was found at this library-relative path.
     Repaired { to: String },
-    /// The artifact at the record's own path was edited since borax
-    /// last saw it, and now hashes to this.
-    Changed { hash: ContentHash },
+    /// The artifact at the record's own path changed since borax last
+    /// saw it, now hashes to `hash`, and was accepted on `accepted`.
+    Changed {
+        hash: ContentHash,
+        accepted: AcceptedBy,
+    },
+    /// The artifact at the record's own path changed since borax last
+    /// saw it, now hashes to `hash`, and was not accepted: extraction
+    /// made `extraction` of it.
+    Pending {
+        hash: ContentHash,
+        extraction: Extraction,
+    },
     /// Nothing was decided.
     Unresolved,
+}
+
+/// How one reconcile is to run: what it hashes regardless, what the
+/// operator accepts, how it reads a document, and what it stamps an
+/// entry with.
+pub struct Reconciling<'a> {
+    /// Whether to hash every record's file whatever the fast path says.
+    pub rehash: bool,
+    /// The `--accept` paths, as given: each taken as every path
+    /// argument is, made absolute against the working directory and
+    /// normalised lexically. A record whose last-known path is one of
+    /// them is hashed whatever the fast path says, and its pending
+    /// change is accepted.
+    pub accept: &'a [PathBuf],
+    /// What extraction makes of the file at a full path. Asked only
+    /// about a file whose bytes changed at a recorded path.
+    pub extract: &'a dyn Fn(&Path) -> Extraction,
+    /// The run an appended entry is stamped with.
+    pub run: RunId,
+    /// The timestamp an appended entry is stamped with.
+    pub timestamp: &'a str,
+    /// The borax version an appended entry is stamped with.
+    pub tool_version: &'a str,
 }
 
 /// What a reconcile made of a library.
@@ -1838,8 +2037,15 @@ pub struct Reconciliation {
     /// by the fast path, or by a hash in the record's own history after
     /// the fast path missed.
     pub confirmed: usize,
+    /// Records whose change is pending: one [`Repair::Pending`] each in
+    /// `repairs`.
+    pub pending: usize,
     /// How many artifacts the run hashed.
     pub hashed: usize,
+    /// The `--accept` paths, as given and in the order given, at which
+    /// no change was pending to accept: each one the run reports as a
+    /// `not-pending` skip. A path given twice is listed once.
+    pub not_pending: Vec<PathBuf>,
 }
 
 /// Reconcile the library rooted at `root`, writing what it repairs.
@@ -1847,9 +2053,11 @@ pub struct Reconciliation {
 /// Brings each artifact record's last-known path back into agreement
 /// with the tree. Every record is compared against the file it names by
 /// size and modification time first, and only what that comparison
-/// leaves unsettled is hashed; `rehash` skips the comparison and hashes
-/// regardless, which is what finds a change made within the granularity
-/// a recorded modification time keeps.
+/// leaves unsettled is hashed; [`Reconciling::rehash`] skips the
+/// comparison and hashes regardless, which is what finds a change made
+/// within the granularity a recorded modification time keeps. A record
+/// whose last-known path is named in [`Reconciling::accept`] is hashed
+/// regardless too.
 ///
 /// Records are resolved in four steps, each run to completion across
 /// every record before the next begins:
@@ -1862,11 +2070,17 @@ pub struct Reconciliation {
 ///    match on the record's current hash preferred over one on an
 ///    earlier hash. A record with exactly one candidate that no other
 ///    record also wants has its path repaired and claims that artifact.
-/// 3. **Edited in place.** A record still unresolved whose last-known
-///    path holds an unclaimed artifact matching no record's history is
-///    that artifact edited since borax last saw it: the file's hash is
-///    appended after the hashes already recorded, and it claims that
-///    artifact.
+/// 3. **Changed in place.** A record still unresolved whose last-known
+///    path holds an unclaimed artifact matching no record's history has
+///    changed since borax last saw it, and claims that artifact whatever
+///    is decided about the change. Extraction is asked about the file:
+///    the change is accepted when the identifier it finds is one the
+///    record's linked item carries ([`accepted_by`]), or else when the
+///    operator named the path, and its hash is then appended after the
+///    hashes already recorded, naming the record's link. Otherwise the
+///    change is pending and nothing is written for the record, its size
+///    and modification time included, so the next reconcile meets it
+///    again.
 /// 4. **Unresolved.** Everything still unresolved is left exactly as it
 ///    is, and reported: [`Repair::Ambiguous`] naming its candidates
 ///    when it matched any, and [`Repair::Missing`] when it matched
@@ -1876,7 +2090,8 @@ pub struct Reconciliation {
 /// in the library competing for a record whose own file is fine. Step 2
 /// before step 3 is what makes a swap work: two files that traded paths
 /// each match the *other* record's history, so both repair in step 2
-/// rather than each being read as the other's artifact edited in place.
+/// rather than each being read as the other's artifact changed in place,
+/// and neither file is opened for extraction.
 ///
 /// Every step reaches the library's own artifacts alone — neither the
 /// item store, nor the state directory, nor a nested library can supply
@@ -1887,7 +2102,7 @@ pub struct Reconciliation {
 /// reconcile that confirmed itself from one would be resting on a file
 /// nothing else in the library can see.
 ///
-/// A record this run confirmed, repaired or appended to is written
+/// A record this run confirmed, repaired or accepted a change of is written
 /// with the file's current size and modification time, so those fields
 /// describe the file as borax last saw it and the next pass settles it
 /// on the fast path rather than hashing it again. A record the fast
@@ -1898,17 +2113,24 @@ pub struct Reconciliation {
 /// — `borax adopt` is what records what is on disk — and a record whose
 /// artifact is gone keeps its path and says so.
 ///
-/// `run`, `timestamp` and `tool_version` stamp a hash appended by step
-/// 3; a run that appends nothing uses none of them. Never fails: a
+/// Each `--accept` path that came to no accepted change — no record
+/// names it, it is outside the library or excluded, its record was
+/// repaired elsewhere or is ambiguous or missing, or its file belongs to
+/// another record's history — is listed in
+/// [`Reconciliation::not_pending`]. A named path whose record was
+/// confirmed needs nothing and is not listed.
+///
+/// The item store is read once, and only for the gate. Never fails: a
 /// record whose repair cannot be written is reported as
 /// [`Repair::Unwritten`] and left as it was.
-pub fn reconcile(
-    root: &Path,
-    rehash: bool,
-    run: RunId,
-    timestamp: &str,
-    tool_version: &str,
-) -> Reconciliation {
+pub fn reconcile(root: &Path, reconciling: &Reconciling<'_>) -> Reconciliation {
+    let rehash = reconciling.rehash;
+    let accepted = accepted_paths(root, reconciling.accept);
+    let named = |relative: &str| {
+        accepted
+            .iter()
+            .any(|(_, named)| named.as_deref() == Some(relative))
+    };
     let artifacts: Vec<String> = walk(root)
         .0
         .iter()
@@ -1935,7 +2157,8 @@ pub fn reconcile(
         if excludes(root, &relative_to(root, &record.path)) {
             continue;
         }
-        if !rehash && describes(record, &relative_to(root, &record.path)) {
+        let described = describes(record, &relative_to(root, &record.path));
+        if !rehash && described && !named(&record.path) {
             outcomes[index] = Decided::Confirmed { refreshed: false };
             claimed.insert(record.path.clone());
             continue;
@@ -1944,7 +2167,9 @@ pub fn reconcile(
             .of(root, &record.path)
             .is_some_and(|hash| record.holds(&hash))
         {
-            outcomes[index] = Decided::Confirmed { refreshed: true };
+            outcomes[index] = Decided::Confirmed {
+                refreshed: !described,
+            };
             claimed.insert(record.path.clone());
         }
     }
@@ -2000,7 +2225,9 @@ pub fn reconcile(
     }
 
     // Step 3. A record whose own path holds an unclaimed artifact that
-    // matched nothing is that artifact edited in place.
+    // matched nothing has changed in place: accepted on the identifier
+    // extraction finds, or on the operator's word, or left pending.
+    let mut items: Option<ItemStore> = None;
     for index in 0..records.len() {
         if outcomes[index] != Decided::Unresolved {
             continue;
@@ -2015,8 +2242,23 @@ pub fn reconcile(
         if records.iter().any(|(_, other)| other.holds(&hash)) {
             continue;
         }
+        let extraction = (reconciling.extract)(&relative_to(root, &relative));
+        let items = items.get_or_insert_with(|| ItemStore::read(root));
+        let gate = accepted_by(
+            items,
+            &records[index].1,
+            extracted_identifier(&extraction).as_ref(),
+            None,
+        );
+        outcomes[index] = match gate {
+            Some(accepted) => Decided::Changed { hash, accepted },
+            None if named(&relative) => Decided::Changed {
+                hash,
+                accepted: AcceptedBy::Operator,
+            },
+            None => Decided::Pending { hash, extraction },
+        };
         claimed.insert(relative);
-        outcomes[index] = Decided::Changed { hash };
     }
 
     // Step 4, and the writing of everything the three before decided.
@@ -2025,7 +2267,9 @@ pub fn reconcile(
         repairs: Vec::new(),
         records: records.len(),
         confirmed: 0,
+        pending: 0,
         hashed: 0,
+        not_pending: Vec::new(),
     };
     for (index, (file, original)) in records.iter().enumerate() {
         let mut record = original.clone();
@@ -2046,18 +2290,33 @@ pub fn reconcile(
                 };
                 (to.clone(), Some(repair))
             }
-            Decided::Changed { hash } => {
-                record.history.push(HashEntry {
+            Decided::Changed { hash, accepted } => {
+                let entry = HashEntry {
                     hash: hash.clone(),
-                    run: run.clone(),
-                    timestamp: timestamp.to_string(),
-                    tool_version: tool_version.to_string(),
-                });
+                    run: reconciling.run.clone(),
+                    timestamp: reconciling.timestamp.to_string(),
+                    tool_version: reconciling.tool_version.to_string(),
+                    item: original.item.clone(),
+                };
+                record.append(entry, original.item.as_ref());
                 refresh(root, &mut record);
                 let repair = Repair::Changed {
                     hash: hash.to_string(),
+                    accepted: accepted.clone(),
                 };
                 (original.path.clone(), Some(repair))
+            }
+            Decided::Pending { hash, extraction } => {
+                reconciliation.pending += 1;
+                let repair = Repair::Pending {
+                    hash: hash.to_string(),
+                    item: original.item.as_ref().map(ItemId::to_string),
+                    extraction: extraction.clone(),
+                };
+                reconciliation
+                    .repairs
+                    .push((original.id.clone(), original.path.clone(), repair));
+                continue;
             }
             Decided::Unresolved => {
                 let candidates = wanted[index].clone();
@@ -2090,8 +2349,41 @@ pub fn reconcile(
         }
     }
 
+    // A named path is settled when a record naming it was confirmed or
+    // had its change accepted; every other one held nothing pending.
+    let settled = |relative: &str| {
+        records.iter().zip(&outcomes).any(|((_, record), outcome)| {
+            record.path == relative
+                && matches!(outcome, Decided::Confirmed { .. } | Decided::Changed { .. })
+        })
+    };
+    reconciliation.not_pending = accepted
+        .into_iter()
+        .filter(|(_, named)| !named.as_deref().is_some_and(&settled))
+        .map(|(given, _)| given)
+        .collect();
     reconciliation.hashed = hashes.hashed;
     reconciliation
+}
+
+/// The `--accept` paths `given`, each beside the library-relative path
+/// it names under `root`, in the order given and with a path named
+/// twice kept once.
+///
+/// A path is normalised as every path argument is, absolute against the
+/// working directory and lexically, so two spellings of one file are one
+/// path. The relative path is `None` for a path outside the library or
+/// in a subtree it excludes, which names no record of it.
+fn accepted_paths(root: &Path, given: &[PathBuf]) -> Vec<(PathBuf, Option<String>)> {
+    let mut seen = BTreeSet::new();
+    given
+        .iter()
+        .filter(|path| seen.insert(lexical(path).unwrap_or_else(|| path.to_path_buf())))
+        .map(|path| {
+            let relative = library_relative(root, path).filter(|_| !excludes(root, path));
+            (path.clone(), relative)
+        })
+        .collect()
 }
 
 /// The events reporting `reconciliation`: one per record it has
@@ -2126,6 +2418,7 @@ pub fn reconciliation_events(reconciliation: &Reconciliation) -> Vec<Event> {
         confirmed: reconciliation.confirmed,
         repaired: count(&|repair| matches!(repair, Repair::Repaired { .. })),
         changed: count(&|repair| matches!(repair, Repair::Changed { .. })),
+        pending: count(&|repair| matches!(repair, Repair::Pending { .. })),
         ambiguous: count(&|repair| matches!(repair, Repair::Ambiguous { .. })),
         missing: count(&|repair| matches!(repair, Repair::Missing)),
         hashed: reconciliation.hashed,
@@ -2168,7 +2461,7 @@ pub fn recorded_at(root: &Path, path: &Path) -> Option<ArtifactRecord> {
 /// A record whose history does not hold it does not survive. After the
 /// move its path holds nothing, and reconciliation has no route left:
 /// the walk matches by hash and finds none of its hashes anywhere,
-/// and its edited-in-place step needs a file at the recorded path.
+/// and its changed-in-place step needs a file at the recorded path.
 ///
 /// The fast path is deliberately not consulted. It compares size and
 /// modification time, which a same-length in-place edit leaves alone,
@@ -2304,12 +2597,23 @@ pub struct Unrecorded {
 ///
 /// **What the artifact record says.** Its identity is the held
 /// record's, or one minted for a file that had none. Its path is
-/// `path` rendered library-relative, its size and modification time
-/// are the file's as it stands now, and the file's hash is appended to
-/// its history when that hash is not already the history's newest. So
-/// a record this touched describes the file it names: the next
-/// reconcile settles it on the fast path and hashes nothing, and the
-/// file's bytes appear in a record rather than in none.
+/// `path` rendered library-relative, and its size and modification
+/// time are the file's as it stands now, so the next reconcile settles
+/// it on the fast path and hashes nothing.
+///
+/// **Its history.** A minted record's one entry names the item it
+/// links. A held record whose history does not hold the file's hash
+/// has it appended, naming the item the record links afterwards: the
+/// caller passes such a record only for bytes it has accepted as that
+/// artifact, and passes no held record for bytes it separates from it.
+/// Bytes the history already holds are appended again only when the
+/// admission decides which item they belong to — a re-identification,
+/// or a record that linked no item gaining one — and they are not
+/// already the newest entry answering with that item; an ordinary
+/// re-run over restored bytes appends nothing, so they keep answering
+/// with the item they were accepted under. Before an entry for other
+/// bytes, [`ArtifactRecord::append`] restates the newest bytes under
+/// the link as it was read, where that link was corrected by hand.
 ///
 /// A minted record is written at
 /// [`STATE_DIR`]`/`[`ARTIFACT_STORE`]`/<artifact-uuid>.toml`, flat and
@@ -2370,6 +2674,7 @@ pub fn admit(
         run: admitting.run.clone(),
         timestamp: admitting.timestamp.to_string(),
         tool_version: admitting.tool_version.to_string(),
+        item: Some(item.clone()),
     };
 
     let Some(held) = admitting.held else {
@@ -2411,9 +2716,7 @@ pub fn admit(
     record.path = relative;
     record.size = size;
     record.modified_millis = modified_millis;
-    if record.current_hash() != Some(admitting.hash) {
-        record.history.push(entry);
-    }
+    settle_history(&mut record, admitting, held.item.as_ref());
     rewrite(&file, &record, write).map_err(|error| unrecorded(error.to_string()))?;
 
     Ok(Admitted {

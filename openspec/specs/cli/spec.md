@@ -399,15 +399,18 @@ skip-named pair, and `--apply`; `bib`
 accepts the resolution settings and the bibliography settings; `cache`
 accepts `--clear`; `status` accepts the extraction settings and
 `--identify`; `validate` accepts no setting of its own; `reconcile`
-accepts `--rehash`; `adopt` accepts no setting of its own, since it
+accepts the extraction settings, `--rehash` and `--accept`, since what
+it accepts as a changed artifact depends on what extraction reads;
+`adopt` accepts no setting of its own, since it
 queries nothing, opens no document and renames nothing. Every
 subcommand additionally accepts the run-log pair, which is decided at
 dispatch and is therefore operative on all of them.
 
-`--identify` and `--rehash` are per-invocation selectors rather than
-settings: each says what this run is being asked to do rather than how
-borax behaves, so neither is settable from configuration and neither
-takes a `--no-` form.
+`--identify`, `--rehash` and `--accept` are per-invocation selectors
+rather than settings: each says what this run is being asked to do
+rather than how borax behaves, so none is settable from configuration
+and none takes a `--no-` form. `--accept` names the paths whose pending
+changes this run accepts, and is given once per path.
 
 `config` accepts every configurable setting. Passing an override there
 is not a no-op but the question the command answers — what this
@@ -461,6 +464,18 @@ runs, since neither is an argument to an invocation.
 - **WHEN** a configuration file sets `identify = true`
 - **THEN** the run aborts at config load naming the unknown key, and
   `borax status --identify` is the accepted form
+
+#### Scenario: Reconcile reads documents as status does
+- **WHEN** `borax reconcile --page-limit 3` runs
+- **THEN** it is accepted, and the extraction it makes of a changed
+  artifact reads at most three pages
+
+#### Scenario: Accepting is a selector
+- **WHEN** a configuration file sets `accept`, and separately `borax
+  reconcile --no-accept` runs
+- **THEN** the first aborts at config load naming the unknown key, the
+  second is rejected as an unknown argument, and `borax reconcile
+  --accept a.pdf --accept b.pdf` is the accepted form
 
 ### Requirement: A question describes whichever verdict it is asking about
 A question put about a file SHALL be preceded by a description of the verdict the run is holding for it, whether that verdict is a resolution or a failure, and SHALL show only what that verdict's own event carries.

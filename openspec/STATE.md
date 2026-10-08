@@ -6,7 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-06, at 0.9.0.
+Last reviewed: 2026-10-07, at 0.9.0 with `separate-change-from-acceptance`
+implemented on its branch.
 
 ## What is built
 
@@ -309,11 +310,10 @@ so `validate` reports an unlistable one. Schema 3 is kept: the
 additions, and Phase 3 of the roadmap migrates them. Two restorations
 landed with it: override discovery climbs from a normalised start, and
 `library_relative` and `excludes` normalise both sides, so relative
-input spellings find and are admitted into their library. Still open,
-and handed to the roadmap's change 15: reconciliation and an applying
-rename append unrecognised bytes at a recorded path to its history,
-after which the item answers for them, and history entries record no
-item, so bytes restored after a re-link answer with the new item.
+input spellings find and are admitted into their library. The two
+items it left open for the roadmap's change 15 — unrecognised bytes at
+a recorded path appended to its history, and history entries recording
+no item — are closed by `separate-change-from-acceptance`, below.
 
 `report-extraction-per-file` is implemented on top, ships in 0.8.0,
 and opens Phase 2 of the roadmap. `status --identify` writes a
@@ -443,6 +443,48 @@ reads the current round alone. `FileRecord` gained `accepted`, set by
 `pipeline::accept`, and `Unattempted` gained `not-asked`,
 `not-supplied`, `unparsed` and `no-move`. A rejected candidate is
 still never written to the content index.
+
+`separate-change-from-acceptance` is implemented on top, as change 15
+and the first of Phase 4, and keeps schema 4. Bytes at a record's path
+that no record's history holds become its history only once accepted:
+automatically when the identifier extraction finds in them is one the
+record's linked item carries (`library::accepted_by`, comparing each
+kind with its own field, an arXiv identifier without its version, and
+an ISBN-10 never against an ISBN-13), by an identifier the operator
+supplied for the file in a rename, or by `borax reconcile --accept
+<path>`. Reconciliation's step 3 is "changed in place": it extracts
+only from a file that reaches it, under the run's extraction settings,
+which `reconcile` now takes (`--page-limit`), and a change it does not
+accept is a `pending` repair that writes nothing, size and
+modification time included, so every reconcile reports it again and
+`library-reconciled` counts it. An `--accept` path at which nothing was
+pending is a `skipped` event of reason `not-pending`, a partial
+success. An applying rename settles the gate before the move: accepted
+bytes are appended to the held record and reported `changed` (then
+`relinked` if the link moved); unaccepted bytes it moves are minted as
+a new artifact and reported `separated`, the old record left to become
+`missing`; unaccepted bytes left in place write nothing and are
+reported `pending`, whatever the hold. A preview foresees the same and
+treats every path it moves a file away from as holding nothing.
+`HashEntry` gained an optional `item`, written only when present, so a
+0.9.0 record reads and stays byte-identical until borax appends to it.
+`ArtifactRecord::item_for` gives the item a record answers with for
+given bytes: the link for the newest entry's, otherwise the item the
+newest entry holding them names, or the link when it names none.
+`ArtifactRecord::append` restates the newest bytes under the link as
+read before appending other bytes, where that link was corrected by
+hand, and `admit` and `Stores::take_in` append only for a decision: an
+ordinary admission of held bytes appends nothing, so restored bytes
+keep answering with the item they were accepted under.
+`Stores::consult` checks the link first, so every 0.9.0 answer keeps
+its kind, then answers `tracked` with `accepted_under`, or the new
+`accepted-item-unavailable`; `record_retrieval`'s `item` names the
+item whose record was returned. The work check passes over the item
+the own record answers with for the incoming bytes as well as its link.
+Neither `status` nor `validate` reports a pending change, and an
+entry's item is never a finding. A supplied identifier that leads to no
+move is set aside by the interactive driver, so a supplied identifier
+can accept or separate a file but never leave it pending in place.
 
 ## Not built yet
 

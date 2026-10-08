@@ -331,8 +331,9 @@ A file the run's library tracks SHALL resolve to the record of its library item,
 
 A file is tracked when, among the artifact records whose last-known
 path is the file's own path, exactly one holds the file's content hash
-anywhere in its hash history, and that record links to an item that
-exactly one item file of the library carries.
+anywhere in its hash history, that record links to an item that
+exactly one item file of the library carries, and the item it answers
+with for those bytes is carried by exactly one item file too.
 
 Paths SHALL be compared as the `ledger` capability's duplicate checks
 compare them: the library root and the file's path are both made
@@ -343,12 +344,31 @@ by a relative path, or by a spelling with `.` or `..` in it, SHALL be
 consulted exactly as its absolute spelling is.
 
 Any entry of the history SHALL count, not only the newest, so that an
-artifact restored to an earlier version still resolves from its item.
-This is an interim rule and not a statement that every entry was
-accepted as the work the record now links to: a history entry does not
-record which item the artifact was linked to when it was written, so
-bytes an artifact held before its record was re-linked to another item
-resolve from the item it links to now.
+artifact restored to an earlier version still resolves from an item.
+The item a record answers with for given bytes SHALL be the record's
+link when those bytes are the history's newest entry, and otherwise
+the item named by the newest entry holding them: the item those bytes
+were accepted under, which each history entry records as the `library`
+capability states. So bytes an artifact held before its record was
+re-linked to another item resolve from the item they were accepted
+under, and not from the item it links to now, while a link a person
+corrected in a text editor decides for the artifact's newest bytes.
+The `library` capability ties every change of a link to the bytes it
+applied to, so a link corrected while bytes were newest still answers
+for them once later bytes are accepted.
+
+The record's link SHALL still be checked first, and a problem with it
+reported as it always was. An answer through an earlier entry's item
+SHALL report the link as the answer's `item`, and the item answered
+with beside it, as "A resolution says whether its library answered"
+states.
+
+An entry that does not record which item the artifact was linked to
+when it was written, as no entry written before entries named items
+does, answers with the item the record links to now. That is the
+interim rule this requirement once stated for every entry, kept only
+where the history holds nothing better: it is not a statement that the
+entry was accepted as the work the record now links to.
 
 Both the path and the hash SHALL be required. A record naming the
 file's path whose history does not hold the file's bytes SHALL NOT
@@ -444,11 +464,53 @@ capability states.
 - **THEN** it resolves from its library item
 
 #### Scenario: Bytes from before a re-link
-- **WHEN** an artifact whose history holds the hash of work A's bytes
-  was re-linked to work B's item when the operator re-identified it,
-  and work A's bytes are restored at its path
-- **THEN** the file resolves from work B's item, which is the interim
-  rule this requirement states
+- **WHEN** an artifact whose history holds the hash of work A's bytes,
+  in an entry naming work A's item, was re-linked to work B's item when
+  the operator re-identified newer bytes as work B, and work A's bytes
+  are restored at its path
+- **THEN** the file resolves from work A's item, the item those bytes
+  were accepted under
+
+#### Scenario: Bytes recorded before entries named items
+- **WHEN** the same happens to an artifact whose entry for work A's
+  bytes was written by an earlier release and names no item
+- **THEN** the file resolves from work B's item, the item the record
+  links to now, which is all its history can say
+
+#### Scenario: A link corrected by hand
+- **WHEN** a tracked file holds its record's newest bytes, whose entry
+  names one item, and the record's link has since been edited in a
+  text editor to another item the library holds
+- **THEN** the file resolves from the item the link now names
+
+#### Scenario: A correction holds for the bytes it corrected
+- **WHEN** an operator re-identified a tracked file as work B in an
+  applying run, its record had earlier linked work A, and later bytes
+  have since been accepted, and the corrected bytes are restored at its
+  path
+- **THEN** the file resolves from work B's item
+
+#### Scenario: A hand correction holds for the bytes it corrected
+- **WHEN** a record's link was corrected in a text editor from work A's
+  item to work B's while bytes A were its newest, later bytes have
+  since been accepted under work B's item, and bytes A are restored at
+  its path
+- **THEN** the file resolves from work B's item
+
+#### Scenario: Re-identifying restored bytes leaves newer bytes alone
+- **WHEN** a record holds bytes A accepted under work X and newer bytes
+  B accepted under work Y, bytes A are restored and an operator
+  re-identifies them as work X in an applying run, and bytes B are then
+  restored
+- **THEN** the file resolves from work Y's item
+
+#### Scenario: An answer through an earlier entry names the link too
+- **WHEN** a file resolves from the item its bytes were accepted under,
+  which is not the record's link
+- **THEN** its `library` answer is `tracked` with the link as `item`
+  and the item answered with as `accepted_under`, and its
+  `record_retrieval` names the item answered with as the item its
+  record was retrieved from
 
 #### Scenario: A rename names the file from its item
 - **WHEN** `borax rename --apply` runs over a tracked file whose
@@ -484,7 +546,8 @@ as its own kind:
 
 - no record naming the path holds the file's content hash
   (`unrecognised-content`): the file was edited or replaced since the
-  library recorded it;
+  library recorded it, and no change to it has been accepted, which
+  includes a change pending acceptance;
 - more than one record naming the path holds that hash (`ambiguous`);
 - the one record that holds it links no item (`no-item`);
 - it links an item the library does not hold (`dangling-item`);
@@ -495,6 +558,13 @@ as its own kind:
   that could not be read SHALL NOT be taken to lack the item;
 - it links an identity that more than one item file carries
   (`ambiguous-item`), reported with those files;
+- its link is carried by exactly one item file, but the file's bytes
+  are an earlier entry of its history, accepted under another item, and
+  that item is not carried by exactly one readable item file
+  (`accepted-item-unavailable`), reported with the link, the item the
+  bytes were accepted under, and whether that item is missing,
+  unreadable (with the file or directory and the reason) or carried by
+  several files (with those files);
 - the file could not be hashed, so no record naming its path can be
   confirmed (`unhashable`);
 - no record the library could read names the file's path, but the
@@ -539,6 +609,28 @@ could not be listed or naming how many could not be read, and that
 - **THEN** the file resolves from the content index, and its `resolved`
   event reports a dangling item naming the artifact and the missing
   item, and its human line says the library could not answer and why
+
+#### Scenario: Restored bytes whose item is gone
+- **WHEN** a file's bytes are an earlier entry of its record's history,
+  naming an item whose file has since been deleted, while the record
+  links an item the library holds
+- **THEN** its event reports `accepted-item-unavailable` naming the
+  artifact, the record's link as `item`, and the deleted item as the
+  item the bytes were accepted under, with the cause `dangling`, and
+  the file resolves as untracked
+
+#### Scenario: A damaged link is reported as it always was
+- **WHEN** a file's bytes are an earlier entry naming an item the
+  library holds, while the record's link names an item whose file has
+  been deleted
+- **THEN** its event reports a dangling item naming the artifact and the
+  link, exactly as for the record's newest bytes
+
+#### Scenario: A pending change is unrecognised content
+- **WHEN** `borax reconcile` reported the change at a tracked file's
+  path as pending, and `borax resolve` runs on the file
+- **THEN** its event reports unrecognised content naming the artifact
+  recorded at that path, and the file resolves as untracked
 
 #### Scenario: Bytes the library has not recorded at a recorded path
 - **WHEN** another PDF has been copied over a tracked artifact at its
@@ -627,6 +719,22 @@ the artifact store could be `listed` and how many of its files were
 `unreadable`. Identities SHALL be written as the canonical UUID text a
 record stores.
 
+Every `item` above SHALL name the record's link, as it always has. When
+the item answered with is another item, because the file's bytes are an
+earlier entry accepted under it, `tracked` SHALL also carry that item
+as `accepted_under`. `accepted_under` is absent whenever the item
+answered with is the link, so an answer that release 0.9.0 could have
+given is written exactly as 0.9.0 wrote it. The new kind
+`accepted-item-unavailable` SHALL carry the `artifact`, the link as
+`item`, the item the bytes were accepted under as `accepted_under`, and
+a `cause`:
+- `dangling`, when no item file carries it;
+- `unreadable`, with the `path` and `message`, as for `unreadable-item`;
+- `ambiguous`, with the item `files` carrying it.
+
+The schema version does not change, because every key and kind here is
+an addition and no existing one changes meaning.
+
 What the library said SHALL reach every event that reports the file's
 resolution verdict, whichever way the run settled the file: a batch
 rename's skip, an interactive run's report after its operator's answer,
@@ -705,6 +813,24 @@ a library not asked SHALL leave the line as it was.
   supplies a different identifier and renames the file
 - **THEN** the file's `resolved` event reports `operator` as its
   lookup's origin and `tracked` as its library's answer
+
+#### Scenario: An answer through the link is written as before
+- **WHEN** a tracked file holds its record's newest bytes
+- **THEN** its `tracked` answer carries the `artifact` and the link as
+  `item`, with no `accepted_under`, and its `record_retrieval` names
+  the same artifact and item
+
+#### Scenario: An answer through an earlier entry's item
+- **WHEN** a tracked file's bytes are an earlier entry accepted under
+  work X's item, while the record links work Y's
+- **THEN** its `tracked` answer carries Y's identity as `item` and X's
+  as `accepted_under`, and its record is X's item's record
+
+#### Scenario: An earlier entry's item that cannot answer
+- **WHEN** that entry's item has since been deleted
+- **THEN** its answer is `accepted-item-unavailable` with Y as `item`, X
+  as `accepted_under` and the cause `dangling`, and its human line says
+  the library could not answer, naming the artifact and both items
 
 ### Requirement: A resolution keeps every service it asked, in order
 Resolution SHALL retain, for each identifier it looks up, every service it asked about that identifier, in the order it asked them, each with the outcome that service gave.
@@ -1330,6 +1456,14 @@ the current round only.
 ### Requirement: A resolution reports where its record was retrieved
 The `record_retrieval` section SHALL name where the record a resolution reached was retrieved from: `library` with the `artifact` and `item` identities, `content-index`, `service-cache` with the `service`, or `network` with the `service`.
 
+The `library` retrieval's `item` SHALL name the item whose record was
+returned, which is what this section has always attributed the record
+to. For a file whose bytes are an earlier entry accepted under another
+item, that is the item it was accepted under, not the record's link.
+The link is reported in the `library` section. No key is added here,
+and the field keeps its meaning, so the schema version does not
+change.
+
 On a conflict skip it SHALL name where the refused candidate was
 retrieved from. A record an operator reached by a lookup SHALL be
 reported as retrieved from the service, even where the library or the
@@ -1358,6 +1492,13 @@ though it were a service.
   renames it from the record Crossref holds
 - **THEN** its `record_retrieval` names Crossref, and its `library`
   section still reports the library's answer as `tracked`
+
+#### Scenario: A record retrieved through an earlier entry
+- **WHEN** a tracked file's bytes are an earlier entry accepted under
+  work X's item, while the record links work Y's
+- **THEN** `record_retrieval` is `library` naming the artifact and X as
+  `item`, while the `library` section's `tracked` answer names Y as
+  `item` and X as `accepted_under`
 
 ### Requirement: A resolution reports its title check and whether its record was accepted
 The `match_check` section SHALL report the title check's conclusion as `agreed`, `conflict` with the `field`, the `extracted` and `resolved` values and their `similarity`, `insufficient-evidence` with a `reason` of `record-untitled`, `no-titles` or `no-evidence`, or not attempted, and the `acceptance` section SHALL report `automatic`, `overridden`, `accepted`, `pending` or `not-applicable`.

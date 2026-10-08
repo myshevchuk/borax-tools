@@ -2,7 +2,7 @@
 
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, RunId, is_library_relative,
+    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, Malformed, RunId, is_library_relative,
     is_well_formed_hash, name_uuid,
 };
 use borax_core::record::{EntryType, Record};
@@ -18,6 +18,11 @@ const UUID_A: &str = "018f2b36-7f21-7abc-8def-0123456789ab";
 /// A second, distinct canonical UUID, used wherever a test needs two
 /// identities or wants to show one disagreeing with another.
 const UUID_B: &str = "0198c4de-1a2b-7c3d-9e4f-56789abcdef0";
+/// A third distinct canonical UUID, for tests that need to tell apart a
+/// record's link, an entry's own item, and a third item neither names.
+const UUID_C: &str = "018f2b37-0000-7000-8000-000000000001";
+/// A fourth distinct canonical UUID, for the same reason as [`UUID_C`].
+const UUID_D: &str = "018f2b37-0000-7000-8000-000000000002";
 
 fn hash(seed: &str) -> ContentHash {
     hash_bytes(seed.as_bytes())
@@ -37,6 +42,7 @@ fn hash_entry(seed: &str, run: &str, timestamp: &str, tool_version: &str) -> Has
         run: RunId::new(run),
         timestamp: timestamp.to_string(),
         tool_version: tool_version.to_string(),
+        item: None,
     }
 }
 
@@ -716,4 +722,378 @@ fn is_well_formed_hash_refuses_a_missing_prefix() {
         .unwrap()
         .to_string();
     assert!(!is_well_formed_hash(&malformed_hash(&without_prefix)));
+}
+
+// ---------------------------------------------------------------------
+// 1.1 History entries name their item (design D6, D7, D11)
+// ---------------------------------------------------------------------
+
+#[test]
+fn hash_entry_item_round_trips_through_toml() {
+    let item = ItemId::parse(UUID_B).unwrap();
+    let mut entry = hash_entry("bytes-1", "run-1", "t1", "v1");
+    entry.item = Some(item.clone());
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(item.clone()),
+        history: vec![entry],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let parsed = ArtifactRecord::from_toml(&record.to_toml()).unwrap();
+
+    assert_eq!(parsed.history[0].item, Some(item));
+}
+
+#[test]
+fn a_hash_entry_with_no_item_writes_no_item_key() {
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(ItemId::parse(UUID_B).unwrap()),
+        history: vec![hash_entry("bytes-1", "run-1", "t1", "v1")],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let text = record.to_toml();
+    let history_start = text.find("[[history]]").expect("a history table");
+    let history_text = &text[history_start..];
+
+    assert!(
+        !history_text.contains("item"),
+        "a hash entry naming no item must write no item key: {text}"
+    );
+}
+
+#[test]
+fn a_record_written_before_entries_named_items_parses_with_no_item() {
+    let h1 = hash("bytes-1");
+    let h2 = hash("bytes-2");
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"x.pdf\"\n\
+         size = 1\n\
+         modified_millis = 0\n\n\
+         [[history]]\n\
+         hash = \"{h1}\"\n\
+         run = \"run-1\"\n\
+         timestamp = \"t1\"\n\
+         tool_version = \"v1\"\n\n\
+         [[history]]\n\
+         hash = \"{h2}\"\n\
+         run = \"run-2\"\n\
+         timestamp = \"t2\"\n\
+         tool_version = \"v2\"\n",
+    );
+
+    let parsed = ArtifactRecord::from_toml(&text).expect("0.9.0-shaped text must still parse");
+
+    assert_eq!(parsed.history.len(), 2);
+    assert!(
+        parsed.history.iter().all(|entry| entry.item.is_none()),
+        "no 0.9.0 entry names an item"
+    );
+}
+
+#[test]
+fn a_hash_entry_item_that_is_not_a_canonical_uuid_does_not_parse() {
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"x.pdf\"\n\
+         size = 1\n\
+         modified_millis = 0\n\n\
+         [[history]]\n\
+         hash = \"{}\"\n\
+         run = \"run-1\"\n\
+         timestamp = \"t1\"\n\
+         tool_version = \"v1\"\n\
+         item = \"not-a-uuid\"\n",
+        hash("bytes-1"),
+    );
+
+    let result = ArtifactRecord::from_toml(&text);
+
+    assert!(
+        matches!(result, Err(Malformed::Toml(_))),
+        "an entry whose item is not a canonical uuid must not parse: {result:?}"
+    );
+}
+
+#[test]
+fn item_for_the_newest_hash_is_the_records_link_whatever_its_entry_names() {
+    let link = ItemId::parse(UUID_B).unwrap();
+    let other = ItemId::parse(UUID_C).unwrap();
+
+    let mut entry = hash_entry("bytes-1", "run-1", "t1", "v1");
+    entry.item = Some(other);
+
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(link.clone()),
+        history: vec![entry.clone()],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    assert_eq!(record.item_for(&entry.hash), Some(&link));
+}
+
+#[test]
+fn item_for_an_earlier_hash_is_the_item_its_newest_entry_names() {
+    let x = ItemId::parse(UUID_B).unwrap();
+    let y = ItemId::parse(UUID_C).unwrap();
+
+    let mut a = hash_entry("bytes-a", "run-1", "t1", "v1");
+    a.item = Some(x.clone());
+    let mut b = hash_entry("bytes-b", "run-2", "t2", "v2");
+    b.item = Some(y.clone());
+
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(y),
+        history: vec![a.clone(), b],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    assert_eq!(record.item_for(&a.hash), Some(&x));
+}
+
+#[test]
+fn item_for_an_earlier_hash_whose_entry_names_none_is_the_records_link() {
+    let link = ItemId::parse(UUID_D).unwrap();
+    let b_item = ItemId::parse(UUID_C).unwrap();
+
+    let a = hash_entry("bytes-a", "run-1", "t1", "v1");
+    let mut b = hash_entry("bytes-b", "run-2", "t2", "v2");
+    b.item = Some(b_item);
+
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(link.clone()),
+        history: vec![a.clone(), b],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    assert_eq!(record.item_for(&a.hash), Some(&link));
+}
+
+#[test]
+fn item_for_a_hash_the_history_does_not_hold_is_none() {
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(ItemId::parse(UUID_B).unwrap()),
+        history: vec![hash_entry("bytes-a", "run-1", "t1", "v1")],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    assert_eq!(record.item_for(&hash("never-recorded")), None);
+}
+
+#[test]
+fn item_for_uses_the_newest_of_several_entries_holding_one_hash() {
+    let x = ItemId::parse(UUID_B).unwrap();
+    let y = ItemId::parse(UUID_C).unwrap();
+    let z = ItemId::parse(UUID_D).unwrap();
+
+    let mut a1 = hash_entry("bytes-a", "run-1", "t1", "v1");
+    a1.item = Some(x);
+    let mut b = hash_entry("bytes-b", "run-2", "t2", "v2");
+    b.item = Some(y.clone());
+    let mut a2 = hash_entry("bytes-a", "run-3", "t3", "v3");
+    a2.item = Some(z.clone());
+    let mut c = hash_entry("bytes-c", "run-4", "t4", "v4");
+    c.item = Some(y.clone());
+
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(y),
+        history: vec![a1, b, a2.clone(), c],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    assert_eq!(record.item_for(&a2.hash), Some(&z));
+}
+
+#[test]
+fn append_restates_the_newest_bytes_under_the_link_as_read_when_their_entry_names_another_item() {
+    let x = ItemId::parse(UUID_B).unwrap();
+    let y = ItemId::parse(UUID_C).unwrap();
+
+    let mut a = hash_entry("bytes-a", "run-1", "t1", "v1");
+    a.item = Some(x);
+
+    let mut record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(y.clone()),
+        history: vec![a.clone()],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let mut b = hash_entry("bytes-b", "run-2", "t2", "v2");
+    b.item = Some(y.clone());
+
+    record.append(b.clone(), Some(&y));
+
+    assert_eq!(record.history.len(), 3, "a restatement, then b");
+    assert_eq!(record.history[0], a);
+    assert_eq!(
+        record.history[1].hash, a.hash,
+        "the restatement names the newest (a's) bytes"
+    );
+    assert_eq!(record.history[1].item, Some(y));
+    assert_eq!(
+        record.history[1].run, b.run,
+        "the restatement carries the appended entry's run"
+    );
+    assert_eq!(record.history[1].timestamp, b.timestamp);
+    assert_eq!(record.history[1].tool_version, b.tool_version);
+    assert_eq!(record.history[2], b);
+}
+
+#[test]
+fn append_restates_the_newest_bytes_when_their_entry_names_no_item() {
+    let y = ItemId::parse(UUID_B).unwrap();
+
+    let a = hash_entry("bytes-a", "run-1", "t1", "v1");
+
+    let mut record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(y.clone()),
+        history: vec![a.clone()],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let mut b = hash_entry("bytes-b", "run-2", "t2", "v2");
+    b.item = Some(y.clone());
+
+    record.append(b.clone(), Some(&y));
+
+    assert_eq!(record.history.len(), 3, "a restatement, then b");
+    assert_eq!(record.history[1].hash, a.hash);
+    assert_eq!(record.history[1].item, Some(y));
+    assert_eq!(record.history[2], b);
+}
+
+#[test]
+fn append_does_not_restate_for_an_entry_for_the_newest_bytes() {
+    let x = ItemId::parse(UUID_B).unwrap();
+    let y = ItemId::parse(UUID_C).unwrap();
+
+    let mut a = hash_entry("bytes-a", "run-1", "t1", "v1");
+    a.item = Some(x);
+
+    let mut record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(y.clone()),
+        history: vec![a.clone()],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let mut a_again = hash_entry("bytes-a", "run-2", "t2", "v2");
+    a_again.item = Some(y.clone());
+
+    record.append(a_again.clone(), Some(&y));
+
+    assert_eq!(
+        record.history,
+        vec![a, a_again],
+        "re-identifying the newest bytes restates nothing"
+    );
+}
+
+#[test]
+fn append_does_not_restate_when_the_newest_entry_names_the_link_as_read() {
+    let y = ItemId::parse(UUID_B).unwrap();
+
+    let mut a = hash_entry("bytes-a", "run-1", "t1", "v1");
+    a.item = Some(y.clone());
+
+    let mut record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(y.clone()),
+        history: vec![a.clone()],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let mut b = hash_entry("bytes-b", "run-2", "t2", "v2");
+    b.item = Some(y.clone());
+
+    record.append(b.clone(), Some(&y));
+
+    assert_eq!(record.history, vec![a, b]);
+}
+
+#[test]
+fn append_does_not_restate_when_the_link_as_read_is_none() {
+    let a = hash_entry("bytes-a", "run-1", "t1", "v1");
+
+    let mut record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(ItemId::parse(UUID_B).unwrap()),
+        history: vec![a.clone()],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let mut b = hash_entry("bytes-b", "run-2", "t2", "v2");
+    b.item = Some(ItemId::parse(UUID_B).unwrap());
+
+    record.append(b.clone(), None);
+
+    assert_eq!(record.history, vec![a, b]);
+}
+
+#[test]
+fn append_judges_the_link_as_read_not_the_records_current_link() {
+    let x = ItemId::parse(UUID_B).unwrap();
+    let y = ItemId::parse(UUID_C).unwrap();
+
+    let mut a_old = hash_entry("bytes-a", "run-1", "t1", "v1");
+    a_old.item = Some(x.clone());
+    let mut b = hash_entry("bytes-b", "run-2", "t2", "v2");
+    b.item = Some(y.clone());
+
+    // As `admit` does: the caller has already assigned the new link
+    // before calling `append`.
+    let mut record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(x.clone()),
+        history: vec![a_old.clone(), b.clone()],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let mut a_new = hash_entry("bytes-a", "run-3", "t3", "v3");
+    a_new.item = Some(x);
+
+    record.append(a_new.clone(), Some(&y));
+
+    assert_eq!(
+        record.history,
+        vec![a_old, b, a_new],
+        "judged against the link as read (y), not the record's current link (x), \
+         so the newest entry (b, naming y) triggers no restatement"
+    );
 }

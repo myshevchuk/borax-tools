@@ -1473,15 +1473,67 @@ fn reconcile_refuses_identify_as_an_unknown_argument() {
     assert!(message.contains("--identify"), "got {message:?}");
 }
 
-/// `reconcile` accepts no setting of its own beyond `--rehash`, so an
-/// extraction setting is refused rather than silently inert.
+/// design D4: `reconcile` now accepts the extraction settings, since
+/// `--accept` reaches extraction too.
 #[test]
-fn reconcile_refuses_page_limit_as_an_unknown_argument() {
-    let result = <Cli as Parser>::try_parse_from(["borax", "reconcile", "--page-limit", "3"]);
+fn reconcile_accepts_page_limit() {
+    let cli = parse(&["reconcile", "--page-limit", "3", "papers/"]);
+
+    match &cli.command {
+        Command::Reconcile { path, .. } => {
+            assert_eq!(path.as_deref(), Some(Path::new("papers/")));
+        }
+        other => panic!("expected Command::Reconcile, got {other:?}"),
+    }
+    assert_eq!(
+        cli.settings(),
+        Settings {
+            page_limit: Some(3),
+            ..Settings::default()
+        },
+        "got {:?}",
+        cli.settings()
+    );
+}
+
+/// design D4: `--accept` is repeatable, and the paths are kept in the
+/// order given.
+#[test]
+fn reconcile_accept_is_repeatable_and_keeps_the_order_given() {
+    let cli = parse(&["reconcile", "--accept", "a.pdf", "--accept", "b.pdf"]);
+
+    match &cli.command {
+        Command::Reconcile { accept, .. } => {
+            assert_eq!(
+                accept,
+                &vec![PathBuf::from("a.pdf"), PathBuf::from("b.pdf")]
+            );
+        }
+        other => panic!("expected Command::Reconcile, got {other:?}"),
+    }
+}
+
+/// design D4: `--accept` is a selector, like `--identify` and
+/// `--rehash`, with no `--no-accept` counterpart.
+#[test]
+fn reconcile_refuses_no_accept_as_an_unknown_argument() {
+    let result = <Cli as Parser>::try_parse_from(["borax", "reconcile", "--no-accept"]);
     assert!(result.is_err(), "got {result:?}");
 
     let message = result.unwrap_err().to_string();
-    assert!(message.contains("--page-limit"), "got {message:?}");
+    assert!(message.contains("--no-accept"), "got {message:?}");
+}
+
+/// design D11: `Command::reconcile` builds the same command as parsing
+/// with no `--accept` at all.
+#[test]
+fn reconcile_without_accept_equals_command_reconcile() {
+    let cli = parse(&["reconcile", "papers/"]);
+
+    assert_eq!(
+        cli.command,
+        Command::reconcile(Some(PathBuf::from("papers/")), false)
+    );
 }
 
 /// `validate` and `adopt` both take an optional library path, parsing

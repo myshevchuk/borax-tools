@@ -292,9 +292,13 @@ pub enum Event {
         /// Records whose last-known path was brought to an artifact
         /// found elsewhere in the library.
         repaired: usize,
-        /// Records whose artifact was edited since borax last saw it,
-        /// and whose new hash was appended.
+        /// Records whose artifact changed since borax last saw it, and
+        /// whose new hash was accepted and appended.
         changed: usize,
+        /// Records whose artifact changed since borax last saw it, and
+        /// whose change is pending: one [`Repair::Pending`] each, and
+        /// nothing written for any of them.
+        pending: usize,
         /// Records left exactly as they were because the match was
         /// ambiguous.
         ambiguous: usize,
@@ -411,11 +415,22 @@ pub enum SkipReason {
     /// while leaving nothing in it that matches the file's content.
     ///
     /// `id` is the artifact identity, which is the record's file name
-    /// under `.borax/artifacts/`. The remedy named is
+    /// under `.borax/artifacts/`. The remedies named are
     /// `borax reconcile --rehash`, which records the file's current
-    /// bytes and lets the move proceed under either setting; re-running
+    /// bytes when they carry an identifier the record's item carries,
+    /// and `borax reconcile --accept` for a change that leaves pending;
+    /// either lets the move proceed under either setting. Re-running
     /// without the gate is not named, because it does not always work.
     Stranding { id: String },
+    /// A path named by `borax reconcile --accept` held no pending change
+    /// to accept, so nothing was accepted there.
+    ///
+    /// That covers a path no record names, one outside the library, one
+    /// whose record was repaired elsewhere or is ambiguous or missing,
+    /// and one whose file belongs to another record's history. The
+    /// event's `path` is the path as given, so a mistyped one is
+    /// recognisable.
+    NotPending,
 }
 
 impl SkipReason {
@@ -440,7 +455,8 @@ impl SkipReason {
             | SkipReason::Unciteable
             | SkipReason::SidecarTaken { .. }
             | SkipReason::Unrecordable { .. }
-            | SkipReason::Stranding { .. } => false,
+            | SkipReason::Stranding { .. }
+            | SkipReason::NotPending => false,
         }
     }
 }
@@ -507,21 +523,37 @@ pub enum Finding {
 pub enum LibraryAnswer {
     /// The artifact record `artifact` names the file's path and holds
     /// its bytes, and links the item `item`, which exactly one item
-    /// file carries. The item's record is the file's.
-    Tracked { artifact: String, item: String },
+    /// file carries.
+    ///
+    /// `accepted_under` is the item the record answers with for these
+    /// bytes when that is not `item`: the bytes are an earlier entry of
+    /// its history, accepted under that item, which exactly one item
+    /// file carries too. Its record is then the file's; otherwise the
+    /// linked item's is. Absent whenever the item answered with is the
+    /// link.
+    Tracked {
+        artifact: String,
+        item: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accepted_under: Option<String>,
+    },
     /// No artifact record names the file's path, and the artifact store
     /// was read whole.
     Untracked,
     /// The records naming the file's path hold none of the file's
     /// bytes in their histories: the file changed since the library
-    /// last recorded it.
+    /// last recorded it, and no change to it has been accepted, which
+    /// includes a change pending acceptance.
     UnrecognisedContent { artifacts: Vec<String> },
     /// Several records naming the file's path hold its bytes.
     Ambiguous { artifacts: Vec<String> },
-    /// The one record holding the file links no item.
+    /// The one record holding the file links no item, whichever entry
+    /// of its history the file's bytes are.
     NoItem { artifact: String },
     /// The one record holding the file links an item the item store
-    /// does not hold.
+    /// does not hold. This and the two variants after it are about the
+    /// record's link, whichever entry of its history the file's bytes
+    /// are.
     DanglingItem { artifact: String, item: String },
     /// The one record holding the file links an item the item store
     /// does not hold, and `path` could not be read: an item file whose
@@ -540,6 +572,17 @@ pub enum LibraryAnswer {
         item: String,
         files: Vec<PathBuf>,
     },
+    /// The one record holding the file links `item`, which exactly one
+    /// item file carries, but the file's bytes are an earlier entry of
+    /// its history accepted under `accepted_under`, and `cause` says why
+    /// that item cannot answer.
+    AcceptedItemUnavailable {
+        artifact: String,
+        item: String,
+        accepted_under: String,
+        #[serde(flatten)]
+        cause: AcceptedItemCause,
+    },
     /// Records name the file's path, and the file could not be hashed,
     /// so none of them can be confirmed as its record.
     Unhashable { artifacts: Vec<String> },
@@ -549,6 +592,45 @@ pub enum LibraryAnswer {
     /// `unreadable` counts the record files that could not be read, 0
     /// when `listed` is `false`.
     UnreadableRecords { listed: bool, unreadable: usize },
+}
+
+/// Why the item an earlier history entry names cannot answer for the
+/// bytes it was accepted under, in a
+/// [`LibraryAnswer::AcceptedItemUnavailable`].
+///
+/// Serialized with a `cause` tag, flattened into the answer beside its
+/// `artifact`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "cause", rename_all = "kebab-case")]
+pub enum AcceptedItemCause {
+    /// No item file carries it.
+    Dangling,
+    /// No item file carries it, and `path` could not be read: an item
+    /// file whose name claims that item, or the item store's directory.
+    /// `message` is the reader's.
+    Unreadable { path: PathBuf, message: String },
+    /// Several item files carry it: `files`.
+    Ambiguous { files: Vec<PathBuf> },
+}
+
+/// What a changed artifact's new bytes were accepted on, as
+/// [`Repair::Changed`] and [`Admission::Changed`] report it.
+///
+/// Serialized with a `by` tag, nested under the event's `accepted`
+/// field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "kebab-case")]
+pub enum AcceptedBy {
+    /// Extraction found `identifier` in the new bytes, and the record's
+    /// linked item carries it. `identifier` is as extraction wrote it
+    /// (`doi:…` or `arXiv:…`).
+    Extracted { identifier: String },
+    /// The operator supplied `identifier` for the file in this run, and
+    /// the record's linked item carries it. Only a rename reports this.
+    Supplied { identifier: String },
+    /// The operator named the path with `borax reconcile --accept`.
+    /// Only a reconcile reports this.
+    Operator,
 }
 
 /// What a reconcile made of one artifact record.
@@ -565,10 +647,24 @@ pub enum Repair {
     /// named, library-relative, so the move is legible from the event
     /// alone.
     Repaired { from: String },
-    /// The artifact at the record's own path has bytes no hash in its
-    /// history held: it was edited since borax last saw it, and `hash`
-    /// was appended after the hashes already recorded.
-    Changed { hash: String },
+    /// The artifact at the record's own path has bytes no record's
+    /// history held, and they were accepted as the record's artifact on
+    /// `accepted`: `hash` was appended after the hashes already
+    /// recorded.
+    Changed { hash: String, accepted: AcceptedBy },
+    /// The artifact at the record's own path has bytes no record's
+    /// history held, and they were not accepted: nothing was written,
+    /// the record's size and modification time included, so the next
+    /// reconcile meets the change again.
+    ///
+    /// `item` is the record's link, absent when it links none, and
+    /// `extraction` is what extraction made of the file.
+    Pending {
+        hash: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+        extraction: Extraction,
+    },
     /// The record matched more than one unclaimed artifact, or its one
     /// match is a match for another record too. Nothing was written:
     /// a stale path is repaired by the next pass, and an item link
@@ -591,15 +687,37 @@ pub enum Repair {
 /// admissions it has something to say about.
 ///
 /// Every variant is about an admission that did not simply happen:
-/// nothing is written for a file outside the library, nothing lands
-/// when the store refuses the write, and a link only moves when the
-/// operator re-identified the file. An admission that minted or
-/// updated a record and left its link where it was produces no event
-/// at all. Serialized with a `kind` tag, nested under the event's
+/// changed bytes accepted, changed bytes not accepted, nothing written
+/// for a file outside the library, nothing landing when the store
+/// refuses the write, and a link moving because the operator
+/// re-identified the file. An admission that minted or updated a
+/// record of bytes it already held, and left its link where it was,
+/// produces no event at all. Serialized with a `kind` tag, nested under the event's
 /// `admission` field, as [`Repair`] is under `repair`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Admission {
+    /// The file sat at its record's path with bytes the record's
+    /// history did not hold, and they were accepted on `accepted`:
+    /// `hash` was appended to the artifact record `id`.
+    Changed {
+        id: String,
+        hash: String,
+        accepted: AcceptedBy,
+    },
+    /// The file sits at the path the artifact record `id` names, with
+    /// bytes `hash` that record has not accepted, so nothing was
+    /// written. Reported whatever an interactive run's hold withholds.
+    Pending { id: String, hash: String },
+    /// The run moved a file whose bytes the artifact record `from` had
+    /// not accepted, so it was recorded as a new artifact `id`, linked
+    /// to `item`. `from` was left exactly as it was, naming the path
+    /// the file left.
+    Separated {
+        id: String,
+        item: String,
+        from: String,
+    },
     /// The operator re-identified a file that already had an artifact
     /// record, so the record was re-linked to the item for the record
     /// they settled it on.
@@ -1373,6 +1491,14 @@ pub fn human_line(event: &Event) -> Option<String> {
         )),
         Event::Skipped {
             path,
+            reason: SkipReason::NotPending,
+            ..
+        } => Some(format!(
+            "{}: no change is pending here, so nothing was accepted",
+            escaped(&path.display().to_string())
+        )),
+        Event::Skipped {
+            path,
             reason,
             sections,
             ..
@@ -1462,11 +1588,11 @@ pub fn human_line(event: &Event) -> Option<String> {
             root.display()
         )),
         Event::LibraryRepair { path, repair, .. } => {
-            Some(format!("{path}: {}", what_was_repaired(repair)))
+            Some(format!("{}: {}", escaped(path), what_was_repaired(repair)))
         }
         Event::LibraryAdmission { path, admission } => Some(format!(
             "{}: {}",
-            path.display(),
+            escaped(&path.display().to_string()),
             what_was_admitted(admission)
         )),
         Event::LibraryReconciled {
@@ -1475,12 +1601,13 @@ pub fn human_line(event: &Event) -> Option<String> {
             confirmed,
             repaired,
             changed,
+            pending,
             ambiguous,
             missing,
             hashed,
         } => Some(format!(
             "{}: {records} records, {confirmed} confirmed, {repaired} repaired, \
-             {changed} changed, {ambiguous} ambiguous, {missing} missing, \
+             {changed} changed, {pending} pending, {ambiguous} ambiguous, {missing} missing, \
              {hashed} hashed",
             root.display()
         )),
@@ -1665,8 +1792,10 @@ fn skipped_because(reason: &SkipReason, sections: Option<&Sections>) -> String {
         ),
         SkipReason::Stranding { id } => format!(
             "artifact record {id} holds no hash of these bytes, and this run writes none, so \
-             moving it would strand the record; borax reconcile --rehash records them"
+             moving it would strand the record; borax reconcile --rehash records them, or \
+             reports them pending for borax reconcile --accept"
         ),
+        SkipReason::NotPending => "no change is pending here, so nothing was accepted".to_string(),
     }
 }
 
@@ -1823,6 +1952,22 @@ pub(crate) fn why_unanswered(answer: &LibraryAnswer) -> Option<String> {
             files.len(),
             paths(files)
         ),
+        LibraryAnswer::AcceptedItemUnavailable {
+            artifact,
+            accepted_under,
+            cause,
+            ..
+        } => format!(
+            "artifact {artifact} holds these bytes as accepted under item {accepted_under}, \
+             which {}",
+            match cause {
+                AcceptedItemCause::Dangling => "is not in the library".to_string(),
+                AcceptedItemCause::Unreadable { path, message } => {
+                    format!("could not be read from {} ({message})", path.display())
+                }
+                AcceptedItemCause::Ambiguous { files } => format!("is carried by {}", paths(files)),
+            }
+        ),
         LibraryAnswer::Unhashable { artifacts: ids } => format!(
             "the file could not be hashed, so {} recorded at this path cannot be confirmed",
             artifacts(ids)
@@ -1879,9 +2024,35 @@ fn what_is_wrong(finding: &Finding) -> String {
 fn what_was_repaired(repair: &Repair) -> String {
     match repair {
         Repair::Repaired { from } => format!("was recorded at {from:?} and is here now"),
-        Repair::Changed { hash } => {
-            format!("has changed since borax last saw it; {hash} recorded")
-        }
+        Repair::Changed { hash, accepted } => format!(
+            "has changed since borax last saw it; {hash} recorded, {}",
+            match accepted {
+                AcceptedBy::Extracted { identifier } | AcceptedBy::Supplied { identifier } => {
+                    format!(
+                        "since it carries {}, which its item carries",
+                        escaped(identifier)
+                    )
+                }
+                AcceptedBy::Operator => "as the operator accepted it".to_string(),
+            }
+        ),
+        Repair::Pending {
+            item, extraction, ..
+        } => format!(
+            "has changed since borax last saw it, and the change is pending: {}; \
+             borax reconcile --accept accepts it",
+            match (extraction, item) {
+                (Extraction::Found { identifier, .. }, Some(item)) => format!(
+                    "it carries {}, which item {item} is not known to carry",
+                    escaped(identifier)
+                ),
+                (Extraction::Found { identifier, .. }, None) => format!(
+                    "it carries {}, and its record links no item",
+                    escaped(identifier)
+                ),
+                (failure, _) => what_was_extracted(failure),
+            }
+        ),
         Repair::Ambiguous { candidates } => format!(
             "could be any of {}, so nothing was changed",
             candidates.join(", ")
@@ -1895,6 +2066,37 @@ fn what_was_repaired(repair: &Repair) -> String {
 /// rendering of [`Event::LibraryAdmission`].
 fn what_was_admitted(admission: &Admission) -> String {
     match admission {
+        Admission::Changed {
+            id,
+            hash,
+            accepted: AcceptedBy::Supplied { identifier },
+        } => format!(
+            "artifact {id} accepted these bytes ({hash}), since its item carries {}, which the \
+             operator supplied",
+            escaped(identifier)
+        ),
+        Admission::Changed {
+            id,
+            hash,
+            accepted: AcceptedBy::Extracted { identifier },
+        } => format!(
+            "artifact {id} accepted these bytes ({hash}), since they carry {}, which its item \
+             carries",
+            escaped(identifier)
+        ),
+        Admission::Changed {
+            id,
+            hash,
+            accepted: AcceptedBy::Operator,
+        } => format!("artifact {id} accepted these bytes ({hash}), as the operator accepted them"),
+        Admission::Pending { id, hash } => format!(
+            "artifact {id} has not accepted these bytes ({hash}), so nothing was recorded; \
+             borax reconcile --accept accepts them"
+        ),
+        Admission::Separated { id, item, from } => format!(
+            "artifact {from} did not accept these bytes, so they were recorded as artifact {id} \
+             of item {item}"
+        ),
         Admission::Relinked { id, from, to } => {
             format!("artifact {id} moved from item {from} to item {to}")
         }

@@ -288,6 +288,15 @@ pub enum Command {
         #[arg(long)]
         rehash: bool,
 
+        /// Accept the change pending at PATH as its record's artifact,
+        /// under the item the record links. Given once per path; a path
+        /// with no change pending there is reported as skipped.
+        #[arg(long, value_name = "PATH")]
+        accept: Vec<PathBuf>,
+
+        #[command(flatten)]
+        extraction: ExtractionOptions,
+
         #[command(flatten)]
         run_log: RunLogOptions,
     },
@@ -508,13 +517,18 @@ impl Cli {
                 extraction,
                 run_log,
                 ..
+            }
+            | Command::Reconcile {
+                extraction,
+                run_log,
+                ..
             } => {
                 extraction.fill(&mut settings);
                 run_log.fill(&mut settings);
             }
-            Command::Validate { run_log, .. }
-            | Command::Reconcile { run_log, .. }
-            | Command::Adopt { run_log, .. } => run_log.fill(&mut settings),
+            Command::Validate { run_log, .. } | Command::Adopt { run_log, .. } => {
+                run_log.fill(&mut settings)
+            }
             Command::Cache { run_log, .. } => run_log.fill(&mut settings),
         }
         settings
@@ -601,9 +615,22 @@ impl Command {
     /// The `reconcile` command over the library at `path`, hashing
     /// every artifact when `rehash`, with no setting overridden.
     pub fn reconcile(path: Option<PathBuf>, rehash: bool) -> Command {
+        Command::reconcile_accepting(path, rehash, Vec::new())
+    }
+
+    /// The `reconcile` command over the library at `path`, hashing
+    /// every artifact when `rehash` and accepting the changes pending at
+    /// `accept`, with no setting overridden.
+    pub fn reconcile_accepting(
+        path: Option<PathBuf>,
+        rehash: bool,
+        accept: Vec<PathBuf>,
+    ) -> Command {
         Command::Reconcile {
             path,
             rehash,
+            accept,
+            extraction: ExtractionOptions::default(),
             run_log: RunLogOptions::default(),
         }
     }

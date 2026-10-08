@@ -372,6 +372,48 @@ folded into the record so that one file answers it. Neither the file's
 modification time nor the time inside a UUID substitutes for it: the
 first is the artifact's and the second is the identity's.
 
+Each entry borax writes SHALL also name the item its bytes were
+accepted under, as "Changed bytes become an artifact's history only
+once accepted" accepts them: the item a minted record links, the item a
+record links once an acceptance of changed bytes is written, or the
+item a re-identification links. An entry recorded before entries named
+items names none, and SHALL remain valid and readable exactly as it was
+written: nothing rewrites it, and where it decides which item answers
+for its bytes, the record's link answers, as the `resolution`
+capability states.
+
+Every decision about which item a record's bytes belong to SHALL be
+tied to those bytes. The bytes a record holds answer as follows:
+
+- the newest entry's bytes answer with the record's link;
+- other bytes answer with the item named by the newest entry holding
+  them, or with the link when that entry names none;
+- a record that links no item answers for no bytes, as the `resolution`
+  capability states.
+
+Two rules keep this true, and both keep the history append-only:
+
+- **A decision is recorded.** Whenever an admission decides that bytes
+  belong to an item, it SHALL append an entry for those bytes under
+  that item. That covers accepting changed bytes, re-identifying a file,
+  re-linking a record, and giving an item to a record that linked none.
+  The one exception is bytes that are already the newest entry's and
+  already answer with that item once the admission is made.
+- **A hand correction is restated.** This is judged on the record as it
+  was read, before the admission changes its link. When that record
+  links an item, its newest entry names another item or none, and the
+  admission is about to append an entry for other bytes, the admission
+  SHALL first append a restatement of the newest entry's bytes under
+  the link as read. A restatement is an ordinary entry, stamped with
+  the run that writes it. A link corrected in a text editor applies to
+  the bytes that were newest when it was corrected, and the
+  restatement is what keeps that correction for those bytes once later
+  bytes are accepted.
+
+So the history grows by at most one entry for each explicit operator
+re-identification, plus at most one restatement, and by nothing on an
+ordinary re-run.
+
 The key SHALL NOT be a content hash. Annotating or otherwise editing a
 file changes its bytes, so a hash-keyed record would have to be renamed
 when its artifact was edited, and an identity that moves when the
@@ -415,11 +457,52 @@ itself.
 
 #### Scenario: An annotated artifact keeps its identity
 - **WHEN** an artifact with a record is annotated in a PDF reader so
-  that its size or modification time changed, and `borax reconcile`
-  runs
+  that its size or modification time changed, its text still carrying
+  the DOI its item carries, and `borax reconcile` runs
 - **THEN** its record is the same file under the same artifact UUID, its
-  new hash is appended with the run that recorded it, and its earlier
-  hashes and their provenance are still there
+  new hash is appended with the run that recorded it and the item it
+  was accepted under, and its earlier hashes and their provenance are
+  still there
+
+#### Scenario: A record written before entries named items
+- **WHEN** an artifact record whose every history entry was written by
+  an earlier release, naming no item, is read, validated and reconciled
+  over a library in which nothing has changed
+- **THEN** it parses, `borax validate` reports no finding about it,
+  `borax reconcile` writes nothing to it, and its file is
+  byte-identical afterwards
+
+#### Scenario: A hand correction is kept for the bytes it corrected
+- **WHEN** a record holds bytes A in an entry naming item X, its link
+  has been corrected in a text editor to item Y, and `borax reconcile`
+  accepts edited bytes B under Y
+- **THEN** the history gains an entry restating A under Y and then the
+  entry for B under Y, with every earlier entry unchanged, and A, if
+  restored, answers with Y
+
+#### Scenario: Re-identifying restored bytes ties the link to them
+- **WHEN** a record holds A under X and newer B under Y, links Y, and an
+  applying run re-identifies restored A as X
+- **THEN** the history gains an entry for A under X and the link moves
+  to X, and B, if restored, still answers with Y
+
+#### Scenario: Re-identifying restored bytes as the link's own item
+- **WHEN** a record holds A under X and newer B under Y, links Y, and an
+  applying run re-identifies restored A as Y
+- **THEN** the link stays Y, the history gains an entry for A under Y,
+  and A answers with Y from then on
+
+#### Scenario: Ordinary re-runs add nothing
+- **WHEN** ten ordinary applying runs reach a restored earlier version
+  of a recorded artifact in turn
+- **THEN** its history is exactly what it was before the first, and the
+  version still answers with the item it was accepted under
+
+#### Scenario: The first acceptance in a record written before entries named items
+- **WHEN** a record whose one entry, for bytes A, names no item, and
+  which links item X, has edited bytes B accepted
+- **THEN** the history gains an entry restating A under X and then the
+  entry for B, and the earlier entry is unchanged
 
 #### Scenario: A record outlives its artifact
 - **WHEN** an artifact with a record is deleted from the library
@@ -516,24 +599,45 @@ SHALL complete each step for every record before beginning the next:
    earlier one. A record with exactly one candidate, where that
    candidate is a candidate for no other record, has its last-known
    path repaired and claims that artifact.
-3. **Edited in place.** A record still unresolved whose last-known path
-   holds an unclaimed artifact matching no record's history is that
-   artifact edited since borax last saw it: its new hash is appended
-   after the hashes already recorded, and it claims that artifact.
+3. **Changed in place.** A record still unresolved whose last-known path
+   holds an unclaimed artifact matching no record's history has changed
+   since borax last saw it, and it claims that artifact whatever is
+   decided about the change. The change is accepted, and its new hash
+   appended after the hashes already recorded with the item the record
+   links, when "Changed bytes become an artifact's history only once
+   accepted" accepts it; otherwise the change is pending, and nothing is
+   written for that record.
 4. **Unresolved.** Any record still unresolved is left exactly as it is.
 
 The order is what makes two records whose files swapped paths both
 repair: each file matches the other record's history in step 2, so
-neither is mistaken in step 3 for the other's artifact edited in place.
+neither is mistaken in step 3 for the other's artifact changed in
+place, and neither file is opened to be read.
+
+A pending change SHALL be reported on every reconcile that reaches it,
+as a `library-repair` event of kind `pending` carrying the hash, the
+record's linked item and what extraction made of the file, and SHALL
+be counted as pending on the totals. It is not a finding and not a
+skip, and the run's exit status does not depend on it. A path named by
+`--accept` SHALL be hashed whatever the fast path says, and a pending
+change at it SHALL be accepted as "An operator accepts a pending change
+by naming its path" states. An accepted change SHALL be reported as the
+`changed` repair, carrying how it was accepted.
 
 A reconcile SHALL refresh a record's recorded size and modification
-time whenever it confirms or repairs that record, so that those fields
+time whenever it confirms or repairs that record, or accepts its
+change, so that those fields
 describe the file as borax last saw it rather than as it once was. This
 includes a record confirmed by a hash match after the fast path missed:
 the bytes are the same and the record is right about them, and the
 fields the fast path compares are the ones that were wrong. A record
 whose recorded fields already describe the file is confirmed by the
 fast path itself and needs no refresh.
+
+A reconcile SHALL NOT refresh those fields for a record whose change is
+pending. They are what makes the next reconcile hash the file again
+and report the change again: a refreshed record would be settled by the
+fast path, and the change would never be reported again.
 
 Nothing else in the library repairs those fields, which is why this is
 stated rather than left to follow. `touch` on an artifact changes its
@@ -572,7 +676,9 @@ written as any run's is.
 modification time already agree with the file it names: a file whose
 modification time changed has been touched, its record does not yet
 describe it, and refreshing that record is a change the reconcile was
-run to make.
+run to make. A record whose change is pending is the exception: it is
+written nothing, so a reconcile that finds nothing but pending changes
+writes no library state either.
 
 Reconciliation is a routine library operation and SHALL NOT be an error
 path. Between an out-of-band move and the next reconcile, a recorded
@@ -630,16 +736,48 @@ correct by construction.
 
 #### Scenario: An artifact annotated in place
 - **WHEN** an artifact at its recorded path has different bytes and a
-  different size or modification time, and `borax reconcile` runs
+  different size or modification time, its text still carrying the DOI
+  its item carries, and `borax reconcile` runs
 - **THEN** its new hash is appended after the hashes already recorded,
-  with the run that recorded it, and it is reported as changed since
-  borax last saw it
+  with the run that recorded it and its item, and it is reported as
+  changed since borax last saw it, accepted on that DOI
 
 #### Scenario: A change the fast path cannot see
 - **WHEN** an artifact's bytes changed while its size and modification
-  time did not, and `borax reconcile` runs
+  time did not, the new bytes still carrying the DOI its item carries,
+  and `borax reconcile` runs
 - **THEN** nothing is reported for it and nothing is written, and
   `borax reconcile --rehash` reports the change and appends the hash
+
+#### Scenario: A replacement is left pending
+- **WHEN** another PDF, carrying an identifier the record's item does
+  not carry, has replaced an artifact at its recorded path, and `borax
+  reconcile` runs
+- **THEN** nothing is written to the record, its size and modification
+  time included, and it is reported as pending, naming the identifier
+  found and the record's item, and counted as pending
+
+#### Scenario: A pending change is reported again
+- **WHEN** `borax reconcile` runs a second time over that library
+- **THEN** the file is hashed again, the change is reported as pending
+  again, and still nothing is written
+
+#### Scenario: A replacement with nothing to read
+- **WHEN** the file at a record's path has been replaced by a scan whose
+  pages hold no text and whose metadata holds no identifier, and `borax
+  reconcile` runs
+- **THEN** the change is pending, reported with the result
+  `no-text-layer`, and nothing is written
+
+#### Scenario: A swap opens no document
+- **WHEN** two recorded artifacts are moved onto each other's paths and
+  `borax reconcile` runs
+- **THEN** both records repair in step 2, and neither file is opened
+  for extraction
+
+#### Scenario: An untouched library opens no document
+- **WHEN** `borax reconcile` runs over a library nothing has touched
+- **THEN** no file is opened for extraction, and no change is reported
 
 #### Scenario: An orphan stays an orphan
 - **WHEN** `borax reconcile` runs over a library holding artifacts with
@@ -667,6 +805,14 @@ text-editor edit is checked by exactly the same rules.
   malformed hash, or a history entry naming no run;
 - a file in the item store that does not parse as an item record,
   including one whose verbatim source fields do not parse as JSON.
+
+The item a history entry names SHALL NOT be a finding, whether the
+entry names none, as every entry recorded before entries named items
+does, or names an item the library does not hold, which is the history
+of an item deleted since: deleting an item nothing links to is an
+ordinary operation, and the entry still records what those bytes were
+accepted as. An entry whose item is not a canonical UUID makes its
+record a file that does not parse, and is reported as such a file is.
 
 `borax validate` SHALL repair nothing and SHALL refuse nothing. A
 finding is a report about a library, not a rejected write: a writer that
@@ -742,6 +888,14 @@ run cut short.
   in the totals, and none of the three conditions is reported as a
   finding
 
+#### Scenario: History entries name no item, or a deleted one
+- **WHEN** `borax validate` runs over a library holding an artifact
+  record that links an item the library holds, whose first history
+  entry names no item and whose second names an item no item file
+  carries
+- **THEN** no finding is reported about either entry, and the run exits
+  0
+
 ### Requirement: borax brings no file into the library
 borax SHALL NOT copy or move a file into a library. A file named as input
 from outside the library tree SHALL be resolved and renamed where it
@@ -775,17 +929,23 @@ An applying `rename` run SHALL write an artifact record for each file in
 the library whose fate it settled with a record in hand — a file it
 moved, and a file it found already carrying the name its record implies
 — minting an artifact identity for a file that has no record yet and
-updating the record of a file that has one. A preview SHALL write no
+updating the record of a file that has one, except where that record
+has not accepted the file's bytes, which the paragraphs on changed
+bytes below govern. A preview SHALL write no
 artifact record and no item, and a run with duplicate detection off
 (`--no-record` or config) SHALL write neither either.
 
 Updating a record SHALL write the file's content hash into that
-record's hash history when it is not already the history's current
-hash, together with the file's library-relative path and its size and
+record's hash history when the history does not already hold it,
+together with the file's library-relative path and its size and
 modification time as they are after the run's work on it. So a record
-an applying run touched describes the file it names: its current hash
-is that file's, and the fields reconciliation's fast path compares are
-that file's too.
+an applying run touched describes the file it names: its history holds
+that file's hash, and the fields reconciliation's fast path compares
+are that file's too. A hash the history already holds, such as an
+earlier version restored, SHALL NOT be written again by an ordinary
+run, only when the operator decides what those bytes are, so that they
+keep answering with the item they were accepted under rather than
+becoming the newest and answering with the record's link.
 
 This is stated rather than left to follow from what a record holds,
 because the evidence that identifies a record is not evidence about
@@ -793,10 +953,42 @@ content. A record is identified by its recorded path holding the file,
 and it is confirmed by the fast path *or* by a recorded hash — and the
 fast path compares size and modification time, which a same-length
 in-place edit leaves alone. An update that wrote only the new path
-would therefore leave a history whose newest hash is not the file's, and
+would therefore leave a history that does not hold the file's hash, and
 nothing afterwards would say so: the fast path would settle that record
 on every later reconcile, and the file's actual bytes would appear in no
 record at all.
+
+A file at the path its record names, whose bytes that record's history
+does not hold, SHALL be written into that record only once accepted,
+as "Changed bytes become an artifact's history only once accepted"
+accepts it: by an identifier extracted from the file, or supplied for
+it by the operator in this run, that the record's linked item carries.
+An accepted file's hash is written with the item the record links once
+the admission is made, and the run SHALL report the acceptance, naming
+the artifact, the hash and what it was accepted on.
+
+A file whose changed bytes are not accepted SHALL NOT be written into
+that record, whether or not the operator re-identified it. Where the
+run moved the file, it SHALL be recorded as a new artifact: a minted
+identity at the path it moved to, linked to the item a mint selects for
+the record the file resolved to. The record that did not accept it
+SHALL be left exactly as it was, still naming the path the file left,
+and the run SHALL report the separation, naming both artifacts and the
+new artifact's item. Where the file stays at the path its record names,
+already named or kept, the run SHALL write nothing for it and SHALL
+report the change as pending, naming the record and the hash, whatever
+an interactive run's hold would otherwise withhold. A preview foresees
+the same outcome and writes nothing, treating the path a separated
+file left as holding nothing, as the `ledger` capability requires of a
+preview's account.
+
+A pending change is a state of a path. Once a move takes the bytes
+away, the record names a path holding nothing, which is the missing
+artifact it has become, with its whole history kept and repairable by
+hash if those bytes appear again. The bytes are then a file no record
+names, and recording such a file is what an applying run does. No
+unaccepted bytes enter any history, and no record is left linked to a
+work its file is not.
 
 An artifact that already has a record SHALL keep the item link that
 record carries, unless the operator has re-identified the file in that
@@ -820,13 +1012,29 @@ together or neither does. The run SHALL report the re-link, naming both
 items; an item nothing links to afterwards is an ordinary library state
 that `borax validate` counts.
 
+A re-identification SHALL write the file's hash into the history under
+the item it selected, unless those bytes are already the newest entry's
+and answer with that item once the link has moved. "An artifact record
+is authoritative state keyed by an artifact identity" requires this of
+every decision about an item. A restored version re-identified as the
+very item the link already names is therefore still written, because
+until then it answered with the item it was accepted under. The
+correction then holds for those bytes once later bytes are accepted,
+and bytes newer than them keep the item they were accepted under. A
+re-identification moves
+the link of a record that holds or
+accepts the file's bytes. A file whose changed bytes its record does
+not accept is separated or left pending, as the paragraphs on changed
+bytes state.
+
 When a record is minted, the run SHALL link it to the item the library
 already holds carrying one of the resolved record's identifiers, or to
 one it mints from that record when the library holds none. A record with
 no identifier at all SHALL still get an item, since an item's identity
 is its minted UUID and identifiers are optional — so two *different*
 files carrying no identifier become two items, which states what borax
-knows rather than guessing a match.
+knows rather than guessing a match. The minted record's one history
+entry SHALL name the item it was linked to.
 
 An item the library holds with no artifact recorded against it, or none
 whose recorded path still holds a file, SHALL take the incoming file as
@@ -880,21 +1088,34 @@ names the file's current path and its history does not hold that file's
 hash — reported with a reason naming the record, leaving the file where
 it is. Such a record cannot survive the move: its path would hold
 nothing, and reconciliation's walk matches by hash while its
-edited-in-place step needs a file at the recorded path, so neither route
-could find the artifact again.
+changed-in-place step needs a file at the recorded path, so neither route
+could find the artifact again. That holds as much for a change the
+record has not accepted as for one it would: the move would take away
+the one place the change can be accepted at.
 
 The reason SHALL name `borax reconcile --rehash` as the remedy, and
-SHALL NOT tell the operator to re-run without the flag. Reconciling
-with `--rehash` reaches this file by its recorded path, finds bytes no
-record's history holds, and appends them as an edit in place; the move
-then proceeds under either setting, because the record's history holds
-the file's hash. Re-running without the flag is *not* a remedy that
-always works: where the file's size or modification time changed along
-with its bytes, the record is settled by neither clause of the pre-move
-test, and a run without the flag refuses the move for that reason
-instead. A diagnostic may not name a retry that cannot succeed, so this
-one names the operation that repairs the record rather than the
-invocation that sometimes skirts it.
+`borax reconcile --accept` for a change that leaves pending, and SHALL
+NOT tell the operator to re-run without the flag. Reconciling with
+`--rehash` reaches this file by its recorded path, finds bytes no
+record's history holds, and appends them when they carry an identifier
+the record's item carries, or reports them pending for `--accept` when
+they do not; once they are appended, the move proceeds under either
+setting, because the record's history holds the file's hash.
+
+Re-running without the flag is *not* a remedy that always works. A
+recording run identifies the record by path alone and refuses nothing.
+It writes the record afterwards, which keeps the record with its
+artifact only when the record accepts the file's bytes, by an
+identifier its item carries. Otherwise the recording run moves the file
+and records it as a new artifact, separated from the record, which is
+left naming a path that holds nothing. That is the right outcome for a
+replacement, and the wrong one for an edit nobody has accepted yet. The
+flag's refusal exists because a run that writes nothing cannot separate
+the file either: the move would leave the record unable to name its
+artifact, and leave the moved file recorded nowhere. A diagnostic may
+not name a retry that cannot succeed, so this one names the operation
+that repairs the record rather than the invocation that sometimes
+skirts it.
 
 A move whose artifact has no record strands nothing and SHALL proceed.
 A record elsewhere in the store whose history already holds this file's
@@ -967,7 +1188,8 @@ damage.
   file named from the wrong record, the operator supplies the right
   identifier, and the file is renamed
 - **THEN** its artifact record keeps its artifact identity and is
-  re-linked to the item for the supplied record, the run reports both
+  re-linked to the item for the supplied record, the file's bytes
+  answer with that item from then on, the run reports both
   items, and the item it left is counted by `borax validate` as an item
   nothing links to
 
@@ -1007,8 +1229,9 @@ damage.
   record names its current path but whose bytes changed out of band, so
   that no recorded hash is the file's
 - **THEN** the file is not moved and is reported with a reason naming
-  the record and `borax reconcile --rehash`, which records the file's
-  current bytes and lets the move proceed afterwards
+  the record, `borax reconcile --rehash` and `borax reconcile --accept`,
+  which between them record the file's current bytes and let the move
+  proceed afterwards
 
 #### Scenario: An edit the fast path cannot see does not license a move
 - **WHEN** `borax rename --apply --no-record` reaches an artifact edited
@@ -1020,11 +1243,54 @@ damage.
   nothing and hold no hash matching the file
 
 #### Scenario: A recorded move leaves the record describing the file
-- **WHEN** an applying run without the flag moves that same artifact
+- **WHEN** an applying run without the flag moves that same artifact,
+  whose edited bytes still carry the DOI its item carries
 - **THEN** its record afterwards names the new path, carries the file's
   current hash as the newest in its history with the earlier hashes
-  still there, and carries the file's size and modification time — so
-  the next reconcile settles it on the fast path
+  still there and with its item named, and carries the file's size and
+  modification time — so the next reconcile settles it on the fast path
+
+#### Scenario: A replacement moved by a rename is a new artifact
+- **WHEN** an applying run renames a file at a recorded path whose bytes
+  that record's history does not hold, and which carries an identifier
+  the record's item does not carry
+- **THEN** a new artifact record names the path it moved to, linked to
+  the item for the record the file resolved to; the old record is
+  byte-identical, still naming the path the file left; and the run
+  reports the separation, naming both artifacts and the new item
+
+#### Scenario: A replacement left where it is stays pending
+- **WHEN** the same file already carries the name its record implies
+- **THEN** no artifact record and no item is written, and the run
+  reports the change as pending, naming the record and the hash
+
+#### Scenario: A pending file passed over is still reported
+- **WHEN** an interactive run that passes over already-named files
+  reaches that file
+- **THEN** the pending change is shown on the terminal, though the
+  file's other lines would have been withheld
+
+#### Scenario: The operator names the linked work
+- **WHEN** an interactive run reaches a scan at its recorded path whose
+  bytes the history does not hold and from which nothing can be
+  extracted, and the operator supplies the DOI the record's item
+  carries and renames the file
+- **THEN** the file's hash is appended naming that item, and the run
+  reports the acceptance on the supplied DOI
+
+#### Scenario: The operator names another work
+- **WHEN** the operator instead supplies a DOI the record's item does
+  not carry, and renames the file
+- **THEN** the file is recorded as a new artifact linked to the item for
+  the supplied record, and the old record is left exactly as it was
+
+#### Scenario: Restored bytes keep the item they were accepted under
+- **WHEN** an applying run renames a file whose bytes are an earlier
+  entry of its record's history, an entry naming another item than the
+  one the record now links
+- **THEN** no hash is appended, the record's path, size and modification
+  time describe the moved file, its link is unchanged, and the file
+  still resolves from the item that entry names
 
 ### Requirement: borax adopt records what the library already holds
 `borax adopt` SHALL give recorded state to the artifacts already on disk,
@@ -1237,4 +1503,157 @@ and not from the exit status.
 - **THEN** the orphan's line writes that character as `\x1b`, and the
   `library-condition` event in `--json` output carries the path
   unchanged
+
+### Requirement: Changed bytes become an artifact's history only once accepted
+Bytes at an artifact record's last-known path that no record's history holds SHALL become that record's history only once accepted as its artifact, whether `borax reconcile` or an applying `rename` meets them.
+
+Both SHALL observe such bytes and report them every time they meet
+them. Observing them SHALL NOT accept them. A record whose item
+answered for bytes it never accepted would let one work's item answer
+for another work's file, and nothing afterwards could tell.
+
+The bytes SHALL be accepted automatically only when extraction of the
+file finds an identifier that the record's linked item carries. The
+operator accepts them otherwise: in a rename, by supplying for the file
+an identifier the linked item carries; in reconciliation, by naming the
+path with `--accept`. Re-identifying the file as a work the linked item
+does not carry, and answering a rename question, SHALL NOT accept them:
+each says what work the file is or what it is to be called, and neither
+says that the file is the record's artifact.
+
+The linked item carries an identifier when exactly one item file of the
+library holds the record's linked identity and that item's record holds
+an identifier of the same kind equal to it. DOI, arXiv, PMID and ISBN
+SHALL each be compared, in the normalised form the `extraction`
+capability defines, only with the item's identifier of its own kind. An
+arXiv identifier SHALL be compared without its version, because the
+item holds the version that was newest when it was looked up and the
+file holds its own. An ISBN-10 and an ISBN-13 SHALL NOT be taken for
+each other. A record linking no item, or an item no single readable
+item file carries, carries nothing.
+
+Bytes not accepted are a pending change for as long as they stay at the
+path. A pending change SHALL write nothing to the record: no hash, no
+size and no modification time. It SHALL be reported on every reconcile
+that reaches it, and by every applying run that keeps a record and
+settles the file there, until it is accepted, the way a missing record
+is reported until it is found. It is not a finding and not a skip, and
+no exit status depends on it. Meanwhile every run that resolves the
+file, `--no-record` and previews included, reports its library answer
+as unrecognised content, as the `resolution` capability states.
+
+`borax status` and `borax validate` SHALL NOT report pending changes.
+The first opens and hashes nothing, the second hashes nothing, and a
+pending change is known only once a file has been hashed and read.
+
+Deciding acceptance SHALL open only a file whose bytes changed at a
+recorded path. It runs the extraction passes `resolve` runs, under the
+run's extraction settings, and queries no service.
+
+#### Scenario: An unrelated replacement
+- **WHEN** a buffer guide whose first page prints a DOI the paper's item
+  does not carry has replaced a paper's PDF at its recorded path, and
+  `borax reconcile` runs
+- **THEN** the paper's record gains no hash, the paper's item does not
+  answer for the guide's bytes, and the change is reported as pending,
+  naming the DOI found and the paper's item
+
+#### Scenario: A trailing comment is an edit
+- **WHEN** the paper's PDF instead gains a trailing comment and its DOI
+  can still be extracted, and `borax reconcile` runs
+- **THEN** the new bytes are accepted on that DOI, which the paper's
+  item carries, and appended naming that item
+
+#### Scenario: An annotated paper renamed
+- **WHEN** an applying run renames a file at its recorded path whose
+  bytes the record's history does not hold, and from which extraction
+  reads the DOI its item carries
+- **THEN** the hash is appended naming that item, the record follows
+  the file, and the run reports the acceptance on that DOI
+
+#### Scenario: A later arXiv version
+- **WHEN** an annotated preprint whose stamp reads `arXiv:2401.12345v1`
+  sits at its recorded path, its item carries `arXiv:2401.12345v2`, and
+  `borax reconcile` runs
+- **THEN** the change is accepted on that arXiv identifier
+
+#### Scenario: An ISBN of the other length
+- **WHEN** an interactive run reaches a changed scan of a book at its
+  recorded path, from which nothing can be extracted, the operator
+  supplies the book's ISBN-10 while its item carries only its ISBN-13,
+  and the operator renames the file
+- **THEN** the change is not accepted: the renamed file is recorded as
+  a new artifact, and the record that did not accept the bytes keeps
+  its path, its history and its link
+
+#### Scenario: A record that links no item
+- **WHEN** the record whose path holds the changed bytes links no item
+- **THEN** the change is pending, and is reported naming no item
+
+#### Scenario: Status knows nothing of a pending change
+- **WHEN** `borax status` runs over a library holding a pending change
+- **THEN** no document is opened, no file is hashed, and nothing names
+  the change
+
+### Requirement: An operator accepts a pending change by naming its path
+`borax reconcile --accept <path>` SHALL accept the pending change at `path` as that record's artifact, appending its hash after the hashes already recorded, with the record's linked item, and refreshing the record's size and modification time.
+
+A record linking no item gains an entry naming none.
+
+The flag SHALL be repeatable. Each path SHALL be taken as every path
+borax is given is taken: made absolute against the working directory
+and normalised lexically before it is compared with a record's
+library-relative path. A path named twice counts once. A record whose
+last-known path is named SHALL be hashed whatever its recorded size and
+modification time say, so that a change the fast path cannot see is
+accepted without `--rehash`.
+
+Acceptance happens in reconciliation's step 3, after steps 1 and 2 have
+claimed what they claim, and only for a change step 3 left pending. A
+named path whose change the identifier accepted in the same run is
+reported as accepted on that identifier, and a named path whose
+record's history already holds the bytes there needs nothing. Neither
+is reported further. Every other named path SHALL be reported as a
+`skipped` event naming the path as given, with the reason
+`not-pending`, and the run SHALL then exit with the partial-success
+code, so that a mistyped path is never taken for a success. That covers
+a path no record names, one outside the library or in a subtree it
+excludes, one whose record was repaired elsewhere or is ambiguous or
+missing, and one whose file belongs to another record's history.
+
+The acceptance SHALL be reported as the `changed` repair, with
+`accepted` `{"by":"operator"}`, and counted as changed. It is the
+operator's decision, made where the change was observed. There is no
+prompt, and no form that accepts every pending change at once.
+
+#### Scenario: The operator accepts a pending change
+- **WHEN** `borax reconcile` left `scan.pdf` pending, and `borax
+  reconcile --accept scan.pdf` runs from the library root
+- **THEN** the file's hash is appended naming the record's item, the
+  record is reported `changed`, accepted by the operator, and a further
+  `borax reconcile` settles it on the fast path
+
+#### Scenario: A change the fast path hides
+- **WHEN** a recorded artifact was edited to the same length with its
+  modification time preserved, and `borax reconcile --accept` names it
+  without `--rehash`
+- **THEN** the file is hashed and its change accepted
+
+#### Scenario: Two paths in one run
+- **WHEN** `borax reconcile --accept a.pdf --accept b.pdf` runs over a
+  library where both changes are pending
+- **THEN** both are accepted and both are reported
+
+#### Scenario: A path with nothing pending
+- **WHEN** `borax reconcile --accept typo.pdf` names a path no artifact
+  record names
+- **THEN** a `skipped` event names `typo.pdf` with the reason
+  `not-pending`, nothing is written, and the run exits with the
+  partial-success code
+
+#### Scenario: Accepting what is already recorded
+- **WHEN** `borax reconcile --accept kept.pdf` names a path whose
+  record's history holds the bytes there
+- **THEN** nothing is written and nothing is reported for it, and the
+  run exits 0
 

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Changed bytes at a recorded path now enter the artifact's history only
+  after acceptance. Reconciliation accepts them automatically when their
+  extracted identifier is carried by the linked item, or explicitly through
+  the new repeatable `borax reconcile --accept PATH`; `reconcile` also accepts
+  `--page-limit`. Unaccepted changes remain pending, write no record fields,
+  are reported on every reconcile, and are counted in
+  `library-reconciled.pending`. A path named with `--accept` that has no
+  pending change reports `skipped` with reason `not-pending`, except that
+  already-held bytes remain silent and make repeated acceptance harmless.
+
+- An applying rename now accepts changed bytes when their extracted or
+  operator-supplied identifier is carried by the linked item. It reports
+  accepted bytes as `changed`; unaccepted bytes moved away from the recorded
+  path become a new artifact reported as `separated`, while unaccepted bytes
+  left in place are reported as `pending`. The old record is left to become
+  missing after separation. The `--no-record` stranding message now names
+  both `reconcile --rehash` and `reconcile --accept`.
+
+- New artifact-history entries record the item under which their bytes were
+  accepted. Older entries remain valid and are never rewritten. Restored
+  bytes now resolve from that accepted-under item, while the newest bytes
+  still resolve through the record's link. A hand-corrected link is restated
+  before different bytes are appended, and ordinary runs over restored bytes
+  no longer add duplicate history entries. Work-duplicate detection also
+  excludes the item the file's own record answers with.
+
+- Schema 4 gains additive `accepted`, `pending`, and `accepted_under` fields;
+  `library-repair` gains acceptance details and pending outcomes, while
+  `library-admission` gains changed, pending, and separated outcomes. It also
+  gains the `accepted-item-unavailable` library answer and the `not-pending`
+  skip reason. For restored bytes,
+  `record_retrieval.item` names the item whose record was returned. Human
+  `library-repair` and `library-admission` lines now escape their paths.
+
 ## [0.9.0] - 2026-10-06
 
 ### Changed

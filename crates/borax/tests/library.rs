@@ -1,21 +1,28 @@
 #![allow(clippy::unwrap_used)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borax::event::{Admission, Condition, Event, Extraction, Finding, LibraryAnswer, Repair};
+use borax::event::{
+    AcceptedBy, AcceptedItemCause, Admission, Condition, Event, Extraction, Finding, LibraryAnswer,
+    Repair,
+};
+use borax::evidence::{
+    Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
+    IndexRead, IndexWrite, LookupEvidence, MatchCheck, RecordRetrieval, Titles, Unattempted,
+};
 use borax::library::{
     ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, Consulted, ITEM_STORE, ItemStore,
-    RecordFaults, STATE_DIR, Stores, Unrecorded, WorkDuplicate, admission_event, admit, artifacts,
-    contains, excludes, extraction_event, item_file_name, library_relative, missing, orphan_events,
-    orphans, reconcile, reconciliation_events, recorded_at, relative_to, store_write, strands,
-    survey, validate,
+    Reconciling, RecordFaults, STATE_DIR, Stores, Unrecorded, WorkDuplicate, accepted_by,
+    admission_event, admit, artifacts, carries, contains, excludes, extracted_identifier,
+    extraction_event, item_file_name, library_relative, missing, orphan_events, orphans, reconcile,
+    reconciliation_events, recorded_at, relative_to, store_write, strands, survey, validate,
 };
 use borax_core::content::{ContentHash, hash_bytes};
-use borax_core::identifier::{Doi, Identifier};
+use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
 use borax_core::library::{ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, RunId};
 use borax_core::record::{EntryType, Record};
 use tempfile::tempdir;
@@ -91,7 +98,14 @@ fn hash_entry(seed: &str, run: &str) -> HashEntry {
         run: RunId::new(run),
         timestamp: "2026-01-01T00:00:00Z".to_string(),
         tool_version: "0.6.0-test".to_string(),
+        item: None,
     }
+}
+
+/// `entry`, naming `item` as the item its bytes were accepted under.
+fn entry_naming(mut entry: HashEntry, item: &ItemId) -> HashEntry {
+    entry.item = Some(item.clone());
+    entry
 }
 
 fn artifact_record(
@@ -1231,6 +1245,78 @@ fn validate_reports_a_history_entry_naming_no_run() {
     );
 }
 
+// ---------------------------------------------------------------------
+// 9: Validation — pre-change and malformed entries (design D7, D11)
+// ---------------------------------------------------------------------
+
+#[test]
+fn validate_reports_no_finding_for_an_entry_naming_no_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "a.pdf",
+        vec![hash_entry("a", "run-1")],
+    );
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+}
+
+#[test]
+fn validate_reports_no_finding_for_an_entry_naming_an_item_the_library_does_not_hold() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut entry = hash_entry("a", "run-1");
+    entry.item = Some(item_id(UUID_B));
+    let record = artifact_record(artifact_id(UUID_A), None, "a.pdf", vec![entry]);
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert!(
+        result.findings.is_empty(),
+        "an entry naming an item the library no longer holds is the history of a \
+         deleted item, not a finding: got {:?}",
+        result.findings
+    );
+}
+
+#[test]
+fn validate_reports_a_record_whose_entry_item_is_not_a_canonical_uuid_as_unreadable() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"a.pdf\"\n\
+         size = 1\n\
+         modified_millis = 0\n\n\
+         [[history]]\n\
+         hash = \"{}\"\n\
+         run = \"run-1\"\n\
+         timestamp = \"t1\"\n\
+         tool_version = \"v1\"\n\
+         item = \"not-a-uuid\"\n",
+        hash("a"),
+    );
+    let records_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records_dir).unwrap();
+    fs::write(records_dir.join(format!("{UUID_A}.toml")), &text).unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(result.findings.len(), 1, "got {:?}", result.findings);
+    assert!(
+        matches!(result.findings[0].1, Finding::Unreadable { .. }),
+        "a record whose entry item is not a canonical uuid does not parse, and is \
+         reported as any unparseable record is: got {:?}",
+        result.findings
+    );
+}
+
 /// A `.toml` in the item store that does not parse as an item record.
 /// The well-formed item beside it costs nothing, following
 /// `item_store_reports_a_toml_file_that_is_not_an_item_record_as_a_fault`.
@@ -2065,6 +2151,58 @@ fn validate_every_check_still_reports_beside_all_three_conditions() {
     assert_eq!(result.unlinked(), pre_change_unlinked(root));
 }
 
+/// An extractor double for a [`Reconciling`]: answers whatever
+/// `answers` gives for a path, or `Extraction::Unreadable { message:
+/// "not opened in this test" }` for a path it does not know, and counts
+/// every call it received.
+#[derive(Default)]
+struct Extractor {
+    answers: BTreeMap<PathBuf, Extraction>,
+    calls: Cell<usize>,
+}
+
+impl Extractor {
+    /// An extractor that answers from `answers`, keyed by full path.
+    fn with(answers: BTreeMap<PathBuf, Extraction>) -> Extractor {
+        Extractor {
+            answers,
+            calls: Cell::new(0),
+        }
+    }
+
+    fn extract(&self, path: &Path) -> Extraction {
+        self.calls.set(self.calls.get() + 1);
+        self.answers
+            .get(path)
+            .cloned()
+            .unwrap_or(Extraction::Unreadable {
+                message: "not opened in this test".to_string(),
+            })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.get()
+    }
+}
+
+/// A [`Reconciling`] built from `rehash`, the run name `run`, the
+/// `--accept` paths given, and `extract` — the one helper task 4 adds.
+fn reconciling<'a>(
+    rehash: bool,
+    run: &str,
+    accept: &'a [PathBuf],
+    extract: &'a dyn Fn(&Path) -> Extraction,
+) -> Reconciling<'a> {
+    Reconciling {
+        rehash,
+        accept,
+        extract,
+        run: RunId::new(run),
+        timestamp: TIMESTAMP,
+        tool_version: TOOL_VERSION,
+    }
+}
+
 // ---------------------------------------------------------------------
 // 6.1: reconcile() repairs a moved artifact by matching its history
 // ---------------------------------------------------------------------
@@ -2088,7 +2226,11 @@ fn a_moved_artifact_is_repaired_by_matching_its_current_hash() {
     );
     write_artifact_record(root, &record);
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2135,7 +2277,11 @@ fn a_moved_artifact_is_repaired_by_matching_a_historical_hash() {
     );
     write_artifact_record(root, &record);
 
-    let result = reconcile(root, false, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-2", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2184,7 +2330,11 @@ fn fast_path_record_matching_size_and_mtime_is_not_hashed() {
     write_artifact_record(root, &record);
     let before = snapshot(root);
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(result.hashed, 0, "got {result:?}");
     assert!(result.repairs.is_empty(), "got {:?}", result.repairs);
@@ -2205,20 +2355,38 @@ fn fast_path_miss_appends_the_new_hash_after_the_ones_already_recorded() {
     let root = dir.path();
     fs::write(root.join("paper.pdf"), b"version two content").unwrap();
     let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(root, "item.toml", &item_with_doi(item.clone(), "10.1000/x"));
     // A record whose size deliberately disagrees with the file, so the
     // fast path cannot possibly match it, over a history describing an
     // earlier version of the bytes.
     let mut record = fresh_record(
         root,
         id.clone(),
-        None,
+        Some(item.clone()),
         "paper.pdf",
-        vec![hash_entry("version one content", "run-0")],
+        vec![entry_naming(
+            hash_entry("version one content", "run-0"),
+            &item,
+        )],
     );
     record.size += 1;
     write_artifact_record(root, &record);
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let identifier = doi_identifier("10.1000/x");
+    let mut answers = BTreeMap::new();
+    answers.insert(
+        root.join("paper.pdf"),
+        Extraction::Found {
+            identifier: identifier.to_string(),
+            tier: "text-layer".to_string(),
+        },
+    );
+    let extractor = Extractor::with(answers);
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     let new_hash = hash_bytes(b"version two content");
     assert_eq!(result.hashed, 1, "got {result:?}");
@@ -2228,7 +2396,10 @@ fn fast_path_miss_appends_the_new_hash_after_the_ones_already_recorded() {
             id.clone(),
             "paper.pdf".to_string(),
             Repair::Changed {
-                hash: new_hash.to_string()
+                hash: new_hash.to_string(),
+                accepted: AcceptedBy::Extracted {
+                    identifier: identifier.to_string(),
+                },
             }
         )],
         "got {:?}",
@@ -2238,12 +2409,13 @@ fn fast_path_miss_appends_the_new_hash_after_the_ones_already_recorded() {
     assert_eq!(
         after.history,
         vec![
-            hash_entry("version one content", "run-0"),
+            entry_naming(hash_entry("version one content", "run-0"), &item),
             HashEntry {
                 hash: new_hash,
                 run: RunId::new("run-1"),
                 timestamp: TIMESTAMP.to_string(),
                 tool_version: TOOL_VERSION.to_string(),
+                item: Some(item),
             },
         ],
         "the new hash must be appended after the ones already recorded, got {:?}",
@@ -2263,10 +2435,12 @@ fn a_change_the_fast_path_cannot_see_is_missed_without_rehash_and_found_with_it(
     let original: &[u8] = b"original content, unedited";
     fs::write(&path, original).unwrap();
     let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(root, "item.toml", &item_with_doi(item.clone(), "10.1000/x"));
     let record = fresh_record(
         root,
         id.clone(),
-        None,
+        Some(item.clone()),
         "paper.pdf",
         vec![hash_entry("original content, unedited", "run-0")],
     );
@@ -2285,7 +2459,11 @@ fn a_change_the_fast_path_cannot_see_is_missed_without_rehash_and_found_with_it(
         .unwrap();
 
     let before = snapshot(root);
-    let plain = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let plain = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         plain.hashed, 0,
@@ -2298,7 +2476,20 @@ fn a_change_the_fast_path_cannot_see_is_missed_without_rehash_and_found_with_it(
         "a plain reconcile must write no library state here"
     );
 
-    let rehashed = reconcile(root, true, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+    let identifier = doi_identifier("10.1000/x");
+    let mut answers = BTreeMap::new();
+    answers.insert(
+        path.clone(),
+        Extraction::Found {
+            identifier: identifier.to_string(),
+            tier: "text-layer".to_string(),
+        },
+    );
+    let extractor = Extractor::with(answers);
+    let rehashed = reconcile(
+        root,
+        &reconciling(true, "run-2", &[], &|p| extractor.extract(p)),
+    );
 
     let new_hash = hash_bytes(&edited);
     assert_eq!(rehashed.hashed, 1, "got {rehashed:?}");
@@ -2308,7 +2499,10 @@ fn a_change_the_fast_path_cannot_see_is_missed_without_rehash_and_found_with_it(
             id.clone(),
             "paper.pdf".to_string(),
             Repair::Changed {
-                hash: new_hash.to_string()
+                hash: new_hash.to_string(),
+                accepted: AcceptedBy::Extracted {
+                    identifier: identifier.to_string(),
+                },
             }
         )],
         "got {:?}",
@@ -2349,7 +2543,11 @@ fn a_touch_is_confirmed_by_hash_and_refreshes_the_recorded_fields() {
         .set_modified(touched)
         .unwrap();
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(result.hashed, 1, "the fast path must miss on the touch");
     assert_eq!(result.confirmed, 1, "got {result:?}");
@@ -2381,7 +2579,11 @@ fn a_touch_is_confirmed_by_hash_and_refreshes_the_recorded_fields() {
 
     // A second reconcile now settles the record on the fast path.
     let before = snapshot_with_mtime(root);
-    let second = reconcile(root, false, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let second = reconcile(
+        root,
+        &reconciling(false, "run-2", &[], &|p| extractor.extract(p)),
+    );
     assert_eq!(second.hashed, 0, "got {second:?}");
     assert_eq!(
         snapshot_with_mtime(root),
@@ -2412,7 +2614,11 @@ fn a_repair_settles_the_record_on_the_fast_path_for_the_next_reconcile() {
     );
     write_artifact_record(root, &record);
 
-    let first = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let first = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
     assert_eq!(
         first.repairs,
         vec![(
@@ -2427,7 +2633,11 @@ fn a_repair_settles_the_record_on_the_fast_path_for_the_next_reconcile() {
     );
 
     let before = snapshot(root);
-    let second = reconcile(root, false, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let second = reconcile(
+        root,
+        &reconciling(false, "run-2", &[], &|p| extractor.extract(p)),
+    );
     assert_eq!(
         second.hashed, 0,
         "the repair must have written the file's current size and mtime"
@@ -2474,7 +2684,11 @@ fn two_records_whose_files_swapped_paths_both_repair_without_gaining_history_or_
     write_artifact_record(root, &record_a);
     write_artifact_record(root, &record_b);
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2543,7 +2757,11 @@ fn a_settled_records_file_is_not_a_candidate_for_another_record() {
     write_artifact_record(root, &record_a);
     write_artifact_record(root, &record_b);
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2578,7 +2796,11 @@ fn a_current_hash_match_wins_over_a_historical_one() {
     );
     write_artifact_record(root, &record);
 
-    let result = reconcile(root, false, RunId::new("run-2"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-2", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2618,7 +2840,11 @@ fn one_record_with_two_candidates_is_left_exactly_as_it_was() {
     write_artifact_record(root, &record);
     let before = ArtifactStore::read(root).by_id(&id).unwrap().clone();
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2673,7 +2899,11 @@ fn two_records_contending_for_one_file_are_both_left_exactly_as_they_were() {
     let before_a = ArtifactStore::read(root).by_id(&id_a).unwrap().clone();
     let before_b = ArtifactStore::read(root).by_id(&id_b).unwrap().clone();
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2740,7 +2970,11 @@ fn a_reconcile_over_an_untouched_library_writes_no_library_state() {
     write_artifact_record(root, &record_b);
     let before = snapshot_with_mtime(root);
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(result.hashed, 0, "got {result:?}");
     assert!(result.repairs.is_empty(), "got {:?}", result.repairs);
@@ -2760,7 +2994,11 @@ fn reconcile_creates_no_record_for_an_orphan() {
     let root = dir.path();
     fs::write(root.join("orphan.pdf"), b"orphan bytes").unwrap();
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(result.records, 0, "got {result:?}");
     assert!(
@@ -2785,7 +3023,11 @@ fn reconcile_deletes_no_record_whose_artifact_is_gone() {
     write_artifact_record(root, &record);
     let before = snapshot(root);
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2824,7 +3066,11 @@ fn reconcile_does_not_repair_into_a_nested_librarys_subtree() {
     write_artifact_record(root, &record);
     let nested_before = snapshot(&root.join("nested"));
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2863,7 +3109,11 @@ fn reconcile_does_not_treat_a_pdf_under_items_or_the_state_dir_as_a_candidate() 
     );
     write_artifact_record(root, &record);
 
-    let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
 
     assert_eq!(
         result.repairs,
@@ -2899,7 +3149,11 @@ fn reconcile_does_not_confirm_a_record_whose_path_is_inside_a_nested_library() {
     let before = snapshot(root);
 
     for rehash in [false, true] {
-        let result = reconcile(root, rehash, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+        let extractor = Extractor::default();
+        let result = reconcile(
+            root,
+            &reconciling(rehash, "run-1", &[], &|p| extractor.extract(p)),
+        );
 
         assert_eq!(
             result.repairs,
@@ -2945,7 +3199,11 @@ fn reconcile_does_not_confirm_a_record_whose_path_is_under_items_or_the_state_di
         );
         write_artifact_record(root, &record);
 
-        let result = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+        let extractor = Extractor::default();
+        let result = reconcile(
+            root,
+            &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+        );
 
         assert_eq!(
             result.repairs,
@@ -2981,7 +3239,11 @@ fn reconciliation_events_emits_one_repair_event_then_the_totals() {
     );
     write_artifact_record(root, &record);
 
-    let reconciliation = reconcile(root, false, RunId::new("run-1"), TIMESTAMP, TOOL_VERSION);
+    let extractor = Extractor::default();
+    let reconciliation = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
     let events = reconciliation_events(&reconciliation);
 
     assert_eq!(events.len(), 2, "got {events:?}");
@@ -3005,12 +3267,1059 @@ fn reconciliation_events_emits_one_repair_event_then_the_totals() {
             confirmed: 0,
             repaired: 1,
             changed: 0,
+            pending: 0,
             ambiguous: 0,
             missing: 0,
             hashed: 1,
         },
         "got {:?}",
         events[1]
+    );
+}
+
+// ---------------------------------------------------------------------
+// 4: reconciliation — the gate, pending, and --accept (design D1-D4)
+// ---------------------------------------------------------------------
+
+#[test]
+fn an_unrelated_replacement_is_left_pending_and_nothing_is_written() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"replacement bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(
+        root,
+        "item.toml",
+        &item_with_doi(item.clone(), "10.1000/orig"),
+    );
+    let record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let before = snapshot(root);
+    let identifier = doi_identifier("10.1000/other");
+    let extraction = Extraction::Found {
+        identifier: identifier.to_string(),
+        tier: "text-layer".to_string(),
+    };
+    let mut answers = BTreeMap::new();
+    answers.insert(root.join("paper.pdf"), extraction.clone());
+    let extractor = Extractor::with(answers);
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(snapshot(root), before, "a pending change writes nothing");
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id,
+            "paper.pdf".to_string(),
+            Repair::Pending {
+                hash: hash_bytes(b"replacement bytes").to_string(),
+                item: Some(item.to_string()),
+                extraction,
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+    assert_eq!(result.pending, 1, "got {result:?}");
+    assert_eq!(result.confirmed, 0, "got {result:?}");
+}
+
+#[test]
+fn a_pending_change_is_reported_again_by_the_next_reconcile() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"replacement bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(
+        root,
+        "item.toml",
+        &item_with_doi(item.clone(), "10.1000/orig"),
+    );
+    let record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let identifier = doi_identifier("10.1000/other");
+    let extraction = Extraction::Found {
+        identifier: identifier.to_string(),
+        tier: "text-layer".to_string(),
+    };
+    let mut answers = BTreeMap::new();
+    answers.insert(root.join("paper.pdf"), extraction.clone());
+
+    let extractor = Extractor::with(answers.clone());
+    let first = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+    let extractor = Extractor::with(answers);
+    let second = reconcile(
+        root,
+        &reconciling(false, "run-2", &[], &|p| extractor.extract(p)),
+    );
+
+    for result in [&first, &second] {
+        assert_eq!(result.hashed, 1, "got {result:?}");
+        assert_eq!(
+            result.repairs,
+            vec![(
+                id.clone(),
+                "paper.pdf".to_string(),
+                Repair::Pending {
+                    hash: hash_bytes(b"replacement bytes").to_string(),
+                    item: Some(item.to_string()),
+                    extraction: extraction.clone(),
+                }
+            )],
+            "got {:?}",
+            result.repairs
+        );
+    }
+}
+
+#[test]
+fn a_replacement_with_no_text_layer_is_left_pending() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"replacement bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(
+        root,
+        "item.toml",
+        &item_with_doi(item.clone(), "10.1000/orig"),
+    );
+    let record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let mut answers = BTreeMap::new();
+    answers.insert(root.join("paper.pdf"), Extraction::NoTextLayer);
+    let extractor = Extractor::with(answers);
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id,
+            "paper.pdf".to_string(),
+            Repair::Pending {
+                hash: hash_bytes(b"replacement bytes").to_string(),
+                item: Some(item.to_string()),
+                extraction: Extraction::NoTextLayer,
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+}
+
+#[test]
+fn an_unreadable_replacement_is_left_pending() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"replacement bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(
+        root,
+        "item.toml",
+        &item_with_doi(item.clone(), "10.1000/orig"),
+    );
+    let record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let mut answers = BTreeMap::new();
+    answers.insert(
+        root.join("paper.pdf"),
+        Extraction::Unreadable {
+            message: "truncated stream".to_string(),
+        },
+    );
+    let extractor = Extractor::with(answers);
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id,
+            "paper.pdf".to_string(),
+            Repair::Pending {
+                hash: hash_bytes(b"replacement bytes").to_string(),
+                item: Some(item.to_string()),
+                extraction: Extraction::Unreadable {
+                    message: "truncated stream".to_string(),
+                },
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+}
+
+#[test]
+fn a_change_at_a_record_linking_no_item_is_pending_naming_no_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"replacement bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        None,
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let identifier = doi_identifier("10.1000/other");
+    let extraction = Extraction::Found {
+        identifier: identifier.to_string(),
+        tier: "text-layer".to_string(),
+    };
+    let mut answers = BTreeMap::new();
+    answers.insert(root.join("paper.pdf"), extraction.clone());
+    let extractor = Extractor::with(answers);
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id,
+            "paper.pdf".to_string(),
+            Repair::Pending {
+                hash: hash_bytes(b"replacement bytes").to_string(),
+                item: None,
+                extraction,
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+}
+
+#[test]
+fn a_change_whose_linked_item_no_file_carries_is_pending() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"replacement bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    // A dangling link: no item file names `item` at all.
+    let item = item_id(UUID_B);
+    let record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let identifier = doi_identifier("10.1000/x");
+    let extraction = Extraction::Found {
+        identifier: identifier.to_string(),
+        tier: "text-layer".to_string(),
+    };
+    let mut answers = BTreeMap::new();
+    answers.insert(root.join("paper.pdf"), extraction.clone());
+    let extractor = Extractor::with(answers);
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id,
+            "paper.pdf".to_string(),
+            Repair::Pending {
+                hash: hash_bytes(b"replacement bytes").to_string(),
+                item: Some(item.to_string()),
+                extraction,
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+}
+
+#[test]
+fn a_later_arxiv_version_is_accepted() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"replacement bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    let mut item_record = minimal_record(EntryType::Article);
+    item_record.borax.arxiv = Some(ArxivId::parse("2401.12345v2").unwrap());
+    write_item(
+        root,
+        "item.toml",
+        &Item {
+            id: item.clone(),
+            record: item_record,
+        },
+    );
+    let record = artifact_record(
+        id.clone(),
+        Some(item),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let identifier = Identifier::Arxiv(ArxivId::parse("2401.12345v1").unwrap());
+    let extraction = Extraction::Found {
+        identifier: identifier.to_string(),
+        tier: "text-layer".to_string(),
+    };
+    let mut answers = BTreeMap::new();
+    answers.insert(root.join("paper.pdf"), extraction);
+    let extractor = Extractor::with(answers);
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id,
+            "paper.pdf".to_string(),
+            Repair::Changed {
+                hash: hash_bytes(b"replacement bytes").to_string(),
+                accepted: AcceptedBy::Extracted {
+                    identifier: identifier.to_string(),
+                },
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+}
+
+#[test]
+fn a_change_the_fast_path_hides_is_pending_under_rehash_when_its_identifier_is_not_carried() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let original: &[u8] = b"original content, unedited";
+    fs::write(&path, original).unwrap();
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(
+        root,
+        "item.toml",
+        &item_with_doi(item.clone(), "10.1000/orig"),
+    );
+    let record = fresh_record(
+        root,
+        id.clone(),
+        Some(item.clone()),
+        "paper.pdf",
+        vec![hash_entry("original content, unedited", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+
+    let mut edited = original.to_vec();
+    edited[0] = b'X';
+    fs::write(&path, &edited).unwrap();
+    fs::File::open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+
+    let identifier = doi_identifier("10.1000/other");
+    let extraction = Extraction::Found {
+        identifier: identifier.to_string(),
+        tier: "text-layer".to_string(),
+    };
+    let mut answers = BTreeMap::new();
+    answers.insert(path.clone(), extraction.clone());
+    let extractor = Extractor::with(answers);
+    let rehashed = reconcile(
+        root,
+        &reconciling(true, "run-2", &[], &|p| extractor.extract(p)),
+    );
+
+    let new_hash = hash_bytes(&edited);
+    assert_eq!(
+        rehashed.repairs,
+        vec![(
+            id,
+            "paper.pdf".to_string(),
+            Repair::Pending {
+                hash: new_hash.to_string(),
+                item: Some(item.to_string()),
+                extraction,
+            }
+        )],
+        "got {:?}",
+        rehashed.repairs
+    );
+}
+
+#[test]
+fn swapped_files_both_repair_and_no_file_is_opened() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("a.pdf"), b"content-b").unwrap();
+    fs::write(root.join("b.pdf"), b"content-a").unwrap();
+    let id_a = artifact_id(UUID_A);
+    let id_b = artifact_id(UUID_B);
+    let item_a = item_id(UUID_C);
+    let item_b = item_id(UUID_D);
+    let record_a = artifact_record(
+        id_a.clone(),
+        Some(item_a),
+        "a.pdf",
+        vec![hash_entry("content-a", "run-0")],
+    );
+    let record_b = artifact_record(
+        id_b.clone(),
+        Some(item_b),
+        "b.pdf",
+        vec![hash_entry("content-b", "run-0")],
+    );
+    write_artifact_record(root, &record_a);
+    write_artifact_record(root, &record_b);
+
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.repairs.len(), 2, "got {:?}", result.repairs);
+    assert!(
+        result
+            .repairs
+            .iter()
+            .all(|(_, _, repair)| matches!(repair, Repair::Repaired { .. })),
+        "both must repair in step 2, before extraction would ever run: {:?}",
+        result.repairs
+    );
+    assert_eq!(
+        extractor.calls(),
+        0,
+        "a swap is settled in step 2, so no file is opened"
+    );
+}
+
+#[test]
+fn an_untouched_library_opens_no_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "paper.pdf", b"steady content");
+    let id = artifact_id(UUID_A);
+    let record = fresh_record(
+        root,
+        id,
+        None,
+        "paper.pdf",
+        vec![hash_entry("steady content", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert!(result.repairs.is_empty(), "got {:?}", result.repairs);
+    assert_eq!(extractor.calls(), 0);
+}
+
+#[test]
+fn accept_accepts_a_pending_change_under_the_records_link() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"replacement bytes");
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    let record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let extractor = Extractor::default();
+    let accept = vec![path.clone()];
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    let new_hash = hash_bytes(b"replacement bytes");
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id.clone(),
+            "paper.pdf".to_string(),
+            Repair::Changed {
+                hash: new_hash.to_string(),
+                accepted: AcceptedBy::Operator,
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+    assert!(result.not_pending.is_empty(), "got {result:?}");
+
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(
+        after.history.last().unwrap().item,
+        Some(item),
+        "the appended entry must name the record's link"
+    );
+    let (size, modified_millis) = stat(&path);
+    assert_eq!(after.size, size);
+    assert_eq!(after.modified_millis, modified_millis);
+
+    // The next run settles the record on the fast path, hashing 0.
+    let extractor = Extractor::default();
+    let next = reconcile(
+        root,
+        &reconciling(false, "run-2", &[], &|p| extractor.extract(p)),
+    );
+    assert_eq!(next.hashed, 0, "got {next:?}");
+    assert_eq!(next.confirmed, 1, "got {next:?}");
+}
+
+#[test]
+fn accept_reaches_a_change_the_fast_path_hides_without_rehash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let original: &[u8] = b"original content, unedited";
+    fs::write(&path, original).unwrap();
+    let id = artifact_id(UUID_A);
+    let record = fresh_record(
+        root,
+        id.clone(),
+        None,
+        "paper.pdf",
+        vec![hash_entry("original content, unedited", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+
+    let mut edited = original.to_vec();
+    edited[0] = b'X';
+    fs::write(&path, &edited).unwrap();
+    fs::File::open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+
+    let extractor = Extractor::default();
+    let accept = vec![path];
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    let new_hash = hash_bytes(&edited);
+    assert_eq!(result.hashed, 1, "got {result:?}");
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id,
+            "paper.pdf".to_string(),
+            Repair::Changed {
+                hash: new_hash.to_string(),
+                accepted: AcceptedBy::Operator,
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+}
+
+#[test]
+fn accept_on_a_record_linking_no_item_appends_an_entry_naming_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"replacement bytes");
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        None,
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let extractor = Extractor::default();
+    let accept = vec![path];
+    let _ = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(after.history.last().unwrap().item, None);
+}
+
+#[test]
+fn accept_with_two_paths_accepts_both() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path_a = write_file(root, "a.pdf", b"replacement a");
+    let path_b = write_file(root, "b.pdf", b"replacement b");
+    let id_a = artifact_id(UUID_A);
+    let id_b = artifact_id(UUID_B);
+    write_artifact_record(
+        root,
+        &artifact_record(id_a, None, "a.pdf", vec![hash_entry("original a", "run-0")]),
+    );
+    write_artifact_record(
+        root,
+        &artifact_record(id_b, None, "b.pdf", vec![hash_entry("original b", "run-0")]),
+    );
+
+    let extractor = Extractor::default();
+    let accept = vec![path_a, path_b];
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.repairs.len(), 2, "got {:?}", result.repairs);
+    assert!(
+        result.repairs.iter().all(|(_, _, repair)| matches!(
+            repair,
+            Repair::Changed {
+                accepted: AcceptedBy::Operator,
+                ..
+            }
+        )),
+        "got {:?}",
+        result.repairs
+    );
+}
+
+#[test]
+fn accept_naming_one_path_twice_accepts_it_once() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"replacement bytes");
+    let id = artifact_id(UUID_A);
+    write_artifact_record(
+        root,
+        &artifact_record(
+            id.clone(),
+            None,
+            "paper.pdf",
+            vec![hash_entry("original bytes", "run-0")],
+        ),
+    );
+
+    let extractor = Extractor::default();
+    let accept = vec![path.clone(), path];
+    let _ = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(after.history.len(), 2, "one appended entry, not two");
+}
+
+#[test]
+fn accept_normalises_dot_dot_in_a_named_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("sub")).unwrap();
+    write_file(root, "a.pdf", b"replacement bytes");
+    let id = artifact_id(UUID_A);
+    write_artifact_record(
+        root,
+        &artifact_record(
+            id.clone(),
+            None,
+            "a.pdf",
+            vec![hash_entry("original bytes", "run-0")],
+        ),
+    );
+
+    let extractor = Extractor::default();
+    let accept = vec![root.join("sub").join("..").join("a.pdf")];
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    assert!(result.not_pending.is_empty(), "got {result:?}");
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(
+        after.history.len(),
+        2,
+        "the dot-dot path must still reach a.pdf's record"
+    );
+}
+
+#[test]
+fn accept_of_a_change_the_identifier_accepted_reports_it_extracted() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"replacement bytes");
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(root, "item.toml", &item_with_doi(item.clone(), "10.1000/x"));
+    write_artifact_record(
+        root,
+        &artifact_record(
+            id.clone(),
+            Some(item),
+            "paper.pdf",
+            vec![hash_entry("original bytes", "run-0")],
+        ),
+    );
+
+    let identifier = doi_identifier("10.1000/x");
+    let mut answers = BTreeMap::new();
+    answers.insert(
+        path.clone(),
+        Extraction::Found {
+            identifier: identifier.to_string(),
+            tier: "text-layer".to_string(),
+        },
+    );
+    let extractor = Extractor::with(answers);
+    let accept = vec![path];
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    assert!(result.not_pending.is_empty(), "got {result:?}");
+    assert_eq!(
+        result.repairs,
+        vec![(
+            id,
+            "paper.pdf".to_string(),
+            Repair::Changed {
+                hash: hash_bytes(b"replacement bytes").to_string(),
+                accepted: AcceptedBy::Extracted {
+                    identifier: identifier.to_string(),
+                },
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+}
+
+#[test]
+fn accept_of_a_confirmed_path_reports_nothing_and_writes_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"steady content");
+    let id = artifact_id(UUID_A);
+    write_artifact_record(
+        root,
+        &fresh_record(
+            root,
+            id,
+            None,
+            "paper.pdf",
+            vec![hash_entry("steady content", "run-0")],
+        ),
+    );
+    let before = snapshot(root);
+
+    let extractor = Extractor::default();
+    let accept = vec![path];
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    assert!(result.repairs.is_empty(), "got {:?}", result.repairs);
+    assert!(result.not_pending.is_empty(), "got {result:?}");
+    assert_eq!(snapshot(root), before);
+}
+
+#[test]
+fn accept_of_a_path_no_record_names_is_not_pending() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "typo.pdf", b"anything");
+
+    let extractor = Extractor::default();
+    let accept = vec![path.clone()];
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.not_pending, vec![path]);
+}
+
+#[test]
+fn accept_of_a_path_whose_record_was_repaired_elsewhere_is_not_pending() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"moved bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    write_artifact_record(
+        root,
+        &artifact_record(
+            id,
+            None,
+            "old/paper.pdf",
+            vec![hash_entry("moved bytes", "run-0")],
+        ),
+    );
+
+    let extractor = Extractor::default();
+    let accept_path = root.join("old/paper.pdf");
+    let accept = vec![accept_path.clone()];
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.not_pending, vec![accept_path]);
+}
+
+#[test]
+fn accept_of_a_path_outside_the_library_is_not_pending() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let outside = tempdir().unwrap();
+    let path = outside.path().join("elsewhere.pdf");
+    fs::write(&path, b"anything").unwrap();
+
+    let extractor = Extractor::default();
+    let accept = vec![path.clone()];
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.not_pending, vec![path]);
+}
+
+#[test]
+fn an_accepted_entry_is_appended_as_a_table_naming_its_item_and_earlier_entries_are_byte_identical()
+{
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"replacement bytes");
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+
+    let before_record = artifact_record(
+        id.clone(),
+        Some(item.clone()),
+        "paper.pdf",
+        vec![entry_naming(hash_entry("original bytes", "run-0"), &item)],
+    );
+    let mut before_text = before_record.to_toml();
+    // A comment the fixture places in the record, which an edit to one
+    // field must leave alone.
+    before_text = before_text.replacen(
+        "\npath = ",
+        "\n# a comment the fixture places in the record\npath = ",
+        1,
+    );
+    let record_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&record_dir).unwrap();
+    let record_path = record_dir.join(format!("{id}.toml"));
+    fs::write(&record_path, &before_text).unwrap();
+
+    let extractor = Extractor::default();
+    let accept = vec![path.clone()];
+    let _ = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    let after_text = fs::read_to_string(&record_path).unwrap();
+
+    assert!(
+        after_text.contains("# a comment the fixture places in the record"),
+        "got {after_text:?}"
+    );
+    assert!(
+        after_text.contains(&format!("id = \"{id}\"")),
+        "got {after_text:?}"
+    );
+    assert!(
+        after_text.contains(&format!("item = \"{item}\"")),
+        "got {after_text:?}"
+    );
+    assert!(
+        after_text.contains("path = \"paper.pdf\""),
+        "got {after_text:?}"
+    );
+
+    let (size, modified_millis) = stat(&path);
+    assert!(
+        after_text.contains(&format!("size = {size}")),
+        "got {after_text:?}"
+    );
+    assert!(
+        after_text.contains(&format!("modified_millis = {modified_millis}")),
+        "got {after_text:?}"
+    );
+
+    let marker = "[[history]]";
+    let before_first = before_text.find(marker).expect("one history table");
+    let before_table = &before_text[before_first..];
+    let after_first = after_text.find(marker).expect("a history table");
+    let after_rest = &after_text[after_first..];
+    let second_at = after_rest[marker.len()..]
+        .find(marker)
+        .map(|at| at + marker.len())
+        .expect("exactly one new table must follow the old one");
+    assert_eq!(
+        after_rest[..second_at].trim_end(),
+        before_table.trim_end(),
+        "the table that existed before must be byte-identical"
+    );
+    assert!(
+        !after_rest[second_at + marker.len()..].contains(marker),
+        "exactly one new table, got {after_text:?}"
+    );
+    let new_table = &after_rest[second_at..];
+    assert!(
+        new_table
+            .trim_end()
+            .ends_with(&format!("item = \"{item}\"")),
+        "the new table must end naming its item, got {new_table:?}"
+    );
+}
+
+#[test]
+fn an_acceptance_after_a_hand_correction_restates_the_newest_bytes() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "paper.pdf", b"content-b");
+    let id = artifact_id(UUID_A);
+    let x = item_id(UUID_C);
+    let y = item_id(UUID_D);
+    write_item(root, "item.toml", &item_with_doi(y.clone(), "10.1000/y"));
+
+    let mut entry_a = hash_entry("content-a", "run-0");
+    entry_a.item = Some(x.clone());
+    let record = artifact_record(
+        id.clone(),
+        Some(y.clone()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &record);
+
+    let identifier = doi_identifier("10.1000/y");
+    let mut answers = BTreeMap::new();
+    answers.insert(
+        root.join("paper.pdf"),
+        Extraction::Found {
+            identifier: identifier.to_string(),
+            tier: "text-layer".to_string(),
+        },
+    );
+    let extractor = Extractor::with(answers);
+    let _ = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[0].hash, entry_a.hash);
+    assert_eq!(after.history[0].item, Some(x));
+    assert_eq!(
+        after.history[1].hash, entry_a.hash,
+        "the restatement names a's bytes"
+    );
+    assert_eq!(after.history[1].item, Some(y.clone()));
+    assert_eq!(after.history[2].hash, hash_bytes(b"content-b"));
+    assert_eq!(after.history[2].item, Some(y));
+}
+
+#[test]
+fn a_record_written_before_entries_named_items_is_confirmed_without_being_rewritten() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let bytes = b"steady content";
+    let path = root.join("paper.pdf");
+    fs::write(&path, bytes).unwrap();
+    let (size, modified_millis) = stat(&path);
+    let hash = hash_bytes(bytes);
+
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"paper.pdf\"\n\
+         size = {size}\n\
+         modified_millis = {modified_millis}\n\n\
+         [[history]]\n\
+         hash = \"{hash}\"\n\
+         run = \"run-0\"\n\
+         timestamp = \"2026-01-01T00:00:00Z\"\n\
+         tool_version = \"0.9.0\"\n",
+    );
+    let record_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&record_dir).unwrap();
+    let record_path = record_dir.join(format!("{UUID_A}.toml"));
+    fs::write(&record_path, &text).unwrap();
+
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.confirmed, 1, "got {result:?}");
+    assert_eq!(
+        extractor.calls(),
+        0,
+        "a fast-path match reads nothing, let alone extracts"
+    );
+    let after_text = fs::read_to_string(&record_path).unwrap();
+    assert_eq!(
+        after_text, text,
+        "a record confirmed by its 0.9.0-shaped entries must not be rewritten"
     );
 }
 
@@ -3458,6 +4767,1316 @@ fn admit_relinks_to_the_supplied_records_item_when_reidentified() {
 }
 
 // ---------------------------------------------------------------------
+// 6: Admission — each entry names its item (design D6, D11)
+// ---------------------------------------------------------------------
+
+#[test]
+fn admit_mints_a_record_whose_entry_names_its_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = record_with_doi("10.1000/admit-names-item");
+    let hash = hash("paper bytes");
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: Some("smith2024"),
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let saved = ArtifactStore::read(root)
+        .by_id(&admitted.artifact)
+        .unwrap()
+        .clone();
+    assert_eq!(saved.history.len(), 1, "got {:?}", saved.history);
+    assert_eq!(saved.history[0].item, Some(admitted.item));
+}
+
+#[test]
+fn admit_of_bytes_already_held_appends_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("item.{UUID_A}.toml"), &item);
+    let entry_a = hash_entry("bytes a", "run-0");
+    let entry_b = hash_entry("bytes b", "run-1");
+    let held = artifact_record(
+        artifact_id(UUID_B),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone(), entry_b.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &item.record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.item, item.id);
+    assert_eq!(admitted.relinked_from, None);
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_B))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after.history,
+        vec![entry_a, entry_b],
+        "an admission of bytes already held must append nothing"
+    );
+    let (size, modified_millis) = stat(&path);
+    assert_eq!(after.size, size);
+    assert_eq!(after.modified_millis, modified_millis);
+    assert_eq!(after.item, Some(item.id));
+}
+
+#[test]
+fn admit_of_the_newest_bytes_on_a_rerun_appends_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes b");
+    let hash_b = hash("bytes b");
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("item.{UUID_A}.toml"), &item);
+    let held = artifact_record(
+        artifact_id(UUID_B),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("bytes b", "run-0")],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &item.record,
+            hash: &hash_b,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_B))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 1, "got {:?}", after.history);
+}
+
+#[test]
+fn admit_reidentifying_the_newest_bytes_moves_the_link_and_appends_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x = item_id(UUID_C);
+    let y_record = record_with_doi("10.1000/admit-transition-y");
+    let y = Item {
+        id: item_id(UUID_D),
+        record: y_record.clone(),
+    };
+    write_item(root, &format!("y.{UUID_D}.toml"), &y);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(x.clone()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &y_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.item, y.id);
+    assert_eq!(admitted.relinked_from, Some(x));
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after.history,
+        vec![entry_a],
+        "no entry must be appended, got {:?}",
+        after.history
+    );
+    assert_eq!(after.item, Some(y.id));
+}
+
+#[test]
+fn admit_reidentifying_restored_bytes_appends_an_entry_under_the_new_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x = item_id(UUID_B);
+    let y = item_id(UUID_C);
+    let z_record = record_with_doi("10.1000/admit-transition-z");
+    let z = Item {
+        id: item_id(UUID_D),
+        record: z_record.clone(),
+    };
+    write_item(root, &format!("z.{UUID_D}.toml"), &z);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x);
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y),
+        "paper.pdf",
+        vec![entry_a.clone(), entry_b.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &z_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(after.history[1], entry_b);
+    assert_eq!(after.history[2].hash, entry_a.hash);
+    assert_eq!(after.history[2].item, Some(z.id));
+}
+
+#[test]
+fn admit_reidentifying_the_newest_bytes_as_the_item_they_already_answer_with_appends_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x_record = record_with_doi("10.1000/admit-already-answers-x");
+    let x = Item {
+        id: item_id(UUID_B),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_B}.toml"), &x);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(x.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after.history,
+        vec![entry_a],
+        "re-identifying as the item already answered with must append nothing"
+    );
+}
+
+#[test]
+fn admit_reidentifying_restored_bytes_as_the_item_they_already_answer_with_appends_an_entry() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x_record = record_with_doi("10.1000/admit-restored-already-answers-x");
+    let x = Item {
+        id: item_id(UUID_B),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_B}.toml"), &x);
+    let y = item_id(UUID_C);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y),
+        "paper.pdf",
+        vec![entry_a.clone(), entry_b.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[2].hash, entry_a.hash);
+    assert_eq!(after.history[2].item, Some(x.id));
+}
+
+#[test]
+fn admit_captures_the_link_as_read_before_assigning_the_new_one() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x_record = record_with_doi("10.1000/admit-link-as-read-x");
+    let x = Item {
+        id: item_id(UUID_B),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_B}.toml"), &x);
+    let y = item_id(UUID_C);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y),
+        "paper.pdf",
+        vec![entry_a.clone(), entry_b.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let mut expected_new = entry_a.clone();
+    expected_new.run = RunId::new("run-2");
+    expected_new.item = Some(x.id.clone());
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after.history,
+        vec![entry_a, entry_b, expected_new],
+        "no restatement of b: its own entry already names y, the link as read"
+    );
+}
+
+#[test]
+fn admit_of_accepted_changed_bytes_whose_record_write_fails_leaves_the_record_unchanged() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes b");
+    let hash_b = hash("bytes b");
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("item.{UUID_A}.toml"), &item);
+    let held = artifact_record(
+        artifact_id(UUID_B),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("bytes a", "run-0")],
+    );
+    write_artifact_record(root, &held);
+    let record_path = root
+        .join(STATE_DIR)
+        .join(ARTIFACT_STORE)
+        .join(format!("{}.toml", held.id));
+    let before = fs::read(&record_path).unwrap();
+
+    let records_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    let write = |target: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        if target.starts_with(&records_dir) {
+            Err(std::io::Error::other("simulated artifact write failure"))
+        } else {
+            store_write(target, bytes)
+        }
+    };
+
+    let result = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &item.record,
+            hash: &hash_b,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &write,
+    );
+
+    assert!(matches!(result, Err(Unrecorded { .. })), "got {result:?}");
+    let after = fs::read(&record_path).unwrap();
+    assert_eq!(
+        after, before,
+        "a failed write must leave the record byte-identical"
+    );
+}
+
+#[test]
+fn admit_of_accepted_changed_bytes_appends_an_entry_naming_the_linked_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes b");
+    let hash_b = hash("bytes b");
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("item.{UUID_A}.toml"), &item);
+    let held = artifact_record(
+        artifact_id(UUID_B),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![entry_naming(hash_entry("bytes a", "run-0"), &item.id)],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &item.record,
+            hash: &hash_b,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_B))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 2, "got {:?}", after.history);
+    assert_eq!(after.history[1].item, Some(item.id));
+}
+
+#[test]
+fn learn_takes_in_no_entry_for_bytes_already_held() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"steady bytes");
+    let hash = hash("steady bytes");
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("steady.{UUID_A}.toml"), &item);
+    let held = fresh_record(
+        root,
+        artifact_id(UUID_B),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("steady bytes", "run-0")],
+    );
+    write_artifact_record(root, &held);
+
+    let mut stores = Stores::read(root);
+    let admitting = Admitting {
+        path: &path,
+        record: &item.record,
+        hash: &hash,
+        held: Some(&held),
+        reidentified: false,
+        key: None,
+        run: RunId::new("run-1"),
+        timestamp: TIMESTAMP,
+        tool_version: TOOL_VERSION,
+    };
+    let admitted = Admitted {
+        artifact: held.id.clone(),
+        item: item.id.clone(),
+        relinked_from: None,
+    };
+    stores.learn(&admitting, &admitted);
+
+    let exists = |_: &Path| true;
+    let account = stores.account(&exists);
+    let learned = account.records.by_id(&held.id).unwrap();
+    assert_eq!(
+        learned.history, held.history,
+        "an admission of bytes already held must append nothing"
+    );
+}
+
+#[test]
+fn foresee_takes_in_no_entry_for_bytes_already_held() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"steady bytes");
+    let hash = hash("steady bytes");
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("steady.{UUID_A}.toml"), &item);
+    let held = fresh_record(
+        root,
+        artifact_id(UUID_B),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![hash_entry("steady bytes", "run-0")],
+    );
+    write_artifact_record(root, &held);
+
+    let mut stores = Stores::read(root);
+    let admitting = Admitting {
+        path: &path,
+        record: &item.record,
+        hash: &hash,
+        held: Some(&held),
+        reidentified: false,
+        key: None,
+        run: RunId::new("run-1"),
+        timestamp: TIMESTAMP,
+        tool_version: TOOL_VERSION,
+    };
+    let admitted = stores
+        .foresee(&admitting)
+        .expect("a path inside the library must foresee something");
+    assert_eq!(admitted.item, item.id);
+
+    let exists = |_: &Path| true;
+    let account = stores.account(&exists);
+    let foreseen = account.records.by_id(&held.id).unwrap();
+    assert_eq!(
+        foreseen.history, held.history,
+        "a foreseen admission of bytes already held must append nothing"
+    );
+}
+
+#[test]
+fn admit_giving_a_record_with_no_link_an_item_appends_an_entry_under_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let record = record_with_doi("10.1000/admit-no-link-gets-item");
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "paper.pdf",
+        vec![
+            hash_entry("bytes a", "run-0"),
+            hash_entry("bytes b", "run-0"),
+        ],
+    );
+    write_artifact_record(root, &held);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[2].hash, hash_a);
+    assert_eq!(after.history[2].item, Some(admitted.item));
+}
+
+// --- The D6 transitions, each driven through admit, reconcile (with an
+// extractor) and Stores::consult over a real directory ---
+
+#[test]
+fn transition_a_reidentifying_restored_bytes_leaves_newer_bytes_with_their_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let hash_b = hash("bytes b");
+    let x_record = record_with_doi("10.1000/transition-a-x");
+    let x = Item {
+        id: item_id(UUID_C),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_C}.toml"), &x);
+    let y = item_id(UUID_D);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.clone()),
+        "paper.pdf",
+        vec![entry_a.clone(), entry_b.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    // Restore a; re-identify it as x.
+    fs::write(&path, b"bytes a").unwrap();
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+    assert_eq!(admitted.item, x.id);
+
+    // Restore b: an ordinary rerun.
+    fs::write(&path, b"bytes b").unwrap();
+    let held_now = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_b,
+            held: Some(&held_now),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-3"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(after.history[1], entry_b);
+    assert_eq!(after.history[2].hash, hash_a);
+    assert_eq!(after.history[2].item, Some(x.id.clone()));
+    assert_eq!(after.item, Some(x.id.clone()));
+    assert_eq!(after.item_for(&hash_a), Some(&x.id), "a: x");
+    assert_eq!(after.item_for(&hash_b), Some(&y), "b: y");
+}
+
+#[test]
+fn transition_b_a_hand_correction_survives_an_edit_and_a_restore() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let hash_b = hash("bytes b");
+    let x = item_id(UUID_C);
+    let y_record = record_with_doi("10.1000/transition-b-y");
+    let y = Item {
+        id: item_id(UUID_D),
+        record: y_record.clone(),
+    };
+    write_item(root, &format!("y.{UUID_D}.toml"), &y);
+
+    let entry_a = hash_entry("bytes a", "run-0");
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(x),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    // A person corrects the link by hand, in the text.
+    let hand_corrected = ArtifactRecord {
+        item: Some(y.id.clone()),
+        ..held.clone()
+    };
+    write_artifact_record(root, &hand_corrected);
+
+    // An edited b is accepted under y.
+    fs::write(&path, b"bytes b").unwrap();
+    let held_now = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &y_record,
+            hash: &hash_b,
+            held: Some(&held_now),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    // Restore a.
+    fs::write(&path, b"bytes a").unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(
+        after.history[1].hash, hash_a,
+        "the restatement names a's bytes"
+    );
+    assert_eq!(after.history[1].item, Some(y.id.clone()));
+    assert_eq!(after.history[2].hash, hash_b);
+    assert_eq!(after.history[2].item, Some(y.id.clone()));
+    assert_eq!(after.item_for(&hash_a), Some(&y.id), "a: y");
+    assert_eq!(after.item_for(&hash_b), Some(&y.id), "b: y");
+}
+
+#[test]
+fn transition_c_relink_then_restore_then_re_edit() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let hash_b = hash("bytes b");
+    let x_record = record_with_doi("10.1000/transition-c-x");
+    let x = Item {
+        id: item_id(UUID_C),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_C}.toml"), &x);
+    let y = Item {
+        id: item_id(UUID_D),
+        record: record_with_doi("10.1000/transition-c-y"),
+    };
+    write_item(root, &format!("y.{UUID_D}.toml"), &y);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(x.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    // An edited b is accepted under x (an ordinary rerun).
+    fs::write(&path, b"bytes b").unwrap();
+    let held_now = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_b,
+            held: Some(&held_now),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    // b is re-identified as y.
+    let held_now = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &y.record,
+            hash: &hash_b,
+            held: Some(&held_now),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after_relink = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after_relink.history.len(),
+        2,
+        "re-identifying the newest bytes appends nothing, got {:?}",
+        after_relink.history
+    );
+    assert_eq!(after_relink.item, Some(y.id.clone()));
+    assert_eq!(after_relink.item_for(&hash_a), Some(&x.id), "a: x");
+    assert_eq!(after_relink.item_for(&hash_b), Some(&y.id), "b: y");
+
+    // Restore a, then edit it to a', carrying x's doi: y does not
+    // carry it, so the change is pending.
+    fs::write(&path, b"a-prime bytes").unwrap();
+    let identifier = doi_identifier("10.1000/transition-c-x");
+    let extraction = Extraction::Found {
+        identifier: identifier.to_string(),
+        tier: "text-layer".to_string(),
+    };
+    let mut answers = BTreeMap::new();
+    answers.insert(path.clone(), extraction.clone());
+    let extractor = Extractor::with(answers);
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-3", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(
+        result.repairs,
+        vec![(
+            artifact_id(UUID_A),
+            "paper.pdf".to_string(),
+            Repair::Pending {
+                hash: hash_bytes(b"a-prime bytes").to_string(),
+                item: Some(y.id.to_string()),
+                extraction,
+            }
+        )],
+        "got {:?}",
+        result.repairs
+    );
+}
+
+#[test]
+fn transition_d_a_correction_made_while_an_older_version_is_restored_is_credited_to_the_newest_bytes()
+ {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes b");
+    let hash_a = hash("bytes a");
+    let hash_c = hash("bytes c");
+    let x = item_id(UUID_B);
+    let y = item_id(UUID_C);
+    let z_record = record_with_doi("10.1000/transition-d-z");
+    let z = Item {
+        id: item_id(UUID_D),
+        record: z_record.clone(),
+    };
+    write_item(root, &format!("z.{UUID_D}.toml"), &z);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y),
+        "paper.pdf",
+        vec![entry_a.clone(), entry_b.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    // A person sets the link to z by hand.
+    let hand_corrected = ArtifactRecord {
+        item: Some(z.id.clone()),
+        ..held.clone()
+    };
+    write_artifact_record(root, &hand_corrected);
+
+    // Restore a (no admission: the record is unaffected by the file
+    // alone).
+    fs::write(&path, b"bytes a").unwrap();
+
+    // An edited c is accepted under z.
+    fs::write(&path, b"bytes c").unwrap();
+    let held_now = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &z_record,
+            hash: &hash_c,
+            held: Some(&held_now),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 4, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(after.history[1], entry_b);
+    assert_eq!(
+        after.history[2].hash, entry_b.hash,
+        "the restatement names b's bytes"
+    );
+    assert_eq!(after.history[2].item, Some(z.id.clone()));
+    assert_eq!(after.history[3].hash, hash_c);
+    assert_eq!(after.history[3].item, Some(z.id.clone()));
+    assert_eq!(after.item_for(&hash_a), Some(&x), "a: x");
+    assert_eq!(after.item_for(&entry_b.hash), Some(&z.id), "b: z");
+    assert_eq!(after.item_for(&hash_c), Some(&z.id), "c: z");
+}
+
+#[test]
+fn transition_e_a_pre_change_record_pins_its_newest_bytes_at_its_first_acceptance() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let hash_b = hash("bytes b");
+    let x_record = record_with_doi("10.1000/transition-e-x");
+    let x = Item {
+        id: item_id(UUID_C),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_C}.toml"), &x);
+    let y = Item {
+        id: item_id(UUID_D),
+        record: record_with_doi("10.1000/transition-e-y"),
+    };
+    write_item(root, &format!("y.{UUID_D}.toml"), &y);
+
+    // A pre-change entry: written before entries named items.
+    let entry_a = hash_entry("bytes a", "run-0");
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(x.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    // An edited b is accepted.
+    fs::write(&path, b"bytes b").unwrap();
+    let held_now = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_b,
+            held: Some(&held_now),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    // b is re-identified as y.
+    let held_now = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &y.record,
+            hash: &hash_b,
+            held: Some(&held_now),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    // Restore a.
+    fs::write(&path, b"bytes a").unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(
+        after.history[1].hash, hash_a,
+        "the restatement names a's bytes"
+    );
+    assert_eq!(after.history[1].item, Some(x.id.clone()));
+    assert_eq!(after.history[2].hash, hash_b);
+    assert_eq!(after.history[2].item, Some(x.id.clone()));
+    assert_eq!(after.item, Some(y.id.clone()));
+    assert_eq!(
+        after.item_for(&hash_a),
+        Some(&x.id),
+        "a answers x, not the interim y"
+    );
+    assert_eq!(after.item_for(&hash_b), Some(&y.id), "b: y");
+}
+
+#[test]
+fn transition_f_relinking_the_newest_bytes_appends_nothing_until_later_bytes_restate_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let hash_b = hash("bytes b");
+    let x = item_id(UUID_C);
+    let y_record = record_with_doi("10.1000/transition-f-y");
+    let y = Item {
+        id: item_id(UUID_D),
+        record: y_record.clone(),
+    };
+    write_item(root, &format!("y.{UUID_D}.toml"), &y);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x);
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(entry_a.item.clone().unwrap()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &y_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after_relink = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after_relink.history,
+        vec![entry_a.clone()],
+        "re-identifying the newest bytes appends nothing"
+    );
+    assert_eq!(after_relink.item, Some(y.id.clone()));
+
+    fs::write(&path, b"bytes b").unwrap();
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &y_record,
+            hash: &hash_b,
+            held: Some(&after_relink),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(after.history[1].hash, hash_a);
+    assert_eq!(after.history[1].item, Some(y.id.clone()));
+    assert_eq!(after.history[2].hash, hash_b);
+    assert_eq!(after.history[2].item, Some(y.id.clone()));
+    assert_eq!(after.item_for(&hash_a), Some(&y.id), "a: y throughout");
+    assert_eq!(after.item_for(&hash_b), Some(&y.id), "b: y");
+}
+
+#[test]
+fn transition_g_ten_ordinary_reruns_over_a_restored_file_append_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x = item_id(UUID_B);
+    let y = Item {
+        id: item_id(UUID_C),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("y.{UUID_C}.toml"), &y);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x);
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.id.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone(), entry_b.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    for run in 1..=10 {
+        let held_now = ArtifactStore::read(root)
+            .by_id(&artifact_id(UUID_A))
+            .unwrap()
+            .clone();
+        let _ = admit(
+            root,
+            &Admitting {
+                path: &path,
+                record: &y.record,
+                hash: &hash_a,
+                held: Some(&held_now),
+                reidentified: false,
+                key: None,
+                run: RunId::new(format!("run-{run}")),
+                timestamp: TIMESTAMP,
+                tool_version: TOOL_VERSION,
+            },
+            &store_write,
+        )
+        .unwrap();
+    }
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after.history,
+        vec![entry_a, entry_b],
+        "ten ordinary reruns over a restored file must append nothing"
+    );
+    assert_eq!(after.item, Some(y.id));
+}
+
+#[test]
+fn transition_h_restored_bytes_reidentified_as_the_links_own_item_are_appended() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x = item_id(UUID_B);
+    let y_record = record_with_doi("10.1000/transition-h-y");
+    let y = Item {
+        id: item_id(UUID_C),
+        record: y_record.clone(),
+    };
+    write_item(root, &format!("y.{UUID_C}.toml"), &y);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x);
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.id.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone(), entry_b.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &y_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(after.history[1], entry_b);
+    assert_eq!(after.history[2].hash, hash_a);
+    assert_eq!(after.history[2].item, Some(y.id.clone()));
+    assert_eq!(after.item, Some(y.id));
+}
+
+// ---------------------------------------------------------------------
 // 7.4: durability
 // ---------------------------------------------------------------------
 
@@ -3741,6 +6360,235 @@ fn item_with_doi(id: ItemId, doi_value: &str) -> Item {
         id,
         record: record_with_doi(doi_value),
     }
+}
+
+// ---------------------------------------------------------------------
+// 2: Identifier comparison and the gate (design D2, D11)
+// ---------------------------------------------------------------------
+
+#[test]
+fn carries_a_doi_the_item_record_holds() {
+    let record = record_with_doi("10.1000/x");
+    assert!(carries(&record, &doi_identifier("10.1000/x")));
+}
+
+#[test]
+fn carries_compares_only_the_field_of_the_identifiers_own_kind() {
+    let doi_record = record_with_doi("10.1000/x");
+    let arxiv = Identifier::Arxiv(ArxivId::parse("2401.12345").unwrap());
+    assert!(
+        !carries(&doi_record, &arxiv),
+        "a record whose DOI field holds a value does not carry an arXiv identifier"
+    );
+
+    let mut arxiv_record = minimal_record(EntryType::Article);
+    arxiv_record.borax.arxiv = Some(ArxivId::parse("2401.12345").unwrap());
+    assert!(
+        !carries(&arxiv_record, &doi_identifier("10.1000/x")),
+        "nor the reverse"
+    );
+}
+
+#[test]
+fn carries_an_arxiv_identifier_whatever_its_version() {
+    let mut record = minimal_record(EntryType::Article);
+    record.borax.arxiv = Some(ArxivId::parse("2401.12345v2").unwrap());
+
+    assert!(carries(
+        &record,
+        &Identifier::Arxiv(ArxivId::parse("arXiv:2401.12345v1").unwrap())
+    ));
+    assert!(carries(
+        &record,
+        &Identifier::Arxiv(ArxivId::parse("2401.12345").unwrap())
+    ));
+}
+
+#[test]
+fn does_not_carry_an_isbn_10_for_an_item_holding_the_isbn_13() {
+    let mut record = minimal_record(EntryType::Article);
+    record.isbn = Some(Isbn::parse("9780306406157").unwrap());
+
+    let isbn_10 = Identifier::Isbn(Isbn::parse("0306406152").unwrap());
+    assert!(!carries(&record, &isbn_10));
+}
+
+#[test]
+fn carries_a_pmid_and_an_isbn_of_the_same_length() {
+    let mut record = minimal_record(EntryType::Article);
+    record.pmid = Some(Pmid::parse("1234567890").unwrap());
+    record.isbn = Some(Isbn::parse("0306406152").unwrap());
+
+    assert!(carries(
+        &record,
+        &Identifier::Pmid(Pmid::parse("1234567890").unwrap())
+    ));
+    assert!(carries(
+        &record,
+        &Identifier::Isbn(Isbn::parse("0306406152").unwrap())
+    ));
+}
+
+#[test]
+fn extracted_identifier_reads_back_every_form_display_writes() {
+    let doi = doi_identifier("10.1000/x");
+    let arxiv = Identifier::Arxiv(ArxivId::parse("2401.12345v2").unwrap());
+    let pmid = Identifier::Pmid(Pmid::parse("123456").unwrap());
+    let isbn = Identifier::Isbn(Isbn::parse("9780306406157").unwrap());
+
+    for identifier in [doi, arxiv, pmid, isbn] {
+        let extraction = Extraction::Found {
+            identifier: identifier.to_string(),
+            tier: "text-layer".to_string(),
+        };
+        assert_eq!(
+            extracted_identifier(&extraction),
+            Some(identifier.clone()),
+            "{identifier} did not round-trip"
+        );
+    }
+}
+
+#[test]
+fn extracted_identifier_is_none_for_every_failure() {
+    let failures = [
+        Extraction::NoTextLayer,
+        Extraction::TextWithoutIdentifier,
+        Extraction::Encrypted,
+        Extraction::Unreadable {
+            message: "broken".to_string(),
+        },
+    ];
+    for extraction in failures {
+        assert_eq!(extracted_identifier(&extraction), None, "{extraction:?}");
+    }
+}
+
+#[test]
+fn accepted_by_is_extracted_when_the_linked_item_carries_the_extracted_identifier() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let link = item_id(UUID_B);
+    write_item(root, "item.toml", &item_with_doi(link.clone(), "10.1000/x"));
+    let items = ItemStore::read(root);
+    let held = artifact_record(artifact_id(UUID_A), Some(link), "paper.pdf", vec![]);
+    let extracted = doi_identifier("10.1000/x");
+
+    assert_eq!(
+        accepted_by(&items, &held, Some(&extracted), None),
+        Some(AcceptedBy::Extracted {
+            identifier: extracted.to_string()
+        })
+    );
+}
+
+#[test]
+fn accepted_by_prefers_extracted_over_supplied() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let link = item_id(UUID_B);
+    let mut record = record_with_doi("10.1000/x");
+    record.borax.arxiv = Some(ArxivId::parse("2401.12345").unwrap());
+    write_item(
+        root,
+        "item.toml",
+        &Item {
+            id: link.clone(),
+            record,
+        },
+    );
+    let items = ItemStore::read(root);
+    let held = artifact_record(artifact_id(UUID_A), Some(link), "paper.pdf", vec![]);
+
+    let extracted = doi_identifier("10.1000/x");
+    let supplied = Identifier::Arxiv(ArxivId::parse("2401.12345").unwrap());
+
+    assert_eq!(
+        accepted_by(&items, &held, Some(&extracted), Some(&supplied)),
+        Some(AcceptedBy::Extracted {
+            identifier: extracted.to_string()
+        }),
+        "extracted is tried first"
+    );
+}
+
+#[test]
+fn accepted_by_is_supplied_when_only_the_supplied_identifier_is_carried() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let link = item_id(UUID_B);
+    write_item(root, "item.toml", &item_with_doi(link.clone(), "10.1000/x"));
+    let items = ItemStore::read(root);
+    let held = artifact_record(artifact_id(UUID_A), Some(link), "paper.pdf", vec![]);
+
+    let extracted = Identifier::Arxiv(ArxivId::parse("2401.12345").unwrap());
+    let supplied = doi_identifier("10.1000/x");
+
+    assert_eq!(
+        accepted_by(&items, &held, Some(&extracted), Some(&supplied)),
+        Some(AcceptedBy::Supplied {
+            identifier: supplied.to_string()
+        })
+    );
+}
+
+#[test]
+fn accepted_by_is_none_when_neither_is_carried() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let link = item_id(UUID_B);
+    write_item(root, "item.toml", &item_with_doi(link.clone(), "10.1000/x"));
+    let items = ItemStore::read(root);
+    let held = artifact_record(artifact_id(UUID_A), Some(link), "paper.pdf", vec![]);
+
+    let extracted = doi_identifier("10.1000/other");
+    let supplied = Identifier::Arxiv(ArxivId::parse("2401.12345").unwrap());
+
+    assert_eq!(
+        accepted_by(&items, &held, Some(&extracted), Some(&supplied)),
+        None
+    );
+}
+
+#[test]
+fn accepted_by_is_none_for_a_record_linking_no_item() {
+    let items = ItemStore::read(tempdir().unwrap().path());
+    let held = artifact_record(artifact_id(UUID_A), None, "paper.pdf", vec![]);
+    let extracted = doi_identifier("10.1000/x");
+
+    assert_eq!(accepted_by(&items, &held, Some(&extracted), None), None);
+}
+
+#[test]
+fn accepted_by_is_none_when_no_item_file_carries_the_linked_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let link = item_id(UUID_B);
+    // No item file names `link` at all: a dangling link.
+    write_item(
+        root,
+        "other.toml",
+        &item_with_doi(item_id(UUID_C), "10.1000/x"),
+    );
+    let items = ItemStore::read(root);
+    let held = artifact_record(artifact_id(UUID_A), Some(link), "paper.pdf", vec![]);
+    let extracted = doi_identifier("10.1000/x");
+
+    assert_eq!(accepted_by(&items, &held, Some(&extracted), None), None);
+}
+
+#[test]
+fn accepted_by_is_none_when_two_item_files_carry_the_linked_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let link = item_id(UUID_B);
+    write_item(root, "one.toml", &item_with_doi(link.clone(), "10.1000/x"));
+    write_item(root, "two.toml", &item_with_doi(link.clone(), "10.1000/x"));
+    let items = ItemStore::read(root);
+    let held = artifact_record(artifact_id(UUID_A), Some(link), "paper.pdf", vec![]);
+    let extracted = doi_identifier("10.1000/x");
+
+    assert_eq!(accepted_by(&items, &held, Some(&extracted), None), None);
 }
 
 // ---- design D2: Account::is_incoming ----
@@ -4101,6 +6949,7 @@ fn work_duplicate_finds_the_item_holding_the_identifier_with_a_live_artifact() {
 
     let found = account.work_duplicate(
         &root.join("incoming.pdf"),
+        None,
         &[doi_identifier("10.1000/work-dup")],
     );
 
@@ -4146,6 +6995,7 @@ fn work_duplicate_tries_identifiers_in_order_and_the_first_that_answers_decides(
 
     let found = account.work_duplicate(
         &root.join("incoming.pdf"),
+        None,
         &[
             doi_identifier("10.1000/no-item-holds-this"),
             doi_identifier("10.1000/work-dup-second"),
@@ -4181,6 +7031,7 @@ fn work_duplicate_is_none_when_the_item_has_no_artifact() {
 
     let found = account.work_duplicate(
         &root.join("incoming.pdf"),
+        None,
         &[doi_identifier("10.1000/no-artifact-yet")],
     );
 
@@ -4223,6 +7074,7 @@ fn work_duplicate_is_none_when_every_recorded_artifact_of_the_item_is_stale() {
 
     let found = account.work_duplicate(
         &root.join("incoming.pdf"),
+        None,
         &[doi_identifier("10.1000/all-stale")],
     );
 
@@ -4279,12 +7131,182 @@ fn work_duplicate_passes_over_the_item_the_incoming_files_own_record_already_lin
         exists: &exists,
     };
 
-    let found = account.work_duplicate(&incoming, &[doi_identifier("10.1000/own-work")]);
+    let found = account.work_duplicate(&incoming, None, &[doi_identifier("10.1000/own-work")]);
 
     assert_eq!(
         found, None,
         "an item the incoming file's own record already links to must never be reported \
          as a work duplicate: got {found:?}"
+    );
+}
+
+/// design D6: a restored version answers with x, while the own record
+/// still links y. The item the own record *answers with* for the
+/// incoming bytes is excluded too, not only its link.
+#[test]
+fn work_duplicate_passes_over_the_item_the_own_record_answers_with_for_the_incoming_bytes() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let incoming = root.join("incoming.pdf");
+    let incoming_hash = hash("incoming bytes");
+    let x_item = item_with_doi(item_id(UUID_A), "10.1000/answered-with-x");
+    write_item(root, &format!("x.{UUID_A}.toml"), &x_item);
+    let y_item = item_with_doi(item_id(UUID_C), "10.1000/link-y");
+    write_item(root, &format!("y.{UUID_C}.toml"), &y_item);
+
+    let mut entry_incoming = hash_entry("incoming bytes", "run-0");
+    entry_incoming.item = Some(x_item.id.clone());
+    let mut entry_newer = hash_entry("newer bytes", "run-1");
+    entry_newer.item = Some(y_item.id.clone());
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            Some(y_item.id.clone()),
+            "incoming.pdf",
+            vec![entry_incoming, entry_newer],
+        ),
+    );
+
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![incoming.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.work_duplicate(
+        &incoming,
+        Some(&incoming_hash),
+        &[doi_identifier("10.1000/answered-with-x")],
+    );
+
+    assert_eq!(
+        found, None,
+        "the item the own record answers with for the incoming bytes must be passed over, \
+         even though it is not the record's link: got {found:?}"
+    );
+}
+
+/// design D6: with no hash given, only the record's link is excluded,
+/// as today — so x, the item the restored bytes answer with, is still
+/// reported when it has another recorded artifact.
+#[test]
+fn work_duplicate_with_no_hash_passes_over_only_the_link() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let incoming = root.join("incoming.pdf");
+    let x_item = item_with_doi(item_id(UUID_A), "10.1000/no-hash-x");
+    write_item(root, &format!("x.{UUID_A}.toml"), &x_item);
+    let y_item = item_with_doi(item_id(UUID_C), "10.1000/no-hash-y");
+    write_item(root, &format!("y.{UUID_C}.toml"), &y_item);
+
+    let mut entry_incoming = hash_entry("incoming bytes", "run-0");
+    entry_incoming.item = Some(x_item.id.clone());
+    let mut entry_newer = hash_entry("newer bytes", "run-1");
+    entry_newer.item = Some(y_item.id.clone());
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            Some(y_item.id.clone()),
+            "incoming.pdf",
+            vec![entry_incoming, entry_newer],
+        ),
+    );
+    let other_path = relative_to(root, "other.pdf");
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_D),
+            Some(x_item.id.clone()),
+            "other.pdf",
+            vec![hash_entry("other bytes", "run-0")],
+        ),
+    );
+
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![incoming.clone(), other_path.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.work_duplicate(&incoming, None, &[doi_identifier("10.1000/no-hash-x")]);
+
+    assert_eq!(
+        found,
+        Some(WorkDuplicate {
+            item: x_item.id.clone(),
+            item_file: items.file_of(&x_item.id).map(Path::to_path_buf),
+            existing: other_path,
+        }),
+        "with no hash, only the link (y) is excluded, so x's other artifact is found"
+    );
+}
+
+/// design D6: the other side stays by link. An incoming file of y is
+/// still reported a duplicate of a recorded path linking y, even
+/// though that path currently holds a restored version answering with
+/// x.
+#[test]
+fn work_duplicate_still_finds_a_recorded_path_of_the_link_item_holding_a_restored_version() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let incoming = root.join("incoming.pdf");
+    let y_item = item_with_doi(item_id(UUID_A), "10.1000/restored-version-y");
+    write_item(root, &format!("y.{UUID_A}.toml"), &y_item);
+    let x_item = item_id(UUID_C);
+
+    let other_path = relative_to(root, "other.pdf");
+    let mut other_entry_x = hash_entry("other bytes x", "run-0");
+    other_entry_x.item = Some(x_item);
+    let mut other_entry_y = hash_entry("other bytes y", "run-1");
+    other_entry_y.item = Some(y_item.id.clone());
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_D),
+            Some(y_item.id.clone()),
+            "other.pdf",
+            vec![other_entry_x, other_entry_y],
+        ),
+    );
+
+    let items = ItemStore::read(root);
+    let records = ArtifactStore::read(root);
+    let checker = RecordingExists::new(vec![incoming.clone(), other_path.clone()]);
+    let exists = |path: &Path| checker.check(path);
+    let account = Account {
+        root,
+        items: &items,
+        records: &records,
+        exists: &exists,
+    };
+
+    let found = account.work_duplicate(
+        &incoming,
+        None,
+        &[doi_identifier("10.1000/restored-version-y")],
+    );
+
+    assert_eq!(
+        found,
+        Some(WorkDuplicate {
+            item: y_item.id.clone(),
+            item_file: items.file_of(&y_item.id).map(Path::to_path_buf),
+            existing: other_path,
+        }),
+        "the other side stays by link: a recorded path of y is reported even though it \
+         currently holds a restored version answering with x"
     );
 }
 
@@ -4331,6 +7353,7 @@ fn work_duplicate_still_finds_a_duplicate_of_a_different_item() {
 
     let found = account.work_duplicate(
         &incoming,
+        None,
         &[
             doi_identifier("10.1000/own-work-2"),
             doi_identifier("10.1000/other-work-2"),
@@ -4400,16 +7423,17 @@ fn consult_reports_tracked_when_the_hash_is_the_records_newest_entry() {
         LibraryAnswer::Tracked {
             artifact: UUID_A.to_string(),
             item: UUID_B.to_string(),
+            accepted_under: None,
         }
     );
     assert_eq!(found.item, Some(item), "the linked item must come back too");
 }
 
-/// The interim policy (design D1, Risks): a rollback to an earlier
-/// history entry still answers `Tracked`, with the item the record
-/// links to *now* — not the item that entry was accepted under, which
-/// nothing here records. Binding an entry to the item it was accepted
-/// under is change 15's acceptance policy, not this one's.
+/// The pre-change-entry rule (design D7): both entries here were
+/// written before an entry named an item, so a rollback to the earlier
+/// one still answers `Tracked` with no `accepted_under`, the record's
+/// current link — the only thing an entry naming no item can answer
+/// with.
 #[test]
 fn consult_reports_tracked_for_a_rollback_to_an_older_history_entry_interim_policy() {
     let dir = tempdir().unwrap();
@@ -4435,9 +7459,452 @@ fn consult_reports_tracked_for_a_rollback_to_an_older_history_entry_interim_poli
         LibraryAnswer::Tracked {
             artifact: UUID_A.to_string(),
             item: UUID_B.to_string(),
+            accepted_under: None,
         },
-        "work A's bytes, restored at a record re-linked to work B, answer as work B \
-         (interim policy, owned by change 15)"
+        "work A's bytes answer as work B: neither entry names an item, so the record's \
+         current link is the only answer a pre-change entry can give (design D7)"
+    );
+}
+
+// --- Restored bytes answer from the item they were accepted under
+// (design D6, D9) ---
+
+#[test]
+fn consult_answers_restored_bytes_with_the_item_their_entry_names() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let x = item_at(item_id(UUID_C));
+    let y = item_at(item_id(UUID_D));
+    write_item(root, &item_file_name(None, &x.id), &x);
+    write_item(root, &item_file_name(None, &y.id), &y);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.id.clone());
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes a"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Tracked {
+            artifact: UUID_A.to_string(),
+            item: UUID_D.to_string(),
+            accepted_under: Some(UUID_C.to_string()),
+        }
+    );
+    assert_eq!(found.item, Some(x), "the item answered with is x's record");
+}
+
+#[test]
+fn consult_answers_the_newest_bytes_with_no_accepted_under() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes b");
+    let y = item_at(item_id(UUID_D));
+    write_item(root, &item_file_name(None, &y.id), &y);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(item_id(UUID_C));
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.id.clone());
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes b"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Tracked {
+            artifact: UUID_A.to_string(),
+            item: UUID_D.to_string(),
+            accepted_under: None,
+        }
+    );
+}
+
+#[test]
+fn consult_reports_dangling_item_about_the_link_even_for_restored_bytes() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let x = item_at(item_id(UUID_C));
+    write_item(root, &item_file_name(None, &x.id), &x);
+    // The link, y, is dangling: no file names it.
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(item_id(UUID_D));
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_D)),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes a"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::DanglingItem {
+            artifact: UUID_A.to_string(),
+            item: UUID_D.to_string(),
+        },
+        "the link, not the entry's own readable item, is what is wrong"
+    );
+}
+
+#[test]
+fn consult_reports_no_item_for_restored_bytes_when_the_record_links_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(item_id(UUID_C));
+    let entry_b = hash_entry("bytes b", "run-1");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes a"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::NoItem {
+            artifact: UUID_A.to_string(),
+        }
+    );
+}
+
+#[test]
+fn consult_answers_the_newest_bytes_with_the_link_corrected_by_hand() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let y = item_at(item_id(UUID_D));
+    write_item(root, &item_file_name(None, &y.id), &y);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(item_id(UUID_C));
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes a"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::Tracked {
+            artifact: UUID_A.to_string(),
+            item: UUID_D.to_string(),
+            accepted_under: None,
+        },
+        "a's bytes are the newest entry, so the record's current link answers, even \
+         though that entry names a different item"
+    );
+}
+
+#[test]
+fn consult_reports_accepted_item_unavailable_for_restored_bytes_whose_item_is_gone() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let y = item_at(item_id(UUID_D));
+    write_item(root, &item_file_name(None, &y.id), &y);
+    // x, the entry's item, is deleted: no file names it.
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(item_id(UUID_C));
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.id.clone());
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes a"))).unwrap();
+
+    assert_eq!(
+        found.answer,
+        LibraryAnswer::AcceptedItemUnavailable {
+            artifact: UUID_A.to_string(),
+            item: UUID_D.to_string(),
+            accepted_under: UUID_C.to_string(),
+            cause: AcceptedItemCause::Dangling,
+        }
+    );
+}
+
+#[test]
+fn consult_reports_accepted_item_unavailable_when_two_files_carry_the_entrys_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let y = item_at(item_id(UUID_D));
+    write_item(root, &item_file_name(None, &y.id), &y);
+    let x = item_at(item_id(UUID_C));
+    write_item(root, "one.toml", &x);
+    write_item(root, "two.toml", &x);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.id.clone());
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes a"))).unwrap();
+
+    match found.answer {
+        LibraryAnswer::AcceptedItemUnavailable {
+            artifact,
+            item,
+            accepted_under,
+            cause: AcceptedItemCause::Ambiguous { files },
+        } => {
+            assert_eq!(artifact, UUID_A.to_string());
+            assert_eq!(item, UUID_D.to_string());
+            assert_eq!(accepted_under, UUID_C.to_string());
+            assert_eq!(files.len(), 2, "got {files:?}");
+        }
+        other => panic!("expected AcceptedItemUnavailable/ambiguous, got {other:?}"),
+    }
+}
+
+#[test]
+fn consult_reports_accepted_item_unavailable_when_the_entrys_item_file_cannot_be_read() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let y = item_at(item_id(UUID_D));
+    write_item(root, &item_file_name(None, &y.id), &y);
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    let item_path = items.join(format!("badkey.{UUID_C}.toml"));
+    fs::write(&item_path, "not valid toml {{{").unwrap();
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(item_id(UUID_C));
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.id.clone());
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes a"))).unwrap();
+
+    match found.answer {
+        LibraryAnswer::AcceptedItemUnavailable {
+            artifact,
+            item,
+            accepted_under,
+            cause:
+                AcceptedItemCause::Unreadable {
+                    path: reported_path,
+                    ..
+                },
+        } => {
+            assert_eq!(artifact, UUID_A.to_string());
+            assert_eq!(item, UUID_D.to_string());
+            assert_eq!(accepted_under, UUID_C.to_string());
+            assert_eq!(reported_path, item_path);
+        }
+        other => panic!("expected AcceptedItemUnavailable/unreadable, got {other:?}"),
+    }
+}
+
+#[test]
+fn consult_reports_unreadable_item_about_the_link_over_a_valid_entry_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let x = item_at(item_id(UUID_C));
+    write_item(root, &item_file_name(None, &x.id), &x);
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    fs::write(
+        items.join(format!("badkey.{UUID_D}.toml")),
+        "not valid toml {{{",
+    )
+    .unwrap();
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(item_id(UUID_D));
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_D)),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes a"))).unwrap();
+
+    match found.answer {
+        LibraryAnswer::UnreadableItem { artifact, item, .. } => {
+            assert_eq!(artifact, UUID_A.to_string());
+            assert_eq!(
+                item,
+                UUID_D.to_string(),
+                "names the link, not the entry's own (readable) item"
+            );
+        }
+        other => panic!("expected UnreadableItem, got {other:?}"),
+    }
+}
+
+#[test]
+fn consult_reports_ambiguous_item_about_the_link_over_a_valid_entry_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let x = item_at(item_id(UUID_C));
+    write_item(root, &item_file_name(None, &x.id), &x);
+    let y = item_at(item_id(UUID_D));
+    write_item(root, "one.toml", &y);
+    write_item(root, "two.toml", &y);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.id.clone());
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &record);
+
+    let found = consult(root, &path, Some(&hash("bytes a"))).unwrap();
+
+    match found.answer {
+        LibraryAnswer::AmbiguousItem {
+            artifact,
+            item,
+            files,
+        } => {
+            assert_eq!(artifact, UUID_A.to_string());
+            assert_eq!(
+                item,
+                UUID_D.to_string(),
+                "names the link, not the entry's own (readable) item"
+            );
+            assert_eq!(files.len(), 2, "got {files:?}");
+        }
+        other => panic!("expected AmbiguousItem, got {other:?}"),
+    }
+}
+
+#[test]
+fn evidence_retrieval_names_the_item_answered_with_for_restored_bytes() {
+    let evidence = Evidence {
+        library: Consultation::Consulted(LibraryAnswer::Tracked {
+            artifact: UUID_A.to_string(),
+            item: UUID_D.to_string(),
+            accepted_under: Some(UUID_C.to_string()),
+        }),
+        content_index: IndexEvidence {
+            read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+            write: IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
+        },
+        extraction: ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::LibraryAnswered),
+            titles: Titles::NotAttempted(Unattempted::LibraryAnswered),
+        },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::LibraryAnswered),
+        lookup: LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
+        match_check: MatchCheck::NotAttempted(Unattempted::LibraryAnswered),
+    };
+
+    assert_eq!(
+        evidence.retrieval(),
+        Some(RecordRetrieval::Library {
+            artifact: UUID_A.to_string(),
+            item: UUID_C.to_string(),
+        }),
+        "the record retrieved is the one whose item the bytes were accepted under"
+    );
+}
+
+#[test]
+fn consult_reports_unrecognised_content_for_bytes_reconcile_left_pending() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"replacement bytes");
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(
+        root,
+        "item.toml",
+        &item_with_doi(item.clone(), "10.1000/orig"),
+    );
+    let record = artifact_record(
+        id,
+        Some(item),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let identifier = doi_identifier("10.1000/other");
+    let mut answers = BTreeMap::new();
+    answers.insert(
+        path.clone(),
+        Extraction::Found {
+            identifier: identifier.to_string(),
+            tier: "text-layer".to_string(),
+        },
+    );
+    let extractor = Extractor::with(answers);
+    let _ = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    let found = consult(root, &path, Some(&hash_bytes(b"replacement bytes"))).unwrap();
+
+    assert!(
+        matches!(found.answer, LibraryAnswer::UnrecognisedContent { .. }),
+        "a pending change writes nothing, so the new bytes are still unrecognised: got {:?}",
+        found.answer
     );
 }
 
@@ -4569,6 +8036,7 @@ fn consult_normalises_dot_and_dotdot_in_the_input_path() {
     let tracked = LibraryAnswer::Tracked {
         artifact: UUID_A.to_string(),
         item: UUID_B.to_string(),
+        accepted_under: None,
     };
 
     let via_dot = root.join("sub").join(".").join("paper.pdf");
@@ -4617,6 +8085,7 @@ fn consult_normalises_a_relative_spelling_of_the_input_path() {
         LibraryAnswer::Tracked {
             artifact: UUID_A.to_string(),
             item: UUID_B.to_string(),
+            accepted_under: None,
         },
         "a relative spelling of the same file must answer the same way: {relative:?}"
     );
@@ -4652,6 +8121,7 @@ fn consult_normalises_a_relative_spelling_of_the_root() {
         LibraryAnswer::Tracked {
             artifact: UUID_A.to_string(),
             item: UUID_B.to_string(),
+            accepted_under: None,
         },
         "a relative root must answer the same way: {relative_root:?}"
     );
@@ -4840,6 +8310,7 @@ fn consult_prefers_the_one_record_that_actually_holds_the_hash() {
         LibraryAnswer::Tracked {
             artifact: UUID_C.to_string(),
             item: UUID_B.to_string(),
+            accepted_under: None,
         }
     );
 }
@@ -5158,6 +8629,7 @@ fn consult_reports_tracked_even_when_an_unrelated_record_file_is_unreadable() {
         LibraryAnswer::Tracked {
             artifact: UUID_A.to_string(),
             item: UUID_B.to_string(),
+            accepted_under: None,
         },
         "the file's own record is clean, so the unrelated fault must not affect it"
     );
