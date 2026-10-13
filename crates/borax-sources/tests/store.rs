@@ -912,7 +912,13 @@ fn create_atomically_leaves_a_file_at_a_taken_temporary_name_untouched() {
     std::fs::write(root.path().join("taken.tmp"), b"taken bytes").unwrap();
     let name = sequence_name(vec!["taken.tmp".to_string(), "fresh.tmp".to_string()]);
 
-    create_atomically_with(&path, b"content", &std::fs::hard_link, &name).unwrap();
+    create_atomically_with(
+        &path,
+        b"content",
+        &|from: &Path, to: &Path| std::fs::hard_link(from, to),
+        &name,
+    )
+    .unwrap();
 
     assert_eq!(std::fs::read(&path).unwrap(), b"content");
     assert_eq!(
@@ -936,8 +942,13 @@ fn create_atomically_never_writes_through_a_stale_temporary_linked_to_the_destin
     std::fs::hard_link(&path, root.path().join("taken.tmp")).unwrap();
     let name = sequence_name(vec!["taken.tmp".to_string(), "fresh.tmp".to_string()]);
 
-    let error =
-        create_atomically_with(&path, b"new content", &std::fs::hard_link, &name).unwrap_err();
+    let error = create_atomically_with(
+        &path,
+        b"new content",
+        &|from: &Path, to: &Path| std::fs::hard_link(from, to),
+        &name,
+    )
+    .unwrap_err();
 
     assert_eq!(error.kind(), ErrorKind::AlreadyExists);
     assert_eq!(std::fs::read(&path).unwrap(), b"existing identity");
@@ -965,7 +976,13 @@ fn create_atomically_gives_up_after_sixteen_taken_temporary_names() {
         name_list[i].clone()
     };
 
-    let error = create_atomically_with(&path, b"content", &std::fs::hard_link, &name).unwrap_err();
+    let error = create_atomically_with(
+        &path,
+        b"content",
+        &|from: &Path, to: &Path| std::fs::hard_link(from, to),
+        &name,
+    )
+    .unwrap_err();
 
     assert_ne!(
         error.kind(),

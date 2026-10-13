@@ -9106,7 +9106,7 @@ fn a_run_meeting_the_identity_file_mid_write_writes_without_minting_and_remember
         0,
         "B must not try to mint over a short file"
     );
-    assert_eq!(write_log.borrow().as_slice(), [target.clone()]);
+    assert_eq!(write_log.borrow().as_slice(), std::slice::from_ref(&target));
     let fault = writer
         .identity_fault()
         .expect("the fault B met must be remembered");
@@ -9345,21 +9345,36 @@ fn an_admission_that_rewrites_nothing_mints_nothing() {
     let record = record_with_doi("10.1000/rewrite-nothing-mints-nothing");
     let hash = hash("steady bytes");
 
-    let admitting = |held: Option<&ArtifactRecord>, run: &str| Admitting {
-        path: &path,
-        record: &record,
-        hash: &hash,
-        held,
-        reidentified: false,
-        key: Some("rewrite-nothing"),
-        run: RunId::new(run),
-        timestamp: TIMESTAMP,
-        tool_version: TOOL_VERSION,
-    };
+    fn admitting<'a>(
+        path: &'a Path,
+        record: &'a Record,
+        hash: &'a ContentHash,
+        held: Option<&'a ArtifactRecord>,
+        run: &str,
+    ) -> Admitting<'a> {
+        Admitting {
+            path,
+            record,
+            hash,
+            held,
+            reidentified: false,
+            key: Some("rewrite-nothing"),
+            run: RunId::new(run),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        }
+    }
+    let admitting = |held, run| admitting(&path, &record, &hash, held, run);
 
-    admit(root, &admitting(None, "run-1"), &store_write).unwrap();
+    // Through real seams, as a run admits: a StoreWriter over
+    // store_create and store_write, which mints the identity.
+    let real = StoreWriter::new(root, &store_create, &store_write);
+    admit(root, &admitting(None, "run-1"), &|p, b| real.write(p, b)).unwrap();
     let held = recorded_at(root, &path);
-    admit(root, &admitting(held.as_ref(), "run-2"), &store_write).unwrap();
+    admit(root, &admitting(held.as_ref(), "run-2"), &|p, b| {
+        real.write(p, b)
+    })
+    .unwrap();
 
     fs::remove_file(identity_file(root)).unwrap();
 
