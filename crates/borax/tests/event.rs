@@ -452,6 +452,36 @@ fn library_adoption(path: &str, adoption: Adoption) -> Event {
     }
 }
 
+/// Fixed library-identity text for the status and validated fixtures
+/// below, on the same footing as [`COND_UUID_MISSING`].
+const LIB_UUID: &str = "0190c3a2-7f21-7abc-8def-0123456789ab";
+
+/// design D7: `library-status`, with or without `id`.
+fn library_status(id: Option<&str>) -> Event {
+    Event::LibraryStatus {
+        root: PathBuf::from("/lib"),
+        id: id.map(str::to_string),
+        artifacts: 3,
+        items: 2,
+        records: 2,
+        orphans: 1,
+        nested: Vec::new(),
+        identifiable: None,
+    }
+}
+
+/// design D7: `library-validated`, with or without `id`.
+fn library_validated(id: Option<&str>) -> Event {
+    Event::LibraryValidated {
+        root: PathBuf::from("/lib"),
+        id: id.map(str::to_string),
+        findings: 0,
+        orphans: 0,
+        missing: 0,
+        unlinked: 0,
+    }
+}
+
 /// Fixed artifact-identity text for the repair and admission fixtures
 /// below, on the same footing as [`COND_UUID_MISSING`].
 const REPAIR_UUID: &str = "0190c3a2-3333-7000-8000-000000000004";
@@ -630,6 +660,10 @@ fn all_events() -> Vec<Event> {
             },
         ),
         library_adoption("new.pdf", Adoption::Unindexed),
+        library_status(Some(LIB_UUID)),
+        library_status(None),
+        library_validated(Some(LIB_UUID)),
+        library_validated(None),
         content_index_write(WriteStep::Written),
         content_index_write(WriteStep::Failed {
             message: "disk full".to_string(),
@@ -4790,5 +4824,115 @@ fn human_line_of_a_stranding_skip_names_rehash_and_accept() {
         "mystery.pdf: skipped, artifact record ARTIFACT holds no hash of these bytes, and \
          this run writes none, so moving it would strand the record; borax reconcile --rehash \
          records them, or reports them pending for borax reconcile --accept"
+    );
+}
+
+// ---------------------------------------------------------------------
+// design D7: `id` on library-status and library-validated
+// ---------------------------------------------------------------------
+
+#[test]
+fn library_status_without_an_identity_is_written_without_an_id_key() {
+    let event = library_status(None);
+
+    assert_eq!(
+        json_line(&event),
+        r#"{"schema":4,"event":"library-status","root":"/lib","artifacts":3,"items":2,"records":2,"orphans":1,"nested":[],"identifiable":null}"#
+    );
+}
+
+#[test]
+fn library_status_carries_the_id_directly_after_the_root() {
+    let event = library_status(Some(LIB_UUID));
+
+    assert_eq!(
+        json_line(&event),
+        format!(
+            r#"{{"schema":4,"event":"library-status","root":"/lib","id":"{LIB_UUID}","artifacts":3,"items":2,"records":2,"orphans":1,"nested":[],"identifiable":null}}"#
+        )
+    );
+}
+
+#[test]
+fn library_validated_without_an_identity_is_written_without_an_id_key() {
+    let event = library_validated(None);
+
+    assert_eq!(
+        json_line(&event),
+        r#"{"schema":4,"event":"library-validated","root":"/lib","findings":0,"orphans":0,"missing":0,"unlinked":0}"#
+    );
+}
+
+#[test]
+fn library_validated_carries_the_id_directly_after_the_root() {
+    let event = library_validated(Some(LIB_UUID));
+
+    assert_eq!(
+        json_line(&event),
+        format!(
+            r#"{{"schema":4,"event":"library-validated","root":"/lib","id":"{LIB_UUID}","findings":0,"orphans":0,"missing":0,"unlinked":0}}"#
+        )
+    );
+}
+
+#[test]
+fn human_line_of_library_status_with_an_identity_ends_with_the_library_clause() {
+    let event = library_status(Some(LIB_UUID));
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!("/lib: 3 artifacts, 2 items, 2 records, 1 orphans; library {LIB_UUID}")
+    );
+}
+
+#[test]
+fn human_line_of_library_status_with_nested_libraries_and_an_identity_puts_the_identity_last() {
+    let event = Event::LibraryStatus {
+        root: PathBuf::from("/lib"),
+        id: Some(LIB_UUID.to_string()),
+        artifacts: 3,
+        items: 2,
+        records: 2,
+        orphans: 1,
+        nested: vec!["a".to_string(), "b".to_string()],
+        identifiable: None,
+    };
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!(
+            "/lib: 3 artifacts, 2 items, 2 records, 1 orphans \
+             (excluding nested libraries: a, b); library {LIB_UUID}"
+        )
+    );
+}
+
+#[test]
+fn human_line_of_library_status_without_an_identity_is_unchanged() {
+    let event = library_status(None);
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "/lib: 3 artifacts, 2 items, 2 records, 1 orphans"
+    );
+}
+
+#[test]
+fn human_line_of_library_validated_with_an_identity_ends_with_the_library_clause() {
+    let event = library_validated(Some(LIB_UUID));
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!("/lib: 0 findings, 0 orphans, 0 missing, 0 unlinked; library {LIB_UUID}")
+    );
+}
+
+#[test]
+fn human_line_of_library_validated_without_an_identity_is_unchanged() {
+    let event = library_validated(None);
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "/lib: 0 findings, 0 orphans, 0 missing, 0 unlinked"
     );
 }

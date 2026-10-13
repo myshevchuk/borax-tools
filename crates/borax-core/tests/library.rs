@@ -2,8 +2,8 @@
 
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, Malformed, RunId, is_library_relative,
-    is_well_formed_hash, name_uuid,
+    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, LibraryId, LibraryIdentity, Malformed,
+    RunId, is_library_relative, is_well_formed_hash, name_uuid,
 };
 use borax_core::record::{EntryType, Record};
 
@@ -1096,4 +1096,113 @@ fn append_judges_the_link_as_read_not_the_records_current_link() {
         "judged against the link as read (y), not the record's current link (x), \
          so the newest entry (b, naming y) triggers no restatement"
     );
+}
+
+// ---------------------------------------------------------------------
+// 1.1 LibraryId and LibraryIdentity (design D1, D8)
+// ---------------------------------------------------------------------
+
+#[test]
+fn library_id_parses_a_canonical_uuid_and_renders_it_back_byte_identically() {
+    let id = LibraryId::parse(UUID_A).unwrap();
+    assert_eq!(id.to_string(), UUID_A);
+}
+
+#[test]
+fn library_id_from_uuid_renders_the_same_canonical_text() {
+    let uuid = uuid::Uuid::parse_str(UUID_A).unwrap();
+    let id = LibraryId::from_uuid(uuid);
+    assert_eq!(id.to_string(), UUID_A);
+    assert_eq!(id.uuid(), uuid);
+}
+
+#[test]
+fn library_id_refuses_an_uppercase_spelling() {
+    assert_eq!(LibraryId::parse(&UUID_A.to_uppercase()), None);
+}
+
+#[test]
+fn library_id_refuses_a_braced_spelling() {
+    assert_eq!(LibraryId::parse(&format!("{{{UUID_A}}}")), None);
+}
+
+#[test]
+fn library_id_refuses_a_bare_hex_run_with_no_hyphens() {
+    assert_eq!(LibraryId::parse(&UUID_A.replace('-', "")), None);
+}
+
+#[test]
+fn library_id_accepts_a_canonical_uuid_of_another_version() {
+    // Version 4, not version 7: `LibraryId` checks spelling only, as
+    // `canonical_uuid` does for items and artifacts (design D1).
+    let version_4 = "550e8400-e29b-41d4-a716-446655440000";
+    let id = LibraryId::parse(version_4).expect("a canonical uuid of any version must parse");
+    assert_eq!(id.to_string(), version_4);
+}
+
+#[test]
+fn library_identity_is_written_as_one_id_line() {
+    let identity = LibraryIdentity {
+        id: LibraryId::parse(UUID_A).unwrap(),
+    };
+    assert_eq!(identity.to_toml(), format!("id = \"{UUID_A}\"\n"));
+}
+
+#[test]
+fn library_identity_round_trips_through_toml() {
+    let identity = LibraryIdentity {
+        id: LibraryId::parse(UUID_A).unwrap(),
+    };
+    let parsed = LibraryIdentity::from_toml(&identity.to_toml()).unwrap();
+    assert_eq!(parsed, identity);
+}
+
+#[test]
+fn library_identity_ignores_keys_and_tables_it_does_not_know() {
+    let text = format!("id = \"{UUID_A}\"\ncreated = \"2026-01-01\"\n\n[later]\nkey = 1\n");
+    let parsed = LibraryIdentity::from_toml(&text)
+        .expect("unknown keys and tables must not stop this from parsing");
+    assert_eq!(parsed.id, LibraryId::parse(UUID_A).unwrap());
+}
+
+#[test]
+fn library_identity_without_an_id_does_not_parse() {
+    assert!(matches!(
+        LibraryIdentity::from_toml(""),
+        Err(Malformed::Toml(_))
+    ));
+    assert!(matches!(
+        LibraryIdentity::from_toml("other = 1\n"),
+        Err(Malformed::Toml(_))
+    ));
+}
+
+#[test]
+fn library_identity_whose_id_is_not_a_string_does_not_parse() {
+    assert!(matches!(
+        LibraryIdentity::from_toml("id = 7\n"),
+        Err(Malformed::Toml(_))
+    ));
+}
+
+#[test]
+fn library_identity_whose_id_is_not_a_canonical_uuid_does_not_parse() {
+    let text = format!("id = \"{}\"\n", UUID_A.to_uppercase());
+    let result = LibraryIdentity::from_toml(&text);
+    assert!(matches!(result, Err(Malformed::Toml(_))));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("not a canonical library uuid"),
+        "the message must say why the id was refused"
+    );
+}
+
+#[test]
+fn library_identity_that_is_not_toml_does_not_parse() {
+    assert!(matches!(
+        LibraryIdentity::from_toml("not { toml at all"),
+        Err(Malformed::Toml(_))
+    ));
 }

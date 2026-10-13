@@ -4,26 +4,32 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borax::event::{
-    AcceptedBy, AcceptedItemCause, Admission, Condition, Event, Extraction, Finding, LibraryAnswer,
-    Repair,
+    AcceptedBy, AcceptedItemCause, Admission, Adoption, Condition, Event, Extraction, Finding,
+    Level, LibraryAnswer, Repair,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
     IndexRead, IndexWrite, LookupEvidence, MatchCheck, RecordRetrieval, Titles, Unattempted,
 };
 use borax::library::{
-    ARTIFACT_STORE, Account, Admitted, Admitting, ArtifactStore, Consulted, ITEM_STORE, ItemStore,
-    Reconciling, RecordFaults, STATE_DIR, Stores, Unrecorded, WorkDuplicate, accepted_by,
-    admission_event, admit, artifacts, carries, contains, excludes, extracted_identifier,
-    extraction_event, item_file_name, library_relative, missing, orphan_events, orphans, reconcile,
-    reconciliation_events, recorded_at, relative_to, store_write, strands, survey, validate,
+    ARTIFACT_STORE, Account, Admitted, Admitting, Adoptions, ArtifactStore, Consulted, ITEM_STORE,
+    Identity, ItemStore, Reconciliation, Reconciling, RecordFaults, STATE_DIR, StoreFault,
+    StoreWriter, Stores, Unrecorded, WorkDuplicate, accepted_by, admission_event, admit, adopt,
+    artifacts, carries, contains, ensure_identity, excludes, extracted_identifier,
+    extraction_event, identity, identity_fault_warning, identity_file, item_file_name,
+    library_relative, missing, orphan_events, orphans, reconcile, reconciliation_events,
+    recorded_at, relative_to, status_event, store_create, store_write, strands, survey, validate,
+    validation_events,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
-use borax_core::library::{ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, RunId};
+use borax_core::library::{
+    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, LibraryId, LibraryIdentity, RunId,
+};
 use borax_core::record::{EntryType, Record};
 use tempfile::tempdir;
 
@@ -8823,4 +8829,1177 @@ fn extraction_event_names_the_artifact_library_relative() {
             extraction: Extraction::Encrypted,
         }
     );
+}
+
+// ---------------------------------------------------------------------
+// 3.1: identity, ensure_identity and StoreWriter (design D3, D4, D8)
+// ---------------------------------------------------------------------
+
+#[test]
+fn identity_of_a_library_with_no_state_directory_is_absent() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    assert_eq!(identity(root), Identity::Absent);
+}
+
+#[test]
+fn identity_of_a_library_with_records_and_no_identity_file_is_absent() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "paper.pdf",
+            vec![hash_entry("bytes", "run-0")],
+        ),
+    );
+
+    assert_eq!(identity(root), Identity::Absent);
+}
+
+#[test]
+fn identity_reads_the_id_the_file_holds() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), format!("id = \"{UUID_A}\"\n")).unwrap();
+
+    assert_eq!(
+        identity(root),
+        Identity::Present(LibraryId::parse(UUID_A).unwrap())
+    );
+}
+
+#[test]
+fn identity_of_a_file_that_does_not_parse_is_faulty_naming_the_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), b"id = 7\n").unwrap();
+
+    match identity(root) {
+        Identity::Faulty(fault) => {
+            assert_eq!(fault.path, identity_file(root));
+            assert!(!fault.message.is_empty());
+        }
+        other => panic!("expected Faulty, got {other:?}"),
+    }
+}
+
+#[test]
+fn identity_of_an_empty_file_is_faulty() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), b"").unwrap();
+
+    assert!(matches!(identity(root), Identity::Faulty(_)));
+}
+
+#[test]
+fn identity_of_a_directory_at_the_identity_path_is_faulty() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(identity_file(root)).unwrap();
+
+    assert!(matches!(identity(root), Identity::Faulty(_)));
+}
+
+#[cfg(unix)]
+#[test]
+fn identity_of_a_dangling_symlink_is_faulty() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    std::os::unix::fs::symlink(root.join("nowhere"), identity_file(root)).unwrap();
+
+    assert!(matches!(identity(root), Identity::Faulty(_)));
+}
+
+#[test]
+fn ensure_identity_mints_a_v7_identity_into_an_absent_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    let result = ensure_identity(root, &store_create).unwrap();
+
+    let id = match result {
+        Identity::Present(id) => id,
+        other => panic!("expected Present, got {other:?}"),
+    };
+    assert_eq!(id.uuid().get_version_num(), 7, "the minted uuid must be v7");
+    assert_eq!(
+        fs::read_to_string(identity_file(root)).unwrap(),
+        format!("id = \"{id}\"\n")
+    );
+    assert_eq!(identity(root), Identity::Present(id));
+}
+
+#[test]
+fn ensure_identity_creates_the_state_directory_when_there_is_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    assert!(!root.join(STATE_DIR).exists());
+
+    ensure_identity(root, &store_create).unwrap();
+
+    assert!(identity_file(root).exists());
+}
+
+#[test]
+fn ensure_identity_returns_the_identity_already_there_and_calls_no_create() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), format!("id = \"{UUID_A}\"\n")).unwrap();
+    let before = snapshot(root);
+    let calls = Cell::new(0usize);
+    let create = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        calls.set(calls.get() + 1);
+        store_create(path, bytes)
+    };
+
+    let result = ensure_identity(root, &create).unwrap();
+
+    assert_eq!(result, Identity::Present(LibraryId::parse(UUID_A).unwrap()));
+    assert_eq!(
+        calls.get(),
+        0,
+        "an identity already there must not be minted over"
+    );
+    assert_eq!(snapshot(root), before);
+}
+
+#[test]
+fn ensure_identity_does_not_mint_over_a_faulty_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), b"not-toml-at-all {{").unwrap();
+    let before = fs::read(identity_file(root)).unwrap();
+    let calls = Cell::new(0usize);
+    let create = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        calls.set(calls.get() + 1);
+        store_create(path, bytes)
+    };
+
+    let result = ensure_identity(root, &create).unwrap();
+
+    assert!(matches!(result, Identity::Faulty(_)));
+    assert_eq!(fs::read(identity_file(root)).unwrap(), before);
+    assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn ensure_identity_reports_a_failed_mint_naming_the_identity_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let create = |_path: &Path, _bytes: &[u8]| -> std::io::Result<()> {
+        Err(std::io::Error::other("simulated"))
+    };
+
+    let error = ensure_identity(root, &create).unwrap_err();
+
+    let text = error.to_string();
+    assert!(
+        text.contains("cannot create the library's identity at"),
+        "got {text:?}"
+    );
+    assert!(text.contains(&identity_file(root).display().to_string()));
+    assert!(text.contains("simulated"));
+    assert!(!identity_file(root).exists());
+}
+
+#[test]
+fn ensure_identity_after_a_lost_race_returns_the_winners_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let create = |path: &Path, _bytes: &[u8]| -> std::io::Result<()> {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("id = \"{UUID_B}\"\n")).unwrap();
+        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+    };
+
+    let result = ensure_identity(root, &create).unwrap();
+
+    assert_eq!(result, Identity::Present(LibraryId::parse(UUID_B).unwrap()));
+}
+
+#[test]
+fn ensure_identity_after_a_lost_race_to_a_faulty_file_returns_it_faulty() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let create = |path: &Path, _bytes: &[u8]| -> std::io::Result<()> {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"not-toml-at-all {{").unwrap();
+        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+    };
+
+    let result = ensure_identity(root, &create).unwrap();
+
+    assert!(matches!(result, Identity::Faulty(_)));
+}
+
+#[test]
+fn concurrent_ensures_converge_on_one_identity() {
+    let dir = tempdir().unwrap();
+    let root = Arc::new(dir.path().to_path_buf());
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let root = Arc::clone(&root);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                ensure_identity(&root, &store_create)
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    let id = match results[0].as_ref().unwrap() {
+        Identity::Present(id) => id.clone(),
+        other => panic!("expected Present, got {other:?}"),
+    };
+    for result in &results {
+        assert_eq!(result.as_ref().unwrap(), &Identity::Present(id.clone()));
+    }
+    assert_eq!(identity(&root), Identity::Present(id));
+}
+
+/// design D4, "What concurrent minting guarantees", made deterministic:
+/// run A has exclusively created the identity file and written only its
+/// first 10 bytes when run B meets it.
+#[test]
+fn a_run_meeting_the_identity_file_mid_write_writes_without_minting_and_remembers_the_fault() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    let whole = LibraryIdentity {
+        id: LibraryId::parse(UUID_A).unwrap(),
+    }
+    .to_toml();
+    let short = &whole.as_bytes()[..10];
+    fs::write(identity_file(root), short).unwrap();
+
+    let create_calls = Cell::new(0usize);
+    let create = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        create_calls.set(create_calls.get() + 1);
+        store_create(path, bytes)
+    };
+    let write_log: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+    let write = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        write_log.borrow_mut().push(path.to_path_buf());
+        store_write(path, bytes)
+    };
+    let writer = StoreWriter::new(root, &create, &write);
+    let target = root.join("target.toml");
+
+    writer.write(&target, b"target bytes").unwrap();
+
+    assert_eq!(
+        create_calls.get(),
+        0,
+        "B must not try to mint over a short file"
+    );
+    assert_eq!(write_log.borrow().as_slice(), [target.clone()]);
+    let fault = writer
+        .identity_fault()
+        .expect("the fault B met must be remembered");
+    assert_eq!(fault.path, identity_file(root));
+    assert_eq!(fs::read(identity_file(root)).unwrap(), short);
+
+    // A completes.
+    fs::write(identity_file(root), &whole).unwrap();
+    assert_eq!(
+        identity(root),
+        Identity::Present(LibraryId::parse(UUID_A).unwrap())
+    );
+}
+
+#[test]
+fn a_run_whose_concurrent_minter_failed_and_removed_its_file_leaves_no_identity_and_keeps_its_write()
+ {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    let whole = LibraryIdentity {
+        id: LibraryId::parse(UUID_A).unwrap(),
+    }
+    .to_toml();
+    fs::write(identity_file(root), &whole.as_bytes()[..10]).unwrap();
+
+    let writer = StoreWriter::new(root, &store_create, &store_write);
+    let target = root.join("target.toml");
+    writer.write(&target, b"B's bytes").unwrap();
+
+    // A fails and removes its file.
+    fs::remove_file(identity_file(root)).unwrap();
+    assert_eq!(identity(root), Identity::Absent);
+    assert_eq!(fs::read(&target).unwrap(), b"B's bytes");
+
+    let second_writer = StoreWriter::new(root, &store_create, &store_write);
+    second_writer
+        .write(&root.join("second.toml"), b"more bytes")
+        .unwrap();
+    assert!(matches!(identity(root), Identity::Present(_)));
+}
+
+#[test]
+fn store_writer_ensures_the_identity_before_the_write_it_guards() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let log: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+    let create = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        log.borrow_mut().push(path.to_path_buf());
+        store_create(path, bytes)
+    };
+    let write = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        log.borrow_mut().push(path.to_path_buf());
+        store_write(path, bytes)
+    };
+    let writer = StoreWriter::new(root, &create, &write);
+    let target = root.join("target.toml");
+
+    writer.write(&target, b"bytes").unwrap();
+
+    assert_eq!(log.borrow().as_slice(), [identity_file(root), target]);
+}
+
+#[test]
+fn store_writer_does_not_write_when_the_mint_fails() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let create = |_path: &Path, _bytes: &[u8]| -> std::io::Result<()> {
+        Err(std::io::Error::other("simulated"))
+    };
+    let write_calls = Cell::new(0usize);
+    let write = |_path: &Path, _bytes: &[u8]| -> std::io::Result<()> {
+        write_calls.set(write_calls.get() + 1);
+        Ok(())
+    };
+    let writer = StoreWriter::new(root, &create, &write);
+
+    let error = writer
+        .write(&root.join("target.toml"), b"bytes")
+        .unwrap_err();
+
+    assert_eq!(
+        write_calls.get(),
+        0,
+        "a failed mint must not be followed by a write"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains(&identity_file(root).display().to_string())
+    );
+}
+
+#[test]
+fn store_writer_writes_into_a_library_whose_identity_file_is_faulty_and_remembers_the_fault() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), b"not-toml-at-all {{").unwrap();
+    let before = fs::read(identity_file(root)).unwrap();
+    let write_calls = Cell::new(0usize);
+    let write = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+        write_calls.set(write_calls.get() + 1);
+        store_write(path, bytes)
+    };
+    let writer = StoreWriter::new(root, &store_create, &write);
+
+    writer.write(&root.join("target.toml"), b"bytes").unwrap();
+
+    assert_eq!(
+        write_calls.get(),
+        1,
+        "a faulty identity must not block the write"
+    );
+    let fault = writer.identity_fault().expect("a fault must be remembered");
+    assert_eq!(fault.path, identity_file(root));
+    assert_eq!(fs::read(identity_file(root)).unwrap(), before);
+}
+
+#[test]
+fn store_writer_ensures_the_identity_before_each_write() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let writer = StoreWriter::new(root, &store_create, &store_write);
+
+    writer.write(&root.join("first.toml"), b"one").unwrap();
+    assert!(identity_file(root).exists());
+
+    fs::remove_file(identity_file(root)).unwrap();
+
+    writer.write(&root.join("second.toml"), b"two").unwrap();
+    assert!(
+        identity_file(root).exists(),
+        "each write must ensure the identity for itself"
+    );
+}
+
+#[test]
+fn store_writer_that_writes_nothing_mints_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let _writer = StoreWriter::new(root, &store_create, &store_write);
+
+    assert_eq!(identity(root), Identity::Absent);
+}
+
+#[test]
+fn admit_through_a_store_writer_creates_the_identity_before_the_item_and_the_record() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = record_with_doi("10.1000/store-writer-admit");
+    let hash = hash("paper bytes");
+    let log: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+    let create = |p: &Path, b: &[u8]| -> std::io::Result<()> {
+        log.borrow_mut().push(p.to_path_buf());
+        store_create(p, b)
+    };
+    let write = |p: &Path, b: &[u8]| -> std::io::Result<()> {
+        log.borrow_mut().push(p.to_path_buf());
+        store_write(p, b)
+    };
+    let writer = StoreWriter::new(root, &create, &write);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: Some("store-writer"),
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &|p, b| writer.write(p, b),
+    )
+    .unwrap();
+
+    let item_file = root
+        .join(ITEM_STORE)
+        .join(item_file_name(Some("store-writer"), &admitted.item));
+    let record_file = root
+        .join(STATE_DIR)
+        .join(ARTIFACT_STORE)
+        .join(format!("{}.toml", admitted.artifact));
+    assert_eq!(
+        log.borrow().as_slice(),
+        [identity_file(root), item_file, record_file]
+    );
+}
+
+#[test]
+fn admit_through_a_store_writer_whose_mint_fails_writes_nothing_and_names_the_identity_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = record_with_doi("10.1000/store-writer-mint-fails");
+    let hash = hash("paper bytes");
+    let create =
+        |_p: &Path, _b: &[u8]| -> std::io::Result<()> { Err(std::io::Error::other("simulated")) };
+    let writer = StoreWriter::new(root, &create, &store_write);
+
+    let error = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: Some("store-writer"),
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+        },
+        &|p, b| writer.write(p, b),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.message.contains(".borax/library.toml"),
+        "got {error:?}"
+    );
+    assert!(!root.join(ITEM_STORE).exists());
+    assert!(!root.join(STATE_DIR).join(ARTIFACT_STORE).exists());
+}
+
+#[test]
+fn an_admission_that_rewrites_nothing_mints_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"steady bytes");
+    let record = record_with_doi("10.1000/rewrite-nothing-mints-nothing");
+    let hash = hash("steady bytes");
+
+    let admitting = |held: Option<&ArtifactRecord>, run: &str| Admitting {
+        path: &path,
+        record: &record,
+        hash: &hash,
+        held,
+        reidentified: false,
+        key: Some("rewrite-nothing"),
+        run: RunId::new(run),
+        timestamp: TIMESTAMP,
+        tool_version: TOOL_VERSION,
+    };
+
+    admit(root, &admitting(None, "run-1"), &store_write).unwrap();
+    let held = recorded_at(root, &path);
+    admit(root, &admitting(held.as_ref(), "run-2"), &store_write).unwrap();
+
+    fs::remove_file(identity_file(root)).unwrap();
+
+    let held = recorded_at(root, &path);
+    let write_calls = Cell::new(0usize);
+    let write = |p: &Path, b: &[u8]| -> std::io::Result<()> {
+        write_calls.set(write_calls.get() + 1);
+        store_write(p, b)
+    };
+    let writer = StoreWriter::new(root, &store_create, &write);
+
+    admit(root, &admitting(held.as_ref(), "run-3"), &|p, b| {
+        writer.write(p, b)
+    })
+    .unwrap();
+
+    assert_eq!(
+        write_calls.get(),
+        0,
+        "an admission that rewrites nothing must never reach write"
+    );
+    assert_eq!(identity(root), Identity::Absent);
+}
+
+#[test]
+fn identity_fault_warning_names_the_file_and_validate() {
+    let fault = StoreFault {
+        path: identity_file(Path::new("/lib")),
+        message: "malformed toml: not a canonical library uuid: \"not-a-uuid\"".to_string(),
+    };
+
+    let diagnostic = identity_fault_warning(&fault);
+
+    assert_eq!(diagnostic.level, Level::Warning);
+    assert_eq!(
+        diagnostic.message,
+        format!(
+            "{} could not be read as the library's identity, so it was left as it is and the \
+             library has none another location can name; borax validate reports why",
+            fault.path.display()
+        )
+    );
+}
+
+// ---------------------------------------------------------------------
+// 4.1: reconciliation and adoption write through the guard (design D3, D5)
+// ---------------------------------------------------------------------
+
+#[test]
+fn reconcile_that_repairs_a_record_mints_the_identity_first() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"steady content").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id,
+        None,
+        "old/paper.pdf",
+        vec![hash_entry("steady content", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    assert_eq!(identity(root), Identity::Absent);
+
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.repairs.len(), 1, "got {:?}", result.repairs);
+    assert!(matches!(identity(root), Identity::Present(_)));
+}
+
+#[test]
+fn reconcile_over_an_untouched_library_mints_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"steady content").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = fresh_record(
+        root,
+        id,
+        None,
+        "paper.pdf",
+        vec![hash_entry("steady content", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let extractor = Extractor::default();
+    reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(identity(root), Identity::Absent);
+}
+
+#[test]
+fn reconcile_under_rehash_that_confirms_records_already_described_mints_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"steady content").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = fresh_record(
+        root,
+        id,
+        None,
+        "paper.pdf",
+        vec![hash_entry("steady content", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(true, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.hashed, 1, "rehash forces hashing past the fast path");
+    assert_eq!(result.confirmed, 1, "got {result:?}");
+    assert_eq!(identity(root), Identity::Absent);
+}
+
+#[test]
+fn reconcile_that_refreshes_a_touched_record_mints_the_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    fs::write(&path, b"untouched bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = fresh_record(
+        root,
+        id,
+        None,
+        "paper.pdf",
+        vec![hash_entry("untouched bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let touched = SystemTime::now() + std::time::Duration::from_secs(3600);
+    fs::File::open(&path)
+        .unwrap()
+        .set_modified(touched)
+        .unwrap();
+
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.confirmed, 1, "got {result:?}");
+    assert!(matches!(identity(root), Identity::Present(_)));
+}
+
+#[test]
+fn reconcile_that_finds_only_a_pending_change_mints_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("paper.pdf"), b"replacement bytes").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id,
+        None,
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let identifier = doi_identifier("10.1000/pending-mints-nothing");
+    let extraction = Extraction::Found {
+        identifier: identifier.to_string(),
+        tier: "text-layer".to_string(),
+    };
+    let mut answers = BTreeMap::new();
+    answers.insert(root.join("paper.pdf"), extraction);
+    let extractor = Extractor::with(answers);
+
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.pending, 1, "got {result:?}");
+    assert_eq!(identity(root), Identity::Absent);
+}
+
+#[test]
+fn reconcile_that_finds_only_missing_records_mints_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(id, None, "gone.pdf", vec![hash_entry("gone", "run-0")]);
+    write_artifact_record(root, &record);
+
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.repairs.len(), 1, "got {:?}", result.repairs);
+    assert_eq!(identity(root), Identity::Absent);
+}
+
+#[test]
+fn reconcile_into_a_library_with_an_identity_leaves_it_byte_identical() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    ensure_identity(root, &store_create).unwrap();
+    let before = fs::read(identity_file(root)).unwrap();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"steady content").unwrap();
+    let id = artifact_id(UUID_B);
+    let record = artifact_record(
+        id,
+        None,
+        "old/paper.pdf",
+        vec![hash_entry("steady content", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let extractor = Extractor::default();
+    reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(fs::read(identity_file(root)).unwrap(), before);
+}
+
+#[test]
+fn reconcile_into_a_library_with_a_faulty_identity_file_writes_the_repair_and_reports_the_fault() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), b"not-toml-at-all {{").unwrap();
+    let before = fs::read(identity_file(root)).unwrap();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"steady content").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id,
+        None,
+        "old/paper.pdf",
+        vec![hash_entry("steady content", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let extractor = Extractor::default();
+    let result: Reconciliation = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    assert_eq!(result.repairs.len(), 1, "got {:?}", result.repairs);
+    assert_eq!(fs::read(identity_file(root)).unwrap(), before);
+    let fault = result
+        .identity_fault
+        .expect("the fault must be reported on the reconciliation");
+    assert_eq!(fault.path, identity_file(root));
+}
+
+#[cfg(unix)]
+#[test]
+fn reconcile_whose_mint_fails_writes_no_record_and_reports_unwritten_naming_the_identity_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR).join(ARTIFACT_STORE)).unwrap();
+    fs::create_dir_all(root.join(ITEM_STORE)).unwrap();
+    fs::create_dir_all(root.join("new")).unwrap();
+    fs::write(root.join("new/paper.pdf"), b"steady content").unwrap();
+    let id = artifact_id(UUID_A);
+    let record = artifact_record(
+        id.clone(),
+        None,
+        "old/paper.pdf",
+        vec![hash_entry("steady content", "run-0")],
+    );
+    write_artifact_record(root, &record);
+    let record_file = root
+        .join(STATE_DIR)
+        .join(ARTIFACT_STORE)
+        .join(format!("{id}.toml"));
+    let before = fs::read(&record_file).unwrap();
+
+    let state_dir = root.join(STATE_DIR);
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = state_dir.join("probe.tmp");
+    if fs::write(&probe, b"x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping reconcile_whose_mint_fails_writes_no_record_and_reports_unwritten_naming_the_identity_file: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let extractor = Extractor::default();
+    let result = reconcile(
+        root,
+        &reconciling(false, "run-1", &[], &|p| extractor.extract(p)),
+    );
+
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(fs::read(&record_file).unwrap(), before);
+    match &result.repairs[0] {
+        (_, _, Repair::Unwritten { message }) => {
+            assert!(message.contains("library.toml"), "got {message:?}");
+        }
+        other => panic!("expected Unwritten, got {other:?}"),
+    }
+}
+
+#[test]
+fn adopt_that_records_an_orphan_mints_the_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("orphan.pdf"), b"orphan bytes").unwrap();
+    let orphan_hash = hash("orphan bytes");
+    let lookup = |candidate: &ContentHash| -> Option<Record> {
+        if *candidate == orphan_hash {
+            Some(record_with_doi("10.1000/adopt-mints-identity"))
+        } else {
+            None
+        }
+    };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    assert_eq!(result.adopted(), 1, "got {result:?}");
+    assert!(matches!(identity(root), Identity::Present(_)));
+}
+
+#[test]
+fn adopt_that_records_nothing_mints_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("orphan.pdf"), b"unindexed bytes").unwrap();
+    let lookup = |_hash: &ContentHash| -> Option<Record> { None };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    assert_eq!(result.adopted(), 0, "got {result:?}");
+    assert_eq!(identity(root), Identity::Absent);
+}
+
+#[test]
+fn adopt_into_a_library_with_a_faulty_identity_file_records_and_reports_the_fault() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), b"not-toml-at-all {{").unwrap();
+    let before = fs::read(identity_file(root)).unwrap();
+    fs::write(root.join("orphan.pdf"), b"orphan bytes faulty").unwrap();
+    let orphan_hash = hash("orphan bytes faulty");
+    let lookup = |candidate: &ContentHash| -> Option<Record> {
+        if *candidate == orphan_hash {
+            Some(record_with_doi("10.1000/adopt-faulty-identity"))
+        } else {
+            None
+        }
+    };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result: Adoptions = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    assert_eq!(result.adopted(), 1, "got {result:?}");
+    assert_eq!(fs::read(identity_file(root)).unwrap(), before);
+    let fault = result
+        .identity_fault
+        .expect("the fault must be reported on the adoptions");
+    assert_eq!(fault.path, identity_file(root));
+}
+
+#[cfg(unix)]
+#[test]
+fn adopt_whose_mint_fails_records_nothing_and_reports_unwritten_naming_the_identity_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR).join(ARTIFACT_STORE)).unwrap();
+    fs::create_dir_all(root.join(ITEM_STORE)).unwrap();
+    fs::write(root.join("orphan.pdf"), b"orphan bytes mint fails").unwrap();
+    let orphan_hash = hash("orphan bytes mint fails");
+
+    let state_dir = root.join(STATE_DIR);
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = state_dir.join("probe.tmp");
+    if fs::write(&probe, b"x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping adopt_whose_mint_fails_records_nothing_and_reports_unwritten_naming_the_identity_file: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let lookup = |candidate: &ContentHash| -> Option<Record> {
+        if *candidate == orphan_hash {
+            Some(record_with_doi("10.1000/adopt-mint-fails"))
+        } else {
+            None
+        }
+    };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(result.adoptions.len(), 1, "got {:?}", result.adoptions);
+    match &result.adoptions[0] {
+        (_, Adoption::Unwritten { message }) => {
+            assert!(message.contains("library.toml"), "got {message:?}");
+        }
+        other => panic!("expected Unwritten, got {other:?}"),
+    }
+    assert!(
+        ItemStore::read(root).is_empty(),
+        "a failed mint must leave no item"
+    );
+    assert!(
+        ArtifactStore::read(root).is_empty(),
+        "a failed mint must leave no artifact record"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 6.1: status and validation carry the identity (design D6, D7)
+// ---------------------------------------------------------------------
+
+#[test]
+fn survey_carries_the_identity_the_library_holds() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), format!("id = \"{UUID_A}\"\n")).unwrap();
+
+    let surveyed = survey(root);
+
+    assert_eq!(surveyed.identity, Some(LibraryId::parse(UUID_A).unwrap()));
+}
+
+#[test]
+fn survey_of_a_library_with_no_identity_file_carries_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    assert_eq!(survey(root).identity, None);
+}
+
+#[test]
+fn survey_of_a_library_with_a_faulty_identity_file_carries_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), b"not-toml-at-all {{").unwrap();
+
+    assert_eq!(survey(root).identity, None);
+}
+
+#[test]
+fn status_event_carries_the_surveys_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), format!("id = \"{UUID_A}\"\n")).unwrap();
+
+    let surveyed = survey(root);
+    let event = status_event(&surveyed, None);
+
+    match event {
+        Event::LibraryStatus { id, .. } => {
+            assert_eq!(id, Some(UUID_A.to_string()));
+        }
+        other => panic!("expected LibraryStatus, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_reports_an_identity_file_that_does_not_parse_as_unreadable() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), b"id = \"not-a-uuid\"\n").unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(result.findings.len(), 1, "got {:?}", result.findings);
+    let (path, finding) = &result.findings[0];
+    assert_eq!(path, &identity_file(root));
+    match finding {
+        Finding::Unreadable { message } => {
+            assert!(
+                message.contains("not a canonical library uuid"),
+                "got {message:?}"
+            );
+        }
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_reports_an_identity_path_holding_a_directory_as_unreadable() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(identity_file(root)).unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(result.findings.len(), 1, "got {:?}", result.findings);
+    let (path, finding) = &result.findings[0];
+    assert_eq!(path, &identity_file(root));
+    assert!(matches!(finding, Finding::Unreadable { .. }));
+}
+
+#[test]
+fn validate_reports_the_identity_finding_before_the_item_and_record_findings() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), b"id = \"not-a-uuid\"\n").unwrap();
+    let items = root.join(ITEM_STORE);
+    fs::create_dir_all(&items).unwrap();
+    fs::write(items.join("bad.toml"), b"this is not [ valid toml").unwrap();
+    let records_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records_dir).unwrap();
+    fs::write(
+        records_dir.join("bad.toml"),
+        b"this is not [ valid toml either",
+    )
+    .unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(result.findings.len(), 3, "got {:?}", result.findings);
+    assert_eq!(result.findings[0].0, identity_file(root));
+    assert_eq!(result.findings[1].0, items.join("bad.toml"));
+    assert_eq!(result.findings[2].0, records_dir.join("bad.toml"));
+}
+
+#[test]
+fn validate_reports_no_finding_and_no_condition_for_a_library_with_no_identity_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+    assert_eq!(result.orphans(), 0);
+    assert_eq!(result.missing(), 0);
+    assert_eq!(result.unlinked(), 0);
+}
+
+#[test]
+fn validate_reports_no_finding_for_an_identity_file_with_an_unknown_key() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(
+        identity_file(root),
+        format!("id = \"{UUID_A}\"\nunknown = 1\n"),
+    )
+    .unwrap();
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+}
+
+#[test]
+fn validate_carries_the_identity_on_its_totals() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), format!("id = \"{UUID_A}\"\n")).unwrap();
+
+    let result = validate(root);
+    let events = validation_events(&result);
+
+    match events.last() {
+        Some(Event::LibraryValidated { id, .. }) => {
+            assert_eq!(id, &Some(UUID_A.to_string()));
+        }
+        other => panic!("expected LibraryValidated last, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_mints_no_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "paper.pdf",
+            vec![hash_entry("bytes", "run-0")],
+        ),
+    );
+    let before = snapshot(root);
+
+    validate(root);
+
+    assert_eq!(snapshot(root), before);
 }
