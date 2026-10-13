@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Libraries now have a stable UUID in `.borax/library.toml`. The first item
+  or artifact-record write creates it, including an applying rename that
+  records a file, an adoption, or a reconciliation write; runs that write no
+  store record create no identity. A library written by 0.9.0 receives its
+  identity on its next store write. Copying or cloning the library together
+  with `.borax/` produces the same library at another location.
+
+- `borax validate` now reports an identity file that cannot be read or parsed
+  as an `unreadable` finding; an absent file remains valid. A run that writes
+  records while an unreadable identity file exists leaves that file unchanged
+  and prints one warning on standard error.
+
+- The `library-status` and `library-validated` JSONL events now carry `id`
+  immediately after `root` when the library has a readable identity. This is
+  additive, so the event schema remains at version 4.
+
 ### Changed
 
 - Changed bytes at a recorded path now enter the artifact's history only
