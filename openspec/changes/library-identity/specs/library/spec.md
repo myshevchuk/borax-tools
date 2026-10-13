@@ -86,24 +86,34 @@ That covers:
 
 - `borax status`, `borax validate`, `borax resolve` and `borax bib`;
 - a preview, and a run with duplicate detection off;
-- a reconcile that only confirms records, or finds only pending
-  changes and missing records;
+- a reconcile whose confirmations write nothing, or that finds only
+  pending changes and missing records. A record confirmed by its hash
+  after a touch has its size and modification time rewritten, and that
+  is a store write;
 - an adoption that records nothing;
 - an admission that leaves its record exactly as it was.
 
 So every item and artifact record borax writes is written into a
-library that has an identity file, and nothing else creates one.
+library that has an identity file at that moment, and nothing else
+creates one.
 
-Minting SHALL never replace an identity file that is there. Two runs
-minting into one library at once SHALL end with one identity file, and
-each SHALL go on with the identity that file holds, whichever run
-created it.
+borax SHALL never replace or rewrite an identity file that exists, and
+a run that goes on with an identity SHALL go on with the one on disk.
+A library minted into by several runs at once SHALL end with at most
+one identity.
 
 On a filesystem that can give one file two names, a reader SHALL never
-see a partially written identity file. On one that cannot, borax still
-never replaces an identity file. A reader that meets the file in the
-moment it is being written finds it unreadable, as it finds any file a
-peer writer has half-written.
+see a partially written identity file. Every run minting there at once
+SHALL end with the identity of the run whose file was created first.
+
+On a filesystem that cannot, borax still never replaces an identity
+file, but a run can meet the file in the moment another run is writing
+it. Such a run finds the file unreadable, as it finds any file a peer
+writer has half-written, and proceeds as the paragraph on an unreadable
+identity file below states: it writes without an identity, and warns.
+The library then holds the other run's identity once that write
+completes. If that write fails, the library holds none, and its next
+store write mints one.
 
 When the identity file is absent and creating it fails, the store write
 it precedes SHALL NOT be made. It SHALL be reported as that write's
@@ -148,9 +158,18 @@ No event reports a mint, and none reports that warning.
 
 #### Scenario: Two runs mint one identity
 - **WHEN** two runs each make their first store write into one library
-  with no identity file at the same moment
+  with no identity file at the same moment, on a filesystem that can
+  give one file two names
 - **THEN** one identity file exists afterwards, neither run replaced
   it, and both went on with the identity it holds
+
+#### Scenario: A run meets the identity file mid-write
+- **WHEN** on a filesystem that cannot give one file two names, a run
+  makes a store write while another run has created the identity file
+  and not finished writing it
+- **THEN** the first run writes without minting and warns, and the
+  library afterwards holds the other run's identity, or none if the
+  other run's write failed
 
 #### Scenario: A failed mint writes no record
 - **WHEN** `borax rename --apply` renames a file in a library whose
@@ -531,7 +550,10 @@ will not take it, so validation SHALL be correct on a library observed
 mid-edit — a file that does not parse is a finding about that file and
 about nothing else. Since every borax write replaces a whole file
 atomically, such a file came from a peer writer rather than from a borax
-run cut short.
+run cut short. The one exception is a library identity file: on a
+filesystem that cannot give one file two names, a mint interrupted
+mid-write can leave it short, and it is then a finding about that file
+like any other.
 
 #### Scenario: A dangling item link
 - **WHEN** an item file is deleted and an artifact record still names it

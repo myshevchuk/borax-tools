@@ -64,18 +64,30 @@ The maintainer has settled the following, and this change preserves it:
   no artifact record mints nothing. That includes:
   - `status`, `validate`, `resolve` and `bib`;
   - a preview, and a run under `--no-record`;
-  - a reconcile of an untouched library;
+  - a reconcile whose confirmations write nothing. A record confirmed
+    by hash after a `touch` has its size and modification time
+    rewritten, which is a store write and mints;
   - an adoption that records nothing;
   - an admission whose rewrite leaves the record as it was.
 
   Design D3.
 - **How it is minted.** The file is created with no-replace semantics.
-  borax writes a temporary file, then links it into place with a hard
-  link, which fails if anything is already there. Where hard links are
-  not supported, borax falls back to an exclusive create. A run that
-  loses a race reads and uses the winner's identity. A reader never sees
-  a partial file where hard links work. This is a new function,
+  borax writes a temporary file, exclusively created and owned by the
+  call, then links it into place with a hard link, which fails if
+  anything is already there. Where hard links are not supported, borax
+  falls back to an exclusive create. This is a new function,
   `borax_sources::store::create_atomically`, beside `write_atomically`.
+
+  The guarantees:
+  - borax never replaces or rewrites an existing identity file;
+  - a run that uses an identity uses the one on disk.
+
+  Where hard links work, every concurrent minter ends up with the
+  winner's identity, and no reader sees a partial file. Under the
+  fallback, a concurrent run can meet the file mid-write. It then
+  treats the file as unreadable, writes without an identity, and warns.
+  The library still ends with at most one identity, or none if the
+  creating run's write failed, and the next store write mints it.
   Design D4.
 - **Failure.** If the identity file is absent and minting it fails, the
   guarded store write is not made. It is reported as that write already

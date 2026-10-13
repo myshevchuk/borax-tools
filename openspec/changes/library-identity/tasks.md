@@ -103,7 +103,9 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
 | the file is `id = "<uuid>"\n`; an unknown key is ignored; a non-v7 canonical UUID parses; a non-canonical one does not | 1 |
 | a file is never replaced; a lost race returns `AlreadyExists`; no temporary is left | 2 |
 | the exclusive-create fallback when linking fails, and it still never replaces | 2 |
-| concurrent creates leave one winner; concurrent ensures converge on one identity | 2, 3 |
+| a temporary is created exclusively: a taken name is left untouched and a fresh one used; a stale temporary linked to the identity is never written through | 2 |
+| concurrent creates leave one winner; concurrent ensures converge on one identity where hard links work | 2, 3 |
+| under the fallback, a run meeting the file mid-write writes without minting and remembers the fault; if the minter then fails and removes the file, no identity remains and the run's write stands | 3 |
 | absent, present and faulty, a dangling symlink included | 3 |
 | a lost race returns the winner's identity, or the winner's faulty file | 3 |
 | the guard: identity before the write, no write when the mint fails, a faulty file written past and remembered | 3 |
@@ -146,7 +148,10 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
 
 ## 2. Creating a file without replacing one
 
-- [ ] 2.1 Red, in `crates/borax-sources/tests/store.rs`:
+- [ ] 2.1 Red, in `crates/borax-sources/tests/store.rs`. Every
+      `create_atomically_with` call passes both seams (D8). Where a test
+      does not name the temporary, `name` is a closure yielding
+      `format!(".tmp-test-{n}")` from a counter it owns:
       - `create_atomically_creates_the_file_and_its_parent_directories`.
       - `create_atomically_refuses_an_existing_file_and_leaves_it_byte_identical`:
         `ErrorKind::AlreadyExists`.
@@ -162,6 +167,24 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
         `link` returns `AlreadyExists` while the destination is absent.
         The result is `AlreadyExists`, and the destination is still
         absent.
+      - `create_atomically_leaves_a_file_at_a_taken_temporary_name_untouched`:
+        `name` yields `taken.tmp`, which the test created beforehand
+        with its own bytes, and then `fresh.tmp`. The call succeeds and
+        the destination holds the content. `taken.tmp` is still there
+        and byte-identical, and `fresh.tmp` is gone.
+      - `create_atomically_never_writes_through_a_stale_temporary_linked_to_the_destination`:
+        1. The destination exists.
+        2. `taken.tmp` is a hard link to it, as a crash after the link
+           step leaves one.
+        3. `name` yields `taken.tmp`, then `fresh.tmp`.
+
+        The result is `AlreadyExists`, and the destination and
+        `taken.tmp` are both byte-identical.
+      - `create_atomically_gives_up_after_sixteen_taken_temporary_names`:
+        `name` yields sixteen names, each created beforehand. The
+        error's kind is not `AlreadyExists`, and the destination is
+        absent. Every taken file is byte-identical, and `name` was
+        called exactly sixteen times.
       - `concurrent_creates_of_one_path_leave_exactly_one_winner`: eight
         threads behind a `Barrier`, each with its own bytes. Exactly one
         `Ok`, the rest `AlreadyExists`. The file holds the winner's
@@ -199,8 +222,36 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
       - `ensure_identity_after_a_lost_race_to_a_faulty_file_returns_it_faulty`.
       - `concurrent_ensures_converge_on_one_identity`: eight threads
         behind a `Barrier`, each calling
-        `ensure_identity(root, &store_create)`. All return the same
+        `ensure_identity(root, &store_create)` on the test's own
+        filesystem, where hard links work. All return the same
         `Present(id)`, and the file holds it.
+
+      The fallback interleaving (D4, "What concurrent minting
+      guarantees"), made deterministic. Run A's state mid-write is
+      simulated by writing the first 10 bytes of
+      `LibraryIdentity { id: <UUID_A> }.to_toml()` at
+      `identity_file(root)`. That is what the fallback's exclusive
+      create leaves before its `write_all` completes. Run B is the code
+      under test, through a `create` stand-in that counts its calls and
+      a recording `write` stand-in:
+      - `a_run_meeting_the_identity_file_mid_write_writes_without_minting_and_remembers_the_fault`.
+        Check that:
+        - B's `ensure_identity` returns `Faulty`, and `create` was
+          called 0 times;
+        - B's `StoreWriter::write` calls `write` for its target, and
+          `identity_fault()` names the identity file;
+        - the short file is byte-identical.
+
+        Then A "completes" when the test writes the whole text, and
+        `identity(root)` is `Present(UUID_A)`.
+      - `a_run_whose_concurrent_minter_failed_and_removed_its_file_leaves_no_identity_and_keeps_its_write`.
+        B writes past the short file as above. Then A "fails" when the
+        test removes the file. Check that:
+        - `identity(root)` is `Absent`;
+        - B's target holds B's bytes.
+
+        A further `StoreWriter::write`, through `store_create`, then
+        mints an identity: `identity(root)` is `Present`.
       - `store_writer_ensures_the_identity_before_the_write_it_guards`:
         the shared call log reads `[identity file, target]`.
       - `store_writer_does_not_write_when_the_mint_fails`: the `write`
@@ -243,6 +294,13 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
         moved artifact in a library with no identity file. The repair
         is written, and `identity(root)` is `Present` afterwards.
       - `reconcile_over_an_untouched_library_mints_nothing`.
+      - `reconcile_under_rehash_that_confirms_records_already_described_mints_nothing`:
+        every record is confirmed by hash with its size and
+        modification time already right, so nothing is written.
+      - `reconcile_that_refreshes_a_touched_record_mints_the_identity`:
+        a `touch`ed artifact is confirmed by hash, and its size and
+        modification time are rewritten. That is a store write, so
+        `identity(root)` is `Present` afterwards (D3).
       - `reconcile_that_finds_only_a_pending_change_mints_nothing`.
       - `reconcile_that_finds_only_missing_records_mints_nothing`.
       - `reconcile_into_a_library_with_an_identity_leaves_it_byte_identical`.

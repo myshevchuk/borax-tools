@@ -25,7 +25,7 @@ Phase 4, and the second of its four changes.
 **Decided by the orchestrator for this proposal, and recorded below:**
 
 - the fields and the parse rules (D1);
-- minting without replacing, and convergence (D4);
+- minting without replacing, and what concurrent minting guarantees (D4);
 - the order of the identity and the store writes (D3);
 - failure (D5);
 - the validation finding (D6);
@@ -240,8 +240,14 @@ Because the guard sits at the actual write:
   - an admission whose `rewrite` renders its document unchanged
     (line 1918);
   - an `outside` or `pending` admission, which returns before `admit`;
-  - a reconcile that only confirms on the fast path, or finds only
-    pending changes or missing records;
+  - a reconcile whose confirmations write nothing, or that finds only
+    pending changes or missing records. Every confirmation on the fast
+    path writes nothing. A confirmation by hash whose record already
+    describes the file, as under `--rehash`, writes nothing too. A
+    touched artifact confirmed by hash is different: its recorded size
+    and modification time are rewritten (`Decided::Confirmed {
+    refreshed: true }`; the test near `crates/borax/tests/library.rs:2522`).
+    That is a store write, and it mints;
   - an adoption whose orphans are all held, unreadable or unindexed.
 - **Runs that never write mint nothing.** A preview and a run under
   `--no-record` never call `recorded`. `status`, `validate`, `resolve`
@@ -278,9 +284,20 @@ rest of the run.
 `write_atomically`):
 
 1. Create `path`'s parent directories.
-2. Write `content` to a temporary in that directory, named by
-   `temporary_name`. If this fails, remove the temporary and return the
-   error.
+2. **Create a temporary that this call owns.** Take a name from
+   `temporary_name` (`.tmp-<pid>-<n>`) in `path`'s directory and open
+   it with `OpenOptions::new().write(true).create_new(true)`.
+   - `AlreadyExists`: that name is taken, for example by a temporary a
+     crashed process left whose pid has been reused. Leave the file
+     alone and try a fresh name, up to 16 names in all. If every name
+     is taken, return `io::Error::other("no free temporary name in
+     <dir> after 16 attempts")`. That error is deliberately not
+     `AlreadyExists`, which would read as a lost race.
+   - Any other error: return it. Nothing was created.
+
+   Write `content` with `write_all`. If that fails, remove this
+   temporary and return the error. From here on, the call removes only
+   the temporary it created itself, and no other file.
 3. Hard-link the temporary to `path` (`std::fs::hard_link`). `link(2)`
    and `CreateHardLinkW` both fail when `path` exists, so the link is a
    no-replace operation. Then:
@@ -299,25 +316,44 @@ rest of the run.
    - If the write fails, remove the file this call created, then return
      the error.
 
-`create_atomically_with(path, content, link)` is the same function with
-the link step as a parameter, so that tests can force the fallback.
-`create_atomically` passes `std::fs::hard_link`.
+**Why the temporary is not written with `fs::write`.**
+`write_atomically` writes its temporary with `fs::write`, which
+truncates and reuses a file already at that name, and this design
+deliberately does not do the same. Suppose a crash comes after step 3's
+link and before the temporary is removed. The temporary is then a
+second name for `library.toml` itself. A later process that drew the
+same name (pids are reused, and the counter restarts at 0) would truncate
+the identity file through that other name, and so rewrite an identity
+borax promises never to rewrite. `write_atomically`'s temporaries carry
+no such risk, because its rename moves the temporary's name away rather
+than adding a second one.
+
+`create_atomically_with(path, content, link, name)` is the same function
+with two seams, so that tests can force the fallback and a taken name:
+
+- `link` replaces the link step;
+- `name` gives each temporary name in turn.
+
+`create_atomically` passes `std::fs::hard_link` and `temporary_name`.
 
 **What a reader can see.**
 
 - **Hard links supported**, which covers ext4, XFS, Btrfs, APFS, HFS+
   and NTFS. The file appears whole, in one step, under its final name.
-  Nothing can replace it. A crash leaves at most an unlinked temporary
-  `.tmp-*` in `.borax/`, the same litter `write_atomically` can leave.
+  Nothing can replace it. A crash leaves at most a temporary `.tmp-*`
+  in `.borax/`, the same litter `write_atomically` can leave. If the
+  crash came after the link, that temporary is a second name for the
+  identity file. Step 2 never opens an existing temporary, so nothing
+  writes through that name.
 - **Hard links not supported.** The file still never replaces another,
-  and two minters still converge, because only one exclusive create
-  succeeds. For the duration of one `write_all` of about 45 bytes, a
-  concurrent reader can see the file empty or short. That reader finds
-  it `Faulty` (D5): its write proceeds and it uses no identity.
-  A crash inside that window leaves a short file. It is reported by
-  `validate` and by the warning, and a person deletes it. This is the
-  one way decision 2's "a reader never sees a partial file" is weakened,
-  and it applies only where the filesystem cannot do better.
+  because only one exclusive create succeeds. For the duration of one
+  `write_all` of about 45 bytes, a concurrent reader can see the file
+  empty or short. That reader finds it `Faulty` (D5): it does not mint,
+  its write proceeds without an identity, and its run warns. A crash
+  inside that window leaves a short file, which `validate` and the
+  warning report and a person deletes. This is the one way decision 2's
+  "a reader never sees a partial file" is weakened, and it applies only
+  where the filesystem cannot do better.
 
 **`ensure_identity(root, create)`**:
 
@@ -353,9 +389,34 @@ symlink is `Faulty` rather than `Absent`. If it were `Absent`, every
 mint would meet `AlreadyExists` and then read `Absent` again, and every
 write into the library would fail.
 
-**Convergence.** Two runs minting at once both reach step 2. One create
-wins. The other gets `AlreadyExists`, reads the winner's file, and
-returns its id. Both runs therefore use the identity on disk.
+**What concurrent minting guarantees.** These two hold on every
+filesystem:
+
+- **(a)** borax never replaces or rewrites an identity file that
+  exists.
+- **(b)** A run that goes on with an identity goes on with the one on
+  disk.
+
+Beyond that, the outcome depends on the filesystem:
+
+- **Hard links supported.** Two runs reach step 2 of `ensure_identity`
+  together. One create wins. The other gets `AlreadyExists`, reads the
+  winner's whole file, and returns `Present` with the winner's id. Every
+  concurrent minter ends up `Present` with the same identity.
+- **Under the fallback, a run can meet the file mid-write.** Take run A
+  that has exclusively created the file and not yet finished its
+  `write_all`. Run B's `identity` reads the short file as `Faulty`. B
+  does not mint, writes its item or record without an identity,
+  remembers the fault and warns, and does not read the file again
+  within that write. When A finishes, the library holds A's identity. If
+  A's write fails instead, A removes the file, and the library holds no
+  identity. That is the healthy state of a 0.9.0 library with records
+  and no identity, and the next store write mints one.
+
+Either way, the library ends with at most one identity. This design adds
+no retry and no delay to close the fallback window. A retry would
+wait on a peer that may have crashed, and the window costs a warning,
+not a wrong identity.
 
 **Rejected: `write_atomically`.** Its rename replaces. Two runs would
 each install their own UUID, the last rename would win, and the first
@@ -370,9 +431,14 @@ exposes none of them. Each would need a platform crate or `unsafe`
 code, three code paths, and a fallback anyway where the call is
 unsupported. The workspace warns on `unsafe_code`.
 
-**Rejected: an exclusive create alone.** It is no-replace and
-convergent, but it lets a reader see a partial file on every
-filesystem, not just the ones that cannot link.
+**Rejected: an exclusive create alone.** It never replaces, but it lets
+a reader see a partial file on every filesystem, not just the ones that
+cannot link. It would therefore expose every filesystem to the
+mid-write case described above.
+
+**Rejected: writing the temporary with `fs::write`, as
+`write_atomically` does.** See "Why the temporary is not written with
+`fs::write`" above.
 
 **Rejected: a lock file.** No lock may be a precondition for
 correctness, and a peer writer would not take one.
@@ -579,16 +645,19 @@ impl LibraryIdentity {
 
 ```rust
 /// D4. Fails with `ErrorKind::AlreadyExists` when `path` exists, leaving
-/// it untouched. Leaves no temporary behind either way.
+/// it untouched. Leaves behind no temporary it created, and touches no
+/// file it did not create.
 pub fn create_atomically(path: &Path, content: &[u8]) -> io::Result<()>;
 
-/// `create_atomically`, with `link` in place of `std::fs::hard_link`.
-/// An error from `link` other than `AlreadyExists` takes the exclusive-
-/// create fallback.
+/// `create_atomically`, with `link` in place of `std::fs::hard_link`
+/// and `name` in place of `temporary_name`. `name` is called once per
+/// temporary name tried, at most 16 times. An error from `link` other
+/// than `AlreadyExists` takes the exclusive-create fallback.
 pub fn create_atomically_with(
     path: &Path,
     content: &[u8],
     link: &dyn Fn(&Path, &Path) -> io::Result<()>,
+    name: &dyn Fn() -> String,
 ) -> io::Result<()>;
 ```
 
@@ -820,7 +889,25 @@ a site it cannot find, or a count that differs, rather than guessing.
   `validate` reports it, and every run that writes warns about it.
 - **Filesystems without hard links.** During a mint there is a window of
   a few microseconds in which a reader can see a short file. A crash in
-  that window leaves one (D4).
+  that window leaves one. A concurrent run that meets the file in that
+  window writes without an identity and warns. If the minting run then
+  fails and removes the file, the library is left with records and no
+  identity until its next store write (D4).
+- **A successful admission does not imply an identity.** Change 13 must
+  not assume that every admission, adoption or repair that succeeded
+  wrote into a library whose identity is `Present`. There are three
+  exceptions:
+  - the identity file was `Faulty` when the write was made, whether
+    damaged or met mid-write under the fallback;
+  - the identity was `Absent` afterwards, because a concurrent minter
+    failed and removed its file;
+  - the admission made no write at all, because `rewrite` rendered it
+    unchanged, so nothing was ensured.
+
+  Change 13 has to read the identity at the moment it stores a
+  reference. Where it finds none, it should leave that reference
+  unwritten, for a later run to restore, rather than invent or assume
+  an identity.
 - **A peer writer can replace the file.** No-replace protects only
   borax's own mint. A sync tool or a person can still overwrite the
   file, which then holds whatever they wrote.
