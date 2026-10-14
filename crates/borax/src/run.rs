@@ -731,13 +731,21 @@ pub fn preflight<C: Cache>(
         | Command::Resolve { .. }
         // These library commands have nothing that could refuse them:
         // an absent store is an empty one, and a file that will not parse
-        // is reported rather than fatal. A reconcile does write, but
-        // what it writes is decided record by record and reported the
-        // same way, so there is nothing here for it to be refused on
-        // either.
+        // is reported rather than fatal.
         | Command::Status { .. }
-        | Command::Validate { .. }
-        | Command::Reconcile { .. } => Ok(Prepared::Unchecked),
+        | Command::Validate { .. } => Ok(Prepared::Unchecked),
+        // A reconcile writes library state, which a run with no library
+        // root writes none of. Inside a library, what it writes is
+        // decided record by record and reported the same way, so there
+        // is nothing else here for it to be refused on.
+        Command::Reconcile { .. } => match adapters.collection_root {
+            Some(_) => Ok(Prepared::Unchecked),
+            None => Err(error(format!(
+                "{} is in no library, and reconciling writes library state: mark the \
+                 library's root with {OVERRIDE_FILE} first",
+                library_directory(command.directory()).display()
+            ))),
+        },
         Command::Cache { clear, .. } => match adapters.cache_root.as_deref() {
             Some(root) => Ok(Prepared::Cache {
                 report: cache_report(*clear, root)?,
@@ -1020,9 +1028,10 @@ fn tables_used(prepared: &Prepared) -> Vec<TableUsed> {
 /// command's own contract.
 ///
 /// Returns the [`Aftermath`]: what the run has to say for itself once
-/// its events are written, which only a `rename` has anything to fill
-/// in — the files it never reached, and what it found that is about the
-/// run rather than about any one file.
+/// its events are written — the files a `rename` never reached, and
+/// what a run found that is about the run rather than about any one
+/// file, such as an unreadable identity file in the library a
+/// `rename`, `reconcile` or `adopt` wrote into.
 pub fn emit_events<C: Cache>(
     prepared: &Prepared,
     command: &Command,
@@ -1054,10 +1063,10 @@ pub fn emit_events<C: Cache>(
             validation_events(command, adapters, sink);
             Aftermath::default()
         }
-        (Command::Reconcile { rehash, accept, .. }, _) => {
-            reconcile_events(command, *rehash, accept, configs, adapters, sink);
-            Aftermath::default()
-        }
+        (Command::Reconcile { rehash, accept, .. }, _) => Aftermath {
+            identity: reconcile_events(command, *rehash, accept, configs, adapters, sink),
+            ..Aftermath::default()
+        },
         (
             Command::Rename { apply, .. },
             Prepared::Grouped {
@@ -1090,12 +1099,13 @@ pub fn emit_events<C: Cache>(
                 ..Aftermath::default()
             }
         }
-        (Command::Adopt { .. }, Prepared::Grouped { groups, .. }) => {
-            if let [library] = groups.as_slice() {
-                adopt_events(library, adapters, sink);
-            }
-            Aftermath::default()
-        }
+        (Command::Adopt { .. }, Prepared::Grouped { groups, .. }) => Aftermath {
+            identity: match groups.as_slice() {
+                [library] => adopt_events(library, adapters, sink),
+                _ => None,
+            },
+            ..Aftermath::default()
+        },
         // A `Prepared` that does not go with the command could only
         // come of pairing one command's preflight with another's
         // emission, which no caller does: `events_for` and `dispatch`
@@ -1107,8 +1117,8 @@ pub fn emit_events<C: Cache>(
 
 /// What a run has to say for itself once its events are written.
 ///
-/// Both fields are about the run rather than about any one file, and
-/// neither is known until the last file has been reached — which is why
+/// Every field is about the run rather than about any one file, and
+/// none is known until the last file has been reached — which is why
 /// they come back from the emission rather than travelling as events.
 #[derive(Debug, Default)]
 pub struct Aftermath {
@@ -1126,6 +1136,12 @@ pub struct Aftermath {
     /// record might track was resolved as if untracked. `None` for a
     /// library read whole, and for a run that consulted none.
     pub library: Option<Diagnostic>,
+    /// What the run has to say about the library it wrote into: that
+    /// its identity file could not be read, so it was written into
+    /// without an identity and the file left as it was
+    /// ([`crate::library::identity_fault_warning`]). `None` for a run
+    /// that made no store write.
+    pub identity: Option<Diagnostic>,
 }
 
 /// The events `command` produces, between the run's first and last,
@@ -1288,6 +1304,11 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// find stale paths, the run says so once. A run stopped by a move it
 /// could not record reports that instead, being the more urgent of the
 /// two and the reason the rest of the run did not happen.
+///
+/// Every record the run writes goes through one
+/// [`crate::library::StoreWriter`] over the library, and the run
+/// returns [`crate::library::identity_fault_warning`] too when that
+/// writer wrote into a library whose identity file could not be read.
 fn rename_events<C: Cache>(
     groups: &[Group],
     apply: bool,
@@ -1306,6 +1327,16 @@ fn rename_events<C: Cache>(
     // preview reports the same outcomes and records none of them.
     let recording = carrying_out && configs.run().config().record;
     let library = adapters.collection_root.as_deref();
+    // Every store write the run makes goes through this one writer, so
+    // the library's identity is ensured before each and an unreadable
+    // identity file is warned about once for the whole run.
+    let writer = library.map(|root| {
+        crate::library::StoreWriter::new(
+            root,
+            &crate::library::store_create,
+            &crate::library::store_write,
+        )
+    });
     // `exists` is asked about a record that matched and about nothing
     // else, so an answer of "not there" is exactly a record that
     // outlived its file. A file matching nothing never reaches the
@@ -1582,6 +1613,7 @@ fn rename_events<C: Cache>(
                         let admissions = match recording {
                             true => recorded(
                                 library,
+                                writer.as_ref(),
                                 &event,
                                 &file,
                                 held.as_ref(),
@@ -1720,6 +1752,10 @@ fn rename_events<C: Cache>(
             .as_ref()
             .map_or(0, |stopped| unreached(groups, stopped.at)),
         library: consultation_warning(snapshot, consulted),
+        identity: writer
+            .as_ref()
+            .and_then(crate::library::StoreWriter::identity_fault)
+            .map(|fault| crate::library::identity_fault_warning(&fault)),
         // A run that could not record a move says so; otherwise the only
         // thing left to report is a record naming a file that has gone.
         diagnostic: stopped
@@ -3008,9 +3044,9 @@ fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Set
 ///
 /// Only a file the run renamed or found already named is recorded: it
 /// is at the target of a `renamed` event and where it was for an
-/// `already-named` one. Every other outcome, a run with no library, and
-/// a file whose content hash is unknown record nothing and report
-/// nothing.
+/// `already-named` one. Every other outcome, a run with no library or
+/// no writer, and a file whose content hash is unknown record nothing
+/// and report nothing.
 ///
 /// A file outside the library, or inside a subtree it does not own, is
 /// reported as [`Admission::Outside`] and recorded nowhere. Otherwise
@@ -3019,7 +3055,10 @@ fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Set
 /// keyed by what `key` renders — asked only when the file is admitted.
 /// An operator who supplied the identifier or accepted the record over
 /// a conflict has re-identified the file. The hash entry written is
-/// stamped with `at` as both the run and the timestamp.
+/// stamped with `at` as both the run and the timestamp. Every write
+/// goes through `writer`, the run's one [`crate::library::StoreWriter`]
+/// over `library`, so it is preceded by ensuring the library's identity,
+/// and a mint that fails is a write that fails.
 ///
 /// `change` is what [`change`] made of bytes `held` does not hold.
 /// Accepted bytes are admitted under `held`, and reported as
@@ -3040,6 +3079,7 @@ fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Set
 #[allow(clippy::too_many_arguments)]
 fn recorded(
     library: Option<&Path>,
+    writer: Option<&crate::library::StoreWriter<'_>>,
     event: &Event,
     file: &FileRecord,
     held: Option<&ArtifactRecord>,
@@ -3053,7 +3093,7 @@ fn recorded(
         Event::AlreadyNamed { path } => path,
         _ => return Vec::new(),
     };
-    let (Some(library), Some(hash)) = (library, file.hash.as_ref()) else {
+    let (Some(library), Some(writer), Some(hash)) = (library, writer, file.hash.as_ref()) else {
         return Vec::new();
     };
     let reported = |admission: Admission| Event::LibraryAdmission {
@@ -3085,7 +3125,9 @@ fn recorded(
         timestamp: at,
         tool_version: env!("CARGO_PKG_VERSION"),
     };
-    let admitted = crate::library::admit(library, &admitting, &crate::library::store_write);
+    let admitted = crate::library::admit(library, &admitting, &|path, bytes| {
+        writer.write(path, bytes)
+    });
     if let (Ok(admitted), Some(stores)) = (&admitted, stores) {
         stores.learn(&admitting, admitted);
     }
@@ -3736,7 +3778,12 @@ pub fn dispatch<C: Cache>(
     };
     sink.emit(Event::RunFinished { counts });
 
-    for diagnostic in aftermath.library.into_iter().chain(aftermath.diagnostic) {
+    let diagnostics = aftermath
+        .library
+        .into_iter()
+        .chain(aftermath.identity)
+        .chain(aftermath.diagnostic);
+    for diagnostic in diagnostics {
         let _ = writeln!(streams.err, "{diagnostic}");
     }
 
@@ -3843,6 +3890,10 @@ fn validation_events<C: Cache>(command: &Command, adapters: &Adapters<'_, C>, si
 /// run is filed under and the time recorded against it, as an applying
 /// rename's is: one pass over a library is one act of accounting, and
 /// what it recorded has to be identifiable together afterwards.
+///
+/// Returns the warning a library whose identity file could not be read
+/// calls for, when the run wrote into it
+/// ([`crate::library::identity_fault_warning`]).
 fn reconcile_events<C: Cache>(
     command: &Command,
     rehash: bool,
@@ -3850,7 +3901,7 @@ fn reconcile_events<C: Cache>(
     configs: &Configs,
     adapters: &Adapters<'_, C>,
     sink: &mut dyn Sink,
-) {
+) -> Option<Diagnostic> {
     let at = (adapters.now)();
     let extraction = resolving(configs.run().config()).extraction;
     let extract = |path: &Path| crate::pipeline::extraction(path, adapters.documents, &extraction);
@@ -3881,6 +3932,10 @@ fn reconcile_events<C: Cache>(
     if let Some(totals) = totals {
         sink.emit(totals);
     }
+    reconciliation
+        .identity_fault
+        .as_ref()
+        .map(crate::library::identity_fault_warning)
 }
 
 /// Write `adopt`'s events into `sink`: one per orphan, then every
@@ -3892,7 +3947,15 @@ fn reconcile_events<C: Cache>(
 /// content index is the only thing asked about an orphan; no source is
 /// queried and no document opened. The run's timestamp stamps every
 /// hash entry it writes, as [`reconcile_events`]'s does.
-fn adopt_events<C: Cache>(library: &Group, adapters: &Adapters<'_, C>, sink: &mut dyn Sink) {
+///
+/// Returns the warning a library whose identity file could not be read
+/// calls for, when the run recorded an orphan into it
+/// ([`crate::library::identity_fault_warning`]).
+fn adopt_events<C: Cache>(
+    library: &Group,
+    adapters: &Adapters<'_, C>,
+    sink: &mut dyn Sink,
+) -> Option<Diagnostic> {
     let at = (adapters.now)();
     let mut lookups = Lookups::new(&library.tables);
     let adoptions = crate::library::adopt(
@@ -3914,6 +3977,10 @@ fn adopt_events<C: Cache>(library: &Group, adapters: &Adapters<'_, C>, sink: &mu
     missed.absorb(lookups.take());
     missed.report(sink);
     sink.emit(totals);
+    adoptions
+        .identity_fault
+        .as_ref()
+        .map(crate::library::identity_fault_warning)
 }
 
 /// Carry out `cli` against the real world.

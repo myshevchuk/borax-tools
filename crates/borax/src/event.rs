@@ -183,6 +183,12 @@ pub enum Event {
     /// [`Extraction::is_found`].
     LibraryStatus {
         root: PathBuf,
+        /// The library's identity, as canonical UUID text, when its
+        /// identity file holds a readable one. Absent from the line
+        /// otherwise: an identity is not a count, and a library borax
+        /// has never written has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         artifacts: usize,
         items: usize,
         records: usize,
@@ -253,6 +259,12 @@ pub enum Event {
     /// run's [`Event::LibraryCondition`] events of the matching kind.
     LibraryValidated {
         root: PathBuf,
+        /// The library's identity, as canonical UUID text, when its
+        /// identity file holds a readable one. Absent from the line
+        /// otherwise; an identity file that cannot be read is one of
+        /// the `findings`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         findings: usize,
         orphans: usize,
         /// Records whose last-known path holds no artifact of this
@@ -496,12 +508,13 @@ pub enum Finding {
     /// A history entry naming no run, so what it records cannot be
     /// attributed to anything the library did.
     HistoryEntryWithoutRun { hash: String },
-    /// A file of one of the stores that cannot be read or does not
-    /// parse as the record it claims to be, including an item whose
-    /// verbatim source fields do not parse as JSON, or a store
-    /// directory that cannot be listed. One such file is a finding
-    /// about itself and about no other; a directory is a finding about
-    /// every record it would have listed.
+    /// A file of the library's own records — an item, an artifact
+    /// record, or the library's identity file — that cannot be read or
+    /// does not parse as what it claims to be, including an item whose
+    /// verbatim source fields do not parse as JSON; or the directory of
+    /// the item or artifact store, when it cannot be listed. One such
+    /// file is a finding about itself and about no other; a directory
+    /// is a finding about every record it would have listed.
     Unreadable { message: String },
 }
 
@@ -1551,6 +1564,7 @@ pub fn human_line(event: &Event) -> Option<String> {
         )),
         Event::LibraryStatus {
             root,
+            id,
             artifacts,
             items,
             records,
@@ -1558,7 +1572,7 @@ pub fn human_line(event: &Event) -> Option<String> {
             nested,
             identifiable,
         } => Some(format!(
-            "{}: {artifacts} artifacts, {items} items, {records} records, {orphans} orphans{}{}",
+            "{}: {artifacts} artifacts, {items} items, {records} records, {orphans} orphans{}{}{}",
             root.display(),
             match identifiable {
                 None => String::new(),
@@ -1567,7 +1581,8 @@ pub fn human_line(event: &Event) -> Option<String> {
             match nested.is_empty() {
                 true => String::new(),
                 false => format!(" (excluding nested libraries: {})", nested.join(", ")),
-            }
+            },
+            which_library(id.as_deref())
         )),
         Event::LibraryCondition { path, condition } => Some(format!(
             "{}: {}",
@@ -1579,13 +1594,16 @@ pub fn human_line(event: &Event) -> Option<String> {
         }
         Event::LibraryValidated {
             root,
+            id,
             findings,
             orphans,
             missing,
             unlinked,
         } => Some(format!(
-            "{}: {findings} findings, {orphans} orphans, {missing} missing, {unlinked} unlinked",
-            root.display()
+            "{}: {findings} findings, {orphans} orphans, {missing} missing, {unlinked} \
+             unlinked{}",
+            root.display(),
+            which_library(id.as_deref())
         )),
         Event::LibraryRepair { path, repair, .. } => {
             Some(format!("{}: {}", escaped(path), what_was_repaired(repair)))
@@ -1986,6 +2004,15 @@ pub(crate) fn why_unanswered(answer: &LibraryAnswer) -> Option<String> {
             if *unreadable == 1 { "file" } else { "files" }
         ),
     })
+}
+
+/// The clause closing a library report line that names the library's
+/// identity: `; library <id>` when there is one, and nothing otherwise,
+/// so a library with no identity reads as it always has.
+///
+/// The identity is canonical UUID text and needs no escaping.
+fn which_library(id: Option<&str>) -> String {
+    id.map(|id| format!("; library {id}")).unwrap_or_default()
 }
 
 /// What `finding` says is wrong with the file, as the clause following

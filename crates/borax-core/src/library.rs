@@ -1,17 +1,19 @@
-//! The two records a library is made of, as values.
+//! The records a library is made of, as values.
 //!
-//! A library states what it holds in two kinds of file. An *item* is the
-//! canonical record of a work, kept under a minted item identity. An
-//! *artifact record* is authoritative state about one file: the item it
-//! is linked to when it has one, the hash history that says which run
-//! recorded which bytes, and the library-relative path, size and
-//! modification time last seen.
+//! A library states what it holds in two stores and one identity file.
+//! An *item* is the canonical record of a work, kept under a minted item
+//! identity. An *artifact record* is authoritative state about one file:
+//! the item it is linked to when it has one, the hash history that says
+//! which run recorded which bytes, and the library-relative path, size
+//! and modification time last seen. The *library identity* names the
+//! library itself, wherever its tree is.
 //!
-//! This module is that half of the library which is values: the two
-//! identities, the two records, the TOML text each is written as, and
-//! the predicates validation is made of. Reading a file, writing one,
-//! minting an identity, and deciding what a finding means belong to the
-//! caller — nothing here performs I/O.
+//! This module is that half of the library which is values: the item,
+//! artifact and library identities, the records and the identity file,
+//! the TOML text each is written as, and the predicates validation is
+//! made of. Reading a file, writing one, minting an identity, and
+//! deciding what a finding means belong to the caller — nothing here
+//! performs I/O.
 
 use std::fmt;
 
@@ -140,6 +142,85 @@ impl TryFrom<String> for ArtifactId {
 impl From<ArtifactId> for String {
     fn from(id: ArtifactId) -> String {
         id.to_string()
+    }
+}
+
+/// The identity of a library: the tree under one marker, wherever that
+/// tree is.
+///
+/// Stable across a move or a copy of the tree, so it is not the root's
+/// path. Minted once by a caller, like an [`ItemId`], and rendered,
+/// compared, sorted and serialized the same way.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct LibraryId(Uuid);
+
+impl LibraryId {
+    /// The identity `text` spells, or `None` when `text` is not a
+    /// canonical UUID.
+    ///
+    /// Only the canonical spelling is accepted — lowercase, hyphenated —
+    /// so [`LibraryId::to_string`] reproduces the accepted text byte for
+    /// byte. The UUID's version is not checked.
+    pub fn parse(text: &str) -> Option<LibraryId> {
+        canonical_uuid(text).map(LibraryId)
+    }
+
+    /// The identity of `uuid`, whatever spelling it came from.
+    pub fn from_uuid(uuid: Uuid) -> LibraryId {
+        LibraryId(uuid)
+    }
+
+    /// The UUID the identity is.
+    pub fn uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Display for LibraryId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.hyphenated())
+    }
+}
+
+impl TryFrom<String> for LibraryId {
+    type Error = Malformed;
+
+    fn try_from(text: String) -> Result<LibraryId, Malformed> {
+        LibraryId::parse(&text)
+            .ok_or_else(|| Malformed::Toml(format!("not a canonical library uuid: {text:?}")))
+    }
+}
+
+impl From<LibraryId> for String {
+    fn from(id: LibraryId) -> String {
+        id.to_string()
+    }
+}
+
+/// The library's identity file, `.borax/library.toml`, as a value.
+///
+/// A reader ignores keys and tables it does not know, as it does in an
+/// item file or an artifact record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryIdentity {
+    pub id: LibraryId,
+}
+
+impl LibraryIdentity {
+    /// The identity as the text of the identity file: exactly
+    /// `id = "<uuid>"` and a newline.
+    pub fn to_toml(&self) -> String {
+        format!("id = \"{}\"\n", self.id)
+    }
+
+    /// The identity `text` states.
+    ///
+    /// Fails with [`Malformed`] when `text` is not TOML, when its `id`
+    /// is absent or not a string, or when that string is not canonical
+    /// UUID text. Unknown keys and tables are ignored.
+    pub fn from_toml(text: &str) -> Result<LibraryIdentity, Malformed> {
+        toml::from_str(text).map_err(|error| Malformed::Toml(error.to_string()))
     }
 }
 

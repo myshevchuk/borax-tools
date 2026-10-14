@@ -16,6 +16,8 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-05 Mon 04:20] -- operator input evidence
 #+AI_PASS: fact-check claude-opus-5-5 [2026-10-05 Mon] -- supplied identifiers are looked up normalised, not as typed
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-07 Wed] -- gated change acceptance
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-13 Tue] -- library identity
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-14 Wed] -- reconcile outside a library
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -222,7 +224,12 @@ how to install it, and a handful of examples.
    ~--collision~ and ~--record~ alongside the resolution settings.
    An applying run inside a library writes an artifact record for each
    file it moves or finds already named, and links that record to an
-   item for the resolved work. A preview writes neither kind of record.
+   item for the resolved work. The first item or artifact-record write
+   into a library without an identity first creates
+   ~.borax/library.toml~. If creating that file fails, any rename already
+   made stands, but the admission is ~unwritten~ and the guarded store
+   write is not made. The message names the identity file. A preview
+   writes neither kind of record and creates no identity.
 
    With recording enabled, when an applying run finds unrecorded bytes
    at an artifact record's own path, it accepts them only when their
@@ -252,7 +259,8 @@ how to install it, and a handful of examples.
    artifacts or restored versions of one item therefore do not skip
    themselves.
    ~--no-record~ disables both checks and writes no artifact record or
-   item. It does not stop ~rename~ from asking the start-of-run library
+   item, and it creates no library identity. It does not stop ~rename~ from
+   asking the start-of-run library
    what a tracked file is. If moving a changed artifact without updating
    its record would strand that record, borax refuses the move. Its
    message names ~borax reconcile --rehash~, which records accepted
@@ -618,6 +626,10 @@ how to install it, and a handful of examples.
    directory, treating that directory as the root for this report. If
    you omit ~PATH~, the working directory is used.
 
+   When ~.borax/library.toml~ holds a readable identity, the report line
+   ends with ~; library <uuid>~. If the identity file is absent or
+   unreadable, the line is unchanged. ~status~ never creates an identity.
+
    ~--identify~ opens every surveyed artifact, tracked or not, and runs
    the same extraction passes as ~resolve~. It queries no service and
    writes one result per artifact in survey order. ~status~ also accepts
@@ -672,6 +684,14 @@ how to install it, and a handful of examples.
    unlistable directory is an ~unreadable~ finding; a missing directory
    remains an empty store.
 
+   An identity file that cannot be read or parsed is also an ~unreadable~
+   finding against ~.borax/library.toml~. It is listed before findings
+   about items and artifact records. An absent identity file is neither a
+   finding nor a condition, and ~validate~ never creates one.
+   On a filesystem without hard links, such as FAT or exFAT, interrupted
+   identity creation can leave a short file; ~validate~ reports it as the
+   same kind of finding.
+
    Orphans, missing artifact records, and items no artifact record links
    to are conditions rather than findings. They are valid library
    states. After its findings, ~validate~ names each orphan, then each
@@ -700,8 +720,10 @@ how to install it, and a handful of examples.
    or unlinked items.
 
    Each finding and condition has its own line. Human output ends with
-   the unchanged validation totals, including the findings count, and
-   does not repeat that count in another summary line.
+   the validation totals, including the findings count, and does not
+   repeat that count in another summary line. When the library has a
+   readable identity, the totals line ends with ~; library <uuid>~. It
+   is unchanged when the identity is absent or unreadable.
 
 ** borax reconcile
 
@@ -715,6 +737,15 @@ how to install it, and a handful of examples.
    modification time. ~--rehash~ hashes every artifact instead, which
    also catches a same-size in-place edit within the filesystem's
    modification-time granularity.
+
+   Because reconciliation writes library state, ~reconcile~ refuses to
+   run over a directory when neither a ~.borax.toml~ at or above it nor
+   a configured ~library-root~ establishes a library. It returns an
+   error before it reads or writes anything:
+
+   #+begin_example
+     <directory> is in no library, and reconciling writes library state: mark the library's root with .borax.toml first
+   #+end_example
 
    Reconciliation completes four steps in order across the library. It
    first settles records whose own paths still hold their artifacts.
@@ -750,7 +781,15 @@ how to install it, and a handful of examples.
    file two records both match. borax reports every candidate and
    changes nothing rather than guessing. It creates no record for an
    orphan and deletes no record. A pass over an untouched library writes
-   no store file.
+   no store file and creates no library identity.
+
+   A repair, an accepted change, or a touched record refreshed after its
+   hash is confirmed creates a missing identity before it writes the
+   artifact record. If identity creation fails, the repair is
+   ~unwritten~ and the record is not written; the message names
+   ~.borax/library.toml~. An existing identity file that cannot be read
+   or parsed is left unchanged. The repair proceeds, and the run prints
+   one warning on standard error directing you to ~borax validate~.
 
 ** borax adopt
 
@@ -791,6 +830,14 @@ how to install it, and a handful of examples.
    by ~.borax.toml~ or ~library-root~, because it has nowhere to write
    library state.
 
+   The first adoption that writes an item or artifact record creates a
+   missing library identity first. An adoption that records nothing
+   creates none. If identity creation fails, the adoption is ~unwritten~
+   and its guarded store write is not made; the message names
+   ~.borax/library.toml~. An existing identity file that cannot be read
+   or parsed is left unchanged. Adoption proceeds, and the run prints one
+   warning on standard error directing you to ~borax validate~.
+
 ** Choosing how to record existing files
 
    Use ~adopt~ when borax resolved the same bytes on an earlier run and
@@ -829,14 +876,47 @@ how to install it, and a handful of examples.
    file is in charge.
 
    A /library/ root is the configured ~library-root~, or otherwise the
-   nearest ancestor with a ~.borax.toml~. Its ~.borax/~ holds the
-   artifact records and run logs, while ~items/~ under the root holds the
-   item store. A nested marker begins another library, and the outer
-   library stops at that boundary. The boundary is lexical: symlinks are
-   not followed, and a symlink is neither an artifact nor an orphan.
+   nearest ancestor with a ~.borax.toml~. Its ~.borax/~ holds the identity
+   file at ~.borax/library.toml~, the artifact records, and the run logs,
+   while ~items/~ under the root holds the item store. The identity is
+   library state, not a setting in ~.borax.toml~. A nested marker begins
+   another library, and the outer library stops at that boundary. The
+   boundary is lexical: symlinks are not followed, and a symlink is
+   neither an artifact nor an orphan.
 
-   A library keeps two authoritative text stores. An item is a logical,
-   independently citable work. It lives at
+   A library keeps two authoritative text stores and one authoritative
+   identity file. ~.borax/library.toml~ holds one line,
+   ~id = "<uuid>"~. A reader ignores keys it does not know. A copy made
+   with ~rsync~ or ~git clone~ that includes ~.borax/~ is the same library
+   at another location. The identity does not affect how the library
+   answers for its own files; it lets another location name the library.
+   borax never replaces or rewrites an existing identity file, and
+   nothing reconstructs it. Delete it when you want a copied library to
+   become a different library: its next store write creates a new
+   identity.
+
+   The first item or artifact-record write creates an identity when the
+   file is absent. This includes an applying rename recording a file,
+   ~adopt~ recording an orphan, and ~reconcile~ writing a repair,
+   refreshing a touched record, or accepting a change. A library written
+   by borax 0.9.0 receives its identity at its next store write.
+   ~status~, ~validate~, ~resolve~, ~bib~, a rename preview,
+   ~--no-record~, a reconcile that writes nothing, and an adoption that
+   records nothing create no identity. Neither does an admission whose
+   record is already unchanged.
+
+   If the file is absent and creating it fails, the item or artifact
+   record it guards is not written. The command reports that admission,
+   adoption, or repair as ~unwritten~, with a message naming the identity
+   file. If the file exists but cannot be read or parsed, borax does not
+   replace it and still writes the record. Such a run prints this warning
+   once on standard error:
+
+   #+begin_example
+     warning: <path> could not be read as the library's identity, so it was left as it is and the library has none another location can name; borax validate reports why
+   #+end_example
+
+   An item is a logical, independently citable work. It lives at
    ~items/<key>.<uuid>.toml~, where ~<key>~ is the citation key when the
    item is created and is only a label; borax never renames the file
    when the key later changes. The ~id~ field inside the file is the
@@ -1807,10 +1887,13 @@ how to install it, and a handful of examples.
   the affected objects. These additions do not change the event schema
   version.
 
-  ~library-status~ carries ~root~, ~artifacts~, ~items~, ~records~,
-  ~orphans~, ~nested~, and ~identifiable~. ~library-finding~ carries
-  ~path~ and ~finding~, and ~library-validated~ carries ~root~,
-  ~findings~, ~orphans~, ~missing~, and ~unlinked~. ~library-repair~
+  ~library-status~ carries ~root~, optional ~id~, ~artifacts~, ~items~,
+  ~records~, ~orphans~, ~nested~, and ~identifiable~.
+  ~library-finding~ carries ~path~ and ~finding~, and
+  ~library-validated~ carries ~root~, optional ~id~, ~findings~,
+  ~orphans~, ~missing~, and ~unlinked~. The ~id~ is present only when
+  the library has a readable identity. These additions keep the event
+  schema at 4. ~library-repair~
   carries ~id~, ~path~, and ~repair~. A ~changed~ repair carries ~hash~
   and ~accepted~. The latter is tagged by ~by~: ~extracted~ carries its
   ~identifier~, while ~operator~ names acceptance through ~--accept~. A

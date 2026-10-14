@@ -6,8 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-07, at 0.9.0 with `separate-change-from-acceptance`
-implemented on its branch.
+Last reviewed: 2026-10-13, at 0.9.0 with `separate-change-from-acceptance`
+merged and `library-identity` implemented on its branch.
 
 ## What is built
 
@@ -485,6 +485,45 @@ Neither `status` nor `validate` reports a pending change, and an
 entry's item is never a finding. A supplied identifier that leads to no
 move is set aside by the interactive driver, so a supplied identifier
 can accept or separate a file but never leave it pending in place.
+
+`library-identity` is implemented on top, as change 12 and the second
+of Phase 4, and keeps schema 4. A library's identity is a v7 UUID in
+`.borax/library.toml` (`library::IDENTITY_FILE`), the file exactly
+`id = "<uuid>"` and read as `borax_core::library::LibraryIdentity`:
+unknown keys are ignored, and an `id` that is absent, not a string or
+not canonical UUID text does not parse, whatever its version. A copy
+that carries `.borax/` is the same library; nothing inside the library
+reads the identity, and an absent file is healthy. `library::identity`
+reads it as `Absent`, `Present` or `Faulty`, a dangling symlink or a
+directory included in `Faulty`. Every item and artifact-record write
+goes through a `library::StoreWriter`, which calls `ensure_identity`
+immediately before each write: `admit` in the rename driver (one
+writer per run) and in `adopt`, and `rewrite` in `reconcile`. So the
+first store write mints the identity, and a run that writes nothing —
+`status`, `validate`, `resolve`, `bib`, a preview, `--no-record`, an
+untouched or `--rehash`-only reconcile, an adoption that records
+nothing, an admission `rewrite` renders unchanged — mints nothing. A
+reconcile that refreshes a touched record's size and time does mint.
+The mint never replaces: `borax_sources::store::create_atomically`
+writes an exclusively created temporary and hard-links it into place,
+falling back to an exclusive create where linking fails for a reason
+other than `AlreadyExists`, and a lost race reads the winner's file. A
+failed mint fails the guarded write, reported as the `unwritten`
+admission, adoption or repair it already was, naming the identity
+file. A `Faulty` file is neither minted over nor a reason to refuse the
+write; the run warns once on stderr (`library::identity_fault_warning`,
+through `Aftermath::identity`, `Reconciliation::identity_fault` and
+`Adoptions::identity_fault`, written after `Aftermath::library`), and
+`validate` reports it as `unreadable`, ahead of the item and record
+findings. `library-status` and `library-validated` gain `id` after
+`root`, omitted when there is no readable identity, and each human
+report line then ends `; library <uuid>`. Change 13 must read the
+identity when it stores a reference rather than assume one: a
+successful admission does not imply a `Present` identity. Its review
+turned up a restoration: `reconcile` over a directory with no library
+root rewrote stale records there, against the `library` requirement
+that such a run writes no library state, and would have minted an
+identity too. It is now refused before it starts, as `adopt` is.
 
 ## Not built yet
 

@@ -1,16 +1,20 @@
 #![allow(clippy::unwrap_used)]
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::{Arc, Barrier};
 
 use borax_core::content::hash_bytes;
 use borax_core::identifier::{ArxivId, Doi, Isbn, Pmid};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
 use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
 use borax_sources::store::{
-    ContentIndex, FORMAT_VERSION, FileCache, cache_root, content_key, entry_path, hash_file,
-    write_atomically,
+    ContentIndex, FORMAT_VERSION, FileCache, cache_root, content_key, create_atomically,
+    create_atomically_with, entry_path, hash_file, write_atomically,
 };
 
 /// A [`Cache`] whose `put` always reports [`CacheWrite::Failed`]
@@ -748,4 +752,296 @@ fn write_atomically_leaves_the_original_intact_when_it_cannot_finish() {
         std::fs::read_to_string(path.join("sentinel")).unwrap(),
         "still here"
     );
+}
+
+// ---------------------------------------------------------------------
+// create_atomically / create_atomically_with (design D4, D8)
+// ---------------------------------------------------------------------
+
+/// A `name` seam that yields `.tmp-test-<n>` from a counter it owns,
+/// for a test that does not care which temporary name is used.
+fn counting_name() -> impl Fn() -> String {
+    let counter = Cell::new(0u32);
+    move || {
+        let n = counter.get();
+        counter.set(n + 1);
+        format!(".tmp-test-{n}")
+    }
+}
+
+/// A `name` seam that yields each of `names` in turn, for a test that
+/// pins which temporary name is tried.
+fn sequence_name(names: Vec<String>) -> impl Fn() -> String {
+    let index = Cell::new(0usize);
+    move || {
+        let i = index.get();
+        index.set(i + 1);
+        names
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| panic!("the name sequence was exhausted after {i} calls"))
+    }
+}
+
+#[test]
+fn create_atomically_creates_the_file_and_its_parent_directories() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("deep").join("nested").join("library.toml");
+
+    create_atomically(&path, b"id = \"x\"\n").unwrap();
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"id = \"x\"\n");
+}
+
+#[test]
+fn create_atomically_refuses_an_existing_file_and_leaves_it_byte_identical() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("library.toml");
+    std::fs::write(&path, b"original").unwrap();
+
+    let error = create_atomically(&path, b"new").unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+}
+
+#[test]
+fn create_atomically_leaves_no_temporary_behind_when_it_creates() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("library.toml");
+
+    create_atomically(&path, b"content").unwrap();
+
+    let entries: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, ["library.toml"]);
+}
+
+#[test]
+fn create_atomically_leaves_no_temporary_behind_when_the_file_exists() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("library.toml");
+    std::fs::write(&path, b"original").unwrap();
+
+    let _ = create_atomically(&path, b"new");
+
+    let entries: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, ["library.toml"]);
+}
+
+#[test]
+fn create_atomically_with_a_link_that_is_unsupported_falls_back_to_an_exclusive_create() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("library.toml");
+    let name = counting_name();
+
+    create_atomically_with(
+        &path,
+        b"content",
+        &|_from, _to| Err(io::Error::from(ErrorKind::Unsupported)),
+        &name,
+    )
+    .unwrap();
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"content");
+    let entries: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, ["library.toml"]);
+}
+
+#[test]
+fn create_atomically_with_a_link_that_is_unsupported_still_refuses_an_existing_file() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("library.toml");
+    std::fs::write(&path, b"original").unwrap();
+    let name = counting_name();
+
+    let error = create_atomically_with(
+        &path,
+        b"new",
+        &|_from, _to| Err(io::Error::from(ErrorKind::Unsupported)),
+        &name,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    let entries: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, ["library.toml"]);
+}
+
+#[test]
+fn create_atomically_with_a_link_reporting_already_exists_does_not_fall_back() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("library.toml");
+    let name = counting_name();
+
+    let error = create_atomically_with(
+        &path,
+        b"content",
+        &|_from, _to| Err(io::Error::from(ErrorKind::AlreadyExists)),
+        &name,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert!(
+        !path.exists(),
+        "a link reporting AlreadyExists must not fall back to an exclusive create"
+    );
+}
+
+#[test]
+fn create_atomically_leaves_a_file_at_a_taken_temporary_name_untouched() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("library.toml");
+    std::fs::write(root.path().join("taken.tmp"), b"taken bytes").unwrap();
+    let name = sequence_name(vec!["taken.tmp".to_string(), "fresh.tmp".to_string()]);
+
+    create_atomically_with(
+        &path,
+        b"content",
+        &|from: &Path, to: &Path| std::fs::hard_link(from, to),
+        &name,
+    )
+    .unwrap();
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"content");
+    assert_eq!(
+        std::fs::read(root.path().join("taken.tmp")).unwrap(),
+        b"taken bytes",
+        "a file already at a taken temporary name must be untouched"
+    );
+    assert!(
+        !root.path().join("fresh.tmp").exists(),
+        "the temporary that succeeded must not be left behind"
+    );
+}
+
+#[test]
+fn create_atomically_never_writes_through_a_stale_temporary_linked_to_the_destination() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("library.toml");
+    std::fs::write(&path, b"existing identity").unwrap();
+    // A crash after the link step, before the temporary was removed,
+    // leaves exactly this: a second name for the destination.
+    std::fs::hard_link(&path, root.path().join("taken.tmp")).unwrap();
+    let name = sequence_name(vec!["taken.tmp".to_string(), "fresh.tmp".to_string()]);
+
+    let error = create_atomically_with(
+        &path,
+        b"new content",
+        &|from: &Path, to: &Path| std::fs::hard_link(from, to),
+        &name,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&path).unwrap(), b"existing identity");
+    assert_eq!(
+        std::fs::read(root.path().join("taken.tmp")).unwrap(),
+        b"existing identity",
+        "the stale temporary must never be opened and written through"
+    );
+}
+
+#[test]
+fn create_atomically_gives_up_after_sixteen_taken_temporary_names() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("library.toml");
+    let names: Vec<String> = (0..16).map(|n| format!("taken-{n}.tmp")).collect();
+    for name in &names {
+        std::fs::write(root.path().join(name), format!("bytes-{name}")).unwrap();
+    }
+    let call_count = Rc::new(Cell::new(0usize));
+    let counter = Rc::clone(&call_count);
+    let name_list = names.clone();
+    let name = move || {
+        let i = counter.get();
+        counter.set(i + 1);
+        name_list[i].clone()
+    };
+
+    let error = create_atomically_with(
+        &path,
+        b"content",
+        &|from: &Path, to: &Path| std::fs::hard_link(from, to),
+        &name,
+    )
+    .unwrap_err();
+
+    assert_ne!(
+        error.kind(),
+        ErrorKind::AlreadyExists,
+        "giving up must not read as a lost race"
+    );
+    assert!(!path.exists());
+    for name in &names {
+        assert_eq!(
+            std::fs::read(root.path().join(name)).unwrap(),
+            format!("bytes-{name}").into_bytes(),
+            "every taken file must stay byte-identical"
+        );
+    }
+    assert_eq!(call_count.get(), 16);
+}
+
+#[test]
+fn concurrent_creates_of_one_path_leave_exactly_one_winner() {
+    let root = tempdir().unwrap();
+    let path = Arc::new(root.path().join("library.toml"));
+    let barrier = Arc::new(Barrier::new(8));
+
+    let threads: Vec<_> = (0..8)
+        .map(|n| {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                create_atomically(&path, format!("bytes-{n}").as_bytes())
+            })
+        })
+        .collect();
+
+    let results: Vec<io::Result<()>> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+
+    let ok_count = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(ok_count, 1, "exactly one creator must win the race");
+    assert!(
+        results
+            .iter()
+            .filter(|r| r.is_err())
+            .all(|r| r.as_ref().unwrap_err().kind() == ErrorKind::AlreadyExists),
+        "every loser must see AlreadyExists"
+    );
+
+    let winner = results
+        .iter()
+        .position(Result::is_ok)
+        .expect("one winner exists");
+    assert_eq!(
+        std::fs::read_to_string(path.as_path()).unwrap(),
+        format!("bytes-{winner}")
+    );
+
+    let entries: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, ["library.toml"]);
 }

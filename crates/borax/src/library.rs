@@ -1,19 +1,20 @@
 //! A library on disk: where its boundary runs, which files are its
-//! artifacts, and what its two stores say.
+//! artifacts, what its two stores say, and which library it is.
 //!
 //! A library is one directory tree. The directory holding the nearest
 //! `.borax.toml` is its root; `.borax/` under that root holds the state
-//! borax writes, and `items/` holds the record of every work the
-//! library knows. Everything else in the tree is the operator's, and
-//! the artifacts are the PDFs among it.
+//! borax writes, the library's identity among it, and `items/` holds
+//! the record of every work the library knows. Everything else in the
+//! tree is the operator's, and the artifacts are the PDFs among it.
 //!
-//! [`borax_core::library`] holds the values — the two identities, the
-//! two records, the TOML each is written as — and touches no file. This
-//! module is the adapter around them: the boundary predicates, the
-//! artifact walk, and the two stores, each read straight from the files
-//! themselves with no index in between. The library's text is
-//! authoritative, so nothing here caches it beyond the call that read
-//! it.
+//! [`borax_core::library`] holds the values — the item, artifact and
+//! library identities, the records and the identity file, the TOML each
+//! is written as — and touches no file. This module is the adapter
+//! around them: the boundary predicates, the artifact walk, the two
+//! stores and the identity file, each read straight from the files
+//! themselves with no index in between, and the writer every store
+//! write goes through. The library's text is authoritative, so nothing
+//! here caches it beyond the call that read it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,12 +26,12 @@ use std::time::UNIX_EPOCH;
 use borax_core::content::ContentHash;
 use borax_core::identifier::{Identifier, supplied};
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, RunId, is_library_relative,
-    is_well_formed_hash, name_uuid,
+    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, LibraryId, LibraryIdentity, RunId,
+    is_library_relative, is_well_formed_hash, name_uuid,
 };
 use borax_core::record::Record;
 use borax_core::template::slug;
-use borax_sources::store::{hash_file, write_atomically};
+use borax_sources::store::{create_atomically, hash_file, write_atomically};
 use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, value};
 use uuid::Uuid;
 
@@ -54,6 +55,15 @@ pub const ITEM_STORE: &str = "items";
 
 /// The directory holding the artifact records, under [`STATE_DIR`].
 pub const ARTIFACT_STORE: &str = "artifacts";
+
+/// The library's identity file, under [`STATE_DIR`].
+pub const IDENTITY_FILE: &str = "library.toml";
+
+/// Where the library rooted at `root` keeps its identity:
+/// [`IDENTITY_FILE`] under [`STATE_DIR`].
+pub fn identity_file(root: &Path) -> PathBuf {
+    root.join(STATE_DIR).join(IDENTITY_FILE)
+}
 
 /// The extension a library file is written with.
 const RECORD_EXTENSION: &str = "toml";
@@ -260,8 +270,8 @@ fn walk(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
     (found, nested)
 }
 
-/// A file or directory of a library's store that could not be read as
-/// what it claims to be.
+/// A file or directory of a library's store, or the library's identity
+/// file, that could not be read as what it claims to be.
 ///
 /// One fault is one file: the store answers from everything else it
 /// read, so an unreadable or unparsable file costs its own record and
@@ -331,6 +341,195 @@ fn store_files(directory: &Path) -> Vec<(PathBuf, Result<String, StoreFault>)> {
     }
     files.sort_by(|(left, _), (right, _)| left.cmp(right));
     files
+}
+
+/// What a library's identity file says about the library's identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Identity {
+    /// Nothing is at [`identity_file`]: the library has never been
+    /// written to, or its identity file was deleted. A healthy state,
+    /// and not a finding.
+    Absent,
+    /// The identity the file holds.
+    Present(LibraryId),
+    /// Something is at [`identity_file`] and cannot be read or does not
+    /// parse as an identity. `path` is the identity file, and `message`
+    /// is what the reader or the parser said.
+    Faulty(StoreFault),
+}
+
+impl Identity {
+    /// The identity, when there is one.
+    pub fn id(&self) -> Option<&LibraryId> {
+        match self {
+            Identity::Present(id) => Some(id),
+            Identity::Absent | Identity::Faulty(_) => None,
+        }
+    }
+}
+
+/// Read the identity of the library rooted at `root`. Writes nothing.
+///
+/// [`Identity::Absent`] only when nothing at all is at
+/// [`identity_file`]. Anything there that cannot be read as an
+/// identity is [`Identity::Faulty`]: a directory, a dangling symbolic
+/// link, a file that cannot be read or is not UTF-8, text that does not
+/// parse as a [`LibraryIdentity`], and a path whose metadata cannot be
+/// read for any reason but its absence — a `.borax` that is a plain
+/// file, say.
+pub fn identity(root: &Path) -> Identity {
+    let path = identity_file(root);
+    let fault = |message: String| {
+        Identity::Faulty(StoreFault {
+            path: path.clone(),
+            message,
+        })
+    };
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Identity::Absent,
+        Err(error) => return fault(error.to_string()),
+    }
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => return fault(error.to_string()),
+    };
+    match LibraryIdentity::from_toml(&text) {
+        Ok(identity) => Identity::Present(identity.id),
+        Err(malformed) => fault(malformed.to_string()),
+    }
+}
+
+/// The identity of the library rooted at `root`, minted first if it has
+/// none.
+///
+/// A library whose identity is [`Identity::Present`] or
+/// [`Identity::Faulty`] is returned as it is, and nothing is written:
+/// an identity file that cannot be read is never minted over. Otherwise
+/// a v7 identity is minted and its file created through `create`, which
+/// must never replace a file and must fail with
+/// [`io::ErrorKind::AlreadyExists`] when something is already at the
+/// path: [`store_create`] in a run. When it does fail that way, another
+/// writer created the file first, and the identity is read again and
+/// returned as that writer left it.
+///
+/// `Ok` is therefore never [`Identity::Absent`]. Fails when `create`
+/// fails for any other reason, or when the file it found in its way is
+/// gone by the time it is read again; the error has `create`'s kind and
+/// says `cannot create the library's identity at <path>: <reason>`.
+pub fn ensure_identity(
+    root: &Path,
+    create: &dyn Fn(&Path, &[u8]) -> io::Result<()>,
+) -> io::Result<Identity> {
+    let found = identity(root);
+    if !matches!(found, Identity::Absent) {
+        return Ok(found);
+    }
+
+    let path = identity_file(root);
+    let id = LibraryId::from_uuid(Uuid::now_v7());
+    let created = create(
+        &path,
+        LibraryIdentity { id: id.clone() }.to_toml().as_bytes(),
+    );
+    let error = match created {
+        Ok(()) => return Ok(Identity::Present(id)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match identity(root) {
+            Identity::Absent => error,
+            winner => return Ok(winner),
+        },
+        Err(error) => error,
+    };
+    Err(io::Error::new(
+        error.kind(),
+        format!(
+            "cannot create the library's identity at {}: {error}",
+            path.display()
+        ),
+    ))
+}
+
+/// Create `path` holding `bytes`, never replacing a file already there:
+/// the `create` seam [`ensure_identity`] takes in a run.
+///
+/// Fails with [`io::ErrorKind::AlreadyExists`], leaving the file as it
+/// is, when something is already at `path`. Where the filesystem can
+/// hard-link, a reader sees no file or the whole of it; see
+/// [`create_atomically`].
+pub fn store_create(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    create_atomically(path, bytes)
+}
+
+/// The store writes a run makes into one library, each preceded by
+/// ensuring the library has an identity.
+///
+/// Every write to the item store or the artifact store goes through
+/// one, so a library's first store write is what mints its identity and
+/// a run that writes nothing mints nothing. The identity is ensured
+/// again before every write rather than once, so an identity file
+/// deleted mid-run is minted again by the next write.
+pub struct StoreWriter<'a> {
+    root: &'a Path,
+    create: &'a dyn Fn(&Path, &[u8]) -> io::Result<()>,
+    write: &'a dyn Fn(&Path, &[u8]) -> io::Result<()>,
+    fault: RefCell<Option<StoreFault>>,
+}
+
+impl<'a> StoreWriter<'a> {
+    /// A writer into the library rooted at `root`, minting through
+    /// `create` as [`ensure_identity`] does and writing through `write`,
+    /// which replaces the file it writes: [`store_create`] and
+    /// [`store_write`] in a run.
+    pub fn new(
+        root: &'a Path,
+        create: &'a dyn Fn(&Path, &[u8]) -> io::Result<()>,
+        write: &'a dyn Fn(&Path, &[u8]) -> io::Result<()>,
+    ) -> StoreWriter<'a> {
+        StoreWriter {
+            root,
+            create,
+            write,
+            fault: RefCell::new(None),
+        }
+    }
+
+    /// Ensure the library's identity, then write `bytes` to `path`.
+    ///
+    /// When the identity cannot be minted, fails with
+    /// [`ensure_identity`]'s error and does not write. An identity file
+    /// that cannot be read neither stops the write nor is written over:
+    /// the write is made, and the first such fault is kept for
+    /// [`StoreWriter::identity_fault`]. Otherwise fails with what
+    /// `write` said.
+    pub fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        if let Identity::Faulty(fault) = ensure_identity(self.root, self.create)? {
+            self.fault.borrow_mut().get_or_insert(fault);
+        }
+        (self.write)(path, bytes)
+    }
+
+    /// The first [`Identity::Faulty`] identity a write met, if any.
+    pub fn identity_fault(&self) -> Option<StoreFault> {
+        self.fault.borrow().clone()
+    }
+}
+
+/// What a run says about having written into a library whose identity
+/// file could not be read, as [`StoreWriter::identity_fault`] kept it.
+///
+/// One warning however many writes met it: the file is the library's,
+/// not any one record's. Nothing was refused on the strength of it and
+/// nothing was written over it, so this is what the run has to say and
+/// not why it did less; `borax validate` reports the file.
+pub fn identity_fault_warning(fault: &StoreFault) -> Diagnostic {
+    Diagnostic {
+        level: Level::Warning,
+        message: format!(
+            "{} could not be read as the library's identity, so it was left as it is and the \
+             library has none another location can name; borax validate reports why",
+            fault.path.display()
+        ),
+    }
 }
 
 /// The identifier of `record` of the same kind as `wanted`, if it
@@ -1404,6 +1603,10 @@ pub struct Survey {
     pub items: usize,
     /// How many records the artifact store holds.
     pub records: usize,
+    /// The library's identity, when its identity file holds a readable
+    /// one: `None` both for a library with no identity file and for one
+    /// whose file cannot be read, which is [`validate`]'s to report.
+    pub identity: Option<LibraryId>,
 }
 
 /// Survey the library rooted at `root`.
@@ -1417,13 +1620,15 @@ pub fn survey(root: &Path) -> Survey {
     surveyed(root, &contents(root))
 }
 
-/// A library as read: one walk of its tree and one read of each of its
-/// stores, which is everything [`survey`] and [`validate`] are made of.
+/// A library as read: one walk of its tree, one read of each of its
+/// stores and one of its identity, which is everything [`survey`] and
+/// [`validate`] are made of.
 struct Contents {
     artifacts: Vec<PathBuf>,
     nested: Vec<String>,
     items: ItemStore,
     records: ArtifactStore,
+    identity: Identity,
 }
 
 /// Read the library rooted at `root`. Never fails, and opens no
@@ -1435,6 +1640,7 @@ fn contents(root: &Path) -> Contents {
         nested,
         items: ItemStore::read(root),
         records: ArtifactStore::read(root),
+        identity: identity(root),
     }
 }
 
@@ -1448,6 +1654,7 @@ fn surveyed(root: &Path, contents: &Contents) -> Survey {
         nested: contents.nested.clone(),
         items: contents.items.len(),
         records: contents.records.len(),
+        identity: contents.identity.id().cloned(),
     }
 }
 
@@ -1622,7 +1829,8 @@ fn reported(root: &Path, path: &Path) -> String {
 }
 
 /// The event reporting `survey`, carrying `identifiable` as the count
-/// of artifacts an identifier could be extracted from.
+/// of artifacts an identifier could be extracted from, and the
+/// library's identity when the survey found one.
 ///
 /// Its `orphans` count is the number of events [`orphan_events`] gives
 /// for the same survey.
@@ -1634,6 +1842,7 @@ fn reported(root: &Path, path: &Path) -> String {
 pub fn status_event(survey: &Survey, identifiable: Option<usize>) -> Event {
     Event::LibraryStatus {
         root: survey.root.clone(),
+        id: survey.identity.as_ref().map(LibraryId::to_string),
         artifacts: survey.artifacts.len(),
         items: survey.items,
         records: survey.records,
@@ -1656,8 +1865,10 @@ pub struct Validation {
     /// The library the findings are about, as [`Survey::root`].
     pub root: PathBuf,
     /// Every finding, each with the file it is about, in the order the
-    /// stores were read: the item store first, then the artifact
-    /// records, each in path order.
+    /// library was read: the identity file first, then the item store,
+    /// then the artifact records, each store in path order. An identity
+    /// file that cannot be read or does not parse is one
+    /// [`Finding::Unreadable`]; an absent one is no finding.
     pub findings: Vec<(PathBuf, Finding)>,
     /// Every condition, each with the library-relative path it is
     /// about: the orphans in survey order, then the missing records in
@@ -1669,6 +1880,8 @@ pub struct Validation {
     /// an absent file; its path is the one it records. An unlinked
     /// item is one no artifact record links to, named by its file.
     pub conditions: Vec<(String, Condition)>,
+    /// The library's identity, as [`Survey::identity`].
+    pub identity: Option<LibraryId>,
 }
 
 impl Validation {
@@ -1698,8 +1911,9 @@ impl Validation {
 
 /// Validate the library rooted at `root`.
 ///
-/// Reads the tree and both stores and reports what it found. Repairs
-/// nothing, refuses nothing, writes nothing and holds no lock: a
+/// Reads the tree, both stores and the identity file, and reports what
+/// it found. Repairs nothing, refuses nothing, writes nothing — an
+/// identity included — and holds no lock: a
 /// library has no single consistent state at any moment, its writers
 /// being peers, so a file observed half-written is a finding about that
 /// file and about nothing else.
@@ -1710,7 +1924,16 @@ pub fn validate(root: &Path) -> Validation {
     let contents = contents(root);
     let survey = surveyed(root, &contents);
 
-    let mut findings = item_findings(&contents.items);
+    let mut findings: Vec<(PathBuf, Finding)> = match &contents.identity {
+        Identity::Faulty(fault) => vec![(
+            fault.path.clone(),
+            Finding::Unreadable {
+                message: fault.message.clone(),
+            },
+        )],
+        Identity::Absent | Identity::Present(_) => Vec::new(),
+    };
+    findings.extend(item_findings(&contents.items));
     findings.extend(record_findings(&contents.records, &contents.items));
 
     let exists = |path: &Path| !excludes(root, path) && path.is_file();
@@ -1743,6 +1966,7 @@ pub fn validate(root: &Path) -> Validation {
     Validation {
         conditions: orphaned.chain(missing).chain(unlinked).collect(),
         root: survey.root,
+        identity: survey.identity,
         findings,
     }
 }
@@ -1754,7 +1978,8 @@ pub fn validate(root: &Path) -> Validation {
 /// The totals come last so that a reader of the stream has every
 /// finding and condition before the count of them, as every other run
 /// reports its files before its summary. Each condition count is the
-/// number of condition events of its kind.
+/// number of condition events of its kind, and the totals carry the
+/// library's identity when it has one.
 pub fn validation_events(validation: &Validation) -> Vec<Event> {
     let findings = validation
         .findings
@@ -1775,6 +2000,7 @@ pub fn validation_events(validation: &Validation) -> Vec<Event> {
 
     events.push(Event::LibraryValidated {
         root: validation.root.clone(),
+        id: validation.identity.as_ref().map(LibraryId::to_string),
         findings: validation.findings.len(),
         orphans: validation.orphans(),
         missing: validation.missing(),
@@ -2046,6 +2272,11 @@ pub struct Reconciliation {
     /// no change was pending to accept: each one the run reports as a
     /// `not-pending` skip. A path given twice is listed once.
     pub not_pending: Vec<PathBuf>,
+    /// The library's identity file as the run's first write found it
+    /// unreadable, when it did: the fault
+    /// [`identity_fault_warning`] reports. `None` for a run that wrote
+    /// nothing, whatever the file holds.
+    pub identity_fault: Option<StoreFault>,
 }
 
 /// Reconcile the library rooted at `root`, writing what it repairs.
@@ -2109,9 +2340,13 @@ pub struct Reconciliation {
 /// path settled already agrees with its file and is not written, which
 /// is what keeps a routine pass over an untouched library diff-free.
 ///
-/// Nothing is created and nothing is deleted: an orphan stays an orphan
-/// — `borax adopt` is what records what is on disk — and a record whose
-/// artifact is gone keeps its path and says so.
+/// No record or item is created and nothing is deleted: an orphan stays
+/// an orphan — `borax adopt` is what records what is on disk — and a
+/// record whose artifact is gone keeps its path and says so. Every
+/// record written goes through a [`StoreWriter`], so a library with no
+/// identity gains one before the run's first write, and a run that
+/// writes nothing mints none; an identity file that cannot be read is
+/// left as it is and reported in [`Reconciliation::identity_fault`].
 ///
 /// Each `--accept` path that came to no accepted change — no record
 /// names it, it is outside the library or excluded, its record was
@@ -2121,8 +2356,9 @@ pub struct Reconciliation {
 /// confirmed needs nothing and is not listed.
 ///
 /// The item store is read once, and only for the gate. Never fails: a
-/// record whose repair cannot be written is reported as
-/// [`Repair::Unwritten`] and left as it was.
+/// record whose repair cannot be written, or whose write the identity
+/// could not be minted for, is reported as [`Repair::Unwritten`] and
+/// left as it was.
 pub fn reconcile(root: &Path, reconciling: &Reconciling<'_>) -> Reconciliation {
     let rehash = reconciling.rehash;
     let accepted = accepted_paths(root, reconciling.accept);
@@ -2262,6 +2498,7 @@ pub fn reconcile(root: &Path, reconciling: &Reconciling<'_>) -> Reconciliation {
     }
 
     // Step 4, and the writing of everything the three before decided.
+    let writer = StoreWriter::new(root, &store_create, &store_write);
     let mut reconciliation = Reconciliation {
         root: root.to_path_buf(),
         repairs: Vec::new(),
@@ -2270,6 +2507,7 @@ pub fn reconcile(root: &Path, reconciling: &Reconciling<'_>) -> Reconciliation {
         pending: 0,
         hashed: 0,
         not_pending: Vec::new(),
+        identity_fault: None,
     };
     for (index, (file, original)) in records.iter().enumerate() {
         let mut record = original.clone();
@@ -2331,7 +2569,7 @@ pub fn reconcile(root: &Path, reconciling: &Reconciling<'_>) -> Reconciliation {
             }
         };
 
-        match rewrite(file, &record, &store_write) {
+        match rewrite(file, &record, &|path, bytes| writer.write(path, bytes)) {
             Ok(()) => {
                 if let Some(repair) = repair {
                     reconciliation
@@ -2363,6 +2601,7 @@ pub fn reconcile(root: &Path, reconciling: &Reconciling<'_>) -> Reconciliation {
         .map(|(given, _)| given)
         .collect();
     reconciliation.hashed = hashes.hashed;
+    reconciliation.identity_fault = writer.identity_fault();
     reconciliation
 }
 
@@ -2795,10 +3034,11 @@ fn write_whole(
 /// Write `bytes` to `path` as a store write: atomically, creating the
 /// store's directory if this is the library's first record.
 ///
-/// The seam [`admit`] takes in a run. A reader sees either the file as
-/// it was or the file as it now is, and an interrupted write leaves
-/// the previous one intact with no temporary a reader would take for a
-/// record.
+/// The `write` seam of a run's [`StoreWriter`], through which [`admit`]
+/// and [`reconcile`] write. A reader sees either the file as it was or
+/// the file as it now is, and an interrupted write leaves the previous
+/// one intact with no temporary a reader would take for a record. Mints
+/// no identity: that is the writer's.
 pub fn store_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomically(path, bytes)
 }
@@ -2841,6 +3081,11 @@ pub struct Adoptions {
     pub adoptions: Vec<(String, Adoption)>,
     /// How many orphans the library held before the run.
     pub orphans: usize,
+    /// The library's identity file as the run's first write found it
+    /// unreadable, when it did: the fault
+    /// [`identity_fault_warning`] reports. `None` for a run that
+    /// recorded nothing, whatever the file holds.
+    pub identity_fault: Option<StoreFault>,
 }
 
 impl Adoptions {
@@ -2873,8 +3118,10 @@ impl Adoptions {
 /// orphan and reported [`Adoption::Held`], and `lookup` is not asked
 /// about it.
 ///
-/// Nothing but the two stores is written: no file is opened beyond
-/// being hashed, and none is moved, renamed or deleted. A record that
+/// Nothing but the two stores and the library's identity is written:
+/// the identity is minted before the first record when the library has
+/// none ([`StoreWriter`]), no file is opened beyond being hashed, and
+/// none is moved, renamed or deleted. A record that
 /// already names a path is not an orphan's, so it is left exactly as it
 /// is, and a second run over a library the first left alone finds
 /// nothing to write.
@@ -2898,6 +3145,7 @@ pub fn adopt(
     let orphans = orphans(root, &walk(root).0, &store);
     let mut written: BTreeMap<ContentHash, ArtifactId> = BTreeMap::new();
     let mut adoptions = Vec::new();
+    let writer = StoreWriter::new(root, &store_create, &store_write);
 
     for path in &orphans {
         let Some(relative) = library_relative(root, path) else {
@@ -2940,7 +3188,7 @@ pub fn adopt(
                 timestamp,
                 tool_version,
             },
-            &store_write,
+            &|path, bytes| writer.write(path, bytes),
         );
         let adoption = match admitted {
             Ok(admitted) => {
@@ -2961,6 +3209,7 @@ pub fn adopt(
         root: root.to_path_buf(),
         adoptions,
         orphans: orphans.len(),
+        identity_fault: writer.identity_fault(),
     }
 }
 

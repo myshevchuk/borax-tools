@@ -9,7 +9,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -234,6 +234,107 @@ pub fn write_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     written
+}
+
+/// Create `path` holding `content`, failing rather than replacing a
+/// file already there.
+///
+/// Fails with [`io::ErrorKind::AlreadyExists`] when anything is at
+/// `path`, which is left untouched. Missing parent directories are
+/// created. The bytes go to a temporary file this call creates
+/// exclusively in `path`'s directory, which is then hard-linked to
+/// `path`; a link fails when its destination exists, so the file
+/// appears whole and in one step, and never over another. Where the
+/// filesystem cannot link, the file is created exclusively at `path`
+/// and written in place, which still never replaces one but lets a
+/// concurrent reader see it short until the write completes.
+///
+/// No temporary this call created is left behind, and no file it did
+/// not create is opened for writing or removed. A failure to remove the
+/// temporary after the link succeeded is ignored. When every one of 16
+/// temporary names is already taken, the error is not `AlreadyExists`.
+pub fn create_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
+    create_atomically_with(
+        path,
+        content,
+        &|from, to| fs::hard_link(from, to),
+        &temporary_name,
+    )
+}
+
+/// How many temporary names [`create_atomically_with`] tries before it
+/// gives up.
+const TEMPORARY_ATTEMPTS: usize = 16;
+
+/// [`create_atomically`], with `link` in place of
+/// [`std::fs::hard_link`] and `name` in place of the generated
+/// temporary name.
+///
+/// `name` is called once per temporary name tried, at most 16 times; a
+/// name already taken is left alone and the next one tried. An error
+/// from `link` other than [`io::ErrorKind::AlreadyExists`] is taken to
+/// mean the filesystem cannot link, and the exclusive create is used
+/// instead. `link`'s `AlreadyExists` is returned as it is.
+pub fn create_atomically_with(
+    path: &Path,
+    content: &[u8],
+    link: &dyn Fn(&Path, &Path) -> io::Result<()>,
+    name: &dyn Fn() -> String,
+) -> io::Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+
+    let temporary = create_temporary(parent, content, name)?;
+    let linked = link(&temporary, path);
+    // The temporary was this call's own, and whatever the link did, it
+    // is no longer needed under that name.
+    let _ = fs::remove_file(&temporary);
+    match linked {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(error),
+        Err(_) => create_exclusively(path, content),
+    }
+}
+
+/// A temporary in `directory` holding `content`, created exclusively
+/// under the first name `name` gives that is not taken.
+///
+/// Fails with an error that is not `AlreadyExists` once
+/// [`TEMPORARY_ATTEMPTS`] names have all been taken, and with the
+/// filesystem's error for any other failure to create or write it. A
+/// temporary whose write failed is removed.
+fn create_temporary(
+    directory: &Path,
+    content: &[u8],
+    name: &dyn Fn() -> String,
+) -> io::Result<PathBuf> {
+    for _ in 0..TEMPORARY_ATTEMPTS {
+        let temporary = directory.join(name());
+        match create_exclusively(&temporary, content) {
+            Ok(()) => return Ok(temporary),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::other(format!(
+        "no free temporary name in {} after {TEMPORARY_ATTEMPTS} attempts",
+        directory.display()
+    )))
+}
+
+/// Create `path` exclusively and write `content` to it.
+///
+/// Fails with `AlreadyExists`, touching nothing, when anything is at
+/// `path`. A file this call created and could not finish writing is
+/// removed before the error is returned.
+fn create_exclusively(path: &Path, content: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(content).inspect_err(|_| {
+        let _ = fs::remove_file(path);
+    })
 }
 
 /// How many temporary entry files this process has named so far.

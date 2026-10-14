@@ -7364,6 +7364,7 @@ fn status_over_a_marked_directory_of_new_pdfs_reports_every_count_unopened() {
         .collect();
     expected.push(Event::LibraryStatus {
         root: root.clone(),
+        id: None,
         artifacts: 12,
         items: 0,
         records: 0,
@@ -7495,6 +7496,7 @@ fn status_identify_counts_artifacts_yielding_an_identifier_and_queries_no_source
             },
             Event::LibraryStatus {
                 root: root.clone(),
+                id: None,
                 artifacts: 2,
                 items: 0,
                 records: 0,
@@ -7585,6 +7587,7 @@ fn status_identify_reports_each_artifact_in_survey_order_before_the_totals() {
             },
             Event::LibraryStatus {
                 root: root.clone(),
+                id: None,
                 artifacts: 2,
                 items: 0,
                 records: 0,
@@ -7659,6 +7662,7 @@ fn status_identify_tells_the_two_controlled_cases_apart() {
             },
             Event::LibraryStatus {
                 root: root.clone(),
+                id: None,
                 artifacts: 2,
                 items: 0,
                 records: 0,
@@ -7736,6 +7740,7 @@ fn status_identify_counts_a_title_holding_a_doi_as_identifiable() {
         events.last(),
         Some(&Event::LibraryStatus {
             root: root.clone(),
+            id: None,
             artifacts: 3,
             items: 0,
             records: 0,
@@ -7819,6 +7824,7 @@ fn status_identify_tells_encrypted_and_unreadable_apart() {
             },
             Event::LibraryStatus {
                 root: root.clone(),
+                id: None,
                 artifacts: 2,
                 items: 0,
                 records: 0,
@@ -8454,6 +8460,7 @@ fn status_over_an_unmarked_directory_is_reported_as_given_and_writes_nothing() {
             },
             Event::LibraryStatus {
                 root: root.clone(),
+                id: None,
                 artifacts: 1,
                 items: 0,
                 records: 0,
@@ -8534,6 +8541,7 @@ fn status_names_only_the_orphan_and_opens_nothing() {
             },
             Event::LibraryStatus {
                 root: root.clone(),
+                id: None,
                 artifacts: 2,
                 items: 0,
                 records: 1,
@@ -9076,6 +9084,7 @@ fn validate_emits_the_finding_then_the_orphan_and_missing_conditions_then_the_to
         events[3],
         Event::LibraryValidated {
             root: root.clone(),
+            id: None,
             findings: 1,
             orphans: 1,
             missing: 1,
@@ -9263,6 +9272,7 @@ fn validate_names_all_three_conditions_in_kind_order_and_succeeds() {
             },
             Event::LibraryValidated {
                 root: root.clone(),
+                id: None,
                 findings: 0,
                 orphans: 1,
                 missing: 1,
@@ -9428,6 +9438,7 @@ fn validate_names_conditions_beside_a_finding_and_is_partial() {
         events[3],
         Event::LibraryValidated {
             root: root.clone(),
+            id: None,
             findings: 1,
             orphans: 1,
             missing: 0,
@@ -9610,6 +9621,7 @@ fn validate_names_two_missing_conditions_for_two_records_of_one_identity() {
         events[3],
         Event::LibraryValidated {
             root: root.clone(),
+            id: None,
             findings: 1,
             orphans: 0,
             missing: 2,
@@ -10354,6 +10366,7 @@ fn status_over_a_library_with_a_pending_change_opens_and_names_nothing() {
         events.last(),
         Some(&Event::LibraryStatus {
             root: root.clone(),
+            id: None,
             artifacts: 1,
             items: 1,
             records: 1,
@@ -14839,15 +14852,20 @@ fn a_batch_run_over_three_artifacts_of_one_item_skips_none_of_them() {
 // group 8: borax adopt — recording from the content index, offline
 // ---------------------------------------------------------------------
 
-/// Every file under `root` outside the two stores, with its bytes: the
-/// library's artifacts and everything a person put beside them, which
-/// is exactly what adoption must leave alone.
+/// Every file under `root` outside the two stores and the library's
+/// identity file, with its bytes: the library's artifacts and
+/// everything a person put beside them, which is exactly what adoption
+/// must leave alone. Adoption now also writes `.borax/library.toml`
+/// (design D3), so this helper leaves that one file out too, the fact
+/// it pins — that adoption writes nothing outside the library state it
+/// owns — unchanged (design D10).
 fn outside_the_stores(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     snapshot(root)
         .into_iter()
         .filter(|(path, _)| {
             !path.starts_with(root.join(STATE_DIR).join(ARTIFACT_STORE))
                 && !path.starts_with(root.join(ITEM_STORE))
+                && path != &library::identity_file(root)
         })
         .collect()
 }
@@ -15040,6 +15058,10 @@ fn adopt_records_each_orphan_the_content_index_answers_for() {
         outside_the_stores(&root),
         untouched,
         "nothing outside the two stores may be written, moved or deleted"
+    );
+    assert!(
+        matches!(library::identity(&root), library::Identity::Present(_)),
+        "adoption's first write must mint the library's identity"
     );
 }
 
@@ -15603,6 +15625,52 @@ fn adopt_outside_any_library_is_refused_and_writes_nothing() {
         "got {refused:?}"
     );
     assert_eq!(snapshot(&root), before);
+}
+
+/// Reconciliation writes library state, and a run with no library root
+/// writes none: `borax reconcile` over a directory nobody marked is
+/// refused before it starts, even where a stale record there would
+/// otherwise be refreshed, and mints no identity.
+#[test]
+fn reconcile_outside_any_library_is_refused_and_writes_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    write_real_file(&root, "stale.pdf", b"reconcile unmarked");
+    // Size and modification time disagree with the file, so a reconcile
+    // that ran would confirm it by hash and rewrite the record.
+    seed_artifact_record(&root, "stale.pdf", hash_bytes(b"reconcile unmarked"), None);
+    let before = snapshot(&root);
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let refused = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    );
+
+    assert!(
+        matches!(&refused, Err(diagnostic) if diagnostic.level == Level::Error),
+        "got {refused:?}"
+    );
+    assert_eq!(snapshot(&root), before);
+    assert!(!library::identity_file(&root).exists());
 }
 
 // ---------------------------------------------------------------------
@@ -21253,4 +21321,1340 @@ fn a_retry_then_a_correction_moves_the_round_into_displaced() {
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// 6.1: status and validate carry the identity, through the command
+// (design D6, D7)
+// ---------------------------------------------------------------------
+
+#[test]
+fn status_reports_the_identity_of_a_library_that_has_one() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "paper.pdf", b"task-g12 status-identity bytes");
+    let identity = library::ensure_identity(&root, &library::store_create).unwrap();
+    let id = identity.id().unwrap().to_string();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    match events.last() {
+        Some(Event::LibraryStatus { id: reported, .. }) => assert_eq!(reported, &Some(id)),
+        other => panic!("expected LibraryStatus last, got {other:?}"),
+    }
+}
+
+#[test]
+fn status_over_a_library_with_no_identity_reports_none_and_mints_none() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "paper.pdf", b"task-g12 status-no-identity bytes");
+    let before = snapshot(&root);
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    match events.last() {
+        Some(Event::LibraryStatus { id, .. }) => assert_eq!(id, &None),
+        other => panic!("expected LibraryStatus last, got {other:?}"),
+    }
+    assert_eq!(snapshot(&root), before);
+    assert!(!library::identity_file(&root).exists());
+}
+
+#[test]
+fn status_human_output_ends_with_the_library_clause() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "paper.pdf", b"task-g12 status-human-identity bytes");
+    let identity = library::ensure_identity(&root, &library::store_create).unwrap();
+    let id = identity.id().unwrap().to_string();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::status(Some(root.clone()), false), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let text = String::from_utf8(out).unwrap();
+    let last_line = text.lines().last().unwrap();
+    assert!(
+        last_line.ends_with(&format!("; library {id}")),
+        "got {last_line:?}"
+    );
+}
+
+#[test]
+fn validate_over_a_malformed_identity_file_exits_partial_and_names_it() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(library::identity_file(&root), b"id = \"not-a-uuid\"\n").unwrap();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::validate(Some(root.clone())), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Partial, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains(&format!(
+            "{}: unreadable (",
+            library::identity_file(&root).display()
+        )),
+        "got {text:?}"
+    );
+}
+
+#[test]
+fn validate_reports_the_identity_on_library_validated() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let identity = library::ensure_identity(&root, &library::store_create).unwrap();
+    let id = identity.id().unwrap().to_string();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::validate(Some(root.clone())),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    match events.last() {
+        Some(Event::LibraryValidated { id: reported, .. }) => {
+            assert_eq!(reported, &Some(id));
+        }
+        other => panic!("expected LibraryValidated last, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// 7.1: runs mint the library's identity through the guard
+// (design D3, D5)
+// ---------------------------------------------------------------------
+
+/// Copy every file and directory under `from` into `to`, recursively —
+/// including `.borax/`, so a copy carries whatever identity the source
+/// holds (design D2).
+fn copy_dir_recursive(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap().flatten() {
+        let path = entry.path();
+        let target = to.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target);
+        } else {
+            fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+#[test]
+fn an_applying_rename_into_a_library_with_no_identity_mints_one() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"task-g12 mints bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 mints bytes"),
+        pdf_with_embedded_doi("10.1000/g12-mints"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Mints", 2024, "10.1000/g12-mints")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    match library::identity(&root) {
+        library::Identity::Present(id) => assert_eq!(id.uuid().get_version_num(), 7),
+        other => panic!("expected Present, got {other:?}"),
+    }
+    assert_eq!(library::ArtifactStore::read(&root).len(), 1);
+}
+
+#[test]
+fn an_applying_rename_into_a_library_with_an_identity_leaves_it_byte_identical() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    library::ensure_identity(&root, &library::store_create).unwrap();
+    let before = fs::read(library::identity_file(&root)).unwrap();
+    let path = write_real_file(&root, "original.pdf", b"task-g12 identical bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 identical bytes"),
+        pdf_with_embedded_doi("10.1000/g12-identical"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Identical", 2024, "10.1000/g12-identical")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(fs::read(library::identity_file(&root)).unwrap(), before);
+}
+
+#[test]
+fn a_second_applying_rename_keeps_the_identity_the_first_minted() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let first_path = write_real_file(&root, "first.pdf", b"task-g12 second-run first bytes");
+    let documents = FakeDocuments::new().with_file(
+        &first_path,
+        hash_bytes(b"task-g12 second-run first bytes"),
+        pdf_with_embedded_doi("10.1000/g12-second-run-first"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("First", 2024, "10.1000/g12-second-run-first")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    events_for(
+        &Command::rename(vec![first_path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    let id_after_first = match library::identity(&root) {
+        library::Identity::Present(id) => id,
+        other => panic!("expected Present after the first run, got {other:?}"),
+    };
+
+    let second_path = write_real_file(&root, "second.pdf", b"task-g12 second-run second bytes");
+    let documents2 = FakeDocuments::new().with_file(
+        &second_path,
+        hash_bytes(b"task-g12 second-run second bytes"),
+        pdf_with_embedded_doi("10.1000/g12-second-run-second"),
+    );
+    let crossref2 = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Second", 2024, "10.1000/g12-second-run-second")),
+    );
+    let sources2: Vec<&dyn Source> = vec![&crossref2];
+    let index2 = ContentIndex::new(MemoryCache::new());
+    let bib_files2 = FakeBibFiles::new();
+    let adapters2 = Adapters {
+        documents: &documents2,
+        sources: &sources2,
+        index: &index2,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files2,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    events_for(
+        &Command::rename(vec![second_path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters2,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        library::identity(&root),
+        library::Identity::Present(id_after_first)
+    );
+}
+
+#[test]
+fn a_library_an_earlier_release_wrote_gains_an_identity_on_its_next_recorded_rename() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let _seeded_item = seed_tracked_file(
+        &root,
+        "untouched.pdf",
+        hash_bytes(b"untouched bytes"),
+        record_by("Untouched", 2019, "10.1000/g12-untouched"),
+    );
+    let seeded_artifact_id = library::ArtifactStore::read(&root)
+        .iter()
+        .next()
+        .unwrap()
+        .id
+        .clone();
+    let seeded_record_path = root
+        .join(STATE_DIR)
+        .join(ARTIFACT_STORE)
+        .join(format!("{seeded_artifact_id}.toml"));
+    let seeded_before = fs::read(&seeded_record_path).unwrap();
+
+    let path = write_real_file(&root, "fresh.pdf", b"task-g12 gains-identity bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 gains-identity bytes"),
+        pdf_with_embedded_doi("10.1000/g12-gains-identity"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Gains", 2024, "10.1000/g12-gains-identity")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        library::identity(&root),
+        library::Identity::Present(_)
+    ));
+    assert_eq!(fs::read(&seeded_record_path).unwrap(), seeded_before);
+}
+
+#[test]
+fn a_preview_mints_no_identity() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "preview.pdf", b"task-g12 preview bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 preview bytes"),
+        pdf_with_embedded_doi("10.1000/g12-preview"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Preview", 2024, "10.1000/g12-preview")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(!library::identity_file(&root).exists());
+}
+
+#[test]
+fn a_rename_with_no_record_mints_no_identity() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"task-g12 no-record bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 no-record bytes"),
+        pdf_with_embedded_doi("10.1000/g12-no-record"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("NoRecord", 2024, "10.1000/g12-no-record")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.record = Some(false);
+    });
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Renamed { .. })),
+        "the move must still happen under --no-record: got {events:?}"
+    );
+    assert!(!library::identity_file(&root).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_applying_rename_whose_mint_fails_renames_the_file_and_reports_unwritten() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    fs::create_dir_all(root.join(STATE_DIR).join(ARTIFACT_STORE)).unwrap();
+    fs::create_dir_all(root.join(ITEM_STORE)).unwrap();
+    let path = write_real_file(&root, "original.pdf", b"task-g12 mint-fails bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 mint-fails bytes"),
+        pdf_with_embedded_doi("10.1000/g12-mint-fails"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("MintFails", 2024, "10.1000/g12-mint-fails")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let state_dir = root.join(STATE_DIR);
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = state_dir.join("probe.tmp");
+    if fs::write(&probe, b"x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping an_applying_rename_whose_mint_fails_renames_the_file_and_reports_unwritten: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let target = root.join("MintFails2024.pdf");
+    assert!(target.exists(), "the file must still move");
+    let admission = events.iter().find_map(|event| match event {
+        Event::LibraryAdmission { admission, .. } => Some(admission),
+        _ => None,
+    });
+    match admission {
+        Some(Admission::Unwritten { message }) => {
+            assert!(message.contains("library.toml"), "got {message:?}");
+        }
+        other => panic!("expected Unwritten, got {other:?}"),
+    }
+    assert!(
+        root.join(ITEM_STORE).read_dir().unwrap().next().is_none(),
+        "a failed mint must leave no item"
+    );
+    assert!(
+        root.join(STATE_DIR)
+            .join(ARTIFACT_STORE)
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_none(),
+        "a failed mint must leave no artifact record"
+    );
+}
+
+#[test]
+fn an_applying_rename_into_a_library_with_a_faulty_identity_file_records_and_warns_once() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(library::identity_file(&root), b"not-toml-at-all {{").unwrap();
+    let before = fs::read(library::identity_file(&root)).unwrap();
+    let first = write_real_file(&root, "first.pdf", b"task-g12 faulty-warn first");
+    let second = write_real_file(&root, "second.pdf", b"task-g12 faulty-warn second");
+    let documents = FakeDocuments::new()
+        .with_file(
+            &first,
+            hash_bytes(b"task-g12 faulty-warn first"),
+            pdf_with_embedded_doi("10.1000/g12-faulty-warn-first"),
+        )
+        .with_file(
+            &second,
+            hash_bytes(b"task-g12 faulty-warn second"),
+            pdf_with_embedded_doi("10.1000/g12-faulty-warn-second"),
+        );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/g12-faulty-warn-first",
+            record_by("FaultyWarnFirst", 2024, "10.1000/g12-faulty-warn-first"),
+        )
+        .answering(
+            "doi:10.1000/g12-faulty-warn-second",
+            record_by("FaultyWarnSecond", 2024, "10.1000/g12-faulty-warn-second"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(
+            Command::rename(vec![first.clone(), second.clone()], true),
+            false,
+        ),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        2,
+        "both files must be recorded"
+    );
+    assert_eq!(fs::read(library::identity_file(&root)).unwrap(), before);
+    let stderr = String::from_utf8(err).unwrap();
+    let occurrences = stderr
+        .matches("could not be read as the library's identity")
+        .count();
+    assert_eq!(occurrences, 1, "got {stderr:?}");
+}
+
+#[test]
+fn a_reconcile_that_writes_into_a_library_with_a_faulty_identity_file_warns_once() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(library::identity_file(&root), b"not-toml-at-all {{").unwrap();
+    write_real_file(&root, "new/paper.pdf", b"task-g12 reconcile-warn bytes");
+    seed_artifact_record(
+        &root,
+        "old/paper.pdf",
+        hash_bytes(b"task-g12 reconcile-warn bytes"),
+        None,
+    );
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::reconcile(Some(root.clone()), false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let stderr = String::from_utf8(err).unwrap();
+    let occurrences = stderr
+        .matches("could not be read as the library's identity")
+        .count();
+    assert_eq!(occurrences, 1, "got {stderr:?}");
+}
+
+#[test]
+fn an_adoption_into_a_library_with_a_faulty_identity_file_warns_once() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(library::identity_file(&root), b"not-toml-at-all {{").unwrap();
+    write_real_file(&root, "orphan.pdf", b"task-g12 adopt-warn bytes");
+    let cached = record_by("AdoptWarn", 2024, "10.1000/g12-adopt-warn");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put(&hash_bytes(b"task-g12 adopt-warn bytes"), &cached);
+    let documents = CountingDocuments::new();
+    let crossref = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::adopt(Some(root.clone())), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(
+        library::ArtifactStore::read(&root).len(),
+        1,
+        "the orphan must be recorded"
+    );
+    let stderr = String::from_utf8(err).unwrap();
+    let occurrences = stderr
+        .matches("could not be read as the library's identity")
+        .count();
+    assert_eq!(occurrences, 1, "got {stderr:?}");
+}
+
+#[test]
+fn a_preview_over_a_library_with_a_faulty_identity_file_does_not_warn() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(library::identity_file(&root), b"not-toml-at-all {{").unwrap();
+    let path = write_real_file(&root, "preview.pdf", b"task-g12 preview-no-warn bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 preview-no-warn bytes"),
+        pdf_with_embedded_doi("10.1000/g12-preview-no-warn"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by(
+            "PreviewNoWarn",
+            2024,
+            "10.1000/g12-preview-no-warn",
+        )),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::rename(vec![path.clone()], false), false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let stderr = String::from_utf8(err).unwrap();
+    assert!(
+        !stderr.contains("could not be read as the library's identity"),
+        "got {stderr:?}"
+    );
+}
+
+#[test]
+fn a_reconcile_over_an_untouched_library_with_a_faulty_identity_file_does_not_warn() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(library::identity_file(&root), b"not-toml-at-all {{").unwrap();
+    let path = write_real_file(&root, "steady.pdf", b"task-g12 reconcile-no-warn bytes");
+    seed_artifact_record(
+        &root,
+        "steady.pdf",
+        hash_bytes(b"task-g12 reconcile-no-warn bytes"),
+        None,
+    );
+    let (size, modified_millis) = real_stat(&path);
+    let records_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    let id = library::ArtifactStore::read(&root)
+        .iter()
+        .next()
+        .unwrap()
+        .id
+        .clone();
+    let mut record = library::ArtifactStore::read(&root)
+        .by_id(&id)
+        .unwrap()
+        .clone();
+    record.size = size;
+    record.modified_millis = modified_millis;
+    fs::write(records_dir.join(format!("{id}.toml")), record.to_toml()).unwrap();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(Command::reconcile(Some(root.clone()), false), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    let stderr = String::from_utf8(err).unwrap();
+    assert!(
+        !stderr.contains("could not be read as the library's identity"),
+        "got {stderr:?}"
+    );
+}
+
+#[test]
+fn a_copy_of_a_library_is_the_same_library() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "copy-source.pdf", b"task-g12 copy bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 copy bytes"),
+        pdf_with_embedded_doi("10.1000/g12-copy"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Copy", 2024, "10.1000/g12-copy")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    let original_id = match library::identity(&root) {
+        library::Identity::Present(id) => id,
+        other => panic!("expected Present, got {other:?}"),
+    };
+
+    let copy_dir = tempdir().unwrap();
+    copy_dir_recursive(&root, copy_dir.path());
+
+    let copy_documents = FakeDocuments::new();
+    let copy_sources: Vec<&dyn Source> = Vec::new();
+    let copy_index = ContentIndex::new(MemoryCache::new());
+    let copy_filesystem = FakeFilesystem::new();
+    let copy_bib_files = FakeBibFiles::new();
+    let copy_adapters = Adapters {
+        documents: &copy_documents,
+        sources: &copy_sources,
+        index: &copy_index,
+        filesystem: &copy_filesystem,
+        bib_files: &copy_bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(copy_dir.path().to_path_buf()),
+        state_root: None,
+    };
+
+    let original_events = events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    let copy_events = events_for(
+        &Command::status(Some(copy_dir.path().to_path_buf()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &copy_adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let id_of = |events: &[Event]| match events.last() {
+        Some(Event::LibraryStatus { id, .. }) => id.clone(),
+        other => panic!("expected LibraryStatus last, got {other:?}"),
+    };
+    assert_eq!(id_of(&original_events), Some(original_id.to_string()));
+    assert_eq!(id_of(&copy_events), id_of(&original_events));
+
+    let before = fs::read(library::identity_file(copy_dir.path())).unwrap();
+    let second_path = write_real_file(
+        copy_dir.path(),
+        "copy-second.pdf",
+        b"task-g12 copy-second bytes",
+    );
+    let second_documents = FakeDocuments::new().with_file(
+        &second_path,
+        hash_bytes(b"task-g12 copy-second bytes"),
+        pdf_with_embedded_doi("10.1000/g12-copy-second"),
+    );
+    let second_crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("CopySecond", 2024, "10.1000/g12-copy-second")),
+    );
+    let second_sources: Vec<&dyn Source> = vec![&second_crossref];
+    let second_index = ContentIndex::new(MemoryCache::new());
+    let second_bib_files = FakeBibFiles::new();
+    let second_adapters = Adapters {
+        documents: &second_documents,
+        sources: &second_sources,
+        index: &second_index,
+        filesystem: &RealFilesystem,
+        bib_files: &second_bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(copy_dir.path().to_path_buf()),
+        state_root: None,
+    };
+    events_for(
+        &Command::rename(vec![second_path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &second_adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(library::identity_file(copy_dir.path())).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn resolve_mints_no_identity() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "resolve-only.pdf", b"task-g12 resolve-only bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 resolve-only bytes"),
+        pdf_with_embedded_doi("10.1000/g12-resolve-only"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("ResolveOnly", 2024, "10.1000/g12-resolve-only")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    events_for(
+        &Command::resolve(vec![path.clone()]),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(!library::identity_file(&root).exists());
+}
+
+#[test]
+fn bib_mints_no_identity() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "bib-only.pdf", b"task-g12 bib-only bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 bib-only bytes"),
+        pdf_with_embedded_doi("10.1000/g12-bib-only"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("BibOnly", 2024, "10.1000/g12-bib-only")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.citation_keys = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+    });
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    events_for(
+        &Command::bib(vec![path.clone()]),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(!library::identity_file(&root).exists());
+}
+
+#[test]
+fn a_library_with_no_identity_still_answers_for_its_own_files() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "tracked.pdf", b"task-g12 tracked bytes");
+    seed_tracked_file(
+        &root,
+        "tracked.pdf",
+        hash_bytes(b"task-g12 tracked bytes"),
+        record_by("Tracked", 2024, "10.1000/g12-tracked"),
+    );
+    assert!(!library::identity_file(&root).exists());
+
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g12 tracked bytes"),
+        pdf_with_no_identifier(),
+    );
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::resolve(vec![path.clone()]),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let resolved = events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { .. }))
+        .unwrap();
+    match resolved {
+        Event::Resolved { sections, .. } => {
+            assert!(matches!(
+                library_of(sections),
+                Some(LibraryAnswer::Tracked { .. })
+            ));
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+    assert!(!library::identity_file(&root).exists());
+}
+
+/// Apply a batch rename of a new file `name` holding `bytes` inside the
+/// library at `root`, resolved to a record carrying `doi`, so that the
+/// run records it and makes a store write.
+fn record_one_file(root: &Path, name: &str, bytes: &[u8], doi: &str) {
+    let path = write_real_file(root, name, bytes);
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_bytes(bytes), pdf_with_embedded_doi(doi));
+    let crossref = fake_source(SourceName::Crossref, Ok(record_by(name, 2024, doi)));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.to_path_buf()),
+        state_root: None,
+    };
+    events_for(
+        &Command::rename(vec![path], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+}
+
+/// The identity a library at `root` holds, which must be readable.
+fn present_identity(root: &Path) -> borax_core::library::LibraryId {
+    match library::identity(root) {
+        library::Identity::Present(id) => id,
+        other => panic!("expected Present, got {other:?}"),
+    }
+}
+
+/// Deleting the identity file loses the identity: the next applying
+/// run that records a file gives the library a new one, not the one
+/// that was deleted.
+#[test]
+fn a_deleted_identity_is_not_reconstructed() {
+    let library = real_library();
+    let root = library.path();
+    record_one_file(
+        root,
+        "Deleted",
+        b"deleted first bytes",
+        "10.1000/deleted-first",
+    );
+    let first = present_identity(root);
+
+    fs::remove_file(library::identity_file(root)).unwrap();
+    record_one_file(
+        root,
+        "Again",
+        b"deleted second bytes",
+        "10.1000/deleted-second",
+    );
+
+    assert_ne!(present_identity(root), first);
+}
+
+/// The identity is library state, not derived state: deleting the
+/// response cache, the content index and every citation sidecar leaves
+/// `status` counting what it counted and reporting the same identity.
+#[test]
+fn deleting_derived_state_leaves_the_identity_as_it_was() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    record_one_file(&root, "Derived", b"derived bytes", "10.1000/derived");
+    // A sidecar beside the file, as `bib` would leave one.
+    fs::write(root.join("Derived2024.bib"), b"@article{x}\n").unwrap();
+
+    let status = |root: &Path| {
+        let documents = CountingDocuments::new();
+        let sources: Vec<&dyn Source> = Vec::new();
+        // A fresh, empty index and response cache: the derived stores
+        // as they are once deleted.
+        let index = ContentIndex::new(MemoryCache::new());
+        let filesystem = FakeFilesystem::new();
+        let bib_files = FakeBibFiles::new();
+        let adapters = Adapters {
+            documents: &documents,
+            sources: &sources,
+            index: &index,
+            filesystem: &filesystem,
+            bib_files: &bib_files,
+            cache_root: None,
+            now: fixed_now,
+            collection_root: Some(root.to_path_buf()),
+            state_root: None,
+        };
+        events_for(
+            &Command::status(Some(root.to_path_buf()), false),
+            &Configs::uniform(resolve(Vec::new()).unwrap()),
+            &adapters,
+            &mut Session::batch(),
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
+    };
+    let before = status(&root);
+    assert!(
+        matches!(&before, Event::LibraryStatus { id: Some(_), .. }),
+        "got {before:?}"
+    );
+
+    fs::remove_file(root.join("Derived2024.bib")).unwrap();
+
+    assert_eq!(status(&root), before);
 }
