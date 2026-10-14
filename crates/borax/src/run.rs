@@ -731,13 +731,21 @@ pub fn preflight<C: Cache>(
         | Command::Resolve { .. }
         // These library commands have nothing that could refuse them:
         // an absent store is an empty one, and a file that will not parse
-        // is reported rather than fatal. A reconcile does write, but
-        // what it writes is decided record by record and reported the
-        // same way, so there is nothing here for it to be refused on
-        // either.
+        // is reported rather than fatal.
         | Command::Status { .. }
-        | Command::Validate { .. }
-        | Command::Reconcile { .. } => Ok(Prepared::Unchecked),
+        | Command::Validate { .. } => Ok(Prepared::Unchecked),
+        // A reconcile writes library state, which a run with no library
+        // root writes none of. Inside a library, what it writes is
+        // decided record by record and reported the same way, so there
+        // is nothing else here for it to be refused on.
+        Command::Reconcile { .. } => match adapters.collection_root {
+            Some(_) => Ok(Prepared::Unchecked),
+            None => Err(error(format!(
+                "{} is in no library, and reconciling writes library state: mark the \
+                 library's root with {OVERRIDE_FILE} first",
+                library_directory(command.directory()).display()
+            ))),
+        },
         Command::Cache { clear, .. } => match adapters.cache_root.as_deref() {
             Some(root) => Ok(Prepared::Cache {
                 report: cache_report(*clear, root)?,

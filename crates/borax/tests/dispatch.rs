@@ -15627,6 +15627,52 @@ fn adopt_outside_any_library_is_refused_and_writes_nothing() {
     assert_eq!(snapshot(&root), before);
 }
 
+/// Reconciliation writes library state, and a run with no library root
+/// writes none: `borax reconcile` over a directory nobody marked is
+/// refused before it starts, even where a stale record there would
+/// otherwise be refreshed, and mints no identity.
+#[test]
+fn reconcile_outside_any_library_is_refused_and_writes_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    write_real_file(&root, "stale.pdf", b"reconcile unmarked");
+    // Size and modification time disagree with the file, so a reconcile
+    // that ran would confirm it by hash and rewrite the record.
+    seed_artifact_record(&root, "stale.pdf", hash_bytes(b"reconcile unmarked"), None);
+    let before = snapshot(&root);
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let refused = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    );
+
+    assert!(
+        matches!(&refused, Err(diagnostic) if diagnostic.level == Level::Error),
+        "got {refused:?}"
+    );
+    assert_eq!(snapshot(&root), before);
+    assert!(!library::identity_file(&root).exists());
+}
+
 // ---------------------------------------------------------------------
 // group 9.5: the checks answer from the library as the run has left it
 // so far
