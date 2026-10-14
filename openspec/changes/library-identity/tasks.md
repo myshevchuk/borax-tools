@@ -122,7 +122,7 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
 
 ## 1. The library identity as a value
 
-- [ ] 1.1 Red, in `crates/borax-core/tests/library.rs`:
+- [x] 1.1 Red, in `crates/borax-core/tests/library.rs`:
       - `library_id_parses_a_canonical_uuid_and_renders_it_back_byte_identically`.
       - `library_id_from_uuid_renders_the_same_canonical_text`.
       - `library_id_refuses_an_uppercase_spelling`.
@@ -144,11 +144,11 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
         the uppercase spelling fails, and the message contains
         `not a canonical library uuid`.
       - `library_identity_that_is_not_toml_does_not_parse`.
-- [ ] 1.2 Green: `LibraryId` and `LibraryIdentity` (D1, D8).
+- [x] 1.2 Green: `LibraryId` and `LibraryIdentity` (D1, D8).
 
 ## 2. Creating a file without replacing one
 
-- [ ] 2.1 Red, in `crates/borax-sources/tests/store.rs`. Every
+- [x] 2.1 Red, in `crates/borax-sources/tests/store.rs`. Every
       `create_atomically_with` call passes both seams (D8). Where a test
       does not name the temporary, `name` is a closure yielding
       `format!(".tmp-test-{n}")` from a counter it owns:
@@ -189,12 +189,12 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
         threads behind a `Barrier`, each with its own bytes. Exactly one
         `Ok`, the rest `AlreadyExists`. The file holds the winner's
         bytes, and no temporary remains.
-- [ ] 2.2 Green: `create_atomically` and `create_atomically_with` (D4,
+- [x] 2.2 Green: `create_atomically` and `create_atomically_with` (D4,
       D8).
 
 ## 3. Reading and ensuring a library's identity
 
-- [ ] 3.1 Red, in `crates/borax/tests/library.rs`:
+- [x] 3.1 Red, in `crates/borax/tests/library.rs`:
       - `identity_of_a_library_with_no_state_directory_is_absent`.
       - `identity_of_a_library_with_records_and_no_identity_file_is_absent`.
       - `identity_reads_the_id_the_file_holds`.
@@ -283,13 +283,13 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
         renders unchanged (D3).
       - `identity_fault_warning_names_the_file_and_validate`: the exact
         message from D5, with level `Warning`.
-- [ ] 3.2 Green: `IDENTITY_FILE`, `identity_file`, `Identity`,
+- [x] 3.2 Green: `IDENTITY_FILE`, `identity_file`, `Identity`,
       `identity`, `ensure_identity`, `store_create`, `StoreWriter` and
       `identity_fault_warning` (D3, D4, D5, D8).
 
 ## 4. Reconciliation and adoption write through the guard
 
-- [ ] 4.1 Red, in `crates/borax/tests/library.rs`:
+- [x] 4.1 Red, in `crates/borax/tests/library.rs`:
       - `reconcile_that_repairs_a_record_mints_the_identity_first`: a
         moved artifact in a library with no identity file. The repair
         is written, and `identity(root)` is `Present` afterwards.
@@ -321,13 +321,13 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
         `#[cfg(unix)]`. The orphan's adoption is `Adoption::Unwritten`
         whose message contains `library.toml`. No record and no item
         are written.
-- [ ] 4.2 Green: `reconcile` and `adopt` write through a `StoreWriter`,
+- [x] 4.2 Green: `reconcile` and `adopt` write through a `StoreWriter`,
       and `Reconciliation::identity_fault` and `Adoptions::identity_fault`
       carry what it remembered (D3, D5).
 
 ## 5. The event vocabulary
 
-- [ ] 5.1 Red, in `crates/borax/tests/event.rs`. Extend `all_events`
+- [x] 5.1 Red, in `crates/borax/tests/event.rs`. Extend `all_events`
       with `LibraryStatus` and `LibraryValidated`, each once with `id`
       and once without, so the existing round-trip tests cover them.
       Make the D10 (a) edits in `crates/borax/tests/dispatch.rs`, `id:
@@ -362,11 +362,11 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
       - `human_line_of_library_validated_without_an_identity_is_unchanged`.
 
       Every expected string is D7's, exactly.
-- [ ] 5.2 Green: `id` on both variants, and their human lines (D7, D8).
+- [x] 5.2 Green: `id` on both variants, and their human lines (D7, D8).
 
 ## 6. Status and validation
 
-- [ ] 6.1 Red, in `crates/borax/tests/library.rs`:
+- [x] 6.1 Red, in `crates/borax/tests/library.rs`:
       - `survey_carries_the_identity_the_library_holds`.
       - `survey_of_a_library_with_no_identity_file_carries_none`.
       - `survey_of_a_library_with_a_faulty_identity_file_carries_none`.
@@ -397,7 +397,7 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
         `dispatch` with `Streams`. The outcome is partial success, and
         stdout carries `<identity file>: unreadable (`.
       - `validate_reports_the_identity_on_library_validated`.
-- [ ] 6.2 Green: `contents` reads `identity(root)`. `Survey::identity`,
+- [x] 6.2 Green: `contents` reads `identity(root)`. `Survey::identity`,
       `Validation::identity`, the identity finding first, and
       `status_event` and `validation_events` carrying `id` (D6, D7).
       Extend `Finding::Unreadable`'s and `Validation::findings`'
@@ -405,7 +405,7 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
 
 ## 7. Runs
 
-- [ ] 7.1 Red, in `crates/borax/tests/dispatch.rs`, all through
+- [x] 7.1 Red, in `crates/borax/tests/dispatch.rs`, all through
       `events_for` or `dispatch` over `real_library`. Make the (b) edit
       D10 lists to `outside_the_stores` and
       `adopt_records_each_orphan_the_content_index_answers_for`. New
@@ -448,7 +448,7 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
         `resolve` over a tracked file in a seeded library with no
         identity file. The `library` section is `tracked`, and no
         identity file is created.
-- [ ] 7.2 Green:
+- [x] 7.2 Green:
       - the rename driver records through one `StoreWriter` per run,
         and `Aftermath::identity` carries its warning;
       - `reconcile_events` and `adopt_events` return the warning from
@@ -459,12 +459,12 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
 
 ## 8. Audit and verification
 
-- [ ] 8.1 Audit every edit to a pre-existing test against the
+- [x] 8.1 Audit every edit to a pre-existing test against the
       preamble's rules and D10. Report any test that needed anything
       else.
-- [ ] 8.2 Run `cargo test --workspace`, `cargo clippy --workspace
+- [x] 8.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`.
-- [ ] 8.3 Search `crates/borax/src/` and `crates/borax-sources/src/`
+- [x] 8.3 Search `crates/borax/src/` and `crates/borax-sources/src/`
       for what this change makes false. Each search must find nothing,
       or a hit the report justifies:
       - "Nothing but the two stores is written" in `adopt`'s docstring;
@@ -474,9 +474,9 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
         but a test;
       - "store directory" and "one of the stores" in
         `Finding::Unreadable`'s docstring.
-- [ ] 8.4 Run `openspec validate library-identity --strict` and
+- [x] 8.4 Run `openspec validate library-identity --strict` and
       `python3 scripts/check-spec-deltas.py`.
-- [ ] 8.5 By hand, over a copy of a library made from the real-PDF
+- [x] 8.5 By hand, over a copy of a library made from the real-PDF
       corpus, which lives outside the repository:
       1. Run `borax status` (no identity, nothing written).
       2. Run `borax rename --apply` (identity minted).
@@ -489,7 +489,7 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
 
 ## 9. Documents and state
 
-- [ ] 9.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
+- [x] 9.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
       (Org, for CLI users). This is not the implementer's. Keep every
       existing example name. Sources: this change's design.md (D1–D7
       and the illustrative lines), proposal.md, and the implemented
@@ -511,18 +511,18 @@ fail follow `a_failed_write_after_an_accepted_change_reports_unwritten_alone`
       - `* Run logs`: the `library-status` and `library-validated`
         field sentence gains `id`, present only when the library has an
         identity.
-- [ ] 9.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
+- [x] 9.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
       (Markdown, Keep a Changelog). Write the Unreleased entry from
       proposal.md and design.md. It covers:
       - the identity file and when it is minted;
       - that a copy is the same library;
       - the validate finding and the run warning;
       - `id` on the two events, with the schema version unchanged.
-- [ ] 9.3 Orchestrator: read both diffs against the sources, for
+- [x] 9.3 Orchestrator: read both diffs against the sources, for
       anything invented and for anything dropped from the old text.
       Check the `#+AI_PASS` line the doc writer adds. Answer or remove
       every `TODO(docs)`.
-- [ ] 9.4 Implementer, in `openspec/STATE.md`:
+- [x] 9.4 Implementer, in `openspec/STATE.md`:
       - add a paragraph for this change after the
         `separate-change-from-acceptance` paragraph;
       - update "Last reviewed".

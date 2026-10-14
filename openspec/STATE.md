@@ -519,7 +519,11 @@ findings. `library-status` and `library-validated` gain `id` after
 `root`, omitted when there is no readable identity, and each human
 report line then ends `; library <uuid>`. Change 13 must read the
 identity when it stores a reference rather than assume one: a
-successful admission does not imply a `Present` identity.
+successful admission does not imply a `Present` identity. Its review
+turned up a restoration: `reconcile` over a directory with no library
+root rewrote stale records there, against the `library` requirement
+that such a run writes no library state, and would have minted an
+identity too. It is now refused before it starts, as `adopt` is.
 
 ## Not built yet
 
