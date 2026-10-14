@@ -22542,3 +22542,119 @@ fn a_library_with_no_identity_still_answers_for_its_own_files() {
     }
     assert!(!library::identity_file(&root).exists());
 }
+
+/// Apply a batch rename of a new file `name` holding `bytes` inside the
+/// library at `root`, resolved to a record carrying `doi`, so that the
+/// run records it and makes a store write.
+fn record_one_file(root: &Path, name: &str, bytes: &[u8], doi: &str) {
+    let path = write_real_file(root, name, bytes);
+    let documents =
+        FakeDocuments::new().with_file(&path, hash_bytes(bytes), pdf_with_embedded_doi(doi));
+    let crossref = fake_source(SourceName::Crossref, Ok(record_by(name, 2024, doi)));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.to_path_buf()),
+        state_root: None,
+    };
+    events_for(
+        &Command::rename(vec![path], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+}
+
+/// The identity a library at `root` holds, which must be readable.
+fn present_identity(root: &Path) -> borax_core::library::LibraryId {
+    match library::identity(root) {
+        library::Identity::Present(id) => id,
+        other => panic!("expected Present, got {other:?}"),
+    }
+}
+
+/// Deleting the identity file loses the identity: the next applying
+/// run that records a file gives the library a new one, not the one
+/// that was deleted.
+#[test]
+fn a_deleted_identity_is_not_reconstructed() {
+    let library = real_library();
+    let root = library.path();
+    record_one_file(
+        root,
+        "Deleted",
+        b"deleted first bytes",
+        "10.1000/deleted-first",
+    );
+    let first = present_identity(root);
+
+    fs::remove_file(library::identity_file(root)).unwrap();
+    record_one_file(
+        root,
+        "Again",
+        b"deleted second bytes",
+        "10.1000/deleted-second",
+    );
+
+    assert_ne!(present_identity(root), first);
+}
+
+/// The identity is library state, not derived state: deleting the
+/// response cache, the content index and every citation sidecar leaves
+/// `status` counting what it counted and reporting the same identity.
+#[test]
+fn deleting_derived_state_leaves_the_identity_as_it_was() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    record_one_file(&root, "Derived", b"derived bytes", "10.1000/derived");
+    // A sidecar beside the file, as `bib` would leave one.
+    fs::write(root.join("Derived2024.bib"), b"@article{x}\n").unwrap();
+
+    let status = |root: &Path| {
+        let documents = CountingDocuments::new();
+        let sources: Vec<&dyn Source> = Vec::new();
+        // A fresh, empty index and response cache: the derived stores
+        // as they are once deleted.
+        let index = ContentIndex::new(MemoryCache::new());
+        let filesystem = FakeFilesystem::new();
+        let bib_files = FakeBibFiles::new();
+        let adapters = Adapters {
+            documents: &documents,
+            sources: &sources,
+            index: &index,
+            filesystem: &filesystem,
+            bib_files: &bib_files,
+            cache_root: None,
+            now: fixed_now,
+            collection_root: Some(root.to_path_buf()),
+            state_root: None,
+        };
+        events_for(
+            &Command::status(Some(root.to_path_buf()), false),
+            &Configs::uniform(resolve(Vec::new()).unwrap()),
+            &adapters,
+            &mut Session::batch(),
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
+    };
+    let before = status(&root);
+    assert!(
+        matches!(&before, Event::LibraryStatus { id: Some(_), .. }),
+        "got {before:?}"
+    );
+
+    fs::remove_file(root.join("Derived2024.bib")).unwrap();
+
+    assert_eq!(status(&root), before);
+}
