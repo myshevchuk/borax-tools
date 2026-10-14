@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `borax reconcile` now refuses to run over a directory outside any library
+  before it reads or writes anything, because reconciliation writes library
+  state. As with `borax adopt`, mark the library root with `.borax.toml` or
+  configure `library-root` first. Previously, reconciliation could rewrite
+  stale artifact records in an unmarked directory.
+
 - Changed bytes at a recorded path now enter the artifact's history only
   after acceptance. Reconciliation accepts them automatically when their
   extracted identifier is carried by the linked item, or explicitly through

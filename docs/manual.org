@@ -17,6 +17,7 @@
 #+AI_PASS: fact-check claude-opus-5-5 [2026-10-05 Mon] -- supplied identifiers are looked up normalised, not as typed
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-07 Wed] -- gated change acceptance
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-13 Tue] -- library identity
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-14 Wed] -- reconcile outside a library
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -736,6 +737,15 @@ how to install it, and a handful of examples.
    modification time. ~--rehash~ hashes every artifact instead, which
    also catches a same-size in-place edit within the filesystem's
    modification-time granularity.
+
+   Because reconciliation writes library state, ~reconcile~ refuses to
+   run over a directory when neither a ~.borax.toml~ at or above it nor
+   a configured ~library-root~ establishes a library. It returns an
+   error before it reads or writes anything:
+
+   #+begin_example
+     <directory> is in no library, and reconciling writes library state: mark the library's root with .borax.toml first
+   #+end_example
 
    Reconciliation completes four steps in order across the library. It
    first settles records whose own paths still hold their artifacts.
