@@ -40,7 +40,9 @@ atomically and reads no other fact to decide what to write. No writer
 SHALL read, merge and rewrite a file another writer writes:
 
 - `extracted.json` is written only when a resolution reaches a record
-  by extraction and a lookup and the title check does not refuse it;
+  by extraction and a lookup and the title check does not refuse it:
+  as it resolves, or, where that lookup was asked for again by an
+  operator after an outage, when the interactive run moves the file;
 - `operator.json` is written only for an operator's decision: when an
   interactive run moves a file renamed from an operator's record, as
   "An operator's answer about a file is remembered" states, or when
@@ -156,7 +158,11 @@ the response cache.
 
 A record reached this way is a record like any other: the work check
 applies to it, and an interactive run puts it the question it calls
-for.
+for. An operator who asks the services again about the identifier the
+entry answered with repeats it with the same origin, keeping the
+earlier rounds; the file's titles are still not read and the title
+check is still not made, and nothing is written to the content index
+for it, which already holds that evidence.
 
 #### Scenario: An evidence answer
 - **WHEN** a file outside any library, whose entry holds the DOI an
@@ -176,6 +182,15 @@ for.
   file's titles conflict with the record its identifier reaches
 - **THEN** the file is not opened, its `match_check` is not attempted
   with reason `content-index-hit`, and it resolves with that record
+
+#### Scenario: Asking again about an operator's identifier
+- **WHEN** the entry holds evidence of origin `overridden`, its lookup
+  meets an outage, and the operator asks the services again, Crossref
+  answers, and the operator renames the file
+- **THEN** the lookup's origin is still `content-index` with the outage
+  kept as an earlier round, the titles are not read, the title check is
+  not made, no `content-index-write` event is emitted, and the entry is
+  unchanged
 
 #### Scenario: Offline with no response cache
 - **WHEN** the entry holds evidence, the response cache does not hold
@@ -847,8 +862,9 @@ holding records, which changes what released values mean:
 which the resolution then looks up, rather than a record served;
 `content_index.write` writes identification evidence rather than a
 record; `record_retrieval` `content-index` is no longer emitted;
-`content-index-write` reports every write of an operator's evidence,
-`borax reconcile`'s restorations among them, and not only the move's;
+`content-index-write` reports every evidence write made after a
+verdict — the move's, for an operator's record or a retried lookup of
+the file's own identifier, and `borax reconcile`'s restorations;
 and `library-adoption` `unindexed` means no entry rather than
 no record. A consumer reading schema 4 correctly could read these
 wrongly, so the version SHALL be 5. No release has carried schema 5, so
@@ -1112,8 +1128,11 @@ though it were a service.
 When an interactive run writes a record to the content index on the move it followed, or `borax reconcile` writes an operator's identifier to the content index from a library's history, it SHALL report what became of each write in a `content-index-write` event carrying the file's `path`, its content `hash`, the `entry` written, and a `write` of `written`, or `failed` with the store's `message`.
 
 The `entry` SHALL be tagged by `kind`: `evidence`, with the `identifier`
-and its `origin`, `supplied` or `overridden`, which the write put in
-the entry's operator evidence. A restoration is written as the
+and its `origin`. At the move that is `supplied` or `overridden`, put
+in the entry's operator evidence, or `extracted`, put in its extracted
+evidence, for the file's own identifier found again by a lookup the
+operator asked for after an outage. A lookup of the identifier the
+content index already held writes nothing at the move. A restoration is written as the
 `library` capability's requirement "A library's operator decisions are
 restored to the content index" states.
 
@@ -1160,6 +1179,14 @@ rename or the reconcile.
   service
 - **THEN** no `content-index-write` event is emitted, and the file's
   `resolved` event reports `content_index.write` `written`
+
+#### Scenario: A retried lookup remembered
+- **WHEN** a file's own DOI meets an outage, the operator asks the
+  services again, Crossref answers, and the operator renames the file
+- **THEN** the `renamed` event is followed by a `content-index-write`
+  event whose `entry` is `evidence` naming the DOI and `extracted`, the
+  entry's extracted evidence holds the DOI, and its operator evidence is
+  absent
 
 #### Scenario: A restoration reported
 - **WHEN** `borax reconcile` writes to the content index the identifier

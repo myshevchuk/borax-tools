@@ -278,6 +278,9 @@ exists.
       - `remember_writes_supplied_evidence_for_a_supplied_record`.
       - `remember_writes_overridden_evidence_for_a_record_accepted_over_its_conflict`.
       - `remember_leaves_extracted_evidence_byte_identical`.
+      - `remember_writes_extracted_evidence_for_a_successful_retry_of_the_files_own_lookup`:
+        `extracted.json` is written and `operator.json` stays absent.
+      - `remember_of_an_index_held_lookup_writes_nothing_and_is_not_attempted_for_content_index_hit`.
       - `identification_of_an_index_origin_lookup_carries_the_answering_facts_origin`.
       - `sections_projects_a_hit_with_its_evidence`.
       - `retrieval_of_an_index_origin_lookup_is_its_service`.
@@ -297,6 +300,9 @@ exists.
       In `crates/borax/tests/dispatch.rs`:
       - `a_supplied_identifier_renamed_outside_a_library_is_resolved_by_a_later_batch_run_without_extraction_or_question`.
       - `an_operators_answer_survives_a_no_cache_resolve`.
+      - `an_outage_then_a_successful_retry_then_rename_writes_extracted_json_and_no_operator_json`:
+        the move is followed by a `content-index-write` whose `entry`
+        is `evidence` with origin `extracted`.
       - `an_interactive_supplied_rename_in_a_library_writes_the_operator_fact_after_the_record`:
         a recording write stand-in that shares an ordered log with the
         index store.
@@ -410,12 +416,29 @@ transport, so no test here reaches a lookup.
 Green point: additive. Until this lands, Retry on such a lookup does
 nothing, as Retry with no own identifier does today.
 
-- [ ] 7.1 Red, in `crates/borax/tests/dispatch.rs`:
+- [ ] 7.1 Red.
+
+      In `crates/borax/tests/pipeline.rs`:
+      - `resolve_indexed_again_keeps_the_origin_and_the_earlier_rounds`.
+      - `resolve_indexed_again_reads_no_titles_and_makes_no_title_check`:
+        `FakeDocuments::with_open_error`, and `match_check` not
+        attempted for `content-index-hit`.
+      - `resolve_indexed_again_leaves_the_content_index_write_not_attempted_for_content_index_hit`.
+
+      In `crates/borax/tests/dispatch.rs`:
       - `retry_of_an_index_held_lookup_after_an_outage_keeps_the_content_index_origin_and_its_rounds`.
       - `retry_of_an_index_held_lookup_is_offered_only_when_the_lookup_was_inconclusive`.
-- [ ] 7.2 Green: the interactive driver's Retry repeats the file's own
-      lookup whatever its non-operator origin, and `rounds_before` keeps
-      the rounds for `Origin::Indexed` (D6).
+      - `retry_of_an_index_held_overridden_lookup_runs_no_title_check_writes_nothing_and_keeps_its_origin`:
+        the file's titles would conflict. After Retry and Rename,
+        `match_check` is not attempted, there is no `content-index-write`
+        event, both facts are byte-identical, and the evidence origin on
+        the read is `overridden`.
+      - `retry_of_an_index_held_supplied_lookup_runs_no_title_check_writes_nothing_and_keeps_its_origin`:
+        the same with origin `supplied`.
+- [ ] 7.2 Green: `pipeline::resolve_indexed_again`, used by the
+      interactive driver's Retry for an `Origin::Indexed` lookup
+      (`resolve_supplied` stays for an extracted one). `rounds_before`
+      keeps the rounds for `Origin::Indexed` (D6, D10).
 
 ## 8. Audit and verification
 

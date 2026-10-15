@@ -162,7 +162,7 @@ What the engine does today, at the points this change touches:
 
 | File | Holds | Written only by |
 |---|---|---|
-| `extracted.json` | `{"identifier":"doi:…"}` | a resolution that reached a record by extraction and a lookup, unrefused (D4) |
+| `extracted.json` | `{"identifier":"doi:…"}` | a resolution that reached a record by extraction and a lookup, unrefused, and `remember` at the move after a successful retry of that lookup (D4) |
 | `operator.json` | `{"identifier":"doi:…","origin":"supplied"}` or `"overridden"` | `remember` at the move (D4), and `reconcile`'s restoration (D5) |
 | `refs/` | reserved for 13b's library references, one file each | nothing in this change |
 
@@ -262,10 +262,10 @@ Option<IdentificationEvidence>`, written by `history_table` after
 
 | The record was reached by | Evidence |
 |---|---|
-| the file's own lookup, origin extracted | `{lookup id, extracted}` |
+| the file's own lookup, origin extracted, retried or not | `{lookup id, extracted}` |
 | an operator's lookup, acceptance `accepted` | `{supplied id, supplied}` |
 | any lookup, acceptance `overridden` | `{lookup id, overridden}` |
-| a lookup of the index's identifier (D6) | `{that id, the answering fact's origin}` |
+| a lookup of the index's identifier (D6), or a retry of one | `{that id, the answering fact's origin}` |
 | the run's library (tracked) | none |
 
 Other writers:
@@ -341,8 +341,29 @@ entry, and the interrupted-write guarantee assumes so.
   outside a library, under `--no-record` too. Inside a library it is
   written after the admission's item and record, so the library holds
   the decision first. Also by `reconcile` (D5).
-- `pipeline::accept` is unchanged. `pipeline::remember(index, file)`
-  writes `file.identification()`, an operator origin by construction.
+- **`remember` writes through the writer for the evidence's own
+  origin** (settled after the second critic pass). The rename driver
+  remembers whenever the record on offer is not the file's first
+  resolution (`remember: !on.kept`, `run.rs` near line 2176), and a
+  successful retry of the file's own lookup is marked `kept: false`
+  (near line 2280). So `remember` meets three kinds of evidence:
+
+  | `file.identification()` | Written by `remember` |
+  |---|---|
+  | `{id, supplied}` or `{id, overridden}` | `put_operator` → `operator.json` |
+  | `{id, extracted}`: a successful retry of the file's own extracted lookup | `put_extracted` → `extracted.json`, at the move, reported by `content-index-write` as any write is. No `operator.json` |
+  | `{id, origin}` from `Origin::Indexed`: a retry of an index-held lookup (D6) | nothing: the index already holds that evidence. `NotAttempted(ContentIndexHit)`, and no event |
+  | none (no hash) | nothing: `NotAttempted(Unhashable)`, as today |
+
+  This keeps each file's single writer. `extracted.json` is still
+  written only for an identifier extraction found and a lookup
+  confirmed: at the resolution, or at the move when the confirming
+  lookup was a retry, whose resolution event reports the write
+  `awaiting-acceptance`. The retry's title check is today's
+  (`resolve_supplied`), so an agreeing or insufficient check gives
+  `extracted`. A conflict the operator overrides gives `overridden`,
+  which goes to `operator.json`.
+- `pipeline::accept` is unchanged.
 
 ## D5. Recovery converges on the library's evidence (critic finding 4)
 
@@ -447,8 +468,28 @@ the cache on and the file hashed (otherwise as today):
      for `content-index-hit`.
    - Not found: skipped `unresolvable`, with the attempts, and not sent
      to extraction, which would find the same identifier. Retry is
-     offered as for any inconclusive lookup and repeats the identifier
-     with origin `content-index`.
+     offered as for any inconclusive lookup.
+
+   **Retry of an index-held lookup** (settled after the second critic
+   pass):
+
+   - It repeats the identifier with the stored evidence's origin
+     (`Origin::Indexed(o)`, reported `content-index`), and keeps the
+     earlier rounds.
+   - It runs **no** title check: the titles stay not attempted for
+     `content-index-hit`, as for every evidence answer.
+   - It writes **no** evidence: the index already holds it, and
+     `remember` returns not attempted (D4).
+
+   It does not use `pipeline::resolve_supplied`, which reads the file's
+   titles and checks them unconditionally (`pipeline.rs`, near line
+   834). It uses a new `pipeline::resolve_indexed_again(identifier,
+   origin, sources, prior)` (D10). That function looks the identifier
+   up and keeps `prior`'s rounds. It leaves `prior`'s extraction,
+   titles and `match_check` as they are (not attempted for
+   `content-index-hit`) and sets the content-index write not attempted
+   for `content-index-hit`. A record found is resolved, and nothing it
+   reaches is a conflict.
 
 A record reached this way goes through the work check and the
 interactive question as any record does. This is "evidence-first" only
@@ -507,7 +548,7 @@ meanings that change here:
 | `content_index.read` `hit` | a record served; nothing ran after it | an identifier answered with; the lookup runs after it |
 | `content_index.write` | the record written | the extracted identifier written |
 | `record_retrieval` `content-index` | the index's copy | removed |
-| `content-index-write` | the move's remembering of an operator's record | every write of an operator's evidence: the move's, and `reconcile`'s restorations |
+| `content-index-write` | the move's remembering of an operator's record | every evidence write made after a verdict: the move's, for an operator's record or a retried extracted lookup, and `reconcile`'s restorations |
 | `library-adoption` `unindexed` | no record for the bytes | no evidence for the bytes; evidence without a cached record is the new `unanswered` |
 | `extraction`, `lookup`, `match_check` not attempted for `content-index-hit` | always together | `lookup` is now made after a hit |
 
@@ -520,8 +561,8 @@ Added in 13a:
   `origin` (`extracted`, `supplied` or `overridden`).
 - `lookup.origin`: `content-index`.
 - `content-index-write`: `hash`, and `entry`, tagged `kind`, here only
-  `evidence` (with `identifier`, `origin`). `write` is `written` or
-  `failed`.
+  `evidence` (with `identifier`, and `origin` `extracted`, `supplied` or
+  `overridden`). `write` is `written` or `failed`.
 - `library-adoption` `recorded`: `retrieval`, here only `service-cache`;
   and the kind `unanswered`, with `identifier`.
 
@@ -651,7 +692,20 @@ are removed in group 4 (D12).
 
 // pipeline.rs
 impl FileRecord { pub fn identification(&self) -> Option<IdentificationEvidence>; } // D3
+/// D4: writes `file.identification()` through the writer for its
+/// origin: `put_extracted` for `extracted`, `put_operator` for
+/// `supplied`/`overridden`. `NotAttempted(ContentIndexHit)` for an
+/// `Origin::Indexed` lookup, and `NotAttempted(Unhashable)` with no hash.
 pub fn remember<S: IndexStore>(index: &ContentIndex<S>, file: &FileRecord) -> IndexWrite;
+/// D6: a retry of an index-held lookup. No title check and no titles
+/// read; `prior`'s rounds kept; the content-index write not attempted
+/// for `content-index-hit`.
+pub fn resolve_indexed_again(
+    identifier: &Identifier,
+    origin: EvidenceOrigin,
+    sources: &[&dyn Source],
+    prior: &Evidence,
+) -> Result<FileRecord, Unresolved>;
 // index_read, standing, resolve_file, resolve_batch: `C: Cache` becomes `S: IndexStore`
 
 // library.rs
@@ -685,7 +739,8 @@ Keeping their signatures: `admit`, `Admitted`, `reconcile`,
 The private parts are the implementer's:
 
 - how the rename driver passes the evidence to `recorded`;
-- how retry finds the file's own lookup;
+- how retry finds the file's own lookup and chooses between
+  `resolve_supplied` (extracted) and `resolve_indexed_again` (indexed);
 - the enum `execute` opens the index over.
 
 ## D11. Sequences traced
@@ -701,9 +756,16 @@ with no library above it.
    and the file moves.
 2. `operator.json` = `s(X)`, and a `content-index-write`.
 3. `borax cache --clear`, then a batch run online: `hit` with `s(X)`,
-   `doi:X` looked up over the network, no question, no extraction.
-4. The same run offline: `unresolvable`, every attempt `unavailable`.
-   The identifier is kept, and the next online run resolves it.
+   `doi:X` looked up over the network, no question, no extraction. The
+   network answer is written to the response cache (`stored` `written`).
+4. The same run again, offline: `hit` with `s(X)`, and `doi:X` is
+   answered from the response cache step 3 refilled (`retrieval`
+   `service-cache`). No request is sent, and the file is resolved.
+5. Branch, from step 3: a second `borax cache --clear`, or a step 3
+   whose response-cache write failed (`stored` `failed`), and then the
+   offline run: `unresolvable`, every attempt `unavailable`. The
+   identifier is kept in `operator.json`, and the next online run
+   resolves it.
 
 **(c) `--no-cache` over operator evidence.** `operator.json` = `s(X)`.
 
@@ -766,11 +828,11 @@ red/green pair. Every group ends compiling, with the whole suite green.
 |---|---|---|
 | 1 | `HashEntry::evidence` and its parse; `Admitting::evidence`; the append rule; reconcile's extracted evidence; `FileRecord::identification` for today's origins | Every `HashEntry` and `Admitting` literal, `src` and tests, is edited in the same pair, and nothing else changes type |
 | 2 | `borax_core::index`; `data_root`; `IndexStore` for `FileCache` and `MemoryCache`; `ContentIndex`'s evidence API **beside** its record API | Purely additive: no existing consumer changes |
-| 3 | The resolution switch: pipeline, `remember`, the evidence engine, every event change but adoption's, schema 5, the description, `Adapters<S: Cache + IndexStore>`, `IndexStore` impls on custom test stores | Every consumer of `IndexRead`, `RecordRetrieval`, `Origin`, `IndexReadStep`, `RetrievedFrom`, `IdentifierOrigin`, `ContentIndexWrite` and `SCHEMA` changes here. `adopt` still reads the record API. That API exists, and its tests seed it |
+| 3 | The resolution switch: pipeline, `remember` with its per-origin writers (an extracted retry included), the evidence engine, every event change but adoption's, schema 5, the description, `Adapters<S: Cache + IndexStore>`, `IndexStore` impls on custom test stores | Every consumer of `IndexRead`, `RecordRetrieval`, `Origin`, `IndexReadStep`, `RetrievedFrom`, `IdentifierOrigin`, `ContentIndexWrite` and `SCHEMA` changes here. `adopt` still reads the record API. That API exists, and its tests seed it |
 | 4 | Adoption: the `lookup` seam, `Adoption::Recorded::retrieval`, `Unanswered`, the record API removed, `Adapters<S: IndexStore>` | The record API's last consumers (`adopt_events` and the adoption tests) change in the same pair |
 | 5 | `reconcile` restores operator evidence (D5) | Additive behaviour, through the event shape group 3 fixed |
 | 6 | `execute` opens the index over the data root; the binary tests | One call site, and the binary tests |
-| 7 | Retry of an index-origin lookup | Additive. Until it lands, Retry on such a lookup does nothing, as Retry with no own identifier does today |
+| 7 | Retry of an index-origin lookup, through `resolve_indexed_again` | Additive. Until it lands, Retry on such a lookup does nothing, as Retry with no own identifier does today. `remember`'s `Indexed` arm lands in group 3, so it is already in place |
 
 **Interim states, stated so nobody mistakes them for the contract:**
 
@@ -900,10 +962,10 @@ reported back.
 | 3 | `crates/borax/tests/runlog.rs` | `WriteFailingCache` (near 797) | the same |
 | 3 | `crates/borax-sources/tests/store.rs` | `WriteFailingCache` (near 24) | the same |
 | 3 | `crates/borax/tests/event.rs` | `json_line_of_resolved_carries_every_library_answer_variant_tagged_by_kind` (3291, two assertions), `json_line_of_skipped_carries_every_library_answer_variant_tagged_by_kind` (3394), `library_not_attempted_replaces_the_schema_3_null` (3420) | `Value::from(4)` becomes `Value::from(5)` on the `schema` key |
-| 3 | | every `"schema":4` literal: `json_line_of_library_extraction_matches_design_d4_for_every_kind`, `json_line_of_library_condition_matches_design_d3_for_every_kind`, `library_status_without_an_identity_is_written_without_an_id_key`, `library_status_carries_the_id_directly_after_the_root`, `library_validated_without_an_identity_is_written_without_an_id_key`, `library_validated_carries_the_id_directly_after_the_root` | `"schema":5` |
-| 4 | | `json_line_of_library_adoption_unindexed_matches_design_d6` | `"schema":5` |
+| 3 | | every `"schema":4` literal: `json_line_of_library_extraction_matches_design_d4_for_every_kind`, `json_line_of_library_condition_matches_design_d3_for_every_kind`, `library_status_without_an_identity_is_written_without_an_id_key`, `library_status_carries_the_id_directly_after_the_root`, `library_validated_without_an_identity_is_written_without_an_id_key`, `library_validated_carries_the_id_directly_after_the_root`, `json_line_of_library_adoption_unindexed_matches_design_d6` (~4075) | `"schema":5`. The last is here, beside `SCHEMA = 5`, and not in group 4: `unindexed`'s JSON shape does not change, so group 4 has no edit for it |
+| 3 | | the `content_index_write` helper (~367) | builds the event with a fixed `hash` and an `entry` of kind `evidence`. Its other callers, `all_events`, `json_line_event_tag_is_the_variant_name_in_kebab_case`, `a_plausible_run_renders_as_json_lines_ending_in_the_summary` and `counts_observe_ignores_content_index_write`, keep their expectations |
+| 3 | `crates/borax/tests/dispatch.rs` | the `sections_for` helper (451) | its `(None, true)` branch, which builds a content-index retrieval, is rewritten for an evidence answer or removed. No caller reaches it: all six `resolved_event` callers (`resolve_emits_resolved_then_skipped_for_a_mixed_batch`, `rename_preview_emits_resolved_and_planned_and_moves_nothing`, `rename_preview_with_no_journal_succeeds`, `rename_apply_emits_renamed_carrying_the_hash_and_moves_the_file`, `bib_emits_resolved_then_the_bib_events_and_the_fake_bib_files_received_the_writes`, `bib_over_a_library_holding_an_artifactless_item_emits_no_entry_for_it`) pass `cached: false`, and keep their expectations |
 | 4 | | `human_line_of_library_adoption_escapes_control_characters_in_the_path_for_every_kind` (4233), `human_line_of_library_adoption_is_unchanged_for_a_path_with_no_control_character` (4269) | `Adoption::Recorded` gains `retrieval`. The first also gains an `Unanswered` case, the new kind's escaping (b) |
-| 4 | `crates/borax/tests/dispatch.rs` | `adopt_over` (14931) | none: `ContentIndex<MemoryCache>` still names its type |
 
 **Deliberate rewrites (b).**
 
@@ -939,20 +1001,41 @@ The general translation for a test that seeds a record:
 | 3 | | `a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_next_time` | `WriteFailingCache` gains `IndexStore`. The second run still asks, because `operator.json` was never written |
 | 3 | | `resolve_no_cache_still_reads_the_library_and_writes_nothing_to_the_index`, `interactive_tracked_file_offers_the_move_question_and_writes_nothing_to_the_index`, `tracked_file_already_named_reports_already_named_and_writes_nothing` | `index.entry(&hash)` holds both facts `Absent` |
 | 3 | | `a_supplied_identifier_renamed_is_followed_by_content_index_write`, `a_rename_time_content_index_write_failure_is_reported_without_failing_the_rename`, `accepting_a_supplied_candidate_with_agreeing_titles_reports_accepted`, `the_round_two_session_reports_every_submission_on_the_final_skip` | `ContentIndexWrite` gains `hash` and `entry` |
-| 3 | | `sections_for` (helper), `a_batch_run_over_three_artifacts_of_one_item_skips_none_of_them`, `a_batch_content_duplicate_skip_carries_every_section_not_attempted` | the content-index retrieval and `hit` shapes |
+| 3 | | `a_batch_run_over_three_artifacts_of_one_item_skips_none_of_them`, `a_batch_content_duplicate_skip_carries_every_section_not_attempted` | the content-index retrieval and `hit` shapes |
 | 3 | `crates/borax/tests/end_to_end.rs` | `a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_run` | both runs' sources are `Cached` over one shared `MemoryCache`. The second run sends no transport request, its `record_retrieval.kind` is `service-cache`, and its `lookup.origin` is `content-index` |
 | 3 | `crates/borax/tests/event.rs` | `schema_is_four` | renamed `schema_is_five` |
-| 3 | | `all_events`, `content_index_write`, `evidence_via_content_index_hit`, `sections_via_content_index`, `a_content_index_answer_whose_provenance_names_crossref_reports_crossref`, `human_line_appends_the_library_problem_clause_to_a_content_index_resolved_line`, `human_line_of_resolved_shows_the_work_and_the_from_clause`, `an_arxiv_found_identifier_survives_a_doi_carrying_record`, `a_record_whose_provenance_names_no_service_names_no_via` | the content-index retrieval becomes `service-cache`, with `from the response cache`; `hit` carries `evidence`; `ContentIndexWrite` gains `hash` and `entry` |
+| 3 | | `json_line_of_content_index_write_has_exactly_the_documented_field_set` (~1019) | its exact field set becomes `entry`, `event`, `hash`, `path`, `schema`, `write`, and it asserts `entry`'s `kind` `evidence` with `identifier` and `origin` |
+| 3 | | `all_events`, `evidence_via_content_index_hit`, `sections_via_content_index`, `a_content_index_answer_whose_provenance_names_crossref_reports_crossref`, `human_line_appends_the_library_problem_clause_to_a_content_index_resolved_line`, `human_line_of_resolved_shows_the_work_and_the_from_clause`, `an_arxiv_found_identifier_survives_a_doi_carrying_record`, `a_record_whose_provenance_names_no_service_names_no_via` | the content-index retrieval becomes `service-cache`, with `from the response cache`; `hit` carries `evidence`; `ContentIndexWrite` gains `hash` and `entry` |
 | 3 | `crates/borax/tests/describe.rs` | `Fixture` and its content-index case, `a_content_index_answer_is_d1s_worked_example`, `a_cached_answer_names_no_origin_for_its_identifier` | the identifier line names `found by an earlier run`; the record line names the service |
 | 3 | `crates/borax/tests/renaming.rs` | `sections_via_content_index` | `hit` with `evidence`, `service-cache` retrieval |
 | 3 | `crates/borax/tests/runlog.rs` | `run_log_contains_resolved_renamed_and_content_index_write_in_order`, `run_log_reports_a_failed_content_index_write_without_failing_the_rename`, `run_log_contains_exactly_the_json_stdout_stream_including_framing_events` | the event's new fields |
 | 6 | `crates/borax/tests/binary.rs` | `seed_stale_content_index`, used by `resolve_reports_a_tracked_file_the_same_way_for_every_relative_spelling` | seeds an `extracted.json` for another DOI under `XDG_DATA_HOME/borax/v2/content/<hash>/`, and the run sets `XDG_DATA_HOME` |
+| 4 | `crates/borax/tests/dispatch.rs` | the `adopt_over` helper (14931) | takes the response-cache root and passes `cache_root: Some(responses)` instead of `None`. Its `PanicSource` and its no-open and no-rename assertions stay. Its callers rely on it: `adopt_records_each_orphan_the_content_index_answers_for`, `adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent`, `adopt_holds_an_orphan_whose_bytes_a_record_already_holds` and `adopt_every_orphan_is_accounted_for` seed that root with the records they adopt. `adopt_reads_neither_a_sidecar_nor_the_retired_ledger` passes an empty `tempdir` and keeps its expectation |
 | 4 | `crates/borax/tests/dispatch.rs` | `adopt_records_each_orphan_the_content_index_answers_for`, `adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent`, `adopt_holds_an_orphan_whose_bytes_a_record_already_holds`, `adopt_every_orphan_is_accounted_for`, `adopt_outside_any_library_is_refused_and_writes_nothing`, `an_adoption_into_a_library_with_a_faulty_identity_file_warns_once` | seeded with `put_extracted` and a response-cache entry under `cache_root` (a `tempdir`) by `FileCache::put(&cache::key(SourceName::Crossref, &doi), &record)`. `Recorded` gains `retrieval` |
 | 4 | | `adopt_after_the_cache_is_cleared_adopts_nothing_and_succeeds`, `adopt_after_the_cache_is_cleared_still_tells_unindexed_held_and_unreadable_apart` | the facts survive the clear: an evidence-only orphan is `unanswered` with its identifier, and a no-entry one `unindexed`. The first is renamed `adopt_after_the_cache_is_cleared_records_nothing_from_evidence_alone_and_succeeds` |
 | 4 | | `adopt_human_mode_lists_an_unindexed_orphan_before_the_totals_line`, `adopt_human_mode_ends_on_its_own_totals_line_with_no_summary` | kept: their orphans have no entry |
 | 4 | `crates/borax/tests/event.rs` | `all_events` (adoption cases), `render_human_equals_human_line_for_every_library_condition_and_unindexed`, `counts_observe_of_library_adoption_unindexed_counts_nothing` | `Unanswered` added beside `Unindexed` |
 | 4 | `crates/borax/tests/library.rs` | the four `library::adopt(` calls (`adopt_that_records_an_orphan_mints_the_identity`, `adopt_that_records_nothing_mints_nothing`, `adopt_into_a_library_with_a_faulty_identity_file_records_and_reports_the_fault`, `adopt_whose_mint_fails_records_nothing_and_reports_unwritten_naming_the_identity_file`) | the `lookup` closure returns `Result<Adopted, Unadopted>` |
 | 4 | `crates/borax-sources/tests/store.rs` | `content_index_round_trips_a_record`, `content_index_put_returns_written_over_memory_cache`, `content_index_put_returns_what_its_cache_returned`, `content_index_misses_an_unknown_hash`, `renamed_file_with_identical_content_is_served_from_the_content_index`, `entries_survive_a_fresh_file_cache_opened_on_the_same_root` | over the evidence API, as the record API goes. Renamed `content_index_round_trips_both_facts` and `renamed_file_with_identical_content_is_answered_by_the_content_index` |
+
+**Fixture helpers re-checked** (second critic pass). Every helper
+used by a test whose expectation group 3 or 4 changes was read again:
+
+- Reclassified as changed:
+  - `adopt_over` (group 4);
+  - `sections_for`, and event.rs's `content_index_write` (group 3).
+- Unchanged:
+  - `outside_the_stores`: the response cache is a `tempdir` outside the
+    library, and adoption only reads it;
+  - `adoptions`;
+  - `assert_every_orphan_is_accounted_for`: it matches `Recorded { .. }`
+    and counts every other kind as left, `unanswered` included;
+  - `KeyedSource`, `FakeDocuments` and `ScriptedAsker`;
+  - pipeline.rs's `default_content_index`, and event.rs's
+    `evidence_via_lookup` and `sections_via_network`: they build `Miss`;
+  - `prior_tracked`;
+  - `seed_tracked_file` and `seed_artifact_record`: only group 1's
+    shape edit.
 
 Flagged by the sweep and **unchanged**:
 
