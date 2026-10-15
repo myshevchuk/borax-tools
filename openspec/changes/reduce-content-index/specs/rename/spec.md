@@ -12,14 +12,11 @@ have them.
 The identifier SHALL be named with where it was found only where the
 run found it, or where the content index held it for the file's bytes.
 The description SHALL then name it as an earlier run's: found by an
-earlier run, supplied in an earlier run, accepted over a title conflict
-in an earlier run, or adopted in an earlier run, as the origin the
-content index kept it under says. Where a library reference the content
-index holds answered and nothing was looked up, the description SHALL
-name the record's own identifier without claiming where it came from,
-and SHALL name on its `record` line the services the item's provenance
-records followed by `from the library at ` and the reference's root,
-or that root's library alone where the provenance names no service. No title SHALL be truncated, and no identifier SHALL be broken
+earlier run, supplied in an earlier run, or accepted over a title
+conflict in an earlier run, as the origin the content index kept it
+under says, and SHALL NOT name a pass of this run. Where the library
+answered and nothing was looked up, the description SHALL name the
+record's own identifier without claiming where it came from. No title SHALL be truncated, and no identifier SHALL be broken
 across lines: one that cannot be read back in one piece is no longer
 evidence.
 
@@ -109,11 +106,10 @@ change which questions are put or what their answers do.
 - **THEN** the description reports the volume and the pages
 
 #### Scenario: A cached answer names no origin
-- **WHEN** the content index answers for a file through a reference to
-  a library at `/home/u/papers`, whose item's provenance names Crossref
-- **THEN** the description names the record's identifier without saying
-  where it was found, and its `record` line reads `Crossref, from the
-  library at /home/u/papers`
+- **WHEN** the content index answers for a file
+- **THEN** the description names the identifier it looked up without
+  naming an extraction pass of this run as where it was found, and
+  says it comes from an earlier run
 
 #### Scenario: An operator's answer from an earlier run
 - **WHEN** the content index answers for a file with a DOI an operator
