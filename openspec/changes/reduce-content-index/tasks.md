@@ -117,7 +117,7 @@ Green point: `HashEntry` and `Admitting` change type here, and every
 literal of both, in `src` and in tests, is edited in this pair. Nothing
 else changes type.
 
-- [ ] 1.1 Red. Make the group-1 D14 edits: the (a) `evidence: None`
+- [x] 1.1 Red. Make the group-1 D14 edits: the (a) `evidence: None`
       sites, and the (b) rewrites of
       `admit_reidentifying_the_newest_bytes_moves_the_link_and_appends_nothing`,
       `transition_f_relinking_the_newest_bytes_appends_nothing_until_later_bytes_restate_it`,
@@ -169,7 +169,7 @@ else changes type.
       - `an_interactive_rename_from_a_supplied_identifier_records_it_as_supplied`.
       - `an_interactive_rename_over_a_conflict_records_it_as_overridden`.
       - `supplying_the_same_identifier_twice_for_a_tracked_file_appends_one_entry`.
-- [ ] 1.2 Green:
+- [x] 1.2 Green:
       - `EvidenceOrigin`, `IdentificationEvidence`, `HashEntry::evidence`
         and its parse rule;
       - `ArtifactRecord::evidence_for` and `operator_evidence_for`;
@@ -188,7 +188,7 @@ Green point: purely additive. `ContentIndex`'s evidence API is a new
 `impl<S: IndexStore>` block next to the record API. No existing
 consumer changes.
 
-- [ ] 2.1 Red.
+- [x] 2.1 Red.
 
       In a new `crates/borax-core/tests/index.rs`:
       - `extracted_fact_round_trips_through_json_for_each_identifier_kind`.
@@ -235,7 +235,7 @@ consumer changes.
       - `content_index_fact_write_reports_failed_over_a_read_only_root`,
         `#[cfg(unix)]`.
       - `a_v1_record_file_beside_the_entry_is_not_read_as_a_fact`.
-- [ ] 2.2 Green: `borax_core::index`; `INDEX_FORMAT_VERSION`,
+- [x] 2.2 Green: `borax_core::index`; `INDEX_FORMAT_VERSION`,
       `data_root`, `default_data_root`, `extracted_key`, `operator_key`;
       `IndexStore` for `FileCache` and `MemoryCache`; and
       `ContentIndex::entry`, `put_extracted` and `put_operator` (D1, D2,
@@ -251,7 +251,7 @@ becomes `S: Cache + IndexStore`, and every custom test store gains an
 `IndexStore` impl. `adopt` still uses the record API, which still
 exists.
 
-- [ ] 3.1 Red. Make the group-3 D14 edits ((a) store impls and schema
+- [x] 3.1 Red. Make the group-3 D14 edits ((a) store impls and schema
       literals, and (b) rewrites).
 
       In `crates/borax/tests/pipeline.rs`:
@@ -306,7 +306,7 @@ exists.
       - `an_interactive_supplied_rename_in_a_library_writes_the_operator_fact_after_the_record`:
         a recording write stand-in that shares an ordered log with the
         index store.
-- [ ] 3.2 Green:
+- [x] 3.2 Green:
       - `index_read` and `beyond_library` answer by evidence, and the
         resolution write is `put_extracted`;
       - `remember(index, file)` and `FileRecord::identification` for
@@ -328,7 +328,7 @@ Green point: the record API's last consumers, `adopt_events` and the
 adoption tests, change here. The record API is removed, and `Adapters`
 becomes `S: IndexStore`.
 
-- [ ] 4.1 Red. Make the group-4 D14 edits. New tests in
+- [x] 4.1 Red. Make the group-4 D14 edits. New tests in
       `crates/borax/tests/dispatch.rs`:
       - `adopt_records_an_orphan_from_the_response_cache_by_the_entrys_identifier`.
       - `adopt_uses_the_operators_identifier_before_the_extracted_one`.
@@ -352,7 +352,7 @@ becomes `S: IndexStore`.
       - `json_line_of_library_adoption_recorded_carries_its_retrieval`.
       - `json_line_of_library_adoption_unanswered_matches_design_d8`.
       - `human_line_of_library_adoption_unanswered_matches_design_d9`.
-- [ ] 4.2 Green: the `lookup` seam returns `Result<Adopted, Unadopted>`;
+- [x] 4.2 Green: the `lookup` seam returns `Result<Adopted, Unadopted>`;
       `adopt_events` reads the response cache under `cache_root`;
       `Adoption::Recorded::retrieval` and `Adoption::Unanswered`;
       `ContentIndex`'s record API removed; `Adapters<S: IndexStore>`
@@ -362,7 +362,7 @@ becomes `S: IndexStore`.
 
 Green point: additive behaviour through the event shape group 3 fixed.
 
-- [ ] 5.1 Red.
+- [x] 5.1 Red.
 
       In `crates/borax/tests/library.rs`:
       - `operator_decisions_lists_each_hashs_newest_operator_evidence_with_the_records_path`.
@@ -387,7 +387,7 @@ Green point: additive behaviour through the event shape group 3 fixed.
         `#[cfg(unix)]`, over a read-only index root.
       - `reconcile_restores_after_the_index_is_deleted`.
       - `status_and_validate_write_nothing_to_the_content_index`.
-- [ ] 5.2 Green: `library::operator_decisions`, and `reconcile_events`
+- [x] 5.2 Green: `library::operator_decisions`, and `reconcile_events`
       writing `put_operator` where `entry(hash).operator` is not
       `Held(e)`, reporting each write (D5).
 
@@ -396,7 +396,7 @@ Green point: additive behaviour through the event shape group 3 fixed.
 Green point: one call site and the binary tests. The binary has no fake
 transport, so no test here reaches a lookup.
 
-- [ ] 6.1 Red, in `crates/borax/tests/binary.rs`. Make the D14 (b)
+- [x] 6.1 Red, in `crates/borax/tests/binary.rs`. Make the D14 (b)
       rewrite of `seed_stale_content_index`. New tests:
       - `reconcile_writes_operator_evidence_under_xdg_data_home_borax_v2_content`:
         a library seeded with a record whose entry is `s(doi)`.
@@ -408,7 +408,7 @@ transport, so no test here reaches a lookup.
         skipped as unreadable, not resolved from the record.
       - `a_run_with_no_data_directory_writes_no_fact_and_succeeds`:
         `borax reconcile` with `env_clear` and `XDG_CACHE_HOME` alone.
-- [ ] 6.2 Green: `execute` opens the index over `default_data_root()`,
+- [x] 6.2 Green: `execute` opens the index over `default_data_root()`,
       or a `MemoryCache` when there is none (D1).
 
 ## 7. Retry of an index-held lookup
@@ -416,7 +416,7 @@ transport, so no test here reaches a lookup.
 Green point: additive. Until this lands, Retry on such a lookup does
 nothing, as Retry with no own identifier does today.
 
-- [ ] 7.1 Red.
+- [x] 7.1 Red.
 
       In `crates/borax/tests/pipeline.rs`:
       - `resolve_indexed_again_keeps_the_origin_and_the_earlier_rounds`.
@@ -435,20 +435,20 @@ nothing, as Retry with no own identifier does today.
         the read is `overridden`.
       - `retry_of_an_index_held_supplied_lookup_runs_no_title_check_writes_nothing_and_keeps_its_origin`:
         the same with origin `supplied`.
-- [ ] 7.2 Green: `pipeline::resolve_indexed_again`, used by the
+- [x] 7.2 Green: `pipeline::resolve_indexed_again`, used by the
       interactive driver's Retry for an `Origin::Indexed` lookup
       (`resolve_supplied` stays for an extracted one). `rounds_before`
       keeps the rounds for `Origin::Indexed` (D6, D10).
 
 ## 8. Audit and verification
 
-- [ ] 8.1 Audit every edit to a pre-existing test against the preamble's
+- [x] 8.1 Audit every edit to a pre-existing test against the preamble's
       rules and D14. Report any test that needed anything else.
-- [ ] 8.2 Run `cargo test --workspace`, `cargo clippy --workspace
+- [x] 8.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`. Run all
       three at the end of every group too, since each group is a green
       point.
-- [ ] 8.3 Search `crates/*/src/` for what this change makes false. Each
+- [x] 8.3 Search `crates/*/src/` for what this change makes false. Each
       search must find nothing, or a hit the report justifies:
       - `RetrievedFrom::ContentIndex`, `RecordRetrieval::ContentIndex`;
       - `the content index` in a human string as a place a record came
@@ -457,9 +457,9 @@ nothing, as Retry with no own identifier does today.
         docstrings;
       - `FORMAT_VERSION`'s docstring naming the index;
       - `Adoption::Unindexed`'s docstring saying "no record".
-- [ ] 8.4 Run `openspec validate reduce-content-index --strict` and
+- [x] 8.4 Run `openspec validate reduce-content-index --strict` and
       `python3 scripts/check-spec-deltas.py`.
-- [ ] 8.5 By hand, over a copy of a library built from the real-PDF
+- [x] 8.5 By hand, over a copy of a library built from the real-PDF
       corpus, which lives outside the repository:
       1. `borax resolve` a file outside the library, and check that
          `extracted.json` appears under the data directory.
@@ -518,7 +518,7 @@ nothing, as Retry with no own identifier does today.
       anything invented and for anything dropped from the old text.
       Check the `#+AI_PASS` line the doc writer adds. Answer or remove
       every `TODO(docs)`.
-- [ ] 9.4 Implementer, in `openspec/STATE.md`:
+- [x] 9.4 Implementer, in `openspec/STATE.md`:
       - add a paragraph for this change after the `library-identity`
         paragraph;
       - in the `supply-identifiers-interactively` paragraph, the

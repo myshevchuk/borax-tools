@@ -239,16 +239,21 @@ pub enum Event {
     /// What became of an evidence write to the content index made after
     /// a verdict: the move's, for a record an operator reached —
     /// supplied, or accepted over a conflict — or a retried lookup of
-    /// the file's own identifier.
+    /// the file's own identifier; or `reconcile`'s, restoring an
+    /// operator decision the library holds.
     ///
-    /// Follows the file's [`Event::Renamed`] and any
-    /// [`Event::LibraryAdmission`], and is emitted for no other file
-    /// in a rename: the resolution's own `content_index.write` reads
-    /// `awaiting-acceptance` for exactly these. `write` is
-    /// [`WriteStep::Written`] or [`WriteStep::Failed`]; a failure is
-    /// evidence and never a failure of the run. Counts toward no total.
+    /// In a rename, follows the file's [`Event::Renamed`] and any
+    /// [`Event::LibraryAdmission`], and is emitted for no other file:
+    /// the resolution's own `content_index.write` reads
+    /// `awaiting-acceptance` for exactly these. In a reconcile, one
+    /// precedes the totals for each restoration written or failed.
+    /// `write` is [`WriteStep::Written`] or [`WriteStep::Failed`]; a
+    /// failure is evidence and never a failure of the run. Counts toward
+    /// no total.
     ContentIndexWrite {
-        /// The file, at the path it holds after the move.
+        /// The file: in a rename, at the path it holds after the move;
+        /// in a reconcile, the artifact the record holding the decision
+        /// names.
         path: PathBuf,
         /// The content hash whose entry was written, as `sha256-<hex>`.
         hash: String,
@@ -778,8 +783,13 @@ pub enum Admission {
 pub enum Adoption {
     /// The orphan now has an artifact record, `id`, linked to the item
     /// `item`: one the library already held for an identifier of the
-    /// cached record, or one minted from that record.
-    Recorded { id: String, item: String },
+    /// cached record, or one minted from that record. `retrieval` is
+    /// where the record was read: a service's response cache.
+    Recorded {
+        id: String,
+        item: String,
+        retrieval: RetrievedFrom,
+    },
     /// The orphan's bytes are already in the history of the artifact
     /// record `id`, so it was left an orphan.
     ///
@@ -791,13 +801,18 @@ pub enum Adoption {
     /// The orphan could not be read, with `message` as the filesystem
     /// put it, so the content index was never asked about it.
     Unreadable { message: String },
-    /// The index answered and the record could not be written, with
-    /// `message` as the filesystem put it. The orphan is still one, and
-    /// the next adoption tries it again.
+    /// A record was found and could not be written, with `message` as
+    /// the filesystem put it. The orphan is still one, and the next
+    /// adoption tries it again.
     Unwritten { message: String },
-    /// The content index holds no record for the orphan's bytes, so
+    /// The content index holds no evidence for the orphan's bytes, so
     /// there was nothing to adopt it from and it is still an orphan.
     Unindexed,
+    /// The content index knows the orphan's bytes as `identifier`, and
+    /// no response cache holds a record for it, so it is still an
+    /// orphan. A resolution that fetches the record lets a later
+    /// adoption record it.
+    Unanswered { identifier: String },
 }
 
 /// Which library condition a [`Event::LibraryCondition`] names.
@@ -2213,7 +2228,7 @@ fn what_was_extracted(extraction: &Extraction) -> String {
 /// for the human rendering of [`Event::LibraryAdoption`].
 fn what_was_adopted(adoption: &Adoption) -> String {
     match adoption {
-        Adoption::Recorded { id, item } => {
+        Adoption::Recorded { id, item, .. } => {
             format!("adopted as artifact {id} of item {item}")
         }
         Adoption::Held { id } => format!(
@@ -2229,6 +2244,11 @@ fn what_was_adopted(adoption: &Adoption) -> String {
         Adoption::Unindexed => {
             "the content index holds no record of its bytes, so it is still an orphan".to_string()
         }
+        Adoption::Unanswered { identifier } => format!(
+            "the content index knows its bytes as {}, but no response cache holds that \
+             record, so it is still an orphan; borax resolve fetches it",
+            escaped(identifier)
+        ),
     }
 }
 

@@ -31,6 +31,7 @@ use borax_core::library::{
 };
 use borax_core::record::Record;
 use borax_core::template::slug;
+use borax_sources::source::SourceName;
 use borax_sources::store::{create_atomically, hash_file, write_atomically};
 use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, value};
 use uuid::Uuid;
@@ -38,7 +39,7 @@ use uuid::Uuid;
 use crate::config::OVERRIDE_FILE;
 use crate::event::{
     AcceptedBy, AcceptedItemCause, Admission, Adoption, Condition, Diagnostic, Event, Extraction,
-    Finding, Level, LibraryAnswer, Repair,
+    Finding, Level, LibraryAnswer, Repair, RetrievedFrom,
 };
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
@@ -2699,6 +2700,55 @@ pub fn reconciliation_events(reconciliation: &Reconciliation) -> Vec<Event> {
     events
 }
 
+/// An operator decision a library's records hold for some bytes, as
+/// the content index is owed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorDecision {
+    /// The artifact the record holding the decision names, as a full
+    /// path.
+    pub path: PathBuf,
+    /// The bytes the decision is about.
+    pub hash: ContentHash,
+    /// The decision: evidence of origin `supplied` or `overridden`.
+    pub evidence: IdentificationEvidence,
+}
+
+/// Every operator decision the artifact records of the library rooted
+/// at `root` hold: one per distinct hash, with the newest operator
+/// evidence a record's history holds for it
+/// ([`ArtifactRecord::operator_evidence_for`]).
+///
+/// A hash no entry gives operator evidence for has no decision. Where
+/// several records hold decisions for the same hash, the record read
+/// last in path order gives it. Decisions are listed in the order their
+/// hashes were first met, records in path order and each history oldest
+/// first. The store is read afresh; a record file that cannot be read
+/// costs its own decisions and no other. Nothing is written.
+pub fn operator_decisions(root: &Path) -> Vec<OperatorDecision> {
+    let mut decisions: Vec<OperatorDecision> = Vec::new();
+    let mut at: BTreeMap<ContentHash, usize> = BTreeMap::new();
+    for record in ArtifactStore::read(root).iter() {
+        for entry in &record.history {
+            let Some(evidence) = record.operator_evidence_for(&entry.hash) else {
+                continue;
+            };
+            let decision = OperatorDecision {
+                path: relative_to(root, &record.path),
+                hash: entry.hash.clone(),
+                evidence: evidence.clone(),
+            };
+            match at.get(&entry.hash) {
+                Some(&index) => decisions[index] = decision,
+                None => {
+                    at.insert(entry.hash.clone(), decisions.len());
+                    decisions.push(decision);
+                }
+            }
+        }
+    }
+    decisions
+}
+
 /// The artifact record naming `path` in the library rooted at `root`,
 /// or `None` when no record names it.
 ///
@@ -3141,20 +3191,46 @@ impl Adoptions {
     }
 }
 
+/// The record an adoption lookup found for an orphan's bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Adopted {
+    /// The record found.
+    pub record: Record,
+    /// The identifier the record was found by: the one the content
+    /// index answers with for the bytes.
+    pub identifier: Identifier,
+    /// The service whose stored answer the record is.
+    pub service: SourceName,
+}
+
+/// Why an adoption lookup found no record for an orphan's bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unadopted {
+    /// The content index answers with no evidence for the bytes.
+    Unindexed,
+    /// The content index answers with `identifier`, and no stored
+    /// answer holds a record for it.
+    Unanswered { identifier: Identifier },
+}
+
 /// Adopt the orphans of the library rooted at `root`: record each one
-/// whose bytes `lookup` has a record for.
+/// whose bytes `lookup` finds a record for.
 ///
 /// Each orphan ([`orphans`]) is hashed and its hash handed to
-/// `lookup`, which is the content index in a run. Where it answers, the
-/// orphan is admitted exactly as an applying run admits a file it
-/// found already named ([`admit`], with no held record and no
-/// re-identification): the item the library holds for one of the
-/// record's identifiers is linked, or one is minted from the record
-/// and written at the name `key` renders for it. The store is re-read
-/// on every admission, so a second orphan of the work a first one
-/// minted an item for links to that item. Where `lookup` answers
-/// nothing, the orphan is left as it is and reported
-/// [`Adoption::Unindexed`].
+/// `lookup`, which in a run reads the content index's evidence and the
+/// response cache. Where it finds a record, the orphan is admitted
+/// exactly as an applying run admits a file it found already named
+/// ([`admit`], with no held record and no re-identification), and its
+/// history entry carries the identifier the record was found by, with
+/// origin `adopted`: the item the library holds for one of the
+/// record's identifiers is linked, or one is minted from the record and
+/// written at the name `key` renders for it. The store is re-read on
+/// every admission, so a second orphan of the work a first one minted
+/// an item for links to that item. [`Adoption::Recorded`] names the
+/// service's response cache as the record's retrieval. Where `lookup`
+/// finds none, the orphan is left as it is and reported
+/// [`Adoption::Unindexed`] or [`Adoption::Unanswered`], as `lookup`
+/// says.
 ///
 /// An orphan whose hash is in the history of a record already in the
 /// store, or of one this run wrote for an earlier orphan, is left an
@@ -3178,7 +3254,7 @@ impl Adoptions {
 /// written [`Adoption::Unwritten`], each still an orphan afterwards.
 pub fn adopt(
     root: &Path,
-    lookup: &dyn Fn(&ContentHash) -> Option<Record>,
+    lookup: &dyn Fn(&ContentHash) -> Result<Adopted, Unadopted>,
     key: &mut dyn FnMut(&Record, &ContentHash) -> Option<String>,
     run: RunId,
     timestamp: &str,
@@ -3212,9 +3288,22 @@ pub fn adopt(
             adoptions.push((relative, Adoption::Held { id }));
             continue;
         }
-        let Some(record) = lookup(&hash) else {
-            adoptions.push((relative, Adoption::Unindexed));
-            continue;
+        let found = match lookup(&hash) {
+            Ok(found) => found,
+            Err(Unadopted::Unindexed) => {
+                adoptions.push((relative, Adoption::Unindexed));
+                continue;
+            }
+            Err(Unadopted::Unanswered { identifier }) => {
+                let identifier = identifier.to_string();
+                adoptions.push((relative, Adoption::Unanswered { identifier }));
+                continue;
+            }
+        };
+        let record = found.record;
+        let evidence = IdentificationEvidence {
+            identifier: found.identifier,
+            origin: EvidenceOrigin::Adopted,
         };
 
         let key = key(&record, &hash);
@@ -3226,7 +3315,7 @@ pub fn adopt(
                 hash: &hash,
                 held: None,
                 reidentified: false,
-                evidence: None,
+                evidence: Some(&evidence),
                 key: key.as_deref(),
                 run: run.clone(),
                 timestamp,
@@ -3240,6 +3329,9 @@ pub fn adopt(
                 Adoption::Recorded {
                     id: admitted.artifact.to_string(),
                     item: admitted.item.to_string(),
+                    retrieval: RetrievedFrom::ServiceCache {
+                        service: found.service.as_str().to_string(),
+                    },
                 }
             }
             Err(unrecorded) => Adoption::Unwritten {

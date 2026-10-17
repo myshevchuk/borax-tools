@@ -1,11 +1,12 @@
-//! The cache on disk: where it lives, how a key becomes a file, and
-//! the index that recognises a file by its contents.
+//! The stores on disk: where the response cache and the content index
+//! live, how a key becomes a file, and the index that recognises a file
+//! by its contents.
 //!
 //! [`crate::cache`] defines what a cache is, and [`IndexStore`] where
 //! the content index's facts are kept; this module is the one adapter
 //! that touches the filesystem. A read degrades to a miss and
 //! a write to a reported [`CacheWrite::Failed`] rather than an error,
-//! so a cache directory that is unreadable, full, or half-written costs
+//! so a directory that is unreadable, full, or half-written costs
 //! round-trips and never a run.
 
 use std::ffi::OsString;
@@ -165,12 +166,11 @@ fn is_safe_segment(segment: &str) -> bool {
             .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '.' | '-' | '_'))
 }
 
-/// The key a record resolved from a file with hash `hash` is stored
-/// under.
+/// `content/<hash>`: the key under which the entry for `hash` keeps
+/// its facts ([`extracted_key`], [`operator_key`]).
 ///
-/// Formed as `content/<hash>`, which shares the store with the
-/// identifier-keyed entries without colliding: no source is named
-/// `content`.
+/// No source is named `content`, so the key never collides with an
+/// identifier-keyed response under the same root.
 pub fn content_key(hash: &ContentHash) -> String {
     format!("content/{hash}")
 }
@@ -206,10 +206,11 @@ pub trait IndexStore: Sync {
     fn write_fact(&self, key: &str, text: &str) -> CacheWrite;
 }
 
-/// A [`Cache`] backed by a directory of JSON files.
+/// A [`Cache`] and an [`IndexStore`] backed by a directory of JSON
+/// files.
 ///
 /// The directory is created lazily, on the first successful write. A
-/// [`FileCache`] over a path that cannot be created is a cache that
+/// [`FileCache`] over a path that cannot be created is a store that
 /// always misses, and whose every write reports
 /// [`CacheWrite::Failed`].
 #[derive(Debug, Clone)]
@@ -478,11 +479,8 @@ fn temporary_name() -> String {
 /// identification evidence as two facts, read and written through an
 /// [`IndexStore`]: the extracted identifier and the operator's
 /// evidence, each replaced whole by its own writer and never merged
-/// with the other. The index is persistent or in-memory exactly as the
-/// store it is given is.
-///
-/// Over a [`Cache`], the index also keeps a record per hash under
-/// [`content_key`].
+/// with the other. No record is kept. The index is persistent or
+/// in-memory exactly as the store it is given is.
 #[derive(Debug)]
 pub struct ContentIndex<S> {
     store: S,
@@ -492,19 +490,6 @@ impl<S> ContentIndex<S> {
     /// An index keeping its entries in `store`.
     pub fn new(store: S) -> ContentIndex<S> {
         ContentIndex { store }
-    }
-}
-
-impl<S: Cache> ContentIndex<S> {
-    /// The record kept for `hash`, if any.
-    pub fn get(&self, hash: &ContentHash) -> Option<Record> {
-        self.store.get(&content_key(hash))
-    }
-
-    /// Keep `record` for any file hashing to `hash`, and return what the
-    /// underlying cache's write returned.
-    pub fn put(&self, hash: &ContentHash, record: &Record) -> CacheWrite {
-        self.store.put(&content_key(hash), record)
     }
 }
 
