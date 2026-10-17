@@ -13,6 +13,7 @@
 //! stream's own types in [`crate::event`].
 
 use borax_core::identifier::{Identifier, SuppliedError};
+use borax_core::library::{EvidenceOrigin, IdentificationEvidence};
 use borax_core::record::Record;
 use borax_pdf::tiered::Tier;
 use borax_sources::cache::CacheWrite;
@@ -20,7 +21,7 @@ use borax_sources::conflict::{Conflict, Insufficient};
 use borax_sources::source::{Retrieval, SourceError, SourceName};
 
 use crate::event::{
-    Acceptance, Claim, ContentIndexSection, Displaced as DisplacedStep, Extraction,
+    Acceptance, Claim, ContentIndexSection, Displaced as DisplacedStep, EvidenceStep, Extraction,
     ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep, IdentifierOrigin,
     IndexReadStep, LibraryAnswer, LibraryStep, LookupRound as LookupRoundStep, LookupStep,
     MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome,
@@ -35,7 +36,7 @@ pub struct Evidence {
     /// What the run's library said about the file.
     pub library: Consultation,
     /// What the content index did: the read, and the write of the
-    /// record reached.
+    /// identifier the record was reached by.
     pub content_index: IndexEvidence,
     /// What extraction found, and the titles the file claims.
     pub extraction: ExtractionEvidence,
@@ -98,7 +99,9 @@ impl Evidence {
             },
             content_index: ContentIndexSection {
                 read: match &self.content_index.read {
-                    IndexRead::Hit => IndexReadStep::Hit,
+                    IndexRead::Hit(evidence) => IndexReadStep::Hit {
+                        evidence: EvidenceStep::of(evidence),
+                    },
                     IndexRead::Miss => IndexReadStep::Miss,
                     IndexRead::Bypassed => IndexReadStep::Bypassed,
                     IndexRead::Unavailable { message } => IndexReadStep::Unavailable {
@@ -163,13 +166,14 @@ impl Evidence {
     ///    whose record was returned — the item the file's bytes were
     ///    accepted under when the answer names one, and the record's
     ///    link otherwise.
-    /// 3. The content index answered.
     ///
-    /// `None` when none holds, which is evidence of no record.
+    /// `None` when neither holds, which is evidence of no record. A
+    /// content-index answer is an identifier, so the record it led to
+    /// was retrieved by its lookup, as any other lookup's is.
     ///
     /// The lookup is asked first because an operator's lookup can sit
-    /// on evidence that also records a library answer or an index hit,
-    /// and the record it reached came from the service.
+    /// on evidence that also records a library answer, and the record
+    /// it reached came from the service.
     pub fn retrieval(&self) -> Option<RecordRetrieval> {
         if let Some(found) = self.lookup.found() {
             return Some(RecordRetrieval::from_attempt(found));
@@ -190,10 +194,7 @@ impl Evidence {
             });
         }
 
-        match self.content_index.read {
-            IndexRead::Hit => Some(RecordRetrieval::ContentIndex),
-            _ => None,
-        }
+        None
     }
 }
 
@@ -221,16 +222,19 @@ impl Consultation {
 pub struct IndexEvidence {
     /// Whether the index answered for the file's hash.
     pub read: IndexRead,
-    /// What became of writing the record reached under the file's hash.
+    /// What became of writing the identifier the record was reached by
+    /// as the file's extracted evidence.
     pub write: IndexWrite,
 }
 
 /// What reading the content index came to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexRead {
-    /// The index held a record for the file's hash.
-    Hit,
-    /// The index held nothing for the file's hash.
+    /// The index answered for the file's hash with this evidence, whose
+    /// identifier is then looked up.
+    Hit(IdentificationEvidence),
+    /// The index answered with nothing for the file's hash: it holds no
+    /// entry, or one that answers with no evidence.
     Miss,
     /// The run turned the cache off, so the index was not read.
     Bypassed,
@@ -242,7 +246,7 @@ pub enum IndexRead {
     NotAttempted(Unattempted),
 }
 
-/// What writing the record reached to the content index came to.
+/// What writing a file's evidence to the content index came to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexWrite {
     /// The write was made, with the store's result.
@@ -579,15 +583,20 @@ pub enum Origin {
     Extracted(Tier),
     /// An operator supplied it.
     Operator,
+    /// The content index answered with it, from evidence of this
+    /// origin: `extracted`, `supplied` or `overridden`.
+    Indexed(EvidenceOrigin),
 }
 
 impl Origin {
     /// The origin as a resolution event reports it, without the pass,
-    /// which the event's extraction result states.
+    /// which the event's extraction result states, and without the
+    /// index's evidence origin, which the content-index read states.
     pub(crate) fn identifier_origin(self) -> IdentifierOrigin {
         match self {
             Origin::Extracted(_) => IdentifierOrigin::Extracted,
             Origin::Operator => IdentifierOrigin::Operator,
+            Origin::Indexed(_) => IdentifierOrigin::ContentIndex,
         }
     }
 }
@@ -654,8 +663,6 @@ fn not_written(reason: Unattempted) -> WriteStep {
 pub enum RecordRetrieval {
     /// The file's library item, through the artifact record `artifact`.
     Library { artifact: String, item: String },
-    /// The content index, under the file's hash.
-    ContentIndex,
     /// `service`'s response cache. No request was sent.
     ServiceCache { service: SourceName },
     /// `service`, over the network.
@@ -682,7 +689,6 @@ impl RecordRetrieval {
             RecordRetrieval::Library { artifact, item } => {
                 RetrievedFrom::Library { artifact, item }
             }
-            RecordRetrieval::ContentIndex => RetrievedFrom::ContentIndex,
             RecordRetrieval::ServiceCache { service } => RetrievedFrom::ServiceCache {
                 service: service.as_str().to_string(),
             },

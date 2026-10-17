@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::content::ContentHash;
+use crate::identifier::{self, Identifier};
 use crate::record::Record;
 
 /// The UUID `text` spells, or `None` unless `text` is the canonical
@@ -431,12 +432,81 @@ impl Item {
     }
 }
 
+/// How an identifier came to identify a file's bytes.
+///
+/// Written as its [`as_str`](EvidenceOrigin::as_str) word on a history
+/// entry and in the content index. `Supplied` and `Overridden` are the
+/// operator origins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EvidenceOrigin {
+    /// An extraction pass read the identifier from the bytes.
+    Extracted,
+    /// An operator supplied the identifier for the bytes.
+    Supplied,
+    /// An operator accepted the identifier's record over a title
+    /// conflict.
+    Overridden,
+    /// `borax adopt` recorded the bytes on the identifier.
+    Adopted,
+}
+
+impl EvidenceOrigin {
+    /// The origin's word: `extracted`, `supplied`, `overridden` or
+    /// `adopted`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvidenceOrigin::Extracted => "extracted",
+            EvidenceOrigin::Supplied => "supplied",
+            EvidenceOrigin::Overridden => "overridden",
+            EvidenceOrigin::Adopted => "adopted",
+        }
+    }
+
+    /// The origin `text` names, or `None` unless `text` is exactly one
+    /// of the four words [`as_str`](EvidenceOrigin::as_str) writes.
+    pub fn parse(text: &str) -> Option<EvidenceOrigin> {
+        match text {
+            "extracted" => Some(EvidenceOrigin::Extracted),
+            "supplied" => Some(EvidenceOrigin::Supplied),
+            "overridden" => Some(EvidenceOrigin::Overridden),
+            "adopted" => Some(EvidenceOrigin::Adopted),
+            _ => None,
+        }
+    }
+
+    /// Whether the origin is an operator's decision: `Supplied` or
+    /// `Overridden`.
+    pub fn is_operator(self) -> bool {
+        matches!(self, EvidenceOrigin::Supplied | EvidenceOrigin::Overridden)
+    }
+}
+
+impl fmt::Display for EvidenceOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The identifier a file's bytes were identified by, and how.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IdentificationEvidence {
+    pub identifier: Identifier,
+    pub origin: EvidenceOrigin,
+}
+
 /// One moment in an artifact's hash history: the bytes, who recorded
-/// them when, and the item they were accepted under.
+/// them when, the item they were accepted under, and the evidence they
+/// were identified by.
 ///
 /// `timestamp` and `tool_version` are rendered by the caller and stored
 /// verbatim; nothing here parses or reformats them.
+///
+/// The evidence is written after `item` as the two keys `identifier`
+/// and `origin`, both or neither. Text holding one without the other,
+/// an `identifier` [`identifier::supplied`] does not accept, or an
+/// `origin` [`EvidenceOrigin::parse`] does not accept does not parse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "HashEntryFile", into = "HashEntryFile")]
 pub struct HashEntry {
     /// The artifact's content hash as this run found it.
     pub hash: ContentHash,
@@ -447,8 +517,94 @@ pub struct HashEntry {
     /// The item these bytes were accepted under. `None` for an entry
     /// written before entries named items, which is not written with an
     /// `item` key and reads back as it was written.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<ItemId>,
+    /// The evidence these bytes were identified by. `None` for an entry
+    /// whose admission carried none, and for one written before entries
+    /// carried evidence; such an entry is written with neither key and
+    /// reads back as it was written.
+    pub evidence: Option<IdentificationEvidence>,
+}
+
+/// The shape of a history entry as text: the evidence as two optional
+/// strings, checked by the conversion to [`HashEntry`].
+#[derive(Serialize, Deserialize)]
+struct HashEntryFile {
+    hash: ContentHash,
+    run: RunId,
+    timestamp: String,
+    tool_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    item: Option<ItemId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+}
+
+impl TryFrom<HashEntryFile> for HashEntry {
+    type Error = Malformed;
+
+    fn try_from(file: HashEntryFile) -> Result<HashEntry, Malformed> {
+        let evidence = match (file.identifier, file.origin) {
+            (None, None) => None,
+            (Some(identifier), Some(origin)) => Some(evidence_from_text(&identifier, &origin)?),
+            (Some(_), None) => {
+                return Err(Malformed::Toml(
+                    "a history entry has an identifier and no origin".to_string(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(Malformed::Toml(
+                    "a history entry has an origin and no identifier".to_string(),
+                ));
+            }
+        };
+        Ok(HashEntry {
+            hash: file.hash,
+            run: file.run,
+            timestamp: file.timestamp,
+            tool_version: file.tool_version,
+            item: file.item,
+            evidence,
+        })
+    }
+}
+
+impl From<HashEntry> for HashEntryFile {
+    fn from(entry: HashEntry) -> HashEntryFile {
+        let (identifier, origin) = match entry.evidence {
+            Some(evidence) => (
+                Some(evidence.identifier.to_string()),
+                Some(evidence.origin.as_str().to_string()),
+            ),
+            None => (None, None),
+        };
+        HashEntryFile {
+            hash: entry.hash,
+            run: entry.run,
+            timestamp: entry.timestamp,
+            tool_version: entry.tool_version,
+            item: entry.item,
+            identifier,
+            origin,
+        }
+    }
+}
+
+/// The evidence an `identifier` and an `origin` read from text state.
+///
+/// Fails with [`Malformed`] when `identifier` is not an identifier's
+/// text, as [`identifier::supplied`] reads one, or `origin` is not one
+/// of the four origin words.
+pub(crate) fn evidence_from_text(
+    identifier: &str,
+    origin: &str,
+) -> Result<IdentificationEvidence, Malformed> {
+    let identifier = identifier::supplied(identifier)
+        .map_err(|_| Malformed::Toml(format!("not an identifier: {identifier:?}")))?;
+    let origin = EvidenceOrigin::parse(origin)
+        .ok_or_else(|| Malformed::Toml(format!("not an evidence origin: {origin:?}")))?;
+    Ok(IdentificationEvidence { identifier, origin })
 }
 
 /// Authoritative state about one artifact, under the artifact's
@@ -531,6 +687,28 @@ impl ArtifactRecord {
         entry.item.as_ref().or(self.item.as_ref())
     }
 
+    /// The evidence of the newest entry holding `hash` that carries
+    /// any, or `None` when no entry holding `hash` does.
+    pub fn evidence_for(&self, hash: &ContentHash) -> Option<&IdentificationEvidence> {
+        self.history
+            .iter()
+            .rev()
+            .filter(|entry| &entry.hash == hash)
+            .find_map(|entry| entry.evidence.as_ref())
+    }
+
+    /// The evidence of the newest entry holding `hash` whose evidence
+    /// has an operator origin, or `None` when no entry holding `hash`
+    /// has one.
+    pub fn operator_evidence_for(&self, hash: &ContentHash) -> Option<&IdentificationEvidence> {
+        self.history
+            .iter()
+            .rev()
+            .filter(|entry| &entry.hash == hash)
+            .filter_map(|entry| entry.evidence.as_ref())
+            .find(|evidence| evidence.origin.is_operator())
+    }
+
     /// Push `entry` onto the history, first restating the newest bytes
     /// under the link a person may have corrected by hand.
     ///
@@ -539,8 +717,10 @@ impl ArtifactRecord {
     /// the newest entry's, `link_as_read` is `Some(L)`, and the newest
     /// entry names an item other than `L` or none, a restatement of the
     /// newest hash under `L` is pushed first, stamped with `entry`'s run,
-    /// timestamp and tool version. So a link corrected while those bytes
-    /// were newest keeps answering for them once later bytes are newest.
+    /// timestamp and tool version, and carrying no evidence: the earlier
+    /// entry for those bytes keeps its own. So a link corrected while
+    /// those bytes were newest keeps answering for them once later bytes
+    /// are newest.
     ///
     /// Whether an entry is to be appended at all is the caller's
     /// decision; this never declines to push `entry`.
@@ -555,6 +735,7 @@ impl ArtifactRecord {
                 timestamp: entry.timestamp.clone(),
                 tool_version: entry.tool_version.clone(),
                 item: Some(link.clone()),
+                evidence: None,
             };
             self.history.push(restatement);
         }

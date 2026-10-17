@@ -32,7 +32,7 @@ use borax_sources::http::Politeness;
 use borax_sources::openalex::OpenAlexClient;
 use borax_sources::pace::Paced;
 use borax_sources::source::{Source, SourceName};
-use borax_sources::store::{ContentIndex, FileCache, default_cache_root};
+use borax_sources::store::{ContentIndex, FileCache, IndexStore, default_cache_root};
 use borax_sources::transport::UreqTransport;
 
 use crate::bib::{BibConfig, BibFiles, Keyed, RealBibFiles, merge_master, write_sidecar};
@@ -403,10 +403,10 @@ pub struct Streams<'a> {
 /// Every field is a seam already tested against a fake, so a whole
 /// invocation runs in a test with neither a network, a PDF engine, nor
 /// a disk.
-pub struct Adapters<'a, C: Cache> {
+pub struct Adapters<'a, S: Cache + IndexStore> {
     pub documents: &'a dyn Documents,
     pub sources: &'a [&'a dyn Source],
-    pub index: &'a ContentIndex<C>,
+    pub index: &'a ContentIndex<S>,
     pub filesystem: &'a dyn Filesystem,
     pub bib_files: &'a dyn BibFiles,
     /// The response cache's directory, or `None` when the system names
@@ -721,10 +721,10 @@ pub enum Prepared {
 /// consulting the library is not recording. Nothing about that read can
 /// refuse a run: a store that is not there is an empty one, and one
 /// that cannot be read is reported file by file.
-pub fn preflight<C: Cache>(
+pub fn preflight<S: Cache + IndexStore>(
     command: &Command,
     configs: &Configs,
-    adapters: &Adapters<C>,
+    adapters: &Adapters<S>,
 ) -> Result<Prepared, Diagnostic> {
     match command {
         Command::Config { .. }
@@ -799,7 +799,7 @@ pub fn preflight<C: Cache>(
 
 /// The stores of the run's library, read once, or `None` for a run in
 /// no library.
-fn run_library<C: Cache>(adapters: &Adapters<C>) -> Option<crate::library::Stores> {
+fn run_library<S: Cache + IndexStore>(adapters: &Adapters<S>) -> Option<crate::library::Stores> {
     adapters
         .collection_root
         .as_deref()
@@ -1032,11 +1032,11 @@ fn tables_used(prepared: &Prepared) -> Vec<TableUsed> {
 /// what a run found that is about the run rather than about any one
 /// file, such as an unreadable identity file in the library a
 /// `rename`, `reconcile` or `adopt` wrote into.
-pub fn emit_events<C: Cache>(
+pub fn emit_events<S: Cache + IndexStore>(
     prepared: &Prepared,
     command: &Command,
     configs: &Configs,
-    adapters: &Adapters<'_, C>,
+    adapters: &Adapters<'_, S>,
     session: &mut Session<'_>,
     sink: &mut dyn Sink,
 ) -> Aftermath {
@@ -1154,10 +1154,10 @@ pub struct Aftermath {
 ///
 /// Returns whatever [`preflight`] refuses the run for, in which case
 /// nothing was emitted and nothing was touched.
-pub fn events_for<C: Cache>(
+pub fn events_for<S: Cache + IndexStore>(
     command: &Command,
     configs: &Configs,
-    adapters: &Adapters<C>,
+    adapters: &Adapters<S>,
     session: &mut Session<'_>,
 ) -> Result<Vec<Event>, Diagnostic> {
     let prepared = preflight(command, configs, adapters)?;
@@ -1198,10 +1198,10 @@ fn cache_report(clear: bool, root: &Path) -> Result<Event, Diagnostic> {
 /// file and asked about every file ([`resolve_batch`]). Returns the
 /// warning a library whose artifact store could not be read whole calls
 /// for, once for the run ([`consultation_warning`]).
-fn resolve_events<C: Cache>(
+fn resolve_events<S: Cache + IndexStore>(
     paths: &[PathBuf],
     configs: &Configs,
-    adapters: &Adapters<C>,
+    adapters: &Adapters<S>,
     sink: &mut dyn Sink,
 ) -> Option<Diagnostic> {
     let library = run_library(adapters);
@@ -1309,13 +1309,13 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// [`crate::library::StoreWriter`] over the library, and the run
 /// returns [`crate::library::identity_fault_warning`] too when that
 /// writer wrote into a library whose identity file could not be read.
-fn rename_events<C: Cache>(
+fn rename_events<S: Cache + IndexStore>(
     groups: &[Group],
     apply: bool,
     session: &mut Session<'_>,
     snapshot: Option<&crate::library::Stores>,
     configs: &Configs,
-    adapters: &Adapters<C>,
+    adapters: &Adapters<S>,
     sink: &mut dyn Sink,
 ) -> Aftermath {
     let at = (adapters.now)();
@@ -1682,17 +1682,21 @@ fn rename_events<C: Cache>(
                         // the move, when the write had not happened, so
                         // it cannot carry the result. A file with no
                         // hash has nothing to be remembered under, and
-                        // so nothing to report.
+                        // one whose evidence the index already holds
+                        // has nothing to write, so neither reports.
+                        // Inside a library this follows the admission,
+                        // so the library holds the decision first.
                         if remember
                             && let Event::Renamed { target, .. } = &event
-                            && let IndexWrite::Attempted(write) = crate::pipeline::remember(
-                                adapters.index,
-                                file.hash.as_ref(),
-                                &file.record,
-                            )
+                            && let (Some(hash), Some(evidence)) =
+                                (file.hash.as_ref(), file.identification())
+                            && let IndexWrite::Attempted(write) =
+                                crate::pipeline::remember(adapters.index, &file)
                         {
                             sink.emit(Event::ContentIndexWrite {
                                 path: target.clone(),
+                                hash: hash.to_string(),
+                                entry: crate::event::WrittenEntry::evidence(&evidence),
                                 write: crate::evidence::write_step(&write),
                             });
                         }
@@ -1799,14 +1803,14 @@ enum Settled {
     CarryOut {
         file: FileRecord,
         decision: PlannedRename,
-        /// Whether the record is written to the content index once the
-        /// move is made.
+        /// Whether the evidence the record was reached by is written to
+        /// the content index once the move is made.
         ///
-        /// A record the run resolved on its own was written as it
-        /// resolved; one the operator reached — by supplying an
-        /// identifier, by accepting a conflict, by asking the services
-        /// again — is written when they accept it, and their
-        /// acceptance is the rename.
+        /// A record the run resolved on its own wrote its evidence as it
+        /// resolved, or was reached by the index's own; one the operator
+        /// reached — by supplying an identifier, by accepting a
+        /// conflict, by asking the services again — is written when
+        /// they accept it, and their acceptance is the rename.
         remember: bool,
     },
     /// Leave the file as it is and report `reason`, with the record
@@ -1930,13 +1934,13 @@ enum Situation {
 /// A run whose mode says to ask and that has nowhere to ask stops
 /// rather than carrying on, since a move nobody was asked about is the
 /// one thing it may not make.
-fn asked<C: Cache>(
+fn asked<S: Cache + IndexStore>(
     session: &mut Session<'_>,
     standing: Standing,
     about: &About<'_>,
     planning: &mut Planning<'_>,
     lookups: &mut Lookups<'_>,
-    adapters: &Adapters<'_, C>,
+    adapters: &Adapters<'_, S>,
     account: Option<&Account<'_>>,
 ) -> Settled {
     // The verdict the run is holding for the file, which is what its
@@ -1961,8 +1965,8 @@ fn asked<C: Cache>(
     let mut own = match (verdict, refused) {
         (FileOutcome::Resolved(file), _) => Some(Offer {
             file,
-            // Written to the content index as it resolved, or served
-            // from it.
+            // Its evidence was written to the content index as it
+            // resolved, or is the index's own.
             kept: true,
         }),
         (FileOutcome::Skipped(_), Some(file)) => Some(Offer { file, kept: false }),
@@ -3114,12 +3118,14 @@ fn recorded(
 
     let key = key();
     let separated = matches!(change, Some(Change::Unaccepted));
+    let evidence = file.identification();
     let admitting = crate::library::Admitting {
         path: current,
         record: &file.record,
         hash,
         held: held.filter(|_| !separated),
         reidentified: reidentified(file),
+        evidence: evidence.as_ref(),
         key: key.as_deref(),
         run: borax_core::library::RunId::new(at),
         timestamp: at,
@@ -3253,6 +3259,7 @@ fn foreseen(
         hash,
         held: held.filter(|_| !separated),
         reidentified: reidentified(file),
+        evidence: file.identification().as_ref(),
         key: None,
         run: borax_core::library::RunId::new(at),
         timestamp: at,
@@ -3298,11 +3305,11 @@ fn reidentified(file: &FileRecord) -> bool {
 ///
 /// Each file is resolved and reported before the next is opened, so a
 /// reader watching a network-bound run sees it make progress.
-fn resolved_record<C: Cache>(
+fn resolved_record<S: Cache + IndexStore>(
     path: &Path,
     effective: &Effective,
     library: Option<&crate::library::Stores>,
-    adapters: &Adapters<C>,
+    adapters: &Adapters<S>,
     sink: &mut dyn Sink,
 ) -> Option<FileRecord> {
     let standing = crate::pipeline::standing(
@@ -3342,11 +3349,11 @@ fn resolved_record<C: Cache>(
 ///
 /// The lookups that found no row trail the whole run, as they do for
 /// [`rename_events`] and for the same reason.
-fn bib_events<C: Cache>(
+fn bib_events<S: Cache + IndexStore>(
     groups: &[Group],
     library: Option<&crate::library::Stores>,
     configs: &Configs,
-    adapters: &Adapters<C>,
+    adapters: &Adapters<S>,
     sink: &mut dyn Sink,
 ) {
     // Across groups, because a table is named once for the run however
@@ -3601,10 +3608,10 @@ fn log_failure(mandatory: bool, message: String) -> Opened {
 /// with neither a collection nor a state directory has nowhere to
 /// record itself, and a rename nothing recorded is a rename nothing can
 /// account for afterwards.
-fn open_log<C: Cache>(
+fn open_log<S: Cache + IndexStore>(
     cli: &Cli,
     configs: &Configs,
-    adapters: &Adapters<C>,
+    adapters: &Adapters<S>,
     mode: Mode,
     started: &Event,
 ) -> Opened {
@@ -3690,10 +3697,10 @@ fn write_event(log: &mut fs::File, event: &Event) -> io::Result<()> {
 /// all be read, or that it records artifacts which are no longer where
 /// it says — follows on `streams.err` once the stream has closed, which
 /// is the first moment the whole batch has been checked.
-pub fn dispatch<C: Cache>(
+pub fn dispatch<S: Cache + IndexStore>(
     cli: &Cli,
     configs: &Configs,
-    adapters: &Adapters<C>,
+    adapters: &Adapters<S>,
     session: &mut Session<'_>,
     streams: &mut Streams,
 ) -> Outcome {
@@ -3818,7 +3825,7 @@ fn applying(command: &Command, mode: Mode) -> bool {
 /// the same directory the run's configuration was — and the directory
 /// the command was given when neither did. A directory nobody marked is
 /// reported on as given: the marker buys writing rather than seeing.
-fn reported_root<C: Cache>(command: &Command, adapters: &Adapters<'_, C>) -> PathBuf {
+fn reported_root<S: Cache + IndexStore>(command: &Command, adapters: &Adapters<'_, S>) -> PathBuf {
     match &adapters.collection_root {
         Some(root) => root.clone(),
         None => library_directory(command.directory()),
@@ -3838,11 +3845,11 @@ fn reported_root<C: Cache>(command: &Command, adapters: &Adapters<'_, C>) -> Pat
 /// number of those results that found an identifier as
 /// `identifiable`. The survey's artifacts are the whole selection, and
 /// no service is asked anything either way.
-fn status_events<C: Cache>(
+fn status_events<S: Cache + IndexStore>(
     command: &Command,
     identify: bool,
     configs: &Configs,
-    adapters: &Adapters<'_, C>,
+    adapters: &Adapters<'_, S>,
     sink: &mut dyn Sink,
 ) {
     let surveyed = crate::library::survey(&reported_root(command, adapters));
@@ -3870,7 +3877,11 @@ fn status_events<C: Cache>(
 
 /// Write `validate`'s events into `sink`: one per finding, then one per
 /// condition, then the totals ([`crate::library::validation_events`]).
-fn validation_events<C: Cache>(command: &Command, adapters: &Adapters<'_, C>, sink: &mut dyn Sink) {
+fn validation_events<S: Cache + IndexStore>(
+    command: &Command,
+    adapters: &Adapters<'_, S>,
+    sink: &mut dyn Sink,
+) {
     let validation = crate::library::validate(&reported_root(command, adapters));
     for event in crate::library::validation_events(&validation) {
         sink.emit(event);
@@ -3894,12 +3905,12 @@ fn validation_events<C: Cache>(command: &Command, adapters: &Adapters<'_, C>, si
 /// Returns the warning a library whose identity file could not be read
 /// calls for, when the run wrote into it
 /// ([`crate::library::identity_fault_warning`]).
-fn reconcile_events<C: Cache>(
+fn reconcile_events<S: Cache + IndexStore>(
     command: &Command,
     rehash: bool,
     accept: &[PathBuf],
     configs: &Configs,
-    adapters: &Adapters<'_, C>,
+    adapters: &Adapters<'_, S>,
     sink: &mut dyn Sink,
 ) -> Option<Diagnostic> {
     let at = (adapters.now)();
@@ -3951,9 +3962,9 @@ fn reconcile_events<C: Cache>(
 /// Returns the warning a library whose identity file could not be read
 /// calls for, when the run recorded an orphan into it
 /// ([`crate::library::identity_fault_warning`]).
-fn adopt_events<C: Cache>(
+fn adopt_events<S: Cache + IndexStore>(
     library: &Group,
-    adapters: &Adapters<'_, C>,
+    adapters: &Adapters<'_, S>,
     sink: &mut dyn Sink,
 ) -> Option<Diagnostic> {
     let at = (adapters.now)();
@@ -4338,6 +4349,24 @@ impl Cache for ResponseCache {
         match self {
             ResponseCache::File(cache) => cache.put(key, record),
             ResponseCache::Memory(cache) => cache.put(key, record),
+        }
+    }
+}
+
+/// Content-index facts kept in the same place as the responses: under
+/// the cache directory, or in memory when the system names none.
+impl IndexStore for ResponseCache {
+    fn read_fact(&self, key: &str) -> Option<Result<String, String>> {
+        match self {
+            ResponseCache::File(cache) => cache.read_fact(key),
+            ResponseCache::Memory(cache) => cache.read_fact(key),
+        }
+    }
+
+    fn write_fact(&self, key: &str, text: &str) -> CacheWrite {
+        match self {
+            ResponseCache::File(cache) => cache.write_fact(key, text),
+            ResponseCache::Memory(cache) => cache.write_fact(key, text),
         }
     }
 }

@@ -16,9 +16,9 @@ use std::path::Path;
 use borax_core::record::{DateParts, EntryType, Name, Record};
 
 use crate::event::{
-    Acceptance, Claim, ClaimOrigin, Event, ExtractionResultStep, IdentifierOrigin, LibraryAnswer,
-    LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, SkipReason, TitlesStep,
-    rejected_identifiers, services_of, why_unanswered,
+    Acceptance, Claim, ClaimOrigin, Event, ExtractionResultStep, IdentifierOrigin, IndexReadStep,
+    LibraryAnswer, LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, SkipReason,
+    TitlesStep, rejected_identifiers, services_of, why_unanswered,
 };
 
 /// The move a description is about: where the file would go, and the
@@ -80,9 +80,10 @@ const NAMED_AUTHORS: usize = 3;
 /// The lines of a resolution, in order, leaving out every field the
 /// record does not hold: a rule carrying `position`; `name`; the
 /// identifier the run looked up and where it came from (the extraction
-/// pass, or `supplied`), or the record's own identifier where nothing
-/// was looked up; the services that supplied the record, and whether it
-/// came from an earlier run or the library; why the library could not
+/// pass, `supplied`, or the earlier run the content index has it from),
+/// or the record's own identifier where nothing was looked up; the
+/// services that supplied the record, and whether it came from the
+/// library; why the library could not
 /// answer for the file, where it could not; the record's type, title,
 /// authors, date of issue and container; what the file's own titles
 /// say — each title with where it was read, or that it claims none,
@@ -150,10 +151,7 @@ pub fn describe(
     // in the description a person takes away with them.
     //
     // Where nothing was looked up, the record's own identifier is named
-    // with no clause. A content-index answer looked nothing up: the
-    // index keeps records rather than the identifiers they were reached
-    // by, so a record reached last time by an arXiv identifier and
-    // carrying a DOI has nothing to say about where the DOI came from.
+    // with no clause.
     match looked_up(sections) {
         Some(looked_up) => description.whole("identifier", &looked_up),
         None if !identifier.is_empty() => description.whole("identifier", identifier),
@@ -314,8 +312,11 @@ pub(crate) fn escaped(text: &str) -> String {
 
 /// The identifier `sections` says was looked up, with where it came
 /// from — `from embedded metadata` or `from the text layer` for the
-/// file's own, as extraction's result names the pass, and `supplied`
-/// for an operator's — or `None` when nothing was looked up.
+/// file's own, as extraction's result names the pass; `supplied` for an
+/// operator's; and for the content index's, as the evidence on its read
+/// names its origin, `found by an earlier run`, `supplied in an earlier
+/// run` or `accepted over a title conflict in an earlier run` — or
+/// `None` when nothing was looked up.
 fn looked_up(sections: &Sections) -> Option<String> {
     let (identifier, origin) = match &sections.lookup {
         LookupStep::Attempted {
@@ -339,6 +340,15 @@ fn looked_up(sections: &Sections) -> Option<String> {
             })
         }
         (IdentifierOrigin::Extracted, _) => None,
+        (IdentifierOrigin::ContentIndex, _) => match &sections.content_index.read {
+            IndexReadStep::Hit { evidence } => match evidence.origin.as_str() {
+                "extracted" => Some("found by an earlier run"),
+                "supplied" => Some("supplied in an earlier run"),
+                "overridden" => Some("accepted over a title conflict in an earlier run"),
+                _ => None,
+            },
+            _ => None,
+        },
     };
     Some(match whence {
         Some(whence) => format!("{identifier}, {whence}"),
@@ -581,12 +591,11 @@ fn alike(field: &str, similarity: f64) -> String {
 }
 
 /// The `record` line: the services that supplied `record`
-/// ([`services_of`]), and whether it was kept from an earlier run or
-/// held by the library, as `retrieval` says. `None` when there is
-/// nothing to name.
+/// ([`services_of`]), and whether it was held by the library, as
+/// `retrieval` says. `None` when there is nothing to name.
 ///
-/// A content-index or library answer whose record names no service is
-/// named by where it was kept: `an earlier run`, or `the library`.
+/// A library answer whose record names no service is named by where it
+/// was kept: `the library`.
 fn record_from(record: &Record, retrieval: Option<&RetrievedFrom>) -> Option<String> {
     let named = services_of(record, retrieval)
         .into_iter()
@@ -596,8 +605,6 @@ fn record_from(record: &Record, retrieval: Option<&RetrievedFrom>) -> Option<Str
     let from = match (retrieval, named.is_empty()) {
         (Some(RetrievedFrom::Library { .. }), true) => "the library".to_string(),
         (Some(RetrievedFrom::Library { .. }), false) => format!("{named}, from the library"),
-        (Some(RetrievedFrom::ContentIndex), true) => "an earlier run".to_string(),
-        (Some(RetrievedFrom::ContentIndex), false) => format!("{named}, from an earlier run"),
         _ => named,
     };
     (!from.is_empty()).then_some(from)

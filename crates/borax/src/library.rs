@@ -26,8 +26,8 @@ use std::time::UNIX_EPOCH;
 use borax_core::content::ContentHash;
 use borax_core::identifier::{Identifier, supplied};
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, LibraryId, LibraryIdentity, RunId,
-    is_library_relative, is_well_formed_hash, name_uuid,
+    ArtifactId, ArtifactRecord, EvidenceOrigin, HashEntry, IdentificationEvidence, Item, ItemId,
+    LibraryId, LibraryIdentity, RunId, is_library_relative, is_well_formed_hash, name_uuid,
 };
 use borax_core::record::Record;
 use borax_core::template::slug;
@@ -1430,12 +1430,16 @@ impl Stores {
 /// `link_as_read` is the link the record carried as it was read,
 /// before the admission assigned one. Bytes the history already holds
 /// are appended only when the admission decided which item they belong
-/// to, and they do not already answer with it as the newest entry: a
-/// re-identification of restored bytes, or a record that linked no
-/// item gaining one. Bytes the history does not hold are always
-/// appended, the caller having accepted them. The entry names the
-/// record's link, and [`ArtifactRecord::append`] restates the newest
-/// bytes first where the link as read was corrected by hand.
+/// to — a re-identification, or a record that linked no item gaining
+/// one — and are not already the newest entry answering with that item
+/// and carrying the admission's evidence. So a re-identification of
+/// restored bytes appends, and so does one of the newest bytes whose
+/// evidence the newest entry does not already carry; the same decision
+/// made again appends nothing. Bytes the history does not hold are
+/// always appended, the caller having accepted them. The entry names
+/// the record's link and carries [`Admitting::evidence`], and
+/// [`ArtifactRecord::append`] restates the newest bytes first where the
+/// link as read was corrected by hand.
 fn settle_history(
     record: &mut ArtifactRecord,
     admitting: &Admitting<'_>,
@@ -1444,7 +1448,14 @@ fn settle_history(
     let held = record.holds(admitting.hash);
     let decided = admitting.reidentified || link_as_read.is_none();
     let answered = record.current_hash() == Some(admitting.hash)
-        && record.item_for(admitting.hash) == record.item.as_ref();
+        && record.item_for(admitting.hash) == record.item.as_ref()
+        && admitting.evidence.is_none_or(|evidence| {
+            record
+                .history
+                .last()
+                .and_then(|newest| newest.evidence.as_ref())
+                == Some(evidence)
+        });
     if held && (!decided || answered) {
         return;
     }
@@ -1454,6 +1465,7 @@ fn settle_history(
         timestamp: admitting.timestamp.to_string(),
         tool_version: admitting.tool_version.to_string(),
         item: record.item.clone(),
+        evidence: admitting.evidence.cloned(),
     };
     record.append(entry, link_as_read);
 }
@@ -2038,7 +2050,9 @@ fn describes(record: &ArtifactRecord, path: &Path) -> bool {
 }
 
 /// `entry` as the table an artifact record writes a history entry as.
-/// An entry naming no item is written with no `item` key.
+/// An entry naming no item is written with no `item` key, and one
+/// carrying no evidence with neither `identifier` nor `origin`; the
+/// evidence's two keys follow `item`.
 fn history_table(entry: &HashEntry) -> Table {
     let mut table = Table::new();
     table["hash"] = value(entry.hash.as_str());
@@ -2047,6 +2061,10 @@ fn history_table(entry: &HashEntry) -> Table {
     table["tool_version"] = value(entry.tool_version.as_str());
     if let Some(item) = &entry.item {
         table["item"] = value(item.to_string());
+    }
+    if let Some(evidence) = &entry.evidence {
+        table["identifier"] = value(evidence.identifier.to_string());
+        table["origin"] = value(evidence.origin.as_str());
     }
     table
 }
@@ -2529,12 +2547,28 @@ pub fn reconcile(root: &Path, reconciling: &Reconciling<'_>) -> Reconciliation {
                 (to.clone(), Some(repair))
             }
             Decided::Changed { hash, accepted } => {
+                // Only bytes accepted on the identifier extraction found
+                // in them carry evidence: bytes accepted on the
+                // operator's word were accepted as the artifact, not on
+                // any identifier.
+                let evidence = match accepted {
+                    AcceptedBy::Extracted { identifier } => {
+                        supplied(identifier)
+                            .ok()
+                            .map(|identifier| IdentificationEvidence {
+                                identifier,
+                                origin: EvidenceOrigin::Extracted,
+                            })
+                    }
+                    AcceptedBy::Supplied { .. } | AcceptedBy::Operator => None,
+                };
                 let entry = HashEntry {
                     hash: hash.clone(),
                     run: reconciling.run.clone(),
                     timestamp: reconciling.timestamp.to_string(),
                     tool_version: reconciling.tool_version.to_string(),
                     item: original.item.clone(),
+                    evidence,
                 };
                 record.append(entry, original.item.as_ref());
                 refresh(root, &mut record);
@@ -2765,6 +2799,14 @@ pub struct Admitting<'a> {
     /// The one thing that moves an existing record's item link. An
     /// ordinary re-run never moves one, whatever the file resolves to.
     pub reidentified: bool,
+    /// The evidence the record identifies the file's bytes by, written
+    /// on any history entry the admission appends, and `None` when the
+    /// record was reached by no identifier the admission is to record.
+    ///
+    /// Evidence is part of the decision: re-identifying the newest
+    /// bytes with evidence their newest entry does not carry appends an
+    /// entry even when the item they answer with is unchanged.
+    pub evidence: Option<&'a IdentificationEvidence>,
     /// The citation key an item minted here is named by, as the
     /// templates rendered it and before [`item_file_name`] folds it.
     pub key: Option<&'a str>,
@@ -2914,6 +2956,7 @@ pub fn admit(
         timestamp: admitting.timestamp.to_string(),
         tool_version: admitting.tool_version.to_string(),
         item: Some(item.clone()),
+        evidence: admitting.evidence.cloned(),
     };
 
     let Some(held) = admitting.held else {
@@ -3183,6 +3226,7 @@ pub fn adopt(
                 hash: &hash,
                 held: None,
                 reidentified: false,
+                evidence: None,
                 key: key.as_deref(),
                 run: run.clone(),
                 timestamp,
