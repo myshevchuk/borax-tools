@@ -369,9 +369,13 @@ volume and pages are reported when the record names no container to
 have them.
 
 The identifier SHALL be named with where it was found only where the
-run found it. Where the content index answered and nothing was looked
-up, the description SHALL name the record's own identifier without
-claiming where it came from. No title SHALL be truncated, and no identifier SHALL be broken
+run found it, or where the content index held it for the file's bytes.
+The description SHALL then name it as an earlier run's: found by an
+earlier run, supplied in an earlier run, or accepted over a title
+conflict in an earlier run, as the origin the content index kept it
+under says, and SHALL NOT name a pass of this run. Where the library
+answered and nothing was looked up, the description SHALL name the
+record's own identifier without claiming where it came from. No title SHALL be truncated, and no identifier SHALL be broken
 across lines: one that cannot be read back in one piece is no longer
 evidence.
 
@@ -427,9 +431,11 @@ change which questions are put or what their answers do.
 - **THEN** the description says that `smith2024.pdf` is taken
 
 #### Scenario: A record from an earlier run
-- **WHEN** the content index answers for the file
-- **THEN** the description says the identifier comes from an earlier
-  run, names the services the record's provenance records, and says no
+- **WHEN** the content index answers for the file with the DOI an
+  earlier run extracted from it, and Crossref's response cache holds
+  that DOI's record
+- **THEN** the description names the DOI as found by an earlier run,
+  names Crossref as the service that supplied the record, and says no
   title was read from the file
 
 #### Scenario: The record's identifier is not the one that was found
@@ -460,8 +466,14 @@ change which questions are put or what their answers do.
 
 #### Scenario: A cached answer names no origin
 - **WHEN** the content index answers for a file
-- **THEN** the description names the record's identifier without saying
-  where it was found, and says the record comes from an earlier run
+- **THEN** the description names the identifier it looked up without
+  naming an extraction pass of this run as where it was found, and
+  says it comes from an earlier run
+
+#### Scenario: An operator's answer from an earlier run
+- **WHEN** the content index answers for a file with a DOI an operator
+  supplied in an earlier run
+- **THEN** the description names the DOI as supplied in an earlier run
 
 #### Scenario: A candidate is described as pending
 - **WHEN** an interactive run describes the record a supplied DOI
@@ -699,10 +711,10 @@ over under `rename.skip-named` as any already-named file is.
 #### Scenario: A library that could not answer
 - **WHEN** an interactive run is about to ask about a file whose record
   links to an item the library does not hold, and which resolved from
-  the content index instead
+  the content index instead, by the identifier an earlier run extracted
 - **THEN** the description carries a `library` line naming the artifact
-  and the missing item, and its `record` line says the record comes from
-  an earlier run
+  and the missing item, and its identifier line says the identifier
+  comes from an earlier run
 
 #### Scenario: A file nothing identified, whose library could not answer
 - **WHEN** an interactive run offers to supply an identifier for a file
