@@ -40,9 +40,9 @@ use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source as
 use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
 use borax_core::template::RenderInput;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
-use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
+use borax_sources::cache::{self, Cache, CacheWrite, MemoryCache};
 use borax_sources::source::{Fetched, Source, SourceError, SourceName};
-use borax_sources::store::{ContentIndex, IndexStore};
+use borax_sources::store::{ContentIndex, FileCache, IndexStore, entry_path, operator_key};
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
@@ -15245,10 +15245,15 @@ fn assert_every_orphan_is_accounted_for(orphans_before: usize, events: &[Event])
 }
 
 /// Run `borax adopt` over the library at `root`, answering from
-/// `index`, with a document reader that counts every open and sources
-/// that panic when asked anything — so a run that succeeds is a run
-/// that neither extracted nor queried.
-fn adopt_over(root: &Path, index: &ContentIndex<MemoryCache>) -> Vec<Event> {
+/// `index`, over the response cache at `responses`, with a document
+/// reader that counts every open and sources that panic when asked
+/// anything — so a run that succeeds is a run that neither extracted
+/// nor queried a service.
+fn adopt_over<S: Cache + IndexStore>(
+    root: &Path,
+    index: &ContentIndex<S>,
+    responses: &Path,
+) -> Vec<Event> {
     let documents = CountingDocuments::new();
     let crossref = PanicSource {
         name: SourceName::Crossref,
@@ -15262,7 +15267,7 @@ fn adopt_over(root: &Path, index: &ContentIndex<MemoryCache>) -> Vec<Event> {
         index,
         filesystem: &filesystem,
         bib_files: &bib_files,
-        cache_root: None,
+        cache_root: Some(responses.to_path_buf()),
         now: fixed_now,
         collection_root: Some(root.to_path_buf()),
         state_root: None,
@@ -15282,6 +15287,19 @@ fn adopt_over(root: &Path, index: &ContentIndex<MemoryCache>) -> Vec<Event> {
         filesystem.renames()
     );
     events
+}
+
+/// Seeds `responses` (a `FileCache` root) with `record` under the key
+/// Crossref's response cache would hold it at for `identifier`, so an
+/// offline `adopt` over the index's evidence can find it.
+fn seed_response_cache(responses: &Path, identifier: &Identifier, record: &Record) {
+    let _ = FileCache::new(responses).put(&cache::key(SourceName::Crossref, identifier), record);
+}
+
+/// `record`'s own DOI, as the identifier an index fact or a response
+/// cache entry built from it would carry.
+fn doi_of(record: &Record) -> Identifier {
+    Identifier::Doi(record.doi.clone().expect("record_by always sets a doi"))
 }
 
 /// task 8.1, scenario "A library borax has seen before": each orphan
@@ -15308,16 +15326,17 @@ fn adopt_records_each_orphan_the_content_index_answers_for() {
 
     let index = ContentIndex::new(MemoryCache::new());
     let cached = record_by("Adopted", 2020, "10.1000/task-8.1");
-    let _ = index.put(&hash_bytes(b"task-8.1 first"), &cached);
-    let _ = index.put(
-        &hash_bytes(b"task-8.1 second"),
-        &record_by("Held", 2019, "10.1000/task-8.1-held"),
-    );
-    let _ = index.put(&hash_bytes(b"task-8.1 copy"), &cached);
+    let held_cached = record_by("Held", 2019, "10.1000/task-8.1-held");
+    let responses = tempdir().unwrap();
+    let _ = index.put_extracted(&hash_bytes(b"task-8.1 first"), &doi_of(&cached));
+    seed_response_cache(responses.path(), &doi_of(&cached), &cached);
+    let _ = index.put_extracted(&hash_bytes(b"task-8.1 second"), &doi_of(&held_cached));
+    seed_response_cache(responses.path(), &doi_of(&held_cached), &held_cached);
+    let _ = index.put_extracted(&hash_bytes(b"task-8.1 copy"), &doi_of(&cached));
     let untouched = outside_the_stores(&root);
     let orphans_before = library::survey(&root).orphans.len();
 
-    let events = adopt_over(&root, &index);
+    let events = adopt_over(&root, &index, responses.path());
 
     assert_every_orphan_is_accounted_for(orphans_before, &events);
     assert_eq!(adopted_totals(&events), (3, 0), "got {events:?}");
@@ -15422,18 +15441,17 @@ fn adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent() {
     let record_bytes = fs::read(&record_file).unwrap();
 
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(
-        &hash_bytes(b"task-8.2 known"),
-        &record_by("Known", 2021, "10.1000/task-8.2-known"),
-    );
+    let known_cached = record_by("Known", 2021, "10.1000/task-8.2-known");
+    let responses = tempdir().unwrap();
+    let _ = index.put_extracted(&hash_bytes(b"task-8.2 known"), &doi_of(&known_cached));
+    seed_response_cache(responses.path(), &doi_of(&known_cached), &known_cached);
     // What adopting the recorded artifact would take: a different work.
-    let _ = index.put(
-        &hash_bytes(b"task-8.2 recorded"),
-        &record_by("Other", 2022, "10.1000/task-8.2-other"),
-    );
+    let other_cached = record_by("Other", 2022, "10.1000/task-8.2-other");
+    let _ = index.put_extracted(&hash_bytes(b"task-8.2 recorded"), &doi_of(&other_cached));
+    seed_response_cache(responses.path(), &doi_of(&other_cached), &other_cached);
 
     let orphans_before = library::survey(&root).orphans.len();
-    let events = adopt_over(&root, &index);
+    let events = adopt_over(&root, &index, responses.path());
 
     assert_every_orphan_is_accounted_for(orphans_before, &events);
     assert_eq!(
@@ -15476,7 +15494,7 @@ fn adopt_leaves_the_unknown_and_the_recorded_alone_and_is_idempotent() {
         .collect();
 
     let orphans_before_again = library::survey(&root).orphans.len();
-    let again = adopt_over(&root, &index);
+    let again = adopt_over(&root, &index, responses.path());
 
     assert_every_orphan_is_accounted_for(orphans_before_again, &again);
     assert_eq!(adopted_totals(&again), (0, 1), "got {again:?}");
@@ -15530,17 +15548,16 @@ fn adopt_holds_an_orphan_whose_bytes_a_record_already_holds() {
     write_real_file(&root, "twin-b.pdf", b"task-8.2a twin");
 
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(
-        &hash_bytes(b"task-8.2a moved"),
-        &record_by("Other", 2022, "10.1000/task-8.2a-other"),
-    );
-    let _ = index.put(
-        &hash_bytes(b"task-8.2a twin"),
-        &record_by("Twin", 2023, "10.1000/task-8.2a-twin"),
-    );
+    let responses = tempdir().unwrap();
+    let moved_cached = record_by("Other", 2022, "10.1000/task-8.2a-other");
+    let _ = index.put_extracted(&hash_bytes(b"task-8.2a moved"), &doi_of(&moved_cached));
+    seed_response_cache(responses.path(), &doi_of(&moved_cached), &moved_cached);
+    let twin_cached = record_by("Twin", 2023, "10.1000/task-8.2a-twin");
+    let _ = index.put_extracted(&hash_bytes(b"task-8.2a twin"), &doi_of(&twin_cached));
+    seed_response_cache(responses.path(), &doi_of(&twin_cached), &twin_cached);
     let orphans_before = library::survey(&root).orphans.len();
 
-    let events = adopt_over(&root, &index);
+    let events = adopt_over(&root, &index, responses.path());
 
     assert_every_orphan_is_accounted_for(orphans_before, &events);
     assert_eq!(adopted_totals(&events), (1, 2), "got {events:?}");
@@ -15619,13 +15636,13 @@ fn adopt_every_orphan_is_accounted_for() {
     );
 
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(
-        &hash_bytes(b"task-5.1 recorded"),
-        &record_by("Recorded", 2020, "10.1000/task-5.1-recorded"),
-    );
+    let responses = tempdir().unwrap();
+    let recorded_cached = record_by("Recorded", 2020, "10.1000/task-5.1-recorded");
+    let _ = index.put_extracted(&hash_bytes(b"task-5.1 recorded"), &doi_of(&recorded_cached));
+    seed_response_cache(responses.path(), &doi_of(&recorded_cached), &recorded_cached);
     let orphans_before = library::survey(&root).orphans.len();
 
-    let events = adopt_over(&root, &index);
+    let events = adopt_over(&root, &index, responses.path());
 
     assert_every_orphan_is_accounted_for(orphans_before, &events);
     assert_eq!(adopted_totals(&events), (1, 2), "got {events:?}");
@@ -15679,7 +15696,12 @@ fn adopt_reads_neither_a_sidecar_nor_the_retired_ledger() {
     let sidecar_bytes = fs::read(&sidecar).unwrap();
     let orphans_before = library::survey(&root).orphans.len();
 
-    let events = adopt_over(&root, &ContentIndex::new(MemoryCache::new()));
+    let empty_responses = tempdir().unwrap();
+    let events = adopt_over(
+        &root,
+        &ContentIndex::new(MemoryCache::new()),
+        empty_responses.path(),
+    );
 
     assert_every_orphan_is_accounted_for(orphans_before, &events);
     assert_eq!(adopted_totals(&events), (0, 1), "got {events:?}");
@@ -15690,12 +15712,369 @@ fn adopt_reads_neither_a_sidecar_nor_the_retired_ledger() {
     assert_eq!(fs::read_to_string(&ledger).unwrap(), ledger_line);
 }
 
-/// task 8.4, scenario "Adoption after the cache is cleared": the
-/// content index is a cache, so after `borax cache --clear` adoption
-/// records nothing and reports every artifact an orphan — and the run
-/// succeeds, since an empty cache is not a failure.
+// ---------------------------------------------------------------------
+// group 4: adoption from evidence (design D7, D10)
+// ---------------------------------------------------------------------
+
+/// design D7: an orphan the index holds an extracted identifier for is
+/// recorded from the response cache's record under that identifier.
 #[test]
-fn adopt_after_the_cache_is_cleared_adopts_nothing_and_succeeds() {
+fn adopt_records_an_orphan_from_the_response_cache_by_the_entrys_identifier() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"task-g4 by-identifier bytes");
+    let hash = hash_bytes(b"task-g4 by-identifier bytes");
+    let identifier = Identifier::Doi(doi("10.1000/g4-by-identifier"));
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let record = record_by("ByIdentifier", 2024, "10.1000/g4-by-identifier");
+    let responses = tempdir().unwrap();
+    seed_response_cache(responses.path(), &identifier, &record);
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+    let reported = adoptions(&events);
+    assert!(
+        matches!(
+            reported.as_slice(),
+            [(path, Adoption::Recorded { .. })] if path == "orphan.pdf"
+        ),
+        "got {reported:?}"
+    );
+}
+
+/// design D2/D7: when both facts of an entry are held, adoption uses
+/// the operator's identifier, not the extracted one.
+#[test]
+fn adopt_uses_the_operators_identifier_before_the_extracted_one() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"task-g4 operator-first bytes");
+    let hash = hash_bytes(b"task-g4 operator-first bytes");
+    let extracted = Identifier::Doi(doi("10.1000/g4-operator-first-extracted"));
+    let operator_identifier = Identifier::Doi(doi("10.1000/g4-operator-first-operator"));
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &extracted);
+    let _ = index.put_operator(
+        &hash,
+        &IdentificationEvidence {
+            identifier: operator_identifier.clone(),
+            origin: EvidenceOrigin::Supplied,
+        },
+    );
+    let extracted_record = record_by("ExtractedLoses", 2020, "10.1000/g4-operator-first-extracted");
+    let operator_record = record_by("OperatorWins", 2024, "10.1000/g4-operator-first-operator");
+    let responses = tempdir().unwrap();
+    seed_response_cache(responses.path(), &extracted, &extracted_record);
+    seed_response_cache(responses.path(), &operator_identifier, &operator_record);
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+    let records = library::ArtifactStore::read(&root);
+    let artifact = records.by_hash(&hash).into_iter().next().unwrap();
+    let item_id = artifact.item.clone().unwrap();
+    let item = library::ItemStore::read(&root).by_id(&item_id).cloned();
+    assert_eq!(
+        item.map(|item| item.record),
+        Some(operator_record),
+        "the operator's identifier must be used before the extracted one"
+    );
+}
+
+/// design D7: the response cache is read in resolution's service
+/// priority order for the identifier's kind, whatever the `sources`
+/// setting says — adoption consults no setting.
+#[test]
+fn adopt_reads_the_response_cache_in_priority_order_whatever_the_sources_setting() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"task-g4 priority bytes");
+    let hash = hash_bytes(b"task-g4 priority bytes");
+    let identifier = Identifier::Doi(doi("10.1000/g4-priority"));
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+
+    let responses = tempdir().unwrap();
+    let crossref_record = record_by("CrossrefWins", 2024, "10.1000/g4-priority");
+    let openalex_record = record_by("OpenAlexLoses", 2023, "10.1000/g4-priority");
+    let _ = FileCache::new(responses.path())
+        .put(&cache::key(SourceName::Crossref, &identifier), &crossref_record);
+    let _ = FileCache::new(responses.path())
+        .put(&cache::key(SourceName::OpenAlex, &identifier), &openalex_record);
+
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with(|layer| {
+        layer.sources = Some(vec!["openalex".to_string()]);
+    });
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: Some(responses.path().to_path_buf()),
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::adopt(Some(root.clone())),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+    let records = library::ArtifactStore::read(&root);
+    let artifact = records.by_hash(&hash).into_iter().next().unwrap();
+    let item_id = artifact.item.clone().unwrap();
+    let item = library::ItemStore::read(&root).by_id(&item_id).cloned();
+    assert_eq!(
+        item.map(|item| item.record),
+        Some(crossref_record),
+        "Crossref is first in priority order for a DOI, whatever `sources` names: \
+         got {events:?}"
+    );
+}
+
+/// design D7: adoption queries no service — `PanicSource` would panic
+/// if it were asked anything, and `adopt_over` already enforces this,
+/// but this test states the contract as its own named bullet.
+#[test]
+fn adopt_never_queries_a_service() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"task-g4 never-queries bytes");
+    let hash = hash_bytes(b"task-g4 never-queries bytes");
+    let identifier = Identifier::Doi(doi("10.1000/g4-never-queries"));
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let record = record_by("NeverQueries", 2024, "10.1000/g4-never-queries");
+    let responses = tempdir().unwrap();
+    seed_response_cache(responses.path(), &identifier, &record);
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+}
+
+/// design D3/D7: the history entry an adoption writes carries the
+/// identifier it was recorded by, with origin `adopted`.
+#[test]
+fn adopt_records_the_identifier_with_origin_adopted() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"task-g4 adopted-origin bytes");
+    let hash = hash_bytes(b"task-g4 adopted-origin bytes");
+    let identifier = Identifier::Doi(doi("10.1000/g4-adopted-origin"));
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let record = record_by("AdoptedOrigin", 2024, "10.1000/g4-adopted-origin");
+    let responses = tempdir().unwrap();
+    seed_response_cache(responses.path(), &identifier, &record);
+
+    let events = adopt_over(&root, &index, responses.path());
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+
+    let records = library::ArtifactStore::read(&root);
+    let artifact = records.by_hash(&hash).into_iter().next().unwrap();
+    assert_eq!(artifact.history.len(), 1, "got {:?}", artifact.history);
+    assert_eq!(
+        artifact.history[0].evidence,
+        Some(IdentificationEvidence {
+            identifier,
+            origin: EvidenceOrigin::Adopted,
+        }),
+        "got {:?}",
+        artifact.history[0]
+    );
+}
+
+/// design D7: adoption writes nothing to the content index — the
+/// identifier is already there, and adoption's own origin belongs to
+/// the library.
+#[test]
+fn adopt_writes_nothing_to_the_content_index() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"task-g4 writes-nothing bytes");
+    let hash = hash_bytes(b"task-g4 writes-nothing bytes");
+    let identifier = Identifier::Doi(doi("10.1000/g4-writes-nothing"));
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let record = record_by("WritesNothing", 2024, "10.1000/g4-writes-nothing");
+    let responses = tempdir().unwrap();
+    seed_response_cache(responses.path(), &identifier, &record);
+    let before = index.entry(&hash);
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+    assert_eq!(
+        index.entry(&hash),
+        before,
+        "adoption must write nothing to the content index"
+    );
+}
+
+/// design D7: an entry whose evidence names an identifier no response
+/// cache holds a record for is `unanswered`, naming that identifier,
+/// and is left an orphan.
+#[test]
+fn adopt_with_evidence_the_response_cache_does_not_hold_is_unanswered_naming_the_identifier() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"task-g4 unanswered bytes");
+    let hash = hash_bytes(b"task-g4 unanswered bytes");
+    let identifier = Identifier::Doi(doi("10.1000/g4-unanswered"));
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let responses = tempdir().unwrap();
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (0, 1), "got {events:?}");
+    assert_eq!(
+        adoptions(&events),
+        vec![(
+            "orphan.pdf".to_string(),
+            Adoption::Unanswered {
+                identifier: identifier.to_string(),
+            }
+        )],
+        "got {:?}",
+        adoptions(&events)
+    );
+}
+
+/// design D2/D7: an orphan the index holds no entry for at all is
+/// `unindexed`.
+#[test]
+fn adopt_with_no_entry_is_unindexed() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"task-g4 no-entry bytes");
+    let index = ContentIndex::new(MemoryCache::new());
+    let responses = tempdir().unwrap();
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (0, 1), "got {events:?}");
+    assert_eq!(
+        adoptions(&events),
+        vec![("orphan.pdf".to_string(), Adoption::Unindexed)],
+        "got {:?}",
+        adoptions(&events)
+    );
+}
+
+/// design D2: an unreadable `operator.json` withholds any answer, even
+/// with an extracted identifier beside it, so adoption sees the same as
+/// no entry: `unindexed`.
+#[test]
+fn adopt_with_an_unreadable_operator_fact_is_unindexed() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"task-g4 unreadable-operator bytes");
+    let hash = hash_bytes(b"task-g4 unreadable-operator bytes");
+    let identifier = Identifier::Doi(doi("10.1000/g4-unreadable-operator"));
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let _ = index.put_extracted(&hash, &identifier);
+    let operator_path = entry_path(index_dir.path(), &operator_key(&hash)).unwrap();
+    fs::create_dir_all(operator_path.parent().unwrap()).unwrap();
+    fs::write(&operator_path, b"not json").unwrap();
+
+    let record = record_by("UnreadableOperator", 2024, "10.1000/g4-unreadable-operator");
+    let responses = tempdir().unwrap();
+    seed_response_cache(responses.path(), &identifier, &record);
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (0, 1), "got {events:?}");
+    assert_eq!(
+        adoptions(&events),
+        vec![("orphan.pdf".to_string(), Adoption::Unindexed)],
+        "an unreadable operator fact must withhold any answer, same as no entry: \
+         got {:?}",
+        adoptions(&events)
+    );
+}
+
+/// design D9: the human line for an `unanswered` orphan, before the
+/// totals line, on the same footing as the `unindexed` case.
+#[test]
+fn adopt_human_mode_lists_an_unanswered_orphan_before_the_totals_line() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    fs::write(root.join("new.pdf"), b"unanswered bytes").unwrap();
+    let hash = hash_bytes(b"unanswered bytes");
+    let identifier = Identifier::Doi(doi("10.1000/g4-human-unanswered"));
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let responses = tempdir().unwrap();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = resolve(Vec::new()).unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: Some(responses.path().to_path_buf()),
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::adopt(Some(root.clone())), false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "new.pdf: the content index knows its bytes as doi:10.1000/g4-human-unanswered, \
+             but no response cache holds that record, so it is still an orphan; borax \
+             resolve fetches it",
+            &format!("{}: 0 adopted, 1 orphans", root.display()),
+        ],
+        "got {lines:?}"
+    );
+}
+
+/// task 8.4, scenario "Adoption after the cache is cleared": the
+/// index is no longer under the cache root (D1), so after `borax cache
+/// --clear` each orphan's evidence survives, and offline adoption finds
+/// no cached record for it: it is `unanswered`, naming its identifier,
+/// not `unindexed`. The run still succeeds.
+#[test]
+fn adopt_after_the_cache_is_cleared_records_nothing_from_evidence_alone_and_succeeds() {
     use borax_sources::store::FileCache;
 
     let library = real_library();
@@ -15703,15 +16082,14 @@ fn adopt_after_the_cache_is_cleared_adopts_nothing_and_succeeds() {
     write_real_file(&root, "one.pdf", b"task-8.4 one");
     write_real_file(&root, "two.pdf", b"task-8.4 two");
     let cache_dir = tempdir().unwrap();
-    let index = ContentIndex::new(FileCache::new(cache_dir.path()));
-    let _ = index.put(
-        &hash_bytes(b"task-8.4 one"),
-        &record_by("One", 2020, "10.1000/task-8.4-one"),
-    );
-    let _ = index.put(
-        &hash_bytes(b"task-8.4 two"),
-        &record_by("Two", 2020, "10.1000/task-8.4-two"),
-    );
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let one = record_by("One", 2020, "10.1000/task-8.4-one");
+    let two = record_by("Two", 2020, "10.1000/task-8.4-two");
+    let _ = index.put_extracted(&hash_bytes(b"task-8.4 one"), &doi_of(&one));
+    seed_response_cache(cache_dir.path(), &doi_of(&one), &one);
+    let _ = index.put_extracted(&hash_bytes(b"task-8.4 two"), &doi_of(&two));
+    seed_response_cache(cache_dir.path(), &doi_of(&two), &two);
 
     let documents = CountingDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
@@ -15739,7 +16117,8 @@ fn adopt_after_the_cache_is_cleared_adopts_nothing_and_succeeds() {
     .unwrap();
     assert!(
         matches!(cleared.as_slice(), [Event::CacheCleared { entries: 2, .. }]),
-        "setup: the clear must remove both index entries: got {cleared:?}"
+        "setup: the clear must remove both response-cache entries, never the index's, \
+         which lives outside the cache root: got {cleared:?}"
     );
 
     let mut out = Vec::new();
@@ -15764,15 +16143,18 @@ fn adopt_after_the_cache_is_cleared_adopts_nothing_and_succeeds() {
             && out.contains("\"orphans\":2"),
         "got {out:?}"
     );
-    for path in ["one.pdf", "two.pdf"] {
+    for (path, record) in [("one.pdf", &one), ("two.pdf", &two)] {
+        let identifier = doi_of(record).to_string();
         assert!(
             out.lines().any(|line| {
                 line.contains("\"event\":\"library-adoption\"")
                     && line.contains(&format!("\"path\":\"{path}\""))
-                    && line.contains("\"kind\":\"unindexed\"")
+                    && line.contains("\"kind\":\"unanswered\"")
+                    && line.contains(&format!("\"identifier\":\"{identifier}\""))
             }),
-            "an emptied cache must still report {path} as `unindexed`, not just \
-             left out: got {out:?}"
+            "the index still holds evidence for {path} after the clear, so it must be \
+             reported `unanswered`, naming its identifier, and never just left out or \
+             reported `unindexed`: got {out:?}"
         );
     }
     assert!(library::ArtifactStore::read(&root).is_empty());
@@ -15810,11 +16192,11 @@ fn adopt_after_the_cache_is_cleared_still_tells_unindexed_held_and_unreadable_ap
     let unreadable_path = write_real_file(&root, "c-unreadable.pdf", b"task-5.1b unreadable");
 
     let cache_dir = tempdir().unwrap();
-    let index = ContentIndex::new(FileCache::new(cache_dir.path()));
-    let _ = index.put(
-        &hash_bytes(b"task-5.1b unindexed"),
-        &record_by("Unindexed", 2020, "10.1000/task-5.1b-unindexed"),
-    );
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    // `a-unindexed.pdf`'s bytes carry no evidence at all, before or
+    // after the clear: the index has never heard of them, which is
+    // exactly what `unindexed` means.
 
     #[cfg(unix)]
     {
@@ -15846,7 +16228,8 @@ fn adopt_after_the_cache_is_cleared_still_tells_unindexed_held_and_unreadable_ap
         state_root: None,
     };
 
-    // Clear the cache the index was just primed through.
+    // Clear the response cache; the index, over its own root, is
+    // unaffected.
     events_for(
         &Command::cache(true),
         &Configs::uniform(effective.clone()),
@@ -15911,10 +16294,10 @@ fn adopt_outside_any_library_is_refused_and_writes_nothing() {
     let root = dir.path().to_path_buf();
     write_real_file(&root, "unmarked.pdf", b"adopt unmarked");
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(
-        &hash_bytes(b"adopt unmarked"),
-        &record_by("Unmarked", 2020, "10.1000/adopt-unmarked"),
-    );
+    let unmarked_cached = record_by("Unmarked", 2020, "10.1000/adopt-unmarked");
+    let responses = tempdir().unwrap();
+    let _ = index.put_extracted(&hash_bytes(b"adopt unmarked"), &doi_of(&unmarked_cached));
+    seed_response_cache(responses.path(), &doi_of(&unmarked_cached), &unmarked_cached);
     let before = snapshot(&root);
 
     let documents = CountingDocuments::new();
@@ -15927,7 +16310,7 @@ fn adopt_outside_any_library_is_refused_and_writes_nothing() {
         index: &index,
         filesystem: &filesystem,
         bib_files: &bib_files,
-        cache_root: None,
+        cache_root: Some(responses.path().to_path_buf()),
         now: fixed_now,
         collection_root: None,
         state_root: None,
@@ -15991,6 +16374,981 @@ fn reconcile_outside_any_library_is_refused_and_writes_nothing() {
     );
     assert_eq!(snapshot(&root), before);
     assert!(!library::identity_file(&root).exists());
+}
+
+// ---------------------------------------------------------------------
+// group 5: reconcile restores operator evidence (design D5)
+// ---------------------------------------------------------------------
+
+/// `Adapters` for a reconcile or status/validate run over `root`,
+/// answering from `index`, with no sources and no library-tracked
+/// documents the run would need to open.
+fn reconcile_adapters<'a>(
+    root: &Path,
+    index: &'a ContentIndex<FileCache>,
+    documents: &'a FakeDocuments,
+    sources: &'a [&'a dyn Source],
+    filesystem: &'a FakeFilesystem,
+    bib_files: &'a FakeBibFiles,
+) -> Adapters<'a, FileCache> {
+    Adapters {
+        documents,
+        sources,
+        index,
+        filesystem,
+        bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.to_path_buf()),
+        state_root: None,
+    }
+}
+
+/// design D5: the critic's sequence. Bytes H were extracted as X by an
+/// earlier batch resolve; an interactive run then supplied Y and
+/// renamed, but was interrupted before `remember` wrote
+/// `operator.json`. The library's history already holds `s(Y)`.
+/// `reconcile` completes the admission, and the result equals what an
+/// uninterrupted run's `remember` would have left: `extracted` X
+/// untouched, `operator` `s(Y)`.
+#[test]
+fn an_interrupted_operator_admission_is_completed_by_the_next_reconcile() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 interrupted bytes");
+    let hash = hash_bytes(b"task-g5 interrupted bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let extracted = Identifier::Doi(doi("10.1000/g5-interrupted-x"));
+    let supplied = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-interrupted-y")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![HashEntry {
+            evidence: Some(supplied.clone()),
+            ..hash_entry_for(hash.clone(), "run-0")
+        }],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let _ = index.put_extracted(&hash, &extracted);
+    // No operator.json: the move was interrupted before `remember`.
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let entry = index.entry(&hash);
+    assert_eq!(
+        entry.extracted,
+        Fact::Held(extracted.clone()),
+        "extraction's fact must be untouched"
+    );
+    assert_eq!(
+        entry.operator,
+        Fact::Held(supplied.clone()),
+        "reconcile must complete the interrupted admission, writing the library's \
+         operator evidence"
+    );
+
+    let uninterrupted_dir = tempdir().unwrap();
+    let uninterrupted = ContentIndex::new(FileCache::new(uninterrupted_dir.path()));
+    let _ = uninterrupted.put_extracted(&hash, &extracted);
+    let _ = uninterrupted.put_operator(&hash, &supplied);
+    assert_eq!(
+        entry,
+        uninterrupted.entry(&hash),
+        "the interrupted run, once reconciled, must equal the uninterrupted one"
+    );
+}
+
+/// design D5: operator evidence is restored for every distinct hash a
+/// record's history holds, not only its newest — a hash the file's
+/// bytes used to be, and no longer are, is restored too.
+#[test]
+fn reconcile_restores_operator_evidence_for_a_restored_earlier_hash() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 earlier-hash newest");
+    let (size, modified_millis) = real_stat(&path);
+    let older_hash = hash_bytes(b"task-g5 earlier-hash older");
+    let newer_hash = hash_bytes(b"task-g5 earlier-hash newest");
+    let older_evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-earlier-hash-older")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let newer_evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-earlier-hash-newer")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![
+            HashEntry {
+                evidence: Some(older_evidence.clone()),
+                ..hash_entry_for(older_hash.clone(), "run-0")
+            },
+            HashEntry {
+                evidence: Some(newer_evidence.clone()),
+                ..hash_entry_for(newer_hash.clone(), "run-1")
+            },
+        ],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        index.entry(&older_hash).operator,
+        Fact::Held(older_evidence),
+        "the earlier hash's operator evidence must be restored too"
+    );
+    assert_eq!(index.entry(&newer_hash).operator, Fact::Held(newer_evidence));
+}
+
+/// design D5: the library's decision wins over a different one made
+/// outside it, at the next reconcile.
+#[test]
+fn reconcile_replaces_a_different_operator_fact_with_the_librarys() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 replaces bytes");
+    let hash = hash_bytes(b"task-g5 replaces bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let librarys_evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-replaces-library")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let outside_evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-replaces-outside")),
+        origin: EvidenceOrigin::Overridden,
+    };
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![HashEntry {
+            evidence: Some(librarys_evidence.clone()),
+            ..hash_entry_for(hash.clone(), "run-0")
+        }],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let _ = index.put_operator(&hash, &outside_evidence);
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        index.entry(&hash).operator,
+        Fact::Held(librarys_evidence),
+        "the library's decision must win over a different one made outside it"
+    );
+}
+
+/// design D2/D5: an unreadable `operator.json` is rewritten by the
+/// next reconcile, since it disagrees with `Held(e)`.
+#[test]
+fn reconcile_rewrites_an_unreadable_operator_fact() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 unreadable bytes");
+    let hash = hash_bytes(b"task-g5 unreadable bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-unreadable")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![HashEntry {
+            evidence: Some(evidence.clone()),
+            ..hash_entry_for(hash.clone(), "run-0")
+        }],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let operator_path = entry_path(index_dir.path(), &operator_key(&hash)).unwrap();
+    fs::create_dir_all(operator_path.parent().unwrap()).unwrap();
+    fs::write(&operator_path, b"not json").unwrap();
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        index.entry(&hash).operator,
+        Fact::Held(evidence),
+        "an unreadable operator fact must be rewritten, since it is never Held(e)"
+    );
+}
+
+/// design D5: bytes with no operator entry in the library (extracted
+/// evidence alone, or none) get no restoration, and a decision made
+/// outside the library for those bytes is left exactly as it was.
+#[test]
+fn reconcile_writes_nothing_for_bytes_with_no_operator_entry_and_leaves_their_operator_fact() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 no-operator bytes");
+    let hash = hash_bytes(b"task-g5 no-operator bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let extracted = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-no-operator-extracted")),
+        origin: EvidenceOrigin::Extracted,
+    };
+    let outside_evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-no-operator-outside")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![HashEntry {
+            evidence: Some(extracted),
+            ..hash_entry_for(hash.clone(), "run-0")
+        }],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let _ = index.put_operator(&hash, &outside_evidence);
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    let events = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "no restoration for bytes with no operator entry: got {events:?}"
+    );
+    assert_eq!(
+        index.entry(&hash).operator,
+        Fact::Held(outside_evidence),
+        "a decision made outside the library must be left alone"
+    );
+}
+
+/// design D5: a second reconcile over an untouched library writes and
+/// reports nothing — it already agrees with `operator.json`.
+#[test]
+fn reconcile_twice_writes_and_reports_nothing_the_second_time() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 twice bytes");
+    let hash = hash_bytes(b"task-g5 twice bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-twice")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: None,
+        path: "paper.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![HashEntry {
+            evidence: Some(evidence.clone()),
+            ..hash_entry_for(hash.clone(), "run-0")
+        }],
+    };
+    write_lib_artifact_record(&root, &record);
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    let first = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert!(
+        first
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "setup: the first reconcile must restore the evidence: got {first:?}"
+    );
+
+    let second = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        !second
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "a reconcile that already agrees must write and report nothing: got {second:?}"
+    );
+}
+
+/// design D5: every restoration is reported before the run's totals.
+#[test]
+fn reconcile_reports_each_restoration_before_its_totals() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let first_path = write_real_file(&root, "first.pdf", b"task-g5 order first");
+    let second_path = write_real_file(&root, "second.pdf", b"task-g5 order second");
+    let first_hash = hash_bytes(b"task-g5 order first");
+    let second_hash = hash_bytes(b"task-g5 order second");
+    let (first_size, first_modified) = real_stat(&first_path);
+    let (second_size, second_modified) = real_stat(&second_path);
+    let first_evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-order-first")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let second_evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-order-second")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(LIB_UUID_A),
+            item: None,
+            path: "first.pdf".to_string(),
+            size: first_size,
+            modified_millis: first_modified,
+            history: vec![HashEntry {
+                evidence: Some(first_evidence),
+                ..hash_entry_for(first_hash, "run-0")
+            }],
+        },
+    );
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(LIB_UUID_B),
+            item: None,
+            path: "second.pdf".to_string(),
+            size: second_size,
+            modified_millis: second_modified,
+            history: vec![HashEntry {
+                evidence: Some(second_evidence),
+                ..hash_entry_for(second_hash, "run-0")
+            }],
+        },
+    );
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    let events = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(events.len(), 3, "two restorations then the totals: got {events:?}");
+    assert!(
+        matches!(events[0], Event::ContentIndexWrite { .. }),
+        "got {:?}",
+        events[0]
+    );
+    assert!(
+        matches!(events[1], Event::ContentIndexWrite { .. }),
+        "got {:?}",
+        events[1]
+    );
+    assert!(
+        matches!(events[2], Event::LibraryReconciled { .. }),
+        "the totals line must close the run, after every restoration: got {:?}",
+        events[2]
+    );
+}
+
+/// design D5: restoration writes the content index, never library
+/// state — every store file is byte-identical afterwards.
+#[test]
+fn reconcile_restoration_leaves_every_store_file_byte_identical() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 byte-identical bytes");
+    let hash = hash_bytes(b"task-g5 byte-identical bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-byte-identical")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(LIB_UUID_A),
+            item: None,
+            path: "paper.pdf".to_string(),
+            size,
+            modified_millis,
+            history: vec![HashEntry {
+                evidence: Some(evidence),
+                ..hash_entry_for(hash, "run-0")
+            }],
+        },
+    );
+    let before = snapshot(&root);
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    let events = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "setup: a restoration must happen: got {events:?}"
+    );
+    assert_eq!(
+        snapshot(&root),
+        before,
+        "restoration must write the content index alone, never library state"
+    );
+}
+
+/// design D8: a failed restoration still lets the run succeed, and is
+/// reported `failed`, over a read-only index root.
+#[cfg(unix)]
+#[test]
+fn reconcile_whose_restoration_fails_still_succeeds_and_reports_failed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 write-fails bytes");
+    let hash = hash_bytes(b"task-g5 write-fails bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-write-fails")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(LIB_UUID_A),
+            item: None,
+            path: "paper.pdf".to_string(),
+            size,
+            modified_millis,
+            history: vec![HashEntry {
+                evidence: Some(evidence),
+                ..hash_entry_for(hash, "run-0")
+            }],
+        },
+    );
+
+    let index_dir = tempdir().unwrap();
+    fs::set_permissions(index_dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = index_dir.path().join("probe.tmp");
+    if fs::write(&probe, b"x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(index_dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping reconcile_whose_restoration_fails_still_succeeds_and_reports_failed: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    let events = events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    );
+
+    fs::set_permissions(index_dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let events = events.unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ContentIndexWrite {
+                write: WriteStep::Failed { .. },
+                ..
+            }
+        )),
+        "the failed restoration must still be reported: got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(Event::LibraryReconciled { .. })),
+        "the run must still succeed and close with its totals: got {events:?}"
+    );
+}
+
+/// design D5/D11 sequence (h): once the data root is deleted, the next
+/// reconcile restores every operator decision the library holds.
+#[test]
+fn reconcile_restores_after_the_index_is_deleted() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 deleted-index bytes");
+    let hash = hash_bytes(b"task-g5 deleted-index bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-deleted-index")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(LIB_UUID_A),
+            item: None,
+            path: "paper.pdf".to_string(),
+            size,
+            modified_millis,
+            history: vec![HashEntry {
+                evidence: Some(evidence.clone()),
+                ..hash_entry_for(hash.clone(), "run-0")
+            }],
+        },
+    );
+
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let _ = index.put_extracted(&hash, &Identifier::Doi(doi("10.1000/g5-deleted-index-extracted")));
+    let _ = index.put_operator(&hash, &evidence);
+    // As if `rm -rf` had removed the whole data root.
+    fs::remove_dir_all(index_dir.path()).unwrap();
+
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    events_for(
+        &Command::reconcile(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        index.entry(&hash).operator,
+        Fact::Held(evidence),
+        "operator evidence must return once the data root exists again"
+    );
+}
+
+/// design D5: `status` and `validate` are read-only by requirement —
+/// neither writes to the content index, whatever operator evidence the
+/// library holds.
+#[test]
+fn status_and_validate_write_nothing_to_the_content_index() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "paper.pdf", b"task-g5 read-only bytes");
+    let hash = hash_bytes(b"task-g5 read-only bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-read-only")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    write_lib_artifact_record(
+        &root,
+        &ArtifactRecord {
+            id: lib_artifact_id(LIB_UUID_A),
+            item: None,
+            path: "paper.pdf".to_string(),
+            size,
+            modified_millis,
+            history: vec![HashEntry {
+                evidence: Some(evidence),
+                ..hash_entry_for(hash.clone(), "run-0")
+            }],
+        },
+    );
+
+    let decoy = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g5-read-only-decoy")),
+        origin: EvidenceOrigin::Overridden,
+    };
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let _ = index.put_operator(&hash, &decoy);
+    let documents = FakeDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = reconcile_adapters(&root, &index, &documents, &sources, &filesystem, &bib_files);
+
+    events_for(
+        &Command::status(Some(root.clone()), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert_eq!(
+        index.entry(&hash).operator,
+        Fact::Held(decoy.clone()),
+        "status must leave the decoy fact exactly as it was — the library's \
+         disagreeing evidence is restored only by reconcile"
+    );
+
+    events_for(
+        &Command::validate(Some(root.clone())),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    assert_eq!(
+        index.entry(&hash).operator,
+        Fact::Held(decoy),
+        "validate must leave the decoy fact exactly as it was"
+    );
+}
+
+// ---------------------------------------------------------------------
+// group 7: retry of an index-held lookup (design D6, D10)
+// ---------------------------------------------------------------------
+
+/// design D6: an interactive Retry over an index-held lookup repeats
+/// the identifier with origin `content-index`, and keeps the earlier,
+/// failed round once a later attempt succeeds.
+#[test]
+fn retry_of_an_index_held_lookup_after_an_outage_keeps_the_content_index_origin_and_its_rounds() {
+    let path = PathBuf::from("/lib/outage-retry-indexed.pdf");
+    let hash = hash_for("outage-retry-indexed");
+    let identifier = Identifier::Doi(doi("10.1000/outage-retry-indexed"));
+    let documents = FakeDocuments::new().with_open_error(
+        &path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened: an evidence answer is never opened".to_string(),
+        },
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let crossref = FlakySource::new(
+        SourceName::Crossref,
+        1,
+        record_by("Smith", 2024, "10.1000/outage-retry-indexed"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+    {
+        Some(Event::Resolved { sections, .. }) => match &sections.lookup {
+            LookupStep::Attempted {
+                origin, earlier, ..
+            } => {
+                assert_eq!(*origin, IdentifierOrigin::ContentIndex);
+                assert_eq!(
+                    earlier.len(),
+                    1,
+                    "the earlier, failed round must be kept: got {earlier:?}"
+                );
+            }
+            other => panic!("expected an attempted lookup, got {other:?}"),
+        },
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D6: a retry is offered for an index-held lookup only when it
+/// was inconclusive — a conclusive miss (every service says
+/// not-found) must not offer one, on the same terms as any other
+/// lookup.
+#[test]
+fn retry_of_an_index_held_lookup_is_offered_only_when_the_lookup_was_inconclusive() {
+    let path = PathBuf::from("/lib/retry-indexed-conclusive.pdf");
+    let hash = hash_for("retry-indexed-conclusive");
+    let identifier = Identifier::Doi(doi("10.1000/retry-indexed-conclusive"));
+    let documents = FakeDocuments::new().with_open_error(
+        &path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened: an evidence answer is never opened".to_string(),
+        },
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let crossref = fake_source(SourceName::Crossref, Err(SourceError::NotFound));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert!(
+        !questions[0].choices.contains(&Answer::Retry),
+        "a conclusive miss over an index-held identifier must not offer a retry: \
+         got {:?}",
+        questions[0].choices
+    );
+}
+
+/// design D6: a retry of an index-held lookup whose evidence has
+/// `origin` runs no title check, writes nothing, and keeps its origin
+/// on the read — whatever the file's own titles would say.
+fn index_held_retry_runs_no_title_check_writes_nothing_and_keeps_its_origin(
+    seed: &str,
+    origin: EvidenceOrigin,
+    origin_str: &str,
+) {
+    let path = PathBuf::from(format!("/lib/{seed}.pdf"));
+    let hash = hash_for(seed);
+    let identifier = Identifier::Doi(doi(&format!("10.1000/{seed}")));
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash.clone(),
+        pdf_with_embedded_doi(&format!("10.1000/{seed}-conflicting"))
+            .with_title("A Title The File's Own Extraction Would Conflict On"),
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_operator(
+        &hash,
+        &IdentificationEvidence {
+            identifier: identifier.clone(),
+            origin,
+        },
+    );
+    let crossref = FlakySource::new(
+        SourceName::Crossref,
+        1,
+        record_by("Smith", 2024, seed),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let before = index.entry(&hash);
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: p, .. } if *p == path))
+    {
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(
+                sections.match_check,
+                MatchCheckStep::NotAttempted {
+                    reason: "content-index-hit".to_string()
+                },
+                "no title check for an index-held retry, whatever the file's own \
+                 titles would say"
+            );
+            match &sections.content_index.read {
+                IndexReadStep::Hit { evidence } => {
+                    assert_eq!(evidence.origin, origin_str, "got {evidence:?}");
+                }
+                other => panic!("expected a content-index hit, got {other:?}"),
+            }
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "the index already holds this evidence, so retrying it must write nothing: \
+         got {events:?}"
+    );
+    assert_eq!(
+        index.entry(&hash),
+        before,
+        "both facts must be byte-identical after the retry and the rename"
+    );
+}
+
+#[test]
+fn retry_of_an_index_held_overridden_lookup_runs_no_title_check_writes_nothing_and_keeps_its_origin()
+ {
+    index_held_retry_runs_no_title_check_writes_nothing_and_keeps_its_origin(
+        "g7-retry-overridden",
+        EvidenceOrigin::Overridden,
+        "overridden",
+    );
+}
+
+#[test]
+fn retry_of_an_index_held_supplied_lookup_runs_no_title_check_writes_nothing_and_keeps_its_origin()
+ {
+    index_held_retry_runs_no_title_check_writes_nothing_and_keeps_its_origin(
+        "g7-retry-supplied",
+        EvidenceOrigin::Supplied,
+        "supplied",
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -22733,7 +24091,9 @@ fn an_adoption_into_a_library_with_a_faulty_identity_file_warns_once() {
     write_real_file(&root, "orphan.pdf", b"task-g12 adopt-warn bytes");
     let cached = record_by("AdoptWarn", 2024, "10.1000/g12-adopt-warn");
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(&hash_bytes(b"task-g12 adopt-warn bytes"), &cached);
+    let responses = tempdir().unwrap();
+    let _ = index.put_extracted(&hash_bytes(b"task-g12 adopt-warn bytes"), &doi_of(&cached));
+    seed_response_cache(responses.path(), &doi_of(&cached), &cached);
     let documents = CountingDocuments::new();
     let crossref = PanicSource {
         name: SourceName::Crossref,
@@ -22747,7 +24107,7 @@ fn an_adoption_into_a_library_with_a_faulty_identity_file_warns_once() {
         index: &index,
         filesystem: &filesystem,
         bib_files: &bib_files,
-        cache_root: None,
+        cache_root: Some(responses.path().to_path_buf()),
         now: fixed_now,
         collection_root: Some(root.clone()),
         state_root: None,

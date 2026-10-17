@@ -4246,6 +4246,45 @@ fn json_line_of_library_adoption_unindexed_matches_design_d6() {
     );
 }
 
+/// design D8/D10: `Adoption::Recorded` carries `retrieval`, naming the
+/// response cache service the orphan's record was read from.
+#[test]
+fn json_line_of_library_adoption_recorded_carries_its_retrieval() {
+    let event = library_adoption(
+        "new.pdf",
+        Adoption::Recorded {
+            id: "art-1".to_string(),
+            item: "item-1".to_string(),
+            retrieval: RetrievedFrom::ServiceCache {
+                service: "crossref".to_string(),
+            },
+        },
+    );
+
+    assert_eq!(
+        json_line(&event),
+        r#"{"schema":5,"event":"library-adoption","path":"new.pdf","adoption":{"kind":"recorded","id":"art-1","item":"item-1","retrieval":{"kind":"service-cache","service":"crossref"}}}"#
+    );
+}
+
+/// design D8: `json_line` of `Event::LibraryAdoption` with
+/// `Adoption::Unanswered` is exactly the documented line: the content
+/// index's evidence with no record the response cache holds for it.
+#[test]
+fn json_line_of_library_adoption_unanswered_matches_design_d8() {
+    let event = library_adoption(
+        "scan.pdf",
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/z".to_string(),
+        },
+    );
+
+    assert_eq!(
+        json_line(&event),
+        r#"{"schema":5,"event":"library-adoption","path":"scan.pdf","adoption":{"kind":"unanswered","identifier":"doi:10.1000/z"}}"#
+    );
+}
+
 /// Every `library-condition` line deserializes back to the event it was
 /// rendered from.
 #[test]
@@ -4352,6 +4391,25 @@ fn human_line_of_library_adoption_unindexed_matches_design_d7() {
     );
 }
 
+/// design D9: the exact human line for `Adoption::Unanswered` — the
+/// content index knows the bytes' identifier, but the response cache
+/// holds no record for it, so `borax resolve` is what fetches it.
+#[test]
+fn human_line_of_library_adoption_unanswered_matches_design_d9() {
+    let event = library_adoption(
+        "scan.pdf",
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/z".to_string(),
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "scan.pdf: the content index knows its bytes as doi:10.1000/z, but no response \
+         cache holds that record, so it is still an orphan; borax resolve fetches it"
+    );
+}
+
 /// design D7: a control character in a condition's `path` is written as
 /// `\xNN` on the human line, for every kind, while `json_line` of the
 /// same event carries the path unchanged.
@@ -4401,6 +4459,9 @@ fn human_line_of_library_adoption_escapes_control_characters_in_the_path_for_eve
         Adoption::Recorded {
             id: COND_UUID_MISSING.to_string(),
             item: COND_UUID_UNLINKED.to_string(),
+            retrieval: RetrievedFrom::ServiceCache {
+                service: "crossref".to_string(),
+            },
         },
         Adoption::Held {
             id: COND_UUID_MISSING.to_string(),
@@ -4412,6 +4473,9 @@ fn human_line_of_library_adoption_escapes_control_characters_in_the_path_for_eve
             message: "disk full".to_string(),
         },
         Adoption::Unindexed,
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/x".to_string(),
+        },
     ];
 
     for adoption in adoptions {
@@ -4437,6 +4501,9 @@ fn human_line_of_library_adoption_is_unchanged_for_a_path_with_no_control_charac
             Adoption::Recorded {
                 id: "art-1".to_string(),
                 item: "item-1".to_string(),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             },
             "paper.pdf: adopted as artifact art-1 of item item-1",
         ),

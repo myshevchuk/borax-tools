@@ -416,22 +416,92 @@ fn seed_tracked_binary_fixture(root: &Path, relative: &str, bytes: &[u8], title:
     .expect("artifact record file");
 }
 
-/// A stale entry in the content index cache under `cache_home`, sharing
-/// `bytes`' hash but carrying a different title — the fixture the
-/// review scenario needs: an index entry the library answer must leave
-/// untouched and must not be served instead of.
-fn seed_stale_content_index(cache_home: &Path, bytes: &[u8], stale_title: &str) {
+/// A stale `extracted.json` fact under `data_home`'s `v2` content
+/// index, sharing `bytes`' hash but naming a different identifier —
+/// the fixture the review scenario needs: an index entry the library
+/// answer must leave untouched and must not be served instead of
+/// (design D1, D2: the index moved to the data directory and holds
+/// identification evidence, not records).
+fn seed_stale_content_index(data_home: &Path, bytes: &[u8], stale_identifier: &str) {
+    use borax_core::content::hash_bytes;
+    use borax_sources::store::{INDEX_FORMAT_VERSION, entry_path, extracted_key};
+
+    let root = data_home.join("borax").join(INDEX_FORMAT_VERSION);
+    let key = extracted_key(&hash_bytes(bytes));
+    let path = entry_path(&root, &key).expect("a well-formed index key");
+    fs::create_dir_all(path.parent().expect("parent")).expect("index dir");
+    fs::write(
+        &path,
+        format!("{{\"identifier\":\"{stale_identifier}\"}}"),
+    )
+    .expect("stale index entry");
+}
+
+/// Writes an artifact record under `<root>/.borax/artifacts/` for the
+/// tracked file at `relative`, naming `identifier` (`doi:…`) as the
+/// operator's evidence of its one history entry — the fixture group
+/// 6's reconcile tests restore from.
+fn seed_operator_entry(root: &Path, relative: &str, bytes: &[u8], identifier: &str) {
+    use borax_core::content::hash_bytes;
+    use borax_core::identifier::{Doi, Identifier};
+    use borax_core::library::{
+        ArtifactId, ArtifactRecord, EvidenceOrigin, HashEntry, IdentificationEvidence, RunId,
+    };
+    use uuid::Uuid;
+
+    let doi_value = identifier
+        .strip_prefix("doi:")
+        .expect("a doi identifier, for this fixture");
+    let evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(Doi::parse(doi_value).expect("a valid doi")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let metadata = fs::metadata(root.join(relative)).expect("the file must already exist");
+    let modified_millis = metadata
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_millis() as i64;
+    let artifact = ArtifactRecord {
+        id: ArtifactId::from_uuid(Uuid::now_v7()),
+        item: None,
+        path: relative.to_string(),
+        size: bytes.len() as u64,
+        modified_millis,
+        history: vec![HashEntry {
+            hash: hash_bytes(bytes),
+            run: RunId::new("fixture-run"),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            tool_version: "0.6.0-test".to_string(),
+            item: None,
+            evidence: Some(evidence),
+        }],
+    };
+    let records = root.join(".borax").join("artifacts");
+    fs::create_dir_all(&records).expect("artifacts dir");
+    fs::write(
+        records.join(format!("{}.toml", artifact.id)),
+        artifact.to_toml(),
+    )
+    .expect("artifact record file");
+}
+
+/// A `v1`-shaped whole-record entry under `cache_home`'s old cache
+/// root — what a pre-`reduce-content-index` run would have left — so a
+/// test can pin that nothing reads it any more.
+fn seed_v1_cache_entry(cache_home: &Path, bytes: &[u8], title: &str) {
     use borax_core::content::hash_bytes;
     use borax_core::record::{EntryType, Record};
     use borax_sources::store::{content_key, entry_path};
 
     let mut record = Record::new(EntryType::Article);
-    record.title = Some(stale_title.to_string());
+    record.title = Some(title.to_string());
     let root = cache_home.join("borax").join("v1");
     let key = content_key(&hash_bytes(bytes));
     let path = entry_path(&root, &key).expect("a well-formed cache key");
     fs::create_dir_all(path.parent().expect("parent")).expect("cache dir");
-    fs::write(&path, serde_json::to_vec(&record).expect("json")).expect("stale cache entry");
+    fs::write(&path, serde_json::to_vec(&record).expect("json")).expect("v1 cache entry");
 }
 
 /// `borax resolve --json paper.pdf` and
@@ -444,6 +514,7 @@ fn seed_stale_content_index(cache_home: &Path, bytes: &[u8], stale_title: &str) 
 fn resolve_reports_a_tracked_file_the_same_way_for_every_relative_spelling() {
     let library = tempfile::tempdir().expect("a temporary library");
     let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
     let config_home = tempfile::tempdir().expect("a temporary config home");
     let root = library.path();
     fs::write(root.join(".borax.toml"), b"").expect("marker");
@@ -451,7 +522,7 @@ fn resolve_reports_a_tracked_file_the_same_way_for_every_relative_spelling() {
     fs::write(root.join("paper.pdf"), bytes).expect("paper.pdf");
     fs::create_dir_all(root.join("sub")).expect("sub dir");
     seed_tracked_binary_fixture(root, "paper.pdf", bytes, "The Corrected Title");
-    seed_stale_content_index(cache_home.path(), bytes, "The Stale Title");
+    seed_stale_content_index(data_home.path(), bytes, "doi:10.1000/stale");
 
     for spelling in ["paper.pdf", "./sub/../paper.pdf"] {
         let output = Command::new(env!("CARGO_BIN_EXE_borax"))
@@ -461,6 +532,7 @@ fn resolve_reports_a_tracked_file_the_same_way_for_every_relative_spelling() {
             .env("XDG_CONFIG_HOME", config_home.path())
             .env("APPDATA", config_home.path())
             .env("XDG_CACHE_HOME", cache_home.path())
+            .env("XDG_DATA_HOME", data_home.path())
             .output()
             .expect("the binary should run");
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -481,4 +553,245 @@ fn resolve_reports_a_tracked_file_the_same_way_for_every_relative_spelling() {
         );
         assert_eq!(resolved["library"]["answer"]["kind"], "tracked");
     }
+}
+
+// ---------------------------------------------------------------------
+// group 6: the real run (design D1, D5)
+// ---------------------------------------------------------------------
+
+/// design D1/D5: `borax reconcile` restores operator evidence under
+/// `$XDG_DATA_HOME/borax/v2/content/<hash>/operator.json`.
+#[test]
+fn reconcile_writes_operator_evidence_under_xdg_data_home_borax_v2_content() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let root = library.path();
+    fs::write(root.join(".borax.toml"), b"").expect("marker");
+    let bytes = b"g6 reconcile evidence bytes";
+    fs::write(root.join("paper.pdf"), bytes).expect("paper.pdf");
+    seed_operator_entry(root, "paper.pdf", bytes, "doi:10.1000/g6-reconcile");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_borax"))
+        .args(["reconcile", "--json"])
+        .current_dir(root)
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("APPDATA", config_home.path())
+        .env("XDG_CACHE_HOME", cache_home.path())
+        .env("XDG_DATA_HOME", data_home.path())
+        .output()
+        .expect("the binary should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let hash = borax_core::content::hash_bytes(bytes);
+    let path = data_home
+        .path()
+        .join("borax")
+        .join("v2")
+        .join("content")
+        .join(hash.to_string())
+        .join("operator.json");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("expected {path:?} to exist: {error}"));
+    assert!(
+        text.contains("\"identifier\":\"doi:10.1000/g6-reconcile\""),
+        "got {text:?}"
+    );
+    assert!(text.contains("\"origin\":\"supplied\""), "got {text:?}");
+}
+
+/// design D1: the content index lives outside the cache directory, so
+/// `borax reconcile`'s restoration writes nothing under it.
+#[test]
+fn reconcile_writes_nothing_under_the_cache_directory() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let root = library.path();
+    fs::write(root.join(".borax.toml"), b"").expect("marker");
+    let bytes = b"g6 cache-untouched bytes";
+    fs::write(root.join("paper.pdf"), bytes).expect("paper.pdf");
+    seed_operator_entry(root, "paper.pdf", bytes, "doi:10.1000/g6-cache-untouched");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_borax"))
+        .args(["reconcile", "--json"])
+        .current_dir(root)
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("APPDATA", config_home.path())
+        .env("XDG_CACHE_HOME", cache_home.path())
+        .env("XDG_DATA_HOME", data_home.path())
+        .output()
+        .expect("the binary should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written_under_cache = fs::read_dir(cache_home.path())
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(
+        written_under_cache, 0,
+        "reconcile's restoration must write nothing under the cache directory"
+    );
+}
+
+/// design D1: `borax cache --clear` removes service responses only, so
+/// the content index's fact survives it, byte-identical.
+#[test]
+fn cache_clear_leaves_the_content_index() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let root = library.path();
+    fs::write(root.join(".borax.toml"), b"").expect("marker");
+    let bytes = b"g6 cache-clear-survives bytes";
+    fs::write(root.join("paper.pdf"), bytes).expect("paper.pdf");
+    seed_operator_entry(root, "paper.pdf", bytes, "doi:10.1000/g6-cache-clear");
+
+    let reconciled = Command::new(env!("CARGO_BIN_EXE_borax"))
+        .args(["reconcile", "--json"])
+        .current_dir(root)
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("APPDATA", config_home.path())
+        .env("XDG_CACHE_HOME", cache_home.path())
+        .env("XDG_DATA_HOME", data_home.path())
+        .output()
+        .expect("the binary should run");
+    assert_eq!(
+        reconciled.status.code(),
+        Some(0),
+        "setup: the restoration must succeed: stderr {}",
+        String::from_utf8_lossy(&reconciled.stderr)
+    );
+
+    let hash = borax_core::content::hash_bytes(bytes);
+    let path = data_home
+        .path()
+        .join("borax")
+        .join("v2")
+        .join("content")
+        .join(hash.to_string())
+        .join("operator.json");
+    let before =
+        fs::read(&path).unwrap_or_else(|error| panic!("expected {path:?} to exist: {error}"));
+
+    let cleared = Command::new(env!("CARGO_BIN_EXE_borax"))
+        .args(["cache", "--clear", "--json"])
+        .current_dir(root)
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("APPDATA", config_home.path())
+        .env("XDG_CACHE_HOME", cache_home.path())
+        .env("XDG_DATA_HOME", data_home.path())
+        .output()
+        .expect("the binary should run");
+    assert_eq!(
+        cleared.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&cleared.stderr)
+    );
+
+    let after = fs::read(&path).unwrap_or_else(|error| {
+        panic!("`cache --clear` must leave the content index: {path:?}: {error}")
+    });
+    assert_eq!(
+        after, before,
+        "`cache --clear` must leave the content index's fact byte-identical"
+    );
+}
+
+/// design D1: a `v1`-shaped whole-record entry under the cache
+/// directory is never read as a fact. The file (not really a PDF) is
+/// skipped as unreadable, never resolved from the stale record.
+#[test]
+fn a_v1_entry_in_the_cache_directory_is_not_read() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let bytes = b"not really a PDF, v1 entry test";
+    fs::write(directory.path().join("paper.pdf"), bytes).expect("paper.pdf");
+    seed_v1_cache_entry(cache_home.path(), bytes, "The V1 Title");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_borax"))
+        .args(["resolve", "--json", "paper.pdf"])
+        .current_dir(directory.path())
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("APPDATA", config_home.path())
+        .env("XDG_CACHE_HOME", cache_home.path())
+        .env("XDG_DATA_HOME", data_home.path())
+        .output()
+        .expect("the binary should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let event: serde_json::Value = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json"))
+        .find(|line: &serde_json::Value| line["event"] == "resolved" || line["event"] == "skipped")
+        .unwrap_or_else(|| panic!("no resolved/skipped event: {stdout}"));
+
+    assert_eq!(
+        event["event"], "skipped",
+        "a v1 record beside the entry must never be read as a fact: got {stdout}"
+    );
+    assert_eq!(
+        event["reason"]["kind"], "unreadable",
+        "got {stdout}"
+    );
+}
+
+/// design D1: with no data directory the index is held in memory for
+/// the run, exactly as a run with no cache directory is today —
+/// nothing is reported, and the run still succeeds.
+#[test]
+fn a_run_with_no_data_directory_writes_no_fact_and_succeeds() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let root = library.path();
+    fs::write(root.join(".borax.toml"), b"").expect("marker");
+    let bytes = b"g6 no-data-root bytes";
+    fs::write(root.join("paper.pdf"), bytes).expect("paper.pdf");
+    seed_operator_entry(root, "paper.pdf", bytes, "doi:10.1000/g6-no-data-root");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_borax"))
+        .args(["reconcile", "--json"])
+        .current_dir(root)
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("APPDATA", config_home.path())
+        .env("XDG_CACHE_HOME", cache_home.path())
+        .output()
+        .expect("the binary should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a run with no data directory must still succeed: stderr {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written_under_cache = fs::read_dir(cache_home.path())
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(
+        written_under_cache, 0,
+        "with no data directory, nothing is written anywhere: got a file under the \
+         cache directory"
+    );
 }

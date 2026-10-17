@@ -25,8 +25,8 @@ use borax::library::{ArtifactStore, ItemStore, Stores};
 use borax::pipeline::{
     Documents, FileOutcome, FileRecord, RealDocuments, ResolveConfig, accept, attempts_of,
     extraction, extraction_of, from_file, remember, resolution_skip, resolve_batch, resolve_file,
-    resolve_supplied, resolved_event, standing, title_check, titles_of, unheld_evidence,
-    verdict_event,
+    resolve_indexed_again, resolve_supplied, resolved_event, standing, title_check, titles_of,
+    unheld_evidence, verdict_event,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, IdentifierKind, SuppliedError};
@@ -4343,6 +4343,123 @@ fn bypassed_with_cache_false_still_writes_the_index() {
     assert_eq!(
         index.entry(&hash).extracted,
         Fact::Held(Identifier::Doi(doi("10.1000/evidence-bypassed")))
+    );
+}
+
+// ---------------------------------------------------------------------
+// group 7: retry of an index-held lookup (design D6, D10)
+// ---------------------------------------------------------------------
+
+/// An inconclusive evidence hit's `Evidence`: the lookup was attempted
+/// with origin [`Origin::Indexed`] and failed, no title check made, for
+/// `content-index-hit` throughout — the state a retry starts from.
+fn prior_indexed_hit(identifier: Identifier, origin: EvidenceOrigin) -> Evidence {
+    Evidence {
+        library: Consultation::NotConsulted(Unattempted::NoLibrary),
+        content_index: IndexEvidence {
+            read: IndexRead::Hit(IdentificationEvidence {
+                identifier: identifier.clone(),
+                origin,
+            }),
+            write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        extraction: ExtractionEvidence {
+            result: ExtractionStep::NotAttempted(Unattempted::ContentIndexHit),
+            titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
+        },
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
+        lookup: LookupEvidence::Attempted {
+            identifier,
+            origin: Origin::Indexed(origin),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Err(SourceError::Unavailable {
+                    message: "offline".to_string(),
+                }),
+            }],
+            earlier: vec![],
+        },
+        match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
+    }
+}
+
+/// design D6/D10: a retry of an index-held lookup repeats the
+/// identifier with the stored evidence's origin, reported
+/// `content-index`, and keeps the earlier round rather than starting
+/// over.
+#[test]
+fn resolve_indexed_again_keeps_the_origin_and_the_earlier_rounds() {
+    let identifier = Identifier::Doi(doi("10.1000/retry-indexed"));
+    let prior = prior_indexed_hit(identifier.clone(), EvidenceOrigin::Supplied);
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/retry-indexed")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolve_indexed_again(&identifier, EvidenceOrigin::Supplied, &sources, &prior)
+        .expect("the retry must resolve");
+
+    match &file.evidence.lookup {
+        LookupEvidence::Attempted {
+            origin, earlier, ..
+        } => {
+            assert_eq!(*origin, Origin::Indexed(EvidenceOrigin::Supplied));
+            assert_eq!(
+                earlier.len(),
+                1,
+                "the earlier, failed round must be kept: got {earlier:?}"
+            );
+        }
+        other => panic!("expected an attempted lookup, got {other:?}"),
+    }
+}
+
+/// design D6: a retry of an index-held lookup reads no titles — it is
+/// not given a path or a document reader at all — and makes no title
+/// check, keeping `content-index-hit` throughout.
+#[test]
+fn resolve_indexed_again_reads_no_titles_and_makes_no_title_check() {
+    let identifier = Identifier::Doi(doi("10.1000/retry-indexed-no-titles"));
+    let prior = prior_indexed_hit(identifier.clone(), EvidenceOrigin::Overridden);
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/retry-indexed-no-titles")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolve_indexed_again(&identifier, EvidenceOrigin::Overridden, &sources, &prior)
+        .expect("the retry must resolve");
+
+    assert_eq!(
+        file.evidence.extraction.titles,
+        Titles::NotAttempted(Unattempted::ContentIndexHit)
+    );
+    assert_eq!(
+        file.evidence.match_check,
+        MatchCheck::NotAttempted(Unattempted::ContentIndexHit)
+    );
+}
+
+/// design D6: a retry of an index-held lookup writes no evidence — the
+/// index already holds it — so the content-index write stays not
+/// attempted for `content-index-hit`.
+#[test]
+fn resolve_indexed_again_leaves_the_content_index_write_not_attempted_for_content_index_hit() {
+    let identifier = Identifier::Doi(doi("10.1000/retry-indexed-no-write"));
+    let prior = prior_indexed_hit(identifier.clone(), EvidenceOrigin::Extracted);
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/retry-indexed-no-write")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolve_indexed_again(&identifier, EvidenceOrigin::Extracted, &sources, &prior)
+        .expect("the retry must resolve");
+
+    assert_eq!(
+        file.evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::ContentIndexHit)
     );
 }
 

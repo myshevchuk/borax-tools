@@ -16,14 +16,14 @@ use borax::evidence::{
     IndexRead, IndexWrite, LookupEvidence, MatchCheck, RecordRetrieval, Titles, Unattempted,
 };
 use borax::library::{
-    ARTIFACT_STORE, Account, Admitted, Admitting, Adoptions, ArtifactStore, Consulted, ITEM_STORE,
-    Identity, ItemStore, Reconciliation, Reconciling, RecordFaults, STATE_DIR, StoreFault,
-    StoreWriter, Stores, Unrecorded, WorkDuplicate, accepted_by, admission_event, admit, adopt,
-    artifacts, carries, contains, ensure_identity, excludes, extracted_identifier,
-    extraction_event, identity, identity_fault_warning, identity_file, item_file_name,
-    library_relative, missing, orphan_events, orphans, reconcile, reconciliation_events,
-    recorded_at, relative_to, status_event, store_create, store_write, strands, survey, validate,
-    validation_events,
+    ARTIFACT_STORE, Account, Adopted, Admitted, Admitting, Adoptions, ArtifactStore, Consulted,
+    ITEM_STORE, Identity, ItemStore, OperatorDecision, Reconciliation, Reconciling, RecordFaults,
+    STATE_DIR, StoreFault, StoreWriter, Stores, Unadopted, Unrecorded, WorkDuplicate, accepted_by,
+    admission_event, admit, adopt, artifacts, carries, contains, ensure_identity, excludes,
+    extracted_identifier, extraction_event, identity, identity_fault_warning, identity_file,
+    item_file_name, library_relative, missing, operator_decisions, orphan_events, orphans,
+    reconcile, reconciliation_events, recorded_at, relative_to, status_event, store_create,
+    store_write, strands, survey, validate, validation_events,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
@@ -32,6 +32,7 @@ use borax_core::library::{
     LibraryId, LibraryIdentity, RunId,
 };
 use borax_core::record::{EntryType, Record};
+use borax_sources::source::SourceName;
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
@@ -10325,11 +10326,16 @@ fn adopt_that_records_an_orphan_mints_the_identity() {
     let root = dir.path();
     fs::write(root.join("orphan.pdf"), b"orphan bytes").unwrap();
     let orphan_hash = hash("orphan bytes");
-    let lookup = |candidate: &ContentHash| -> Option<Record> {
+    let identifier = Identifier::Doi(Doi::parse("10.1000/adopt-mints-identity").unwrap());
+    let lookup = |candidate: &ContentHash| -> Result<Adopted, Unadopted> {
         if *candidate == orphan_hash {
-            Some(record_with_doi("10.1000/adopt-mints-identity"))
+            Ok(Adopted {
+                record: record_with_doi("10.1000/adopt-mints-identity"),
+                identifier: identifier.clone(),
+                service: SourceName::Crossref,
+            })
         } else {
-            None
+            Err(Unadopted::Unindexed)
         }
     };
     let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
@@ -10352,7 +10358,7 @@ fn adopt_that_records_nothing_mints_nothing() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     fs::write(root.join("orphan.pdf"), b"unindexed bytes").unwrap();
-    let lookup = |_hash: &ContentHash| -> Option<Record> { None };
+    let lookup = |_hash: &ContentHash| -> Result<Adopted, Unadopted> { Err(Unadopted::Unindexed) };
     let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
 
     let result = adopt(
@@ -10377,11 +10383,16 @@ fn adopt_into_a_library_with_a_faulty_identity_file_records_and_reports_the_faul
     let before = fs::read(identity_file(root)).unwrap();
     fs::write(root.join("orphan.pdf"), b"orphan bytes faulty").unwrap();
     let orphan_hash = hash("orphan bytes faulty");
-    let lookup = |candidate: &ContentHash| -> Option<Record> {
+    let identifier = Identifier::Doi(Doi::parse("10.1000/adopt-faulty-identity").unwrap());
+    let lookup = |candidate: &ContentHash| -> Result<Adopted, Unadopted> {
         if *candidate == orphan_hash {
-            Some(record_with_doi("10.1000/adopt-faulty-identity"))
+            Ok(Adopted {
+                record: record_with_doi("10.1000/adopt-faulty-identity"),
+                identifier: identifier.clone(),
+                service: SourceName::Crossref,
+            })
         } else {
-            None
+            Err(Unadopted::Unindexed)
         }
     };
     let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
@@ -10428,11 +10439,16 @@ fn adopt_whose_mint_fails_records_nothing_and_reports_unwritten_naming_the_ident
         return;
     }
 
-    let lookup = |candidate: &ContentHash| -> Option<Record> {
+    let identifier = Identifier::Doi(Doi::parse("10.1000/adopt-mint-fails").unwrap());
+    let lookup = |candidate: &ContentHash| -> Result<Adopted, Unadopted> {
         if *candidate == orphan_hash {
-            Some(record_with_doi("10.1000/adopt-mint-fails"))
+            Ok(Adopted {
+                record: record_with_doi("10.1000/adopt-mint-fails"),
+                identifier: identifier.clone(),
+                service: SourceName::Crossref,
+            })
         } else {
-            None
+            Err(Unadopted::Unindexed)
         }
     };
     let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
@@ -10463,6 +10479,232 @@ fn adopt_whose_mint_fails_records_nothing_and_reports_unwritten_naming_the_ident
         ArtifactStore::read(root).is_empty(),
         "a failed mint must leave no artifact record"
     );
+}
+
+/// design D3/D7: an orphan `lookup` answers with is admitted carrying
+/// the lookup's identifier as evidence with origin `adopted`, on the
+/// one entry its record gains.
+#[test]
+fn adopt_writes_the_lookups_identifier_as_adopted_on_the_adopted_entry() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("orphan.pdf"), b"orphan adopted bytes").unwrap();
+    let orphan_hash = hash("orphan adopted bytes");
+    let identifier = Identifier::Doi(Doi::parse("10.1000/adopt-evidence").unwrap());
+    let lookup = |candidate: &ContentHash| -> Result<Adopted, Unadopted> {
+        if *candidate == orphan_hash {
+            Ok(Adopted {
+                record: record_with_doi("10.1000/adopt-evidence"),
+                identifier: identifier.clone(),
+                service: SourceName::Crossref,
+            })
+        } else {
+            Err(Unadopted::Unindexed)
+        }
+    };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    assert_eq!(result.adopted(), 1, "got {result:?}");
+    let records = ArtifactStore::read(root);
+    let record = records
+        .by_hash(&orphan_hash)
+        .first()
+        .cloned()
+        .cloned()
+        .expect("the orphan must be recorded");
+    assert_eq!(record.history.len(), 1, "got {:?}", record.history);
+    assert_eq!(
+        record.history[0].evidence,
+        Some(IdentificationEvidence {
+            identifier: identifier.clone(),
+            origin: EvidenceOrigin::Adopted,
+        }),
+        "the adopted entry must carry the lookup's identifier with origin \
+         adopted: got {:?}",
+        record.history[0]
+    );
+}
+
+/// design D7: an orphan whose `lookup` finds the content index's
+/// evidence but no cached record is `Unadopted::Unanswered`, and
+/// `adopt` leaves it an orphan reported `Adoption::Unanswered`, naming
+/// the identifier.
+#[test]
+fn adopt_reports_unanswered_as_the_lookup_says() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("orphan.pdf"), b"orphan unanswered bytes").unwrap();
+    let identifier = Identifier::Doi(Doi::parse("10.1000/adopt-unanswered").unwrap());
+    let lookup = |_hash: &ContentHash| -> Result<Adopted, Unadopted> {
+        Err(Unadopted::Unanswered {
+            identifier: identifier.clone(),
+        })
+    };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    assert_eq!(result.adopted(), 0, "got {result:?}");
+    assert_eq!(result.adoptions.len(), 1, "got {:?}", result.adoptions);
+    assert_eq!(
+        result.adoptions[0].1,
+        Adoption::Unanswered {
+            identifier: identifier.to_string(),
+        },
+        "got {:?}",
+        result.adoptions
+    );
+    assert!(
+        ArtifactStore::read(root).is_empty(),
+        "an unanswered orphan must get no record"
+    );
+}
+
+// ---------------------------------------------------------------------
+// group 5: operator_decisions (design D5, D10)
+// ---------------------------------------------------------------------
+
+/// design D5: `operator_decisions` lists one decision per distinct
+/// hash a record's history holds, each carrying the record's path and
+/// the newest operator evidence for that hash
+/// (`ArtifactRecord::operator_evidence_for`).
+#[test]
+fn operator_decisions_lists_each_hashs_newest_operator_evidence_with_the_records_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let doi_a = Identifier::Doi(Doi::parse("10.1000/op-decisions-a").unwrap());
+    let doi_b = Identifier::Doi(Doi::parse("10.1000/op-decisions-b").unwrap());
+    let doi_c = Identifier::Doi(Doi::parse("10.1000/op-decisions-c").unwrap());
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "paper.pdf",
+        vec![
+            HashEntry {
+                evidence: Some(s(doi_a.clone())),
+                ..hash_entry("op-decisions-h1", "run-0")
+            },
+            HashEntry {
+                evidence: Some(s(doi_b.clone())),
+                ..hash_entry("op-decisions-h1", "run-1")
+            },
+            HashEntry {
+                evidence: Some(s(doi_c.clone())),
+                ..hash_entry("op-decisions-h2", "run-2")
+            },
+        ],
+    );
+    write_artifact_record(root, &record);
+
+    let decisions = operator_decisions(root);
+
+    let h1 = hash("op-decisions-h1");
+    let h2 = hash("op-decisions-h2");
+    assert_eq!(decisions.len(), 2, "got {decisions:?}");
+    assert!(
+        decisions.iter().any(|decision| decision.path
+            == relative_to(root, "paper.pdf")
+            && decision.hash == h1
+            && decision.evidence == s(doi_b.clone())),
+        "h1's newest operator evidence is s(doi_b): got {decisions:?}"
+    );
+    assert!(
+        decisions.iter().any(|decision| decision.path
+            == relative_to(root, "paper.pdf")
+            && decision.hash == h2
+            && decision.evidence == s(doi_c.clone())),
+        "got {decisions:?}"
+    );
+}
+
+/// design D5: a hash whose newest evidence is extraction's, not an
+/// operator's, owes the index nothing, so `operator_decisions` lists
+/// no decision for it.
+#[test]
+fn operator_decisions_skips_hashes_with_no_operator_entry() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let extracted = IdentificationEvidence {
+        identifier: Identifier::Doi(Doi::parse("10.1000/op-decisions-extracted").unwrap()),
+        origin: EvidenceOrigin::Extracted,
+    };
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "paper.pdf",
+        vec![HashEntry {
+            evidence: Some(extracted),
+            ..hash_entry("op-decisions-extracted-only", "run-0")
+        }],
+    );
+    write_artifact_record(root, &record);
+
+    let decisions = operator_decisions(root);
+
+    assert!(decisions.is_empty(), "got {decisions:?}");
+}
+
+/// design D5: when the same hash's newest operator evidence disagrees
+/// between two records, the record read last in path order (by
+/// artifact id, since the store sorts its files) wins.
+#[test]
+fn operator_decisions_takes_the_record_read_last_when_two_disagree() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let doi_first = Identifier::Doi(Doi::parse("10.1000/op-decisions-first").unwrap());
+    let doi_second = Identifier::Doi(Doi::parse("10.1000/op-decisions-second").unwrap());
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "first.pdf",
+            vec![HashEntry {
+                evidence: Some(s(doi_first)),
+                ..hash_entry("op-decisions-disagree", "run-0")
+            }],
+        ),
+    );
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            None,
+            "second.pdf",
+            vec![HashEntry {
+                evidence: Some(s(doi_second.clone())),
+                ..hash_entry("op-decisions-disagree", "run-0")
+            }],
+        ),
+    );
+
+    let decisions = operator_decisions(root);
+
+    let h = hash("op-decisions-disagree");
+    assert_eq!(decisions.len(), 1, "one hash, one decision: got {decisions:?}");
+    assert_eq!(decisions[0].hash, h);
+    assert_eq!(
+        decisions[0].evidence,
+        s(doi_second),
+        "UUID_B sorts after UUID_A, so its record is read last: got {decisions:?}"
+    );
+    assert_eq!(decisions[0].path, relative_to(root, "second.pdf"));
 }
 
 // ---------------------------------------------------------------------

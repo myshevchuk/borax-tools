@@ -15,13 +15,14 @@ use borax_core::library::{EvidenceOrigin, IdentificationEvidence};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
 use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
 use borax_sources::store::{
-    ContentIndex, FORMAT_VERSION, FileCache, INDEX_FORMAT_VERSION, cache_root, content_key,
-    create_atomically, create_atomically_with, data_root, entry_path, extracted_key, hash_file,
-    operator_key, write_atomically,
+    ContentIndex, FORMAT_VERSION, FileCache, INDEX_FORMAT_VERSION, IndexStore, cache_root,
+    content_key, create_atomically, create_atomically_with, data_root, entry_path, extracted_key,
+    hash_file, operator_key, write_atomically,
 };
 
 /// A [`Cache`] whose `put` always reports [`CacheWrite::Failed`]
-/// without storing anything.
+/// without storing anything, and an [`IndexStore`] that fails every
+/// write of a fact on the same terms.
 struct WriteFailingCache;
 
 impl Cache for WriteFailingCache {
@@ -30,6 +31,18 @@ impl Cache for WriteFailingCache {
     }
 
     fn put(&self, _key: &str, _record: &Record) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+}
+
+impl IndexStore for WriteFailingCache {
+    fn read_fact(&self, _key: &str) -> Option<Result<String, String>> {
+        None
+    }
+
+    fn write_fact(&self, _key: &str, _text: &str) -> CacheWrite {
         CacheWrite::Failed {
             message: "write-failing cache".to_string(),
         }
@@ -801,51 +814,58 @@ fn file_cache_works_again_after_clear() {
 
 // --- ContentIndex, over both MemoryCache and FileCache ---
 
-fn content_index_round_trips_a_record<C: Cache>(cache: C) {
-    let index = ContentIndex::new(cache);
+fn content_index_round_trips_both_facts<S: IndexStore>(store: S) {
+    let index = ContentIndex::new(store);
     let hash = hash_bytes(b"borax content");
-    let record = article_with_doi("10.1038/171737a0");
+    let identifier = doi_identifier("10.1038/171737a0");
+    let evidence = IdentificationEvidence {
+        identifier: identifier.clone(),
+        origin: EvidenceOrigin::Supplied,
+    };
 
-    let _ = index.put(&hash, &record);
+    let _ = index.put_extracted(&hash, &identifier);
+    let _ = index.put_operator(&hash, &evidence);
 
-    assert_eq!(index.get(&hash), Some(record));
+    let entry = index.entry(&hash);
+    assert_eq!(entry.extracted, Fact::Held(identifier));
+    assert_eq!(entry.operator, Fact::Held(evidence));
 }
 
 #[test]
 fn content_index_put_returns_written_over_memory_cache() {
     let index = ContentIndex::new(MemoryCache::new());
     let hash = hash_bytes(b"borax content");
-    let record = article_with_doi("10.1038/171737a0");
+    let identifier = doi_identifier("10.1038/171737a0");
 
-    assert_eq!(index.put(&hash, &record), CacheWrite::Written);
+    assert_eq!(index.put_extracted(&hash, &identifier), CacheWrite::Written);
 }
 
 #[test]
 fn content_index_put_returns_what_its_cache_returned() {
     let index = ContentIndex::new(WriteFailingCache);
     let hash = hash_bytes(b"borax content");
-    let record = article_with_doi("10.1038/171737a0");
+    let identifier = doi_identifier("10.1038/171737a0");
 
-    match index.put(&hash, &record) {
+    match index.put_extracted(&hash, &identifier) {
         CacheWrite::Failed { message } => assert_eq!(message, "write-failing cache"),
         CacheWrite::Written => panic!("expected Failed, got Written"),
     }
 }
 
 #[test]
-fn content_index_round_trips_a_record_over_memory_cache() {
-    content_index_round_trips_a_record(MemoryCache::new());
+fn content_index_round_trips_both_facts_over_memory_cache() {
+    content_index_round_trips_both_facts(MemoryCache::new());
 }
 
 #[test]
-fn content_index_round_trips_a_record_over_file_cache() {
+fn content_index_round_trips_both_facts_over_file_cache() {
     let dir = tempdir().unwrap();
-    content_index_round_trips_a_record(FileCache::new(dir.path()));
+    content_index_round_trips_both_facts(FileCache::new(dir.path()));
 }
 
-fn content_index_misses_an_unknown_hash<C: Cache>(cache: C) {
-    let index = ContentIndex::new(cache);
-    assert_eq!(index.get(&hash_bytes(b"never indexed")), None);
+fn content_index_misses_an_unknown_hash<S: IndexStore>(store: S) {
+    let index = ContentIndex::new(store);
+    assert_eq!(index.entry(&hash_bytes(b"never indexed")).answer(), None);
 }
 
 #[test]
@@ -859,11 +879,11 @@ fn content_index_misses_an_unknown_hash_over_file_cache() {
     content_index_misses_an_unknown_hash(FileCache::new(dir.path()));
 }
 
-/// Spec scenario: "Renamed file, same content" — a record indexed under a
-/// file's content hash is found again when the same bytes appear under a
-/// different path.
+/// Spec scenario: "Renamed file, same content" — an identifier indexed
+/// under a file's content hash is found again when the same bytes
+/// appear under a different path.
 #[test]
-fn renamed_file_with_identical_content_is_served_from_the_content_index() {
+fn renamed_file_with_identical_content_is_answered_by_the_content_index() {
     let dir = tempdir().unwrap();
     let bytes = b"same bytes, different name";
     let original = dir.path().join("original.pdf");
@@ -872,10 +892,16 @@ fn renamed_file_with_identical_content_is_served_from_the_content_index() {
     std::fs::write(&renamed, bytes).unwrap();
 
     let index = ContentIndex::new(MemoryCache::new());
-    let record = article_with_doi("10.1038/171737a0");
-    let _ = index.put(&hash_file(&original).unwrap(), &record);
+    let identifier = doi_identifier("10.1038/171737a0");
+    let _ = index.put_extracted(&hash_file(&original).unwrap(), &identifier);
 
-    assert_eq!(index.get(&hash_file(&renamed).unwrap()), Some(record));
+    assert_eq!(
+        index.entry(&hash_file(&renamed).unwrap()).answer(),
+        Some(IdentificationEvidence {
+            identifier,
+            origin: EvidenceOrigin::Extracted,
+        })
+    );
 }
 
 /// Spec scenario: "Re-run over the same directory is offline" — entries
@@ -884,14 +910,20 @@ fn renamed_file_with_identical_content_is_served_from_the_content_index() {
 fn entries_survive_a_fresh_file_cache_opened_on_the_same_root() {
     let dir = tempdir().unwrap();
     let hash = hash_bytes(b"offline re-run");
-    let record = article_with_doi("10.1038/171737a0");
+    let identifier = doi_identifier("10.1038/171737a0");
 
     let first_run = ContentIndex::new(FileCache::new(dir.path()));
-    let _ = first_run.put(&hash, &record);
+    let _ = first_run.put_extracted(&hash, &identifier);
     drop(first_run);
 
     let second_run = ContentIndex::new(FileCache::new(dir.path()));
-    assert_eq!(second_run.get(&hash), Some(record));
+    assert_eq!(
+        second_run.entry(&hash).answer(),
+        Some(IdentificationEvidence {
+            identifier,
+            origin: EvidenceOrigin::Extracted,
+        })
+    );
 }
 
 // --- the content-index evidence API: IndexStore, entry/put_extracted/
@@ -1099,19 +1131,26 @@ fn entry_reports_an_operator_json_that_does_not_parse_as_unreadable() {
     );
 }
 
+/// The record API is gone (group 4), so this is read directly against
+/// [`MemoryCache`]'s two traits rather than through [`ContentIndex`]:
+/// its [`Cache`] records and its [`IndexStore`] facts are two separate
+/// maps, and writing one leaves the other exactly as it was.
 #[test]
 fn memory_cache_holds_facts_apart_from_records() {
-    let index = ContentIndex::new(MemoryCache::new());
+    let cache = MemoryCache::new();
     let hash = hash_bytes(b"facts apart from records");
     let record = article_with_doi("10.1038/171737a0");
 
-    let _ = index.put(&hash, &record);
-    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/fact"));
+    let _ = cache.put("some-service-cache-key", &record);
+    let _ = cache.write_fact(
+        &extracted_key(&hash),
+        "{\"identifier\":\"doi:10.1000/fact\"}",
+    );
 
-    assert_eq!(index.get(&hash), Some(record));
+    assert_eq!(cache.get("some-service-cache-key"), Some(record));
     assert_eq!(
-        index.entry(&hash).extracted,
-        Fact::Held(doi_identifier("10.1000/fact"))
+        cache.read_fact(&extracted_key(&hash)),
+        Some(Ok("{\"identifier\":\"doi:10.1000/fact\"}".to_string()))
     );
 }
 
@@ -1147,13 +1186,20 @@ fn content_index_fact_write_reports_failed_over_a_read_only_root() {
     );
 }
 
+/// The record API is gone (group 4), so the `v1` record this test puts
+/// beside the entry is written directly, as the old record API would
+/// have: a whole record, serialized under `content/<hash>.json`, with
+/// no `v2` entry directory for it.
 #[test]
 fn a_v1_record_file_beside_the_entry_is_not_read_as_a_fact() {
     let dir = tempdir().unwrap();
     let hash = hash_bytes(b"v1 record beside entry");
-    let index = ContentIndex::new(FileCache::new(dir.path()));
-    let _ = index.put(&hash, &article_with_doi("10.1038/171737a0"));
+    let record = article_with_doi("10.1038/171737a0");
+    let path = entry_path(dir.path(), &content_key(&hash)).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
 
+    let index = ContentIndex::new(FileCache::new(dir.path()));
     let entry = index.entry(&hash);
 
     assert_eq!(entry.extracted, Fact::Absent);
