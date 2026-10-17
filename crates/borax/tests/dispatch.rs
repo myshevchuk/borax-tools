@@ -15639,7 +15639,11 @@ fn adopt_every_orphan_is_accounted_for() {
     let responses = tempdir().unwrap();
     let recorded_cached = record_by("Recorded", 2020, "10.1000/task-5.1-recorded");
     let _ = index.put_extracted(&hash_bytes(b"task-5.1 recorded"), &doi_of(&recorded_cached));
-    seed_response_cache(responses.path(), &doi_of(&recorded_cached), &recorded_cached);
+    seed_response_cache(
+        responses.path(),
+        &doi_of(&recorded_cached),
+        &recorded_cached,
+    );
     let orphans_before = library::survey(&root).orphans.len();
 
     let events = adopt_over(&root, &index, responses.path());
@@ -15763,7 +15767,11 @@ fn adopt_uses_the_operators_identifier_before_the_extracted_one() {
             origin: EvidenceOrigin::Supplied,
         },
     );
-    let extracted_record = record_by("ExtractedLoses", 2020, "10.1000/g4-operator-first-extracted");
+    let extracted_record = record_by(
+        "ExtractedLoses",
+        2020,
+        "10.1000/g4-operator-first-extracted",
+    );
     let operator_record = record_by("OperatorWins", 2024, "10.1000/g4-operator-first-operator");
     let responses = tempdir().unwrap();
     seed_response_cache(responses.path(), &extracted, &extracted_record);
@@ -15799,10 +15807,14 @@ fn adopt_reads_the_response_cache_in_priority_order_whatever_the_sources_setting
     let responses = tempdir().unwrap();
     let crossref_record = record_by("CrossrefWins", 2024, "10.1000/g4-priority");
     let openalex_record = record_by("OpenAlexLoses", 2023, "10.1000/g4-priority");
-    let _ = FileCache::new(responses.path())
-        .put(&cache::key(SourceName::Crossref, &identifier), &crossref_record);
-    let _ = FileCache::new(responses.path())
-        .put(&cache::key(SourceName::OpenAlex, &identifier), &openalex_record);
+    let _ = FileCache::new(responses.path()).put(
+        &cache::key(SourceName::Crossref, &identifier),
+        &crossref_record,
+    );
+    let _ = FileCache::new(responses.path()).put(
+        &cache::key(SourceName::OpenAlex, &identifier),
+        &openalex_record,
+    );
 
     let documents = CountingDocuments::new();
     let sources: Vec<&dyn Source> = Vec::new();
@@ -16297,7 +16309,11 @@ fn adopt_outside_any_library_is_refused_and_writes_nothing() {
     let unmarked_cached = record_by("Unmarked", 2020, "10.1000/adopt-unmarked");
     let responses = tempdir().unwrap();
     let _ = index.put_extracted(&hash_bytes(b"adopt unmarked"), &doi_of(&unmarked_cached));
-    seed_response_cache(responses.path(), &doi_of(&unmarked_cached), &unmarked_cached);
+    seed_response_cache(
+        responses.path(),
+        &doi_of(&unmarked_cached),
+        &unmarked_cached,
+    );
     let before = snapshot(&root);
 
     let documents = CountingDocuments::new();
@@ -16538,7 +16554,10 @@ fn reconcile_restores_operator_evidence_for_a_restored_earlier_hash() {
         Fact::Held(older_evidence),
         "the earlier hash's operator evidence must be restored too"
     );
-    assert_eq!(index.entry(&newer_hash).operator, Fact::Held(newer_evidence));
+    assert_eq!(
+        index.entry(&newer_hash).operator,
+        Fact::Held(newer_evidence)
+    );
 }
 
 /// design D5: the library's decision wins over a different one made
@@ -16836,7 +16855,11 @@ fn reconcile_reports_each_restoration_before_its_totals() {
     )
     .unwrap();
 
-    assert_eq!(events.len(), 3, "two restorations then the totals: got {events:?}");
+    assert_eq!(
+        events.len(),
+        3,
+        "two restorations then the totals: got {events:?}"
+    );
     assert!(
         matches!(events[0], Event::ContentIndexWrite { .. }),
         "got {:?}",
@@ -17018,7 +17041,10 @@ fn reconcile_restores_after_the_index_is_deleted() {
 
     let index_dir = tempdir().unwrap();
     let index = ContentIndex::new(FileCache::new(index_dir.path()));
-    let _ = index.put_extracted(&hash, &Identifier::Doi(doi("10.1000/g5-deleted-index-extracted")));
+    let _ = index.put_extracted(
+        &hash,
+        &Identifier::Doi(doi("10.1000/g5-deleted-index-extracted")),
+    );
     let _ = index.put_operator(&hash, &evidence);
     // As if `rm -rf` had removed the whole data root.
     fs::remove_dir_all(index_dir.path()).unwrap();
@@ -17267,7 +17293,12 @@ fn index_held_retry_runs_no_title_check_writes_nothing_and_keeps_its_origin(
     let crossref = FlakySource::new(
         SourceName::Crossref,
         1,
-        record_by("Smith", 2024, seed),
+        record_by_with_title(
+            "Smith",
+            2024,
+            &format!("10.1000/{seed}"),
+            "An Entirely Different Work On Another Subject",
+        ),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
     let filesystem = FakeFilesystem::new();
@@ -17343,7 +17374,7 @@ fn retry_of_an_index_held_overridden_lookup_runs_no_title_check_writes_nothing_a
 
 #[test]
 fn retry_of_an_index_held_supplied_lookup_runs_no_title_check_writes_nothing_and_keeps_its_origin()
- {
+{
     index_held_retry_runs_no_title_check_writes_nothing_and_keeps_its_origin(
         "g7-retry-supplied",
         EvidenceOrigin::Supplied,

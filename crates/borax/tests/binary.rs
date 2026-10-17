@@ -430,11 +430,8 @@ fn seed_stale_content_index(data_home: &Path, bytes: &[u8], stale_identifier: &s
     let key = extracted_key(&hash_bytes(bytes));
     let path = entry_path(&root, &key).expect("a well-formed index key");
     fs::create_dir_all(path.parent().expect("parent")).expect("index dir");
-    fs::write(
-        &path,
-        format!("{{\"identifier\":\"{stale_identifier}\"}}"),
-    )
-    .expect("stale index entry");
+    fs::write(&path, format!("{{\"identifier\":\"{stale_identifier}\"}}"))
+        .expect("stale index entry");
 }
 
 /// Writes an artifact record under `<root>/.borax/artifacts/` for the
@@ -750,10 +747,7 @@ fn a_v1_entry_in_the_cache_directory_is_not_read() {
         event["event"], "skipped",
         "a v1 record beside the entry must never be read as a fact: got {stdout}"
     );
-    assert_eq!(
-        event["reason"]["kind"], "unreadable",
-        "got {stdout}"
-    );
+    assert_eq!(event["reason"]["kind"], "unreadable", "got {stdout}");
 }
 
 /// design D1: with no data directory the index is held in memory for

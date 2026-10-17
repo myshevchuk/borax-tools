@@ -16,9 +16,9 @@ use borax::evidence::{
     IndexRead, IndexWrite, LookupEvidence, MatchCheck, RecordRetrieval, Titles, Unattempted,
 };
 use borax::library::{
-    ARTIFACT_STORE, Account, Adopted, Admitted, Admitting, Adoptions, ArtifactStore, Consulted,
-    ITEM_STORE, Identity, ItemStore, OperatorDecision, Reconciliation, Reconciling, RecordFaults,
-    STATE_DIR, StoreFault, StoreWriter, Stores, Unadopted, Unrecorded, WorkDuplicate, accepted_by,
+    ARTIFACT_STORE, Account, Admitted, Admitting, Adopted, Adoptions, ArtifactStore, Consulted,
+    ITEM_STORE, Identity, ItemStore, Reconciliation, Reconciling, RecordFaults, STATE_DIR,
+    StoreFault, StoreWriter, Stores, Unadopted, Unrecorded, WorkDuplicate, accepted_by,
     admission_event, admit, adopt, artifacts, carries, contains, ensure_identity, excludes,
     extracted_identifier, extraction_event, identity, identity_fault_warning, identity_file,
     item_file_name, library_relative, missing, operator_decisions, orphan_events, orphans,
@@ -10618,17 +10618,19 @@ fn operator_decisions_lists_each_hashs_newest_operator_evidence_with_the_records
     let h2 = hash("op-decisions-h2");
     assert_eq!(decisions.len(), 2, "got {decisions:?}");
     assert!(
-        decisions.iter().any(|decision| decision.path
-            == relative_to(root, "paper.pdf")
-            && decision.hash == h1
-            && decision.evidence == s(doi_b.clone())),
+        decisions
+            .iter()
+            .any(|decision| decision.path == relative_to(root, "paper.pdf")
+                && decision.hash == h1
+                && decision.evidence == s(doi_b.clone())),
         "h1's newest operator evidence is s(doi_b): got {decisions:?}"
     );
     assert!(
-        decisions.iter().any(|decision| decision.path
-            == relative_to(root, "paper.pdf")
-            && decision.hash == h2
-            && decision.evidence == s(doi_c.clone())),
+        decisions
+            .iter()
+            .any(|decision| decision.path == relative_to(root, "paper.pdf")
+                && decision.hash == h2
+                && decision.evidence == s(doi_c.clone())),
         "got {decisions:?}"
     );
 }
@@ -10697,7 +10699,11 @@ fn operator_decisions_takes_the_record_read_last_when_two_disagree() {
     let decisions = operator_decisions(root);
 
     let h = hash("op-decisions-disagree");
-    assert_eq!(decisions.len(), 1, "one hash, one decision: got {decisions:?}");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "one hash, one decision: got {decisions:?}"
+    );
     assert_eq!(decisions[0].hash, h);
     assert_eq!(
         decisions[0].evidence,

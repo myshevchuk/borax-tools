@@ -701,6 +701,12 @@ fn all_events() -> Vec<Event> {
             },
         ),
         library_adoption("new.pdf", Adoption::Unindexed),
+        library_adoption(
+            "new.pdf",
+            Adoption::Unanswered {
+                identifier: "doi:10.1000/x".to_string(),
+            },
+        ),
         library_status(Some(LIB_UUID)),
         library_status(None),
         library_validated(Some(LIB_UUID)),
@@ -4329,6 +4335,12 @@ fn counts_observe_of_library_condition_counts_nothing_for_every_kind() {
 fn counts_observe_of_library_adoption_unindexed_counts_nothing() {
     let mut counts = Counts::default();
     counts.observe(&library_adoption("new.pdf", Adoption::Unindexed));
+    counts.observe(&library_adoption(
+        "new.pdf",
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/x".to_string(),
+        },
+    ));
     assert_eq!(counts, Counts::default(), "got {counts:?}");
 }
 
@@ -4547,6 +4559,13 @@ fn render_human_equals_human_line_for_every_library_condition_and_unindexed() {
         assert_eq!(render(Format::Human, &event), human_line(&event));
     }
     let event = library_adoption("new.pdf", Adoption::Unindexed);
+    assert_eq!(render(Format::Human, &event), human_line(&event));
+    let event = library_adoption(
+        "new.pdf",
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/x".to_string(),
+        },
+    );
     assert_eq!(render(Format::Human, &event), human_line(&event));
 }
 
