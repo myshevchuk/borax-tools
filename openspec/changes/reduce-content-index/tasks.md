@@ -476,7 +476,7 @@ nothing, as Retry with no own identifier does today.
 
 ## 9. Documents and state
 
-- [ ] 9.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
+- [x] 9.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
       (Org, for CLI users). This is not the implementer's. Keep every
       existing example name. Sources:
       - this change's design.md (D1–D9, D11, and the illustrative lines);
@@ -504,7 +504,7 @@ nothing, as Retry with no own identifier does today.
       - `* Run logs`: schema 5, `hit`'s `evidence`, `lookup.origin`
         `content-index`, `content-index-write`'s new fields, and the
         adoption kinds.
-- [ ] 9.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
+- [x] 9.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
       (Markdown, Keep a Changelog). Write the Unreleased entry from
       proposal.md and design.md. It covers:
       - the index's new home and its reduced entries;
@@ -514,7 +514,7 @@ nothing, as Retry with no own identifier does today.
       - reconcile's restoration;
       - adoption's new source and kinds;
       - schema 5, with the released values that changed, under Changed.
-- [ ] 9.3 Orchestrator: read both diffs against the sources, for
+- [x] 9.3 Orchestrator: read both diffs against the sources, for
       anything invented and for anything dropped from the old text.
       Check the `#+AI_PASS` line the doc writer adds. Answer or remove
       every `TODO(docs)`.
