@@ -3186,7 +3186,7 @@ fn item_with(root: &Path, doi_value: &str) -> ItemId {
 /// a file — the seam disk occupies in a run, held here so a stale
 /// record is a property of the test rather than of the temporary
 /// directory.
-fn checked<C: borax_sources::cache::Cache>(
+fn checked<C: IndexStore>(
     path: &Path,
     documents: &dyn Documents,
     sources: &[&dyn Source],

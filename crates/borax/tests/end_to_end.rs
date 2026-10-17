@@ -30,7 +30,7 @@ use borax::renaming::RealFilesystem;
 use borax::run::{Adapters, Configs, Streams, dispatch};
 use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_sources::arxiv::ArxivClient;
-use borax_sources::cache::MemoryCache;
+use borax_sources::cache::{Cached, MemoryCache};
 use borax_sources::crossref::CrossrefClient;
 use borax_sources::http::{HttpRequest, HttpResponse, Politeness, Transport, TransportError};
 use borax_sources::source::Source;
@@ -1071,9 +1071,10 @@ impl Asker for ScriptedAsker {
 
 /// design "Asked once" (spec `resolution`, task 4.1): a rename made in
 /// an interactive run from a supplied identifier is written to the
-/// content index, so a later run — batch included — resolves the file
-/// from there under its new name: no extraction, and no source queried
-/// at all, checked against the transport's own call count rather than
+/// content index, so a later run — batch included — looks that
+/// identifier up for the file under its new name: no extraction, and an
+/// answer from the response cache the first run filled, with no request
+/// sent, checked against the transport's own call count rather than
 /// inferred from the event stream.
 #[test]
 fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_run() {
@@ -1084,8 +1085,11 @@ fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_ru
 
     let transport = CassetteTransport::new();
     let politeness = Politeness::default();
-    let crossref = CrossrefClient::new(&transport, politeness.clone());
-    let arxiv = ArxivClient::new(&transport, politeness);
+    let crossref = Cached::new(
+        CrossrefClient::new(&transport, politeness.clone()),
+        MemoryCache::new(),
+    );
+    let arxiv = Cached::new(ArxivClient::new(&transport, politeness), MemoryCache::new());
     let sources: Vec<&dyn Source> = vec![&crossref, &arxiv];
     let index = ContentIndex::new(MemoryCache::new());
 
@@ -1180,11 +1184,13 @@ fn a_rename_from_a_supplied_identifier_is_recognised_offline_by_a_later_batch_ru
     assert_eq!(second_outcome, Outcome::Success, "got {events:?}");
     assert!(
         events.iter().any(|event| event["event"] == "resolved"
-            && event["record_retrieval"]["kind"] == "content-index"
+            && event["record_retrieval"]["kind"] == "service-cache"
+            && event["lookup"]["origin"] == "content-index"
             && event["path"]
                 .as_str()
                 .is_some_and(|p| p.ends_with("ashby2024.pdf"))),
-        "the second run must have resolved the file from the content index: got {events:?}"
+        "the second run must have looked the content index's identifier up in the response \
+         cache: got {events:?}"
     );
     assert!(
         events.iter().any(|event| event["event"] == "already-named"

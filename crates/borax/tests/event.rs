@@ -3348,7 +3348,8 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
 /// design D6/D1: a record whose provenance names two services is
 /// reported with both, in the fixed order Crossref, OpenAlex, arXiv,
 /// DataCite, PubMed, sidecar — not the order the fields happen to be
-/// keyed in.
+/// keyed in. Provenance names the services only where the retrieval
+/// names none, as a library answer's does.
 #[test]
 fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
     let mut record = Record::new(EntryType::Article);
@@ -3361,16 +3362,12 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
         .collect(),
         ..BoraxExt::default()
     };
-    let path = PathBuf::from("paper.pdf");
-    let file = FileRecord {
-        record,
-        hash: Some(hash_bytes(b"paper")),
-        evidence: evidence_via_content_index_hit(),
-        overridden: false,
-        accepted: false,
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: String::new(),
+        record: Box::new(record),
+        sections: Box::new(sections_via_library("artifact-id", "item-id")),
     };
-
-    let event = resolved_event(&path, &file);
 
     assert!(
         human_line(&event)
@@ -3382,8 +3379,9 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
 }
 
 /// design D6: a record whose provenance names no service at all — only
-/// extraction, or nothing — names the content index as `from`, with no
-/// `via` clause at all (the schema-3 `"cache"` stand-in is gone).
+/// extraction, or nothing — and whose retrieval names none either, as
+/// a library answer's does, has no `via` clause at all (the schema-3
+/// `"cache"` stand-in is gone).
 #[test]
 fn a_record_whose_provenance_names_no_service_names_no_via() {
     let mut record = Record::new(EntryType::Article);
@@ -3393,20 +3391,16 @@ fn a_record_whose_provenance_names_no_service_names_no_via() {
             .collect(),
         ..BoraxExt::default()
     };
-    let path = PathBuf::from("paper.pdf");
-    let file = FileRecord {
-        record,
-        hash: Some(hash_bytes(b"paper")),
-        evidence: evidence_via_content_index_hit(),
-        overridden: false,
-        accepted: false,
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: String::new(),
+        record: Box::new(record),
+        sections: Box::new(sections_via_library("artifact-id", "item-id")),
     };
-
-    let event = resolved_event(&path, &file);
     let line = human_line(&event).unwrap();
 
     assert!(!line.contains(" via "), "got {line:?}");
-    assert!(line.contains("from the response cache"), "got {line:?}");
+    assert!(line.contains("from the library"), "got {line:?}");
 }
 
 // ---------------------------------------------------------------------
@@ -3626,7 +3620,8 @@ fn human_line_appends_the_library_problem_clause_after_the_from_clause() {
 }
 
 /// The library-problem clause follows the `from` clause on a `resolved`
-/// line too, here a content-index answer whose record names no service.
+/// line too, here a content-index answer whose record names no service:
+/// the lookup's service is named, as for any lookup.
 #[test]
 fn human_line_appends_the_library_problem_clause_to_a_content_index_resolved_line() {
     let mut sections = sections_via_content_index();
@@ -3645,9 +3640,9 @@ fn human_line_appends_the_library_problem_clause_to_a_content_index_resolved_lin
 
     assert_eq!(
         human_line(&event).unwrap(),
-        "paper.pdf: resolved doi:10.1000/xyz123, from the response cache; the library \
-         could not answer: artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links to item \
-         0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70, which the library does not hold"
+        "paper.pdf: resolved doi:10.1000/xyz123 via crossref, from the response cache; \
+         the library could not answer: artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links \
+         to item 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70, which the library does not hold"
     );
 }
 
@@ -4012,7 +4007,7 @@ fn json_line_of_library_extraction_matches_design_d4_for_every_kind() {
         assert_eq!(
             value,
             serde_json::json!({
-                "schema": 4,
+                "schema": 5,
                 "event": "library-extraction",
                 "path": "sub/a.pdf",
                 "extraction": expected_extraction,

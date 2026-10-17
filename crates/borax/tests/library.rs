@@ -2485,6 +2485,10 @@ fn fast_path_miss_appends_the_new_hash_after_the_ones_already_recorded() {
                 timestamp: TIMESTAMP.to_string(),
                 tool_version: TOOL_VERSION.to_string(),
                 item: Some(item),
+                evidence: Some(IdentificationEvidence {
+                    identifier,
+                    origin: EvidenceOrigin::Extracted,
+                }),
             },
         ],
         "the new hash must be appended after the ones already recorded, got {:?}",
@@ -6536,7 +6540,7 @@ fn transition_f_relinking_the_newest_bytes_records_the_operators_evidence_at_onc
         vec![
             entry_a.clone(),
             HashEntry {
-                hash: hash_a,
+                hash: hash_a.clone(),
                 run: RunId::new("run-1"),
                 timestamp: TIMESTAMP.to_string(),
                 tool_version: TOOL_VERSION.to_string(),

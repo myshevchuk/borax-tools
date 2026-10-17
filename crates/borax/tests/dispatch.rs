@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use borax::bib::{BibFiles, citation_key, sidecar_path};
 use borax::cache::{cleared_event, inspect, status_event};
@@ -5679,7 +5679,7 @@ fn an_outage_then_a_successful_retry_then_rename_writes_extracted_json_and_no_op
 struct RecordOrderStore<'a> {
     root: &'a Path,
     inner: MemoryCache,
-    record_existed_first: Mutex<Option<bool>>,
+    record_existed_first: Arc<Mutex<Option<bool>>>,
 }
 
 impl<'a> RecordOrderStore<'a> {
@@ -5687,12 +5687,14 @@ impl<'a> RecordOrderStore<'a> {
         RecordOrderStore {
             root,
             inner: MemoryCache::new(),
-            record_existed_first: Mutex::new(None),
+            record_existed_first: Arc::new(Mutex::new(None)),
         }
     }
 
-    fn record_existed_first(&self) -> Option<bool> {
-        *self.record_existed_first.lock().unwrap()
+    /// A handle on what the store observes, kept by the test once the
+    /// store is moved into its `ContentIndex`.
+    fn observed(&self) -> Arc<Mutex<Option<bool>>> {
+        Arc::clone(&self.record_existed_first)
     }
 }
 
@@ -5738,7 +5740,9 @@ fn an_interactive_supplied_rename_in_a_library_writes_the_operator_fact_after_th
         record_by("Smith", 2024, "10.1000/g1-write-order"),
     );
     let sources: Vec<&dyn Source> = vec![&crossref];
-    let index = RecordOrderStore::new(&root);
+    let store = RecordOrderStore::new(&root);
+    let observed = store.observed();
+    let index = ContentIndex::new(store);
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
         documents: &documents,
@@ -5763,7 +5767,7 @@ fn an_interactive_supplied_rename_in_a_library_writes_the_operator_fact_after_th
     .unwrap();
 
     assert_eq!(
-        index.record_existed_first(),
+        *observed.lock().unwrap(),
         Some(true),
         "the library's record must be written before the operator fact"
     );
@@ -5789,10 +5793,15 @@ fn skipping_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
     let fixture = SupplyFixture::new(documents);
     let already_held = Identifier::Doi(doi("10.1000/d7-already-held"));
     let _ = fixture.index.put_extracted(&hash, &already_held);
-    let crossref = KeyedSource::new(SourceName::Crossref).answering(
-        "doi:10.1000/d7-wrong-candidate",
-        record_by("Doe", 2023, "10.1000/d7-wrong-candidate"),
-    );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/d7-already-held",
+            record_by("Roe", 2019, "10.1000/d7-already-held"),
+        )
+        .answering(
+            "doi:10.1000/d7-wrong-candidate",
+            record_by("Doe", 2023, "10.1000/d7-wrong-candidate"),
+        );
     let sources: Vec<&dyn Source> = vec![&crossref];
     let effective = effective_with_default_template("[auth][year]");
     let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Skip])
@@ -6710,6 +6719,8 @@ fn a_supplied_identifier_renamed_is_followed_by_content_index_write() {
             Event::Renamed { target, .. },
             Event::ContentIndexWrite {
                 path: written_path,
+                hash: written_hash,
+                entry,
                 write,
             },
         ] => {
@@ -6721,6 +6732,14 @@ fn a_supplied_identifier_renamed_is_followed_by_content_index_write() {
                 "the verdict must not claim the write before the move"
             );
             assert_eq!(written_path, target, "design D8: path after the move");
+            assert_eq!(written_hash, &hash.to_string());
+            assert_eq!(
+                entry,
+                &WrittenEntry::Evidence {
+                    identifier: "doi:10.1000/d8-content-index-write".to_string(),
+                    origin: "supplied".to_string(),
+                }
+            );
             assert_eq!(write, &WriteStep::Written);
         }
         other => panic!("expected resolved, renamed, content-index-write in order, got {other:?}"),
@@ -22130,21 +22149,37 @@ fn an_interactive_rename_over_a_conflict_records_it_as_overridden() {
     );
 }
 
-/// The operator supplies the identical identifier twice in a row — the
-/// second submission replaces the first, as
-/// `a_candidate_replaced_by_another_is_rejected_with_its_record` shows
-/// for two different candidates — and the single rename that follows
-/// must append exactly one entry, not one per submission.
+/// design D3, the append rule: a file its library tracks is
+/// re-identified with the same identifier in two runs. The first run
+/// appends one entry carrying the supplied evidence; the second, where
+/// the newest entry already holds those bytes under that item with that
+/// evidence, appends nothing — the history grows by exactly one entry
+/// over both runs.
+///
+/// The first run renames the file. The second runs under a template
+/// that would move it again, so the tracked file is asked about its move
+/// and the identifier the operator supplies leads to one: a supplied
+/// record that kept the current name would be no move, and would leave
+/// the library's own record on offer rather than re-identify the file.
 #[test]
 fn supplying_the_same_identifier_twice_for_a_tracked_file_appends_one_entry() {
     let library = real_library();
     let root = library.path().to_path_buf();
     let path = write_real_file(&root, "original.pdf", b"task-g1 supply-twice bytes");
-    let documents = FakeDocuments::new().with_file(
-        &path,
-        hash_bytes(b"task-g1 supply-twice bytes"),
-        pdf_with_no_identifier(),
-    );
+    let hash = hash_bytes(b"task-g1 supply-twice bytes");
+    let x_item_id = lib_item_id(G7_UUID_B);
+    let mut entry_a = lib_hash_entry("task-g1 supply-twice bytes", "run-0");
+    entry_a.item = Some(x_item_id.clone());
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(x_item_id),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![entry_a.clone()],
+    };
+    write_lib_artifact_record(&root, &held);
+
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/g1-supply-twice",
         record_by("Smith", 2024, "10.1000/g1-supply-twice"),
@@ -22152,6 +22187,13 @@ fn supplying_the_same_identifier_twice_for_a_tracked_file_appends_one_entry() {
     let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
     let bib_files = FakeBibFiles::new();
+    let supplied = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g1-supply-twice")),
+        origin: EvidenceOrigin::Supplied,
+    };
+
+    // The first run: re-identify the tracked file and rename it.
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
     let adapters = Adapters {
         documents: &documents,
         sources: &sources,
@@ -22163,33 +22205,80 @@ fn supplying_the_same_identifier_twice_for_a_tracked_file_appends_one_entry() {
         collection_root: Some(root.clone()),
         state_root: None,
     };
-    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Rename])
-        .with_texts(vec![
-            Some("10.1000/g1-supply-twice".to_string()),
-            Some("10.1000/g1-supply-twice".to_string()),
-        ]);
-
-    let _ = events_for(
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/g1-supply-twice".to_string())]);
+    let first = events_for(
         &Command::rename(vec![path.clone()], false),
         &Configs::uniform(effective_with_default_template("[auth][year]")),
         &adapters,
         &mut Session::interactive(&mut asker),
     )
     .unwrap();
+    let renamed = first
+        .iter()
+        .find_map(|event| match event {
+            Event::Renamed { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the first run must rename the file: got {first:?}"));
 
-    let records = library::ArtifactStore::read(&root);
-    assert_eq!(records.len(), 1, "got {records:?}");
-    let record = records.iter().next().unwrap();
-    assert_eq!(record.history.len(), 1, "got {:?}", record.history);
+    let after_first = library::ArtifactStore::read(&root)
+        .by_id(&lib_artifact_id(G7_UUID_A))
+        .unwrap()
+        .clone();
     assert_eq!(
-        record.history[0].evidence,
-        Some(IdentificationEvidence {
-            identifier: Identifier::Doi(doi("10.1000/g1-supply-twice")),
-            origin: EvidenceOrigin::Supplied,
-        }),
+        after_first.history.len(),
+        2,
         "got {:?}",
-        record.history
+        after_first.history
     );
+    assert_eq!(after_first.history[1].hash, hash);
+    assert_eq!(after_first.history[1].evidence, Some(supplied.clone()));
+
+    // The second run: the same identifier again, for the same bytes.
+    let documents =
+        FakeDocuments::new().with_file(&renamed, hash.clone(), pdf_with_no_identifier());
+    let adapters = Adapters {
+        documents: &documents,
+        ..adapters
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/g1-supply-twice".to_string())]);
+    let second = events_for(
+        &Command::rename(vec![renamed.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+    assert_eq!(
+        asker.questions_asked().len(),
+        2,
+        "the second run must be asked about the tracked file's move, and asked again once \
+         the identifier is supplied: got {second:?}"
+    );
+    assert_eq!(
+        asker.texts_asked().len(),
+        1,
+        "the second run must take the supplied identifier: got {second:?}"
+    );
+    assert!(
+        second
+            .iter()
+            .any(|event| matches!(event, Event::Renamed { path, .. } if *path == renamed)),
+        "the second run moves the file on the supplied identifier's record: got {second:?}"
+    );
+
+    let after = library::ArtifactStore::read(&root)
+        .by_id(&lib_artifact_id(G7_UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after.history, after_first.history,
+        "the same identifier supplied again for the newest bytes appends nothing"
+    );
+    assert_eq!(after.history.len(), held.history.len() + 1);
+    assert_eq!(after.item, after.history[1].item);
 }
 
 #[test]
