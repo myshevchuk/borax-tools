@@ -806,6 +806,18 @@ impl Cache for WriteFailingCache {
     }
 }
 
+impl borax_sources::store::IndexStore for WriteFailingCache {
+    fn read_fact(&self, _key: &str) -> Option<Result<String, String>> {
+        None
+    }
+
+    fn write_fact(&self, _key: &str, _text: &str) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+}
+
 #[test]
 fn run_log_reports_a_failed_content_index_write_without_failing_the_rename() {
     let dir = tempdir().unwrap();

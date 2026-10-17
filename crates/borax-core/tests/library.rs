@@ -1,9 +1,11 @@
 #![allow(clippy::unwrap_used)]
 
 use borax_core::content::{ContentHash, hash_bytes};
+use borax_core::identifier::supplied;
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, LibraryId, LibraryIdentity, Malformed,
-    RunId, is_library_relative, is_well_formed_hash, name_uuid,
+    ArtifactId, ArtifactRecord, EvidenceOrigin, HashEntry, IdentificationEvidence, Item, ItemId,
+    LibraryId, LibraryIdentity, Malformed, RunId, is_library_relative, is_well_formed_hash,
+    name_uuid,
 };
 use borax_core::record::{EntryType, Record};
 
@@ -43,6 +45,7 @@ fn hash_entry(seed: &str, run: &str, timestamp: &str, tool_version: &str) -> Has
         timestamp: timestamp.to_string(),
         tool_version: tool_version.to_string(),
         item: None,
+        evidence: None,
     }
 }
 
@@ -1205,4 +1208,348 @@ fn library_identity_that_is_not_toml_does_not_parse() {
         LibraryIdentity::from_toml("not { toml at all"),
         Err(Malformed::Toml(_))
     ));
+}
+
+// ---------------------------------------------------------------------
+// 1.1 Identification evidence on history entries (design D3, D10)
+// ---------------------------------------------------------------------
+
+#[test]
+fn evidence_origin_as_str_and_parse_round_trip_for_every_origin() {
+    for (origin, word) in [
+        (EvidenceOrigin::Extracted, "extracted"),
+        (EvidenceOrigin::Supplied, "supplied"),
+        (EvidenceOrigin::Overridden, "overridden"),
+        (EvidenceOrigin::Adopted, "adopted"),
+    ] {
+        assert_eq!(origin.as_str(), word);
+        assert_eq!(EvidenceOrigin::parse(word), Some(origin));
+    }
+}
+
+#[test]
+fn evidence_origin_parse_refuses_any_other_word() {
+    for word in ["accepted", "Extracted", ""] {
+        assert_eq!(
+            EvidenceOrigin::parse(word),
+            None,
+            "{word:?} must not parse as an origin"
+        );
+    }
+}
+
+#[test]
+fn evidence_origin_is_operator_for_supplied_and_overridden_alone() {
+    assert!(!EvidenceOrigin::Extracted.is_operator());
+    assert!(EvidenceOrigin::Supplied.is_operator());
+    assert!(EvidenceOrigin::Overridden.is_operator());
+    assert!(!EvidenceOrigin::Adopted.is_operator());
+}
+
+#[test]
+fn hash_entry_evidence_round_trips_through_toml_for_each_identifier_kind() {
+    let identifiers = [
+        supplied("doi:10.1021/jacs.4c01234").unwrap(),
+        supplied("arXiv:2401.12345").unwrap(),
+        supplied("pmid:12345678").unwrap(),
+        supplied("isbn:978-1-59327-828-1").unwrap(),
+    ];
+
+    for identifier in identifiers {
+        let mut entry = hash_entry("bytes-1", "run-1", "t1", "v1");
+        entry.evidence = Some(IdentificationEvidence {
+            identifier: identifier.clone(),
+            origin: EvidenceOrigin::Extracted,
+        });
+        let record = ArtifactRecord {
+            id: ArtifactId::parse(UUID_A).unwrap(),
+            item: None,
+            history: vec![entry],
+            path: "x.pdf".to_string(),
+            size: 1,
+            modified_millis: 0,
+        };
+
+        let parsed = ArtifactRecord::from_toml(&record.to_toml())
+            .unwrap_or_else(|error| panic!("{identifier} did not round-trip: {error}"));
+
+        assert_eq!(
+            parsed.history[0].evidence,
+            Some(IdentificationEvidence {
+                identifier,
+                origin: EvidenceOrigin::Extracted,
+            })
+        );
+    }
+}
+
+#[test]
+fn hash_entry_evidence_is_written_after_item_as_identifier_then_origin() {
+    let mut entry = hash_entry("bytes-1", "run-1", "t1", "v1");
+    entry.item = Some(ItemId::parse(UUID_B).unwrap());
+    entry.evidence = Some(IdentificationEvidence {
+        identifier: supplied("doi:10.1000/x").unwrap(),
+        origin: EvidenceOrigin::Supplied,
+    });
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: Some(ItemId::parse(UUID_B).unwrap()),
+        history: vec![entry],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let text = record.to_toml();
+    let history_start = text.find("[[history]]").expect("a history table");
+    let history_text = &text[history_start..];
+
+    let item_at = history_text.find("item").expect("an item key");
+    let identifier_at = history_text.find("identifier").expect("an identifier key");
+    let origin_at = history_text.find("origin").expect("an origin key");
+
+    assert!(
+        item_at < identifier_at && identifier_at < origin_at,
+        "evidence must be written after item, as identifier then origin: {history_text}"
+    );
+}
+
+#[test]
+fn hash_entry_without_evidence_is_written_with_neither_key() {
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: None,
+        history: vec![hash_entry("bytes-1", "run-1", "t1", "v1")],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    let text = record.to_toml();
+    let history_start = text.find("[[history]]").expect("a history table");
+    let history_text = &text[history_start..];
+
+    assert!(
+        !history_text.contains("identifier") && !history_text.contains("origin"),
+        "a hash entry with no evidence must write neither key: {text}"
+    );
+}
+
+#[test]
+fn artifact_record_written_before_evidence_parses_with_none_and_renders_byte_identically() {
+    let h1 = hash("bytes-1");
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"x.pdf\"\n\
+         size = 1\n\
+         modified_millis = 0\n\n\
+         [[history]]\n\
+         hash = \"{h1}\"\n\
+         run = \"run-1\"\n\
+         timestamp = \"t1\"\n\
+         tool_version = \"v1\"\n",
+    );
+
+    let parsed =
+        ArtifactRecord::from_toml(&text).expect("text written before evidence must still parse");
+
+    assert_eq!(parsed.history[0].evidence, None);
+    assert_eq!(
+        parsed.to_toml(),
+        text,
+        "a record with no evidence must render byte-identically"
+    );
+}
+
+#[test]
+fn hash_entry_with_an_identifier_and_no_origin_does_not_parse() {
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"x.pdf\"\n\
+         size = 1\n\
+         modified_millis = 0\n\n\
+         [[history]]\n\
+         hash = \"{}\"\n\
+         run = \"run-1\"\n\
+         timestamp = \"t1\"\n\
+         tool_version = \"v1\"\n\
+         identifier = \"doi:10.1000/x\"\n",
+        hash("bytes-1"),
+    );
+
+    let result = ArtifactRecord::from_toml(&text);
+
+    assert!(
+        matches!(result, Err(Malformed::Toml(_))),
+        "an identifier with no origin must not parse: {result:?}"
+    );
+}
+
+#[test]
+fn hash_entry_with_an_origin_and_no_identifier_does_not_parse() {
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"x.pdf\"\n\
+         size = 1\n\
+         modified_millis = 0\n\n\
+         [[history]]\n\
+         hash = \"{}\"\n\
+         run = \"run-1\"\n\
+         timestamp = \"t1\"\n\
+         tool_version = \"v1\"\n\
+         origin = \"supplied\"\n",
+        hash("bytes-1"),
+    );
+
+    let result = ArtifactRecord::from_toml(&text);
+
+    assert!(
+        matches!(result, Err(Malformed::Toml(_))),
+        "an origin with no identifier must not parse: {result:?}"
+    );
+}
+
+#[test]
+fn hash_entry_with_an_unknown_origin_does_not_parse() {
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"x.pdf\"\n\
+         size = 1\n\
+         modified_millis = 0\n\n\
+         [[history]]\n\
+         hash = \"{}\"\n\
+         run = \"run-1\"\n\
+         timestamp = \"t1\"\n\
+         tool_version = \"v1\"\n\
+         identifier = \"doi:10.1000/x\"\n\
+         origin = \"accepted\"\n",
+        hash("bytes-1"),
+    );
+
+    let result = ArtifactRecord::from_toml(&text);
+
+    assert!(
+        matches!(result, Err(Malformed::Toml(_))),
+        "an unknown origin must not parse: {result:?}"
+    );
+}
+
+#[test]
+fn hash_entry_with_an_identifier_that_does_not_parse_does_not_parse() {
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"x.pdf\"\n\
+         size = 1\n\
+         modified_millis = 0\n\n\
+         [[history]]\n\
+         hash = \"{}\"\n\
+         run = \"run-1\"\n\
+         timestamp = \"t1\"\n\
+         tool_version = \"v1\"\n\
+         identifier = \"not-an-identifier\"\n\
+         origin = \"supplied\"\n",
+        hash("bytes-1"),
+    );
+
+    let result = ArtifactRecord::from_toml(&text);
+
+    assert!(
+        matches!(result, Err(Malformed::Toml(_))),
+        "an identifier that does not parse must not parse: {result:?}"
+    );
+}
+
+#[test]
+fn evidence_for_is_the_newest_entry_holding_the_hash_that_carries_evidence() {
+    let h = hash("bytes-a");
+    let mut first = hash_entry("bytes-a", "run-1", "t1", "v1");
+    first.evidence = Some(IdentificationEvidence {
+        identifier: supplied("doi:10.1000/x").unwrap(),
+        origin: EvidenceOrigin::Extracted,
+    });
+    let mut second = hash_entry("bytes-a", "run-2", "t2", "v2");
+    second.evidence = Some(IdentificationEvidence {
+        identifier: supplied("doi:10.1000/y").unwrap(),
+        origin: EvidenceOrigin::Supplied,
+    });
+    let third = hash_entry("bytes-b", "run-3", "t3", "v3");
+
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: None,
+        history: vec![first, second.clone(), third],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    assert_eq!(record.evidence_for(&h), second.evidence.as_ref());
+}
+
+#[test]
+fn evidence_for_is_none_when_no_entry_for_the_hash_carries_any() {
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: None,
+        history: vec![hash_entry("bytes-a", "run-1", "t1", "v1")],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    assert_eq!(record.evidence_for(&hash("bytes-a")), None);
+}
+
+#[test]
+fn operator_evidence_for_skips_extracted_and_adopted_entries() {
+    let h = hash("bytes-a");
+    let mut extracted = hash_entry("bytes-a", "run-1", "t1", "v1");
+    extracted.evidence = Some(IdentificationEvidence {
+        identifier: supplied("doi:10.1000/x").unwrap(),
+        origin: EvidenceOrigin::Extracted,
+    });
+    let mut supplied_entry = hash_entry("bytes-a", "run-2", "t2", "v2");
+    supplied_entry.evidence = Some(IdentificationEvidence {
+        identifier: supplied("doi:10.1000/y").unwrap(),
+        origin: EvidenceOrigin::Supplied,
+    });
+    let mut adopted = hash_entry("bytes-a", "run-3", "t3", "v3");
+    adopted.evidence = Some(IdentificationEvidence {
+        identifier: supplied("doi:10.1000/z").unwrap(),
+        origin: EvidenceOrigin::Adopted,
+    });
+
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: None,
+        history: vec![extracted, supplied_entry.clone(), adopted],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    assert_eq!(
+        record.operator_evidence_for(&h),
+        supplied_entry.evidence.as_ref()
+    );
+}
+
+#[test]
+fn operator_evidence_for_is_none_with_no_operator_entry() {
+    let mut extracted = hash_entry("bytes-a", "run-1", "t1", "v1");
+    extracted.evidence = Some(IdentificationEvidence {
+        identifier: supplied("doi:10.1000/x").unwrap(),
+        origin: EvidenceOrigin::Extracted,
+    });
+
+    let record = ArtifactRecord {
+        id: ArtifactId::parse(UUID_A).unwrap(),
+        item: None,
+        history: vec![extracted],
+        path: "x.pdf".to_string(),
+        size: 1,
+        modified_millis: 0,
+    };
+
+    assert_eq!(record.operator_evidence_for(&hash("bytes-a")), None);
 }

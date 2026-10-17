@@ -9,16 +9,20 @@ use std::rc::Rc;
 use std::sync::{Arc, Barrier};
 
 use borax_core::content::hash_bytes;
-use borax_core::identifier::{ArxivId, Doi, Isbn, Pmid};
+use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
+use borax_core::index::Fact;
+use borax_core::library::{EvidenceOrigin, IdentificationEvidence};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
 use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
 use borax_sources::store::{
-    ContentIndex, FORMAT_VERSION, FileCache, cache_root, content_key, create_atomically,
-    create_atomically_with, entry_path, hash_file, write_atomically,
+    ContentIndex, FORMAT_VERSION, FileCache, INDEX_FORMAT_VERSION, IndexStore, cache_root,
+    content_key, create_atomically, create_atomically_with, data_root, entry_path, extracted_key,
+    hash_file, operator_key, write_atomically,
 };
 
 /// A [`Cache`] whose `put` always reports [`CacheWrite::Failed`]
-/// without storing anything.
+/// without storing anything, and an [`IndexStore`] that fails every
+/// write of a fact on the same terms.
 struct WriteFailingCache;
 
 impl Cache for WriteFailingCache {
@@ -32,10 +36,26 @@ impl Cache for WriteFailingCache {
         }
     }
 }
+
+impl IndexStore for WriteFailingCache {
+    fn read_fact(&self, _key: &str) -> Option<Result<String, String>> {
+        None
+    }
+
+    fn write_fact(&self, _key: &str, _text: &str) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+}
 use tempfile::tempdir;
 
 fn doi(value: &str) -> Doi {
     Doi::parse(value).unwrap()
+}
+
+fn doi_identifier(value: &str) -> Identifier {
+    Identifier::Doi(doi(value))
 }
 
 fn article_with_doi(value: &str) -> Record {
@@ -315,6 +335,229 @@ fn cache_root_is_none_for_a_relative_xdg_cache_home_with_no_localappdata_on_wind
     assert_eq!(cache_root(env(&[("XDG_CACHE_HOME", "relative")])), None);
 }
 
+// --- data_root() (design D1) ---
+
+#[cfg(unix)]
+#[test]
+fn data_root_honors_xdg_data_home_on_unix() {
+    let root = data_root(env(&[
+        ("XDG_DATA_HOME", "/base/home/.local/share"),
+        ("HOME", "/base/home"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from("/base/home/.local/share")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn data_root_falls_back_to_home_dot_local_share_on_unix() {
+    let root = data_root(env(&[("HOME", "/base/home")]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from("/base/home")
+                .join(".local/share")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn data_root_prefers_xdg_data_home_over_home_on_unix() {
+    let root = data_root(env(&[
+        ("XDG_DATA_HOME", "/xdg/data"),
+        ("HOME", "/base/home"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from("/xdg/data")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn data_root_skips_an_empty_xdg_data_home_on_unix() {
+    let root = data_root(env(&[("XDG_DATA_HOME", ""), ("HOME", "/base/home")]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from("/base/home")
+                .join(".local/share")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn data_root_skips_a_relative_xdg_data_home_on_unix() {
+    let root = data_root(env(&[
+        ("XDG_DATA_HOME", "relative/data"),
+        ("HOME", "/base/home"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from("/base/home")
+                .join(".local/share")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn data_root_honors_appdata_on_windows() {
+    let root = data_root(env(&[("APPDATA", r"C:\Users\test\AppData\Roaming")]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\AppData\Roaming")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn data_root_falls_back_to_xdg_data_home_on_windows() {
+    let root = data_root(env(&[("XDG_DATA_HOME", r"C:\Users\test\.data")]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\.data")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn data_root_prefers_appdata_over_xdg_data_home_on_windows() {
+    let root = data_root(env(&[
+        ("APPDATA", r"C:\Users\test\AppData\Roaming"),
+        ("XDG_DATA_HOME", r"C:\Users\test\.data"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\AppData\Roaming")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn data_root_skips_an_empty_appdata_on_windows() {
+    let root = data_root(env(&[
+        ("APPDATA", ""),
+        ("XDG_DATA_HOME", r"C:\Users\test\.data"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\.data")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn data_root_skips_a_relative_appdata_on_windows() {
+    let root = data_root(env(&[
+        ("APPDATA", r"AppData\Roaming"),
+        ("XDG_DATA_HOME", r"C:\Users\test\.data"),
+    ]));
+
+    assert_eq!(
+        root,
+        Some(
+            PathBuf::from(r"C:\Users\test\.data")
+                .join("borax")
+                .join(INDEX_FORMAT_VERSION)
+        )
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn data_root_ends_in_borax_v2() {
+    #[cfg(unix)]
+    let root = data_root(env(&[("HOME", "/base/home")])).unwrap();
+    #[cfg(windows)]
+    let root = data_root(env(&[("APPDATA", r"C:\Users\test\AppData\Roaming")])).unwrap();
+
+    assert!(
+        root.ends_with(Path::new("borax").join(INDEX_FORMAT_VERSION)),
+        "got {root:?}"
+    );
+    assert_eq!(INDEX_FORMAT_VERSION, "v2");
+}
+
+#[cfg(unix)]
+#[test]
+fn data_root_is_none_when_no_candidate_qualifies() {
+    assert_eq!(data_root(env(&[])), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn data_root_is_none_when_no_candidate_qualifies() {
+    assert_eq!(data_root(env(&[])), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn data_root_and_cache_root_differ_for_one_environment() {
+    let environment = env(&[
+        ("XDG_DATA_HOME", "/base/home/.local/share"),
+        ("XDG_CACHE_HOME", "/base/home/.cache"),
+        ("HOME", "/base/home"),
+    ]);
+
+    assert_ne!(data_root(&environment), cache_root(&environment));
+}
+
+#[cfg(windows)]
+#[test]
+fn data_root_and_cache_root_differ_for_one_environment() {
+    let environment = env(&[
+        ("APPDATA", r"C:\Users\test\AppData\Roaming"),
+        ("LOCALAPPDATA", r"C:\Users\test\AppData\Local"),
+    ]);
+
+    assert_ne!(data_root(&environment), cache_root(&environment));
+}
+
 // --- entry_path() ---
 
 #[test]
@@ -571,51 +814,58 @@ fn file_cache_works_again_after_clear() {
 
 // --- ContentIndex, over both MemoryCache and FileCache ---
 
-fn content_index_round_trips_a_record<C: Cache>(cache: C) {
-    let index = ContentIndex::new(cache);
+fn content_index_round_trips_both_facts<S: IndexStore>(store: S) {
+    let index = ContentIndex::new(store);
     let hash = hash_bytes(b"borax content");
-    let record = article_with_doi("10.1038/171737a0");
+    let identifier = doi_identifier("10.1038/171737a0");
+    let evidence = IdentificationEvidence {
+        identifier: identifier.clone(),
+        origin: EvidenceOrigin::Supplied,
+    };
 
-    let _ = index.put(&hash, &record);
+    let _ = index.put_extracted(&hash, &identifier);
+    let _ = index.put_operator(&hash, &evidence);
 
-    assert_eq!(index.get(&hash), Some(record));
+    let entry = index.entry(&hash);
+    assert_eq!(entry.extracted, Fact::Held(identifier));
+    assert_eq!(entry.operator, Fact::Held(evidence));
 }
 
 #[test]
 fn content_index_put_returns_written_over_memory_cache() {
     let index = ContentIndex::new(MemoryCache::new());
     let hash = hash_bytes(b"borax content");
-    let record = article_with_doi("10.1038/171737a0");
+    let identifier = doi_identifier("10.1038/171737a0");
 
-    assert_eq!(index.put(&hash, &record), CacheWrite::Written);
+    assert_eq!(index.put_extracted(&hash, &identifier), CacheWrite::Written);
 }
 
 #[test]
 fn content_index_put_returns_what_its_cache_returned() {
     let index = ContentIndex::new(WriteFailingCache);
     let hash = hash_bytes(b"borax content");
-    let record = article_with_doi("10.1038/171737a0");
+    let identifier = doi_identifier("10.1038/171737a0");
 
-    match index.put(&hash, &record) {
+    match index.put_extracted(&hash, &identifier) {
         CacheWrite::Failed { message } => assert_eq!(message, "write-failing cache"),
         CacheWrite::Written => panic!("expected Failed, got Written"),
     }
 }
 
 #[test]
-fn content_index_round_trips_a_record_over_memory_cache() {
-    content_index_round_trips_a_record(MemoryCache::new());
+fn content_index_round_trips_both_facts_over_memory_cache() {
+    content_index_round_trips_both_facts(MemoryCache::new());
 }
 
 #[test]
-fn content_index_round_trips_a_record_over_file_cache() {
+fn content_index_round_trips_both_facts_over_file_cache() {
     let dir = tempdir().unwrap();
-    content_index_round_trips_a_record(FileCache::new(dir.path()));
+    content_index_round_trips_both_facts(FileCache::new(dir.path()));
 }
 
-fn content_index_misses_an_unknown_hash<C: Cache>(cache: C) {
-    let index = ContentIndex::new(cache);
-    assert_eq!(index.get(&hash_bytes(b"never indexed")), None);
+fn content_index_misses_an_unknown_hash<S: IndexStore>(store: S) {
+    let index = ContentIndex::new(store);
+    assert_eq!(index.entry(&hash_bytes(b"never indexed")).answer(), None);
 }
 
 #[test]
@@ -629,11 +879,11 @@ fn content_index_misses_an_unknown_hash_over_file_cache() {
     content_index_misses_an_unknown_hash(FileCache::new(dir.path()));
 }
 
-/// Spec scenario: "Renamed file, same content" — a record indexed under a
-/// file's content hash is found again when the same bytes appear under a
-/// different path.
+/// Spec scenario: "Renamed file, same content" — an identifier indexed
+/// under a file's content hash is found again when the same bytes
+/// appear under a different path.
 #[test]
-fn renamed_file_with_identical_content_is_served_from_the_content_index() {
+fn renamed_file_with_identical_content_is_answered_by_the_content_index() {
     let dir = tempdir().unwrap();
     let bytes = b"same bytes, different name";
     let original = dir.path().join("original.pdf");
@@ -642,10 +892,16 @@ fn renamed_file_with_identical_content_is_served_from_the_content_index() {
     std::fs::write(&renamed, bytes).unwrap();
 
     let index = ContentIndex::new(MemoryCache::new());
-    let record = article_with_doi("10.1038/171737a0");
-    let _ = index.put(&hash_file(&original).unwrap(), &record);
+    let identifier = doi_identifier("10.1038/171737a0");
+    let _ = index.put_extracted(&hash_file(&original).unwrap(), &identifier);
 
-    assert_eq!(index.get(&hash_file(&renamed).unwrap()), Some(record));
+    assert_eq!(
+        index.entry(&hash_file(&renamed).unwrap()).answer(),
+        Some(IdentificationEvidence {
+            identifier,
+            origin: EvidenceOrigin::Extracted,
+        })
+    );
 }
 
 /// Spec scenario: "Re-run over the same directory is offline" — entries
@@ -654,14 +910,300 @@ fn renamed_file_with_identical_content_is_served_from_the_content_index() {
 fn entries_survive_a_fresh_file_cache_opened_on_the_same_root() {
     let dir = tempdir().unwrap();
     let hash = hash_bytes(b"offline re-run");
-    let record = article_with_doi("10.1038/171737a0");
+    let identifier = doi_identifier("10.1038/171737a0");
 
     let first_run = ContentIndex::new(FileCache::new(dir.path()));
-    let _ = first_run.put(&hash, &record);
+    let _ = first_run.put_extracted(&hash, &identifier);
     drop(first_run);
 
     let second_run = ContentIndex::new(FileCache::new(dir.path()));
-    assert_eq!(second_run.get(&hash), Some(record));
+    assert_eq!(
+        second_run.entry(&hash).answer(),
+        Some(IdentificationEvidence {
+            identifier,
+            origin: EvidenceOrigin::Extracted,
+        })
+    );
+}
+
+// --- the content-index evidence API: IndexStore, entry/put_extracted/
+// put_operator (design D1, D2, D10) ---
+
+#[test]
+fn extracted_and_operator_keys_name_files_in_the_hashs_directory() {
+    let hash = hash_bytes(b"evidence keys");
+    let root = Path::new("/data/root");
+
+    assert_eq!(
+        entry_path(root, &extracted_key(&hash)),
+        Some(
+            root.join("content")
+                .join(hash.to_string())
+                .join("extracted.json")
+        )
+    );
+    assert_eq!(
+        entry_path(root, &operator_key(&hash)),
+        Some(
+            root.join("content")
+                .join(hash.to_string())
+                .join("operator.json")
+        )
+    );
+}
+
+#[test]
+fn put_extracted_writes_only_extracted_json() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"put extracted only");
+
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/x"));
+
+    let hash_dir = dir.path().join("content").join(hash.to_string());
+    let mut names: Vec<String> = std::fs::read_dir(&hash_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["extracted.json".to_string()]);
+}
+
+#[test]
+fn put_operator_writes_only_operator_json() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"put operator only");
+    let evidence = IdentificationEvidence {
+        identifier: doi_identifier("10.1000/x"),
+        origin: EvidenceOrigin::Supplied,
+    };
+
+    let _ = index.put_operator(&hash, &evidence);
+
+    let hash_dir = dir.path().join("content").join(hash.to_string());
+    let mut names: Vec<String> = std::fs::read_dir(&hash_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["operator.json".to_string()]);
+}
+
+#[test]
+fn put_operator_refuses_evidence_of_a_non_operator_origin_without_writing() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"put operator non-operator origin");
+    let evidence = IdentificationEvidence {
+        identifier: doi_identifier("10.1000/x"),
+        origin: EvidenceOrigin::Extracted,
+    };
+
+    let result = index.put_operator(&hash, &evidence);
+
+    assert!(
+        matches!(result, CacheWrite::Failed { .. }),
+        "got {result:?}"
+    );
+    assert!(
+        !dir.path()
+            .join("content")
+            .join(hash.to_string())
+            .join("operator.json")
+            .exists(),
+        "a refused write must leave no file"
+    );
+}
+
+#[test]
+fn put_extracted_leaves_an_existing_operator_json_byte_identical() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"leave operator byte identical");
+    let _ = index.put_operator(
+        &hash,
+        &IdentificationEvidence {
+            identifier: doi_identifier("10.1000/op"),
+            origin: EvidenceOrigin::Supplied,
+        },
+    );
+    let operator_path = dir
+        .path()
+        .join("content")
+        .join(hash.to_string())
+        .join("operator.json");
+    let before = std::fs::read(&operator_path).unwrap();
+
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/ext"));
+
+    assert_eq!(std::fs::read(&operator_path).unwrap(), before);
+}
+
+#[test]
+fn put_operator_leaves_an_existing_extracted_json_byte_identical() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"leave extracted byte identical");
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/ext"));
+    let extracted_path = dir
+        .path()
+        .join("content")
+        .join(hash.to_string())
+        .join("extracted.json");
+    let before = std::fs::read(&extracted_path).unwrap();
+
+    let _ = index.put_operator(
+        &hash,
+        &IdentificationEvidence {
+            identifier: doi_identifier("10.1000/op"),
+            origin: EvidenceOrigin::Overridden,
+        },
+    );
+
+    assert_eq!(std::fs::read(&extracted_path).unwrap(), before);
+}
+
+#[test]
+fn a_later_operator_write_replaces_the_earlier_one() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"later operator write replaces");
+    let _ = index.put_operator(
+        &hash,
+        &IdentificationEvidence {
+            identifier: doi_identifier("10.1000/first"),
+            origin: EvidenceOrigin::Supplied,
+        },
+    );
+    let second = IdentificationEvidence {
+        identifier: doi_identifier("10.1000/second"),
+        origin: EvidenceOrigin::Overridden,
+    };
+
+    let _ = index.put_operator(&hash, &second);
+
+    assert_eq!(index.entry(&hash).operator, Fact::Held(second));
+}
+
+#[test]
+fn entry_of_an_absent_directory_has_both_facts_absent() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"absent directory");
+
+    let entry = index.entry(&hash);
+
+    assert_eq!(entry.extracted, Fact::Absent);
+    assert_eq!(entry.operator, Fact::Absent);
+}
+
+#[test]
+fn entry_ignores_a_temporary_file_in_the_directory() {
+    let dir = tempdir().unwrap();
+    let hash = hash_bytes(b"ignores temp file");
+    let hash_dir = dir.path().join("content").join(hash.to_string());
+    std::fs::create_dir_all(&hash_dir).unwrap();
+    std::fs::write(hash_dir.join(".tmp-12345-0"), b"garbage").unwrap();
+
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let entry = index.entry(&hash);
+
+    assert_eq!(entry.extracted, Fact::Absent);
+    assert_eq!(entry.operator, Fact::Absent);
+}
+
+#[test]
+fn entry_reports_an_operator_json_that_does_not_parse_as_unreadable() {
+    let dir = tempdir().unwrap();
+    let hash = hash_bytes(b"operator does not parse");
+    let hash_dir = dir.path().join("content").join(hash.to_string());
+    std::fs::create_dir_all(&hash_dir).unwrap();
+    std::fs::write(hash_dir.join("operator.json"), b"not json").unwrap();
+
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let entry = index.entry(&hash);
+
+    assert!(
+        matches!(entry.operator, Fact::Unreadable(_)),
+        "got {:?}",
+        entry.operator
+    );
+}
+
+/// The record API is gone (group 4), so this is read directly against
+/// [`MemoryCache`]'s two traits rather than through [`ContentIndex`]:
+/// its [`Cache`] records and its [`IndexStore`] facts are two separate
+/// maps, and writing one leaves the other exactly as it was.
+#[test]
+fn memory_cache_holds_facts_apart_from_records() {
+    let cache = MemoryCache::new();
+    let hash = hash_bytes(b"facts apart from records");
+    let record = article_with_doi("10.1038/171737a0");
+
+    let _ = cache.put("some-service-cache-key", &record);
+    let _ = cache.write_fact(
+        &extracted_key(&hash),
+        "{\"identifier\":\"doi:10.1000/fact\"}",
+    );
+
+    assert_eq!(cache.get("some-service-cache-key"), Some(record));
+    assert_eq!(
+        cache.read_fact(&extracted_key(&hash)),
+        Some(Ok("{\"identifier\":\"doi:10.1000/fact\"}".to_string()))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn content_index_fact_write_reports_failed_over_a_read_only_root() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("locked");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let index = ContentIndex::new(FileCache::new(&root));
+    let hash = hash_bytes(b"read only root");
+
+    let result = index.put_extracted(&hash, &doi_identifier("10.1000/x"));
+
+    // Restored before the temp directory's own cleanup.
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    if matches!(result, CacheWrite::Written) {
+        eprintln!(
+            "skipping content_index_fact_write_reports_failed_over_a_read_only_root: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+
+    assert!(
+        matches!(result, CacheWrite::Failed { .. }),
+        "got {result:?}"
+    );
+}
+
+/// The record API is gone (group 4), so the `v1` record this test puts
+/// beside the entry is written directly, as the old record API would
+/// have: a whole record, serialized under `content/<hash>.json`, with
+/// no `v2` entry directory for it.
+#[test]
+fn a_v1_record_file_beside_the_entry_is_not_read_as_a_fact() {
+    let dir = tempdir().unwrap();
+    let hash = hash_bytes(b"v1 record beside entry");
+    let record = article_with_doi("10.1038/171737a0");
+    let path = entry_path(dir.path(), &content_key(&hash)).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let entry = index.entry(&hash);
+
+    assert_eq!(entry.extracted, Fact::Absent);
+    assert_eq!(entry.operator, Fact::Absent);
 }
 
 // --- hash_file() ---

@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use borax::event::{
-    Acceptance, ContentIndexSection, Counts, Event, ExtractionResultStep, ExtractionSection,
-    IdentifierInputStep, IndexReadStep, LibraryStep, LookupStep, MatchCheckStep, RetrievedFrom,
-    Sections, SkipReason, TitlesStep, WriteStep,
+    Acceptance, ContentIndexSection, Counts, Event, EvidenceStep, ExtractionResultStep,
+    ExtractionSection, FetchedFrom, IdentifierInputStep, IdentifierOrigin, IndexReadStep,
+    LibraryStep, LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer,
+    ServiceOutcome, SkipReason, TitlesStep, WriteStep,
 };
 use borax::evidence::Evidence;
 use borax::evidence::Unattempted;
@@ -183,7 +184,12 @@ fn sections_via_content_index() -> Sections {
             reason: "no-library".to_string(),
         },
         content_index: ContentIndexSection {
-            read: IndexReadStep::Hit,
+            read: IndexReadStep::Hit {
+                evidence: EvidenceStep {
+                    identifier: "doi:10.1000/cached-record".to_string(),
+                    origin: "extracted".to_string(),
+                },
+            },
             write: WriteStep::NotAttempted {
                 reason: not_attempted(),
             },
@@ -199,10 +205,21 @@ fn sections_via_content_index() -> Sections {
         identifier_input: IdentifierInputStep::NotAttempted {
             reason: "not-asked".to_string(),
         },
-        lookup: LookupStep::NotAttempted {
-            reason: not_attempted(),
+        lookup: LookupStep::Attempted {
+            identifier: "doi:10.1000/cached-record".to_string(),
+            origin: IdentifierOrigin::ContentIndex,
+            attempts: vec![ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: ServiceOutcome::Found {
+                    retrieval: FetchedFrom::ServiceCache,
+                    stored: None,
+                },
+            }],
+            earlier: vec![],
         },
-        record_retrieval: Some(RetrievedFrom::ContentIndex),
+        record_retrieval: Some(RetrievedFrom::ServiceCache {
+            service: "crossref".to_string(),
+        }),
         match_check: MatchCheckStep::NotAttempted {
             reason: not_attempted(),
         },

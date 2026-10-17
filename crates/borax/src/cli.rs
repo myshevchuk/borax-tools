@@ -240,7 +240,8 @@ pub enum Command {
     },
     /// Report what the response cache holds.
     Cache {
-        /// Empty the cache instead of reporting it.
+        /// Empty the response cache instead of reporting it. The content
+        /// index is not touched.
         #[arg(long)]
         clear: bool,
 
@@ -277,7 +278,8 @@ pub enum Command {
         run_log: RunLogOptions,
     },
     /// Bring artifact records back into agreement with the library's
-    /// tree.
+    /// tree, and restore the operator decisions they hold to the
+    /// content index.
     Reconcile {
         /// The library to reconcile, as `status` takes it.
         #[arg(value_name = "PATH")]
@@ -300,8 +302,9 @@ pub enum Command {
         #[command(flatten)]
         run_log: RunLogOptions,
     },
-    /// Record the artifacts the content index already knows, querying
-    /// nothing and moving nothing.
+    /// Record the artifacts the content index already knows, from the
+    /// response cache's record for the identifier it knows them by,
+    /// querying nothing and moving nothing.
     Adopt {
         /// The library to adopt into, as `status` takes it.
         #[arg(value_name = "PATH")]

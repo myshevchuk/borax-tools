@@ -15,7 +15,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use borax_core::content::ContentHash;
-use borax_core::library::DuplicateReason;
+use borax_core::library::{DuplicateReason, IdentificationEvidence};
 use borax_core::record::{Record, Source as FieldSource};
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,7 @@ use crate::describe::escaped;
 /// Consumers pin it: within a major version of borax the shape of an
 /// event with a given `event` tag does not change, and a new schema
 /// version is how a breaking change announces itself.
-pub const SCHEMA: u32 = 4;
+pub const SCHEMA: u32 = 5;
 
 /// Something that happened to a file, or to the run as a whole.
 ///
@@ -236,20 +236,29 @@ pub enum Event {
         path: PathBuf,
         admission: Admission,
     },
-    /// What became of writing a record an operator reached — supplied,
-    /// asked for again, or accepted over a conflict — to the content
-    /// index, once its file was moved.
+    /// What became of an evidence write to the content index made after
+    /// a verdict: the move's, for a record an operator reached —
+    /// supplied, or accepted over a conflict — or a retried lookup of
+    /// the file's own identifier; or `reconcile`'s, restoring an
+    /// operator decision the library holds.
     ///
-    /// Follows the file's [`Event::Renamed`] and any
+    /// In a rename, follows the file's [`Event::Renamed`] and any
     /// [`Event::LibraryAdmission`], and is emitted for no other file:
     /// the resolution's own `content_index.write` reads
-    /// `awaiting-acceptance` for exactly these. `write` is
-    /// [`WriteStep::Written`] or [`WriteStep::Failed`]; a failure is
-    /// evidence and never a failure of the rename. Counts toward no
-    /// total.
+    /// `awaiting-acceptance` for exactly these. In a reconcile, one
+    /// precedes the totals for each restoration written or failed.
+    /// `write` is [`WriteStep::Written`] or [`WriteStep::Failed`]; a
+    /// failure is evidence and never a failure of the run. Counts toward
+    /// no total.
     ContentIndexWrite {
-        /// The file, at the path it holds after the move.
+        /// The file: in a rename, at the path it holds after the move;
+        /// in a reconcile, the artifact the record holding the decision
+        /// names.
         path: PathBuf,
+        /// The content hash whose entry was written, as `sha256-<hex>`.
+        hash: String,
+        /// What was written to the entry.
+        entry: WrittenEntry,
         write: WriteStep,
     },
     /// What validating a library amounted to: how many findings were
@@ -774,8 +783,13 @@ pub enum Admission {
 pub enum Adoption {
     /// The orphan now has an artifact record, `id`, linked to the item
     /// `item`: one the library already held for an identifier of the
-    /// cached record, or one minted from that record.
-    Recorded { id: String, item: String },
+    /// cached record, or one minted from that record. `retrieval` is
+    /// where the record was read: a service's response cache.
+    Recorded {
+        id: String,
+        item: String,
+        retrieval: RetrievedFrom,
+    },
     /// The orphan's bytes are already in the history of the artifact
     /// record `id`, so it was left an orphan.
     ///
@@ -787,13 +801,18 @@ pub enum Adoption {
     /// The orphan could not be read, with `message` as the filesystem
     /// put it, so the content index was never asked about it.
     Unreadable { message: String },
-    /// The index answered and the record could not be written, with
-    /// `message` as the filesystem put it. The orphan is still one, and
-    /// the next adoption tries it again.
+    /// A record was found and could not be written, with `message` as
+    /// the filesystem put it. The orphan is still one, and the next
+    /// adoption tries it again.
     Unwritten { message: String },
-    /// The content index holds no record for the orphan's bytes, so
+    /// The content index holds no evidence for the orphan's bytes, so
     /// there was nothing to adopt it from and it is still an orphan.
     Unindexed,
+    /// The content index knows the orphan's bytes as `identifier`, and
+    /// no response cache holds a record for it, so it is still an
+    /// orphan. A resolution that fetches the record lets a later
+    /// adoption record it.
+    Unanswered { identifier: String },
 }
 
 /// Which library condition a [`Event::LibraryCondition`] names.
@@ -1049,7 +1068,8 @@ impl LibraryStep {
 pub struct ContentIndexSection {
     /// Reading the index by the file's hash.
     pub read: IndexReadStep,
-    /// Writing the record reached under the file's hash.
+    /// Writing the identifier the record was reached by, as the
+    /// extracted evidence for the file's hash.
     pub write: WriteStep,
 }
 
@@ -1058,9 +1078,11 @@ pub struct ContentIndexSection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "kebab-case")]
 pub enum IndexReadStep {
-    /// The index held a record for the file's hash.
-    Hit,
-    /// The index held none.
+    /// The index answered with `evidence`, whose identifier the lookup
+    /// then looked up.
+    Hit { evidence: EvidenceStep },
+    /// The index answered with nothing: it holds no entry for the
+    /// file's hash, or one that answers with no evidence.
     Miss,
     /// The run turned the cache off, so the index was not read.
     Bypassed,
@@ -1070,6 +1092,47 @@ pub enum IndexReadStep {
     /// The index was not read, because a content duplicate or the
     /// library settled the file first.
     NotAttempted { reason: String },
+}
+
+/// Identification evidence as the stream carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceStep {
+    /// The identifier, as it displays (`doi:…`, `arXiv:…`, `pmid:…`,
+    /// `isbn:…`).
+    pub identifier: String,
+    /// How it came to identify the bytes: `extracted`, `supplied`,
+    /// `overridden` or `adopted`.
+    pub origin: String,
+}
+
+impl EvidenceStep {
+    /// `evidence` as the stream carries it.
+    pub(crate) fn of(evidence: &IdentificationEvidence) -> EvidenceStep {
+        EvidenceStep {
+            identifier: evidence.identifier.to_string(),
+            origin: evidence.origin.as_str().to_string(),
+        }
+    }
+}
+
+/// What a content-index write wrote to an entry. Serialized with a
+/// `kind` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WrittenEntry {
+    /// Identification evidence: `identifier`, with `origin`
+    /// `extracted`, `supplied` or `overridden`.
+    Evidence { identifier: String, origin: String },
+}
+
+impl WrittenEntry {
+    /// `evidence` as a written entry.
+    pub(crate) fn evidence(evidence: &IdentificationEvidence) -> WrittenEntry {
+        WrittenEntry::Evidence {
+            identifier: evidence.identifier.to_string(),
+            origin: evidence.origin.as_str().to_string(),
+        }
+    }
 }
 
 /// What a write to a store came to. Serialized with a `status` tag.
@@ -1185,6 +1248,10 @@ pub enum IdentifierOrigin {
     Extracted,
     /// An operator supplied it.
     Operator,
+    /// The content index answered with it. The evidence it answered
+    /// with, and that evidence's own origin, are the `content_index`
+    /// section's read.
+    ContentIndex,
 }
 
 /// One service asked about an identifier, and how it answered.
@@ -1254,8 +1321,6 @@ pub enum FetchedFrom {
 pub enum RetrievedFrom {
     /// The file's library item, through the artifact record `artifact`.
     Library { artifact: String, item: String },
-    /// The content index, under the file's hash.
-    ContentIndex,
     /// `service`'s response cache.
     ServiceCache { service: String },
     /// `service`, over the network.
@@ -1632,7 +1697,7 @@ pub fn human_line(event: &Event) -> Option<String> {
         Event::LibraryAdoption { path, adoption } => {
             Some(format!("{}: {}", escaped(path), what_was_adopted(adoption)))
         }
-        Event::ContentIndexWrite { path, write } => match write {
+        Event::ContentIndexWrite { path, write, .. } => match write {
             WriteStep::Failed { message } => Some(format!(
                 "{}: {}",
                 path.display(),
@@ -1835,7 +1900,6 @@ fn resolved_as(identifier: &str, record: &Record, sections: &Sections) -> String
             ", from {}",
             match retrieval {
                 RetrievedFrom::Library { .. } => "the library",
-                RetrievedFrom::ContentIndex => "the content index",
                 RetrievedFrom::ServiceCache { .. } => "the response cache",
                 RetrievedFrom::Network { .. } => "the network",
             }
@@ -2164,7 +2228,7 @@ fn what_was_extracted(extraction: &Extraction) -> String {
 /// for the human rendering of [`Event::LibraryAdoption`].
 fn what_was_adopted(adoption: &Adoption) -> String {
     match adoption {
-        Adoption::Recorded { id, item } => {
+        Adoption::Recorded { id, item, .. } => {
             format!("adopted as artifact {id} of item {item}")
         }
         Adoption::Held { id } => format!(
@@ -2180,6 +2244,11 @@ fn what_was_adopted(adoption: &Adoption) -> String {
         Adoption::Unindexed => {
             "the content index holds no record of its bytes, so it is still an orphan".to_string()
         }
+        Adoption::Unanswered { identifier } => format!(
+            "the content index knows its bytes as {}, but no response cache holds that \
+             record, so it is still an orphan; borax resolve fetches it",
+            escaped(identifier)
+        ),
     }
 }
 

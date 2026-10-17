@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use borax::event::{
     Acceptance, AcceptedBy, AcceptedItemCause, Admission, Adoption, Claim, ClaimOrigin, Condition,
-    ContentIndexSection, Counts, Diagnostic, Displaced, Event, Extraction, ExtractionResultStep,
-    ExtractionSection, FetchedFrom, Format, IdentifierInputStep, IdentifierOrigin, IndexReadStep,
-    Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep, MatchCheckStep, Repair,
-    RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Submission,
-    SubmissionAcceptance, SubmissionOutcome, Summary, SyntaxStep, TableUsed, TitlesStep, WriteStep,
-    human_line, human_summary, json_line, render,
+    ContentIndexSection, Counts, Diagnostic, Displaced, Event, EvidenceStep, Extraction,
+    ExtractionResultStep, ExtractionSection, FetchedFrom, Format, IdentifierInputStep,
+    IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
+    MatchCheckStep, Repair, RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome,
+    SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome, Summary, SyntaxStep,
+    TableUsed, TitlesStep, WriteStep, WrittenEntry, human_line, human_summary, json_line, render,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
@@ -18,6 +18,7 @@ use borax::evidence::{
 use borax::pipeline::{FileRecord, resolved_event};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier};
+use borax_core::library::{EvidenceOrigin, IdentificationEvidence};
 use borax_core::record::{BoraxExt, EntryType, Record, Source};
 use borax_pdf::tiered::Tier;
 use borax_sources::cache::CacheWrite;
@@ -55,12 +56,22 @@ fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) 
     }
 }
 
-/// The evidence of a record the content index answered for.
+fn doi(value: &str) -> Doi {
+    Doi::parse(value).unwrap()
+}
+
+/// The evidence of a record the content index answered for: the
+/// identifier's lookup is attempted with origin [`Origin::Indexed`] and
+/// found by Crossref's response cache.
 fn evidence_via_content_index_hit() -> Evidence {
+    let identifier = Identifier::Doi(doi("10.1000/cached-record"));
     Evidence {
         library: Consultation::NotConsulted(Unattempted::NoLibrary),
         content_index: IndexEvidence {
-            read: IndexRead::Hit,
+            read: IndexRead::Hit(IdentificationEvidence {
+                identifier: identifier.clone(),
+                origin: EvidenceOrigin::Extracted,
+            }),
             write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
         },
         extraction: ExtractionEvidence {
@@ -68,7 +79,15 @@ fn evidence_via_content_index_hit() -> Evidence {
             titles: Titles::NotAttempted(Unattempted::ContentIndexHit),
         },
         identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
-        lookup: LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
+        lookup: LookupEvidence::Attempted {
+            identifier,
+            origin: Origin::Indexed(EvidenceOrigin::Extracted),
+            attempts: vec![ServiceAttempt {
+                service: SourceName::Crossref,
+                outcome: Ok(Retrieval::ServiceCache),
+            }],
+            earlier: vec![],
+        },
         match_check: MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
     }
 }
@@ -119,9 +138,10 @@ fn sections_via_network(service: &str, identifier: &str) -> Sections {
     }
 }
 
-/// Every section as a content-index hit reports them: every step not
-/// attempted for `content-index-hit`, the record retrieved from the
-/// content index.
+/// Every section as a content-index hit reports them: extraction,
+/// titles and the title check not attempted for `content-index-hit`,
+/// and the identifier's lookup attempted and found through the
+/// response cache.
 fn sections_via_content_index() -> Sections {
     let not_attempted = || "content-index-hit".to_string();
     Sections {
@@ -129,7 +149,12 @@ fn sections_via_content_index() -> Sections {
             reason: "no-library".to_string(),
         },
         content_index: ContentIndexSection {
-            read: IndexReadStep::Hit,
+            read: IndexReadStep::Hit {
+                evidence: EvidenceStep {
+                    identifier: "doi:10.1000/cached-record".to_string(),
+                    origin: "extracted".to_string(),
+                },
+            },
             write: WriteStep::NotAttempted {
                 reason: not_attempted(),
             },
@@ -145,10 +170,21 @@ fn sections_via_content_index() -> Sections {
         identifier_input: IdentifierInputStep::NotAttempted {
             reason: "not-asked".to_string(),
         },
-        lookup: LookupStep::NotAttempted {
-            reason: not_attempted(),
+        lookup: LookupStep::Attempted {
+            identifier: "doi:10.1000/cached-record".to_string(),
+            origin: IdentifierOrigin::ContentIndex,
+            attempts: vec![ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: ServiceOutcome::Found {
+                    retrieval: FetchedFrom::ServiceCache,
+                    stored: None,
+                },
+            }],
+            earlier: vec![],
         },
-        record_retrieval: Some(RetrievedFrom::ContentIndex),
+        record_retrieval: Some(RetrievedFrom::ServiceCache {
+            service: "crossref".to_string(),
+        }),
         match_check: MatchCheckStep::NotAttempted {
             reason: not_attempted(),
         },
@@ -367,6 +403,11 @@ fn skipped_conflict(sections: Sections, candidate: Record) -> Event {
 fn content_index_write(write: WriteStep) -> Event {
     Event::ContentIndexWrite {
         path: PathBuf::from("smith2024_borax.pdf"),
+        hash: "sha256-abc123".to_string(),
+        entry: WrittenEntry::Evidence {
+            identifier: "doi:10.1000/x".to_string(),
+            origin: "supplied".to_string(),
+        },
         write,
     }
 }
@@ -660,6 +701,12 @@ fn all_events() -> Vec<Event> {
             },
         ),
         library_adoption("new.pdf", Adoption::Unindexed),
+        library_adoption(
+            "new.pdf",
+            Adoption::Unanswered {
+                identifier: "doi:10.1000/x".to_string(),
+            },
+        ),
         library_status(Some(LIB_UUID)),
         library_status(None),
         library_validated(Some(LIB_UUID)),
@@ -751,8 +798,8 @@ fn json_line_of_every_event_parses_as_a_json_object_carrying_schema_and_event_ta
 }
 
 #[test]
-fn schema_is_four() {
-    assert_eq!(SCHEMA, 4);
+fn schema_is_five() {
+    assert_eq!(SCHEMA, 5);
 }
 
 #[test]
@@ -1013,8 +1060,9 @@ fn json_line_of_planned_has_exactly_the_documented_field_set() {
 }
 
 /// design D8: `content-index-write` serializes to `schema`, `event`,
-/// `path` and `write`, with `write` either `written` or `failed` with
-/// `message`.
+/// `path`, `hash`, `entry` and `write`, with `write` either `written`
+/// or `failed` with `message`, and `entry` tagged `kind`, `evidence`
+/// here, with `identifier` and `origin`.
 #[test]
 fn json_line_of_content_index_write_has_exactly_the_documented_field_set() {
     let value: Value =
@@ -1022,8 +1070,19 @@ fn json_line_of_content_index_write_has_exactly_the_documented_field_set() {
     let object = value.as_object().unwrap();
     let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, vec!["event", "path", "schema", "write"]);
+    assert_eq!(
+        keys,
+        vec!["entry", "event", "hash", "path", "schema", "write"]
+    );
     assert_eq!(object["write"], serde_json::json!({"status": "written"}));
+    assert_eq!(
+        object["entry"],
+        serde_json::json!({
+            "kind": "evidence",
+            "identifier": "doi:10.1000/x",
+            "origin": "supplied",
+        })
+    );
 
     let value: Value = serde_json::from_str(&json_line(&content_index_write(WriteStep::Failed {
         message: "disk full".to_string(),
@@ -1032,6 +1091,103 @@ fn json_line_of_content_index_write_has_exactly_the_documented_field_set() {
     assert_eq!(
         value["write"],
         serde_json::json!({"status": "failed", "message": "disk full"})
+    );
+}
+
+#[test]
+fn json_line_of_a_hit_carries_its_evidence() {
+    let path = PathBuf::from("paper.pdf");
+    let file = FileRecord {
+        record: Record::new(EntryType::Article),
+        hash: Some(hash_bytes(b"paper")),
+        evidence: evidence_via_content_index_hit(),
+        overridden: false,
+        accepted: false,
+    };
+    let event = resolved_event(&path, &file);
+
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(
+        value["content_index"]["read"],
+        serde_json::json!({
+            "status": "hit",
+            "evidence": {
+                "identifier": "doi:10.1000/cached-record",
+                "origin": "extracted",
+            }
+        })
+    );
+}
+
+#[test]
+fn json_line_of_a_lookup_from_the_content_index_has_origin_content_index() {
+    let path = PathBuf::from("paper.pdf");
+    let file = FileRecord {
+        record: Record::new(EntryType::Article),
+        hash: Some(hash_bytes(b"paper")),
+        evidence: evidence_via_content_index_hit(),
+        overridden: false,
+        accepted: false,
+    };
+    let event = resolved_event(&path, &file);
+
+    let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(value["lookup"]["origin"], Value::from("content-index"));
+}
+
+/// The illustrative schema-5 write line at the end of design.md.
+#[test]
+fn json_line_of_content_index_write_matches_design_d8() {
+    let event = Event::ContentIndexWrite {
+        path: PathBuf::from("/home/u/papers/Smith2015.pdf"),
+        hash: "sha256-abc123".to_string(),
+        entry: WrittenEntry::Evidence {
+            identifier: "doi:10.1000/x".to_string(),
+            origin: "supplied".to_string(),
+        },
+        write: WriteStep::Written,
+    };
+
+    assert_eq!(
+        json_line(&event),
+        concat!(
+            r#"{"schema":5,"event":"content-index-write","path":"/home/u/papers/Smith2015.pdf","#,
+            r#""hash":"sha256-abc123","entry":{"kind":"evidence","identifier":"doi:10.1000/x","#,
+            r#""origin":"supplied"},"write":{"status":"written"}}"#
+        )
+    );
+}
+
+#[test]
+fn human_line_of_an_evidence_answer_ends_from_the_response_cache() {
+    let path = PathBuf::from("paper.pdf");
+    let file = FileRecord {
+        record: record_with(Some("A Title"), &["Smith"], Some(2020)),
+        hash: Some(hash_bytes(b"paper")),
+        evidence: evidence_via_content_index_hit(),
+        overridden: false,
+        accepted: false,
+    };
+    let event = resolved_event(&path, &file);
+
+    assert!(
+        human_line(&event)
+            .unwrap()
+            .ends_with("from the response cache"),
+        "got {:?}",
+        human_line(&event)
+    );
+}
+
+#[test]
+fn human_line_of_a_failed_content_index_write_is_unchanged() {
+    let event = content_index_write(WriteStep::Failed {
+        message: "disk full".to_string(),
+    });
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "smith2024_borax.pdf: the content index could not keep this answer (disk full)"
     );
 }
 
@@ -3170,8 +3326,21 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
 
     match &event {
         Event::Resolved { sections, .. } => {
-            assert_eq!(sections.record_retrieval, Some(RetrievedFrom::ContentIndex));
-            assert_eq!(sections.content_index.read, IndexReadStep::Hit);
+            assert_eq!(
+                sections.record_retrieval,
+                Some(RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string()
+                })
+            );
+            assert_eq!(
+                sections.content_index.read,
+                IndexReadStep::Hit {
+                    evidence: EvidenceStep {
+                        identifier: "doi:10.1000/cached-record".to_string(),
+                        origin: "extracted".to_string(),
+                    }
+                }
+            );
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
@@ -3185,7 +3354,8 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
 /// design D6/D1: a record whose provenance names two services is
 /// reported with both, in the fixed order Crossref, OpenAlex, arXiv,
 /// DataCite, PubMed, sidecar — not the order the fields happen to be
-/// keyed in.
+/// keyed in. Provenance names the services only where the retrieval
+/// names none, as a library answer's does.
 #[test]
 fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
     let mut record = Record::new(EntryType::Article);
@@ -3198,16 +3368,12 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
         .collect(),
         ..BoraxExt::default()
     };
-    let path = PathBuf::from("paper.pdf");
-    let file = FileRecord {
-        record,
-        hash: Some(hash_bytes(b"paper")),
-        evidence: evidence_via_content_index_hit(),
-        overridden: false,
-        accepted: false,
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: String::new(),
+        record: Box::new(record),
+        sections: Box::new(sections_via_library("artifact-id", "item-id")),
     };
-
-    let event = resolved_event(&path, &file);
 
     assert!(
         human_line(&event)
@@ -3219,8 +3385,9 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
 }
 
 /// design D6: a record whose provenance names no service at all — only
-/// extraction, or nothing — names the content index as `from`, with no
-/// `via` clause at all (the schema-3 `"cache"` stand-in is gone).
+/// extraction, or nothing — and whose retrieval names none either, as
+/// a library answer's does, has no `via` clause at all (the schema-3
+/// `"cache"` stand-in is gone).
 #[test]
 fn a_record_whose_provenance_names_no_service_names_no_via() {
     let mut record = Record::new(EntryType::Article);
@@ -3230,20 +3397,16 @@ fn a_record_whose_provenance_names_no_service_names_no_via() {
             .collect(),
         ..BoraxExt::default()
     };
-    let path = PathBuf::from("paper.pdf");
-    let file = FileRecord {
-        record,
-        hash: Some(hash_bytes(b"paper")),
-        evidence: evidence_via_content_index_hit(),
-        overridden: false,
-        accepted: false,
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: String::new(),
+        record: Box::new(record),
+        sections: Box::new(sections_via_library("artifact-id", "item-id")),
     };
-
-    let event = resolved_event(&path, &file);
     let line = human_line(&event).unwrap();
 
     assert!(!line.contains(" via "), "got {line:?}");
-    assert!(line.contains("from the content index"), "got {line:?}");
+    assert!(line.contains("from the library"), "got {line:?}");
 }
 
 // ---------------------------------------------------------------------
@@ -3383,7 +3546,7 @@ fn json_line_of_resolved_carries_every_library_answer_variant_tagged_by_kind() {
     for (answer, expected) in cases {
         let event = resolved_with_library(answer.clone());
         let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
-        assert_eq!(value["schema"], Value::from(4));
+        assert_eq!(value["schema"], Value::from(5));
         assert_eq!(value["library"]["status"], Value::from("consulted"));
         assert_eq!(value["library"]["answer"], expected, "for {answer:?}");
     }
@@ -3394,7 +3557,7 @@ fn json_line_of_resolved_carries_every_library_answer_variant_tagged_by_kind() {
 fn json_line_of_skipped_carries_every_library_answer_variant_tagged_by_kind() {
     let event = skipped_with_library(LibraryAnswer::Untracked);
     let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
-    assert_eq!(value["schema"], Value::from(4));
+    assert_eq!(value["schema"], Value::from(5));
     assert_eq!(
         value["library"]["answer"],
         serde_json::json!({"kind": "untracked"})
@@ -3423,11 +3586,11 @@ fn library_not_attempted_replaces_the_schema_3_null() {
         value["library"],
         serde_json::json!({"status": "not-attempted", "reason": "no-library"})
     );
-    assert_eq!(value["schema"], Value::from(4));
+    assert_eq!(value["schema"], Value::from(5));
 
     let value: Value = serde_json::from_str(&json_line(&skipped(SkipReason::Declined))).unwrap();
     assert!(value.get("library").is_none());
-    assert_eq!(value["schema"], Value::from(4));
+    assert_eq!(value["schema"], Value::from(5));
 }
 
 // --- human_line: design D9's exact strings ---
@@ -3463,7 +3626,8 @@ fn human_line_appends_the_library_problem_clause_after_the_from_clause() {
 }
 
 /// The library-problem clause follows the `from` clause on a `resolved`
-/// line too, here a content-index answer whose record names no service.
+/// line too, here a content-index answer whose record names no service:
+/// the lookup's service is named, as for any lookup.
 #[test]
 fn human_line_appends_the_library_problem_clause_to_a_content_index_resolved_line() {
     let mut sections = sections_via_content_index();
@@ -3482,9 +3646,9 @@ fn human_line_appends_the_library_problem_clause_to_a_content_index_resolved_lin
 
     assert_eq!(
         human_line(&event).unwrap(),
-        "paper.pdf: resolved doi:10.1000/xyz123, from the content index; the library \
-         could not answer: artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links to item \
-         0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70, which the library does not hold"
+        "paper.pdf: resolved doi:10.1000/xyz123 via crossref, from the response cache; \
+         the library could not answer: artifact 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links \
+         to item 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70, which the library does not hold"
     );
 }
 
@@ -3593,8 +3757,15 @@ fn human_line_of_resolved_shows_the_work_and_the_from_clause() {
         .provenance
         .insert("title".to_string(), Source::Crossref);
     let mut sections = sections_via_network("crossref", "doi:10.1039/c5ay00042d");
-    sections.record_retrieval = Some(RetrievedFrom::ContentIndex);
-    sections.content_index.read = IndexReadStep::Hit;
+    sections.record_retrieval = Some(RetrievedFrom::ServiceCache {
+        service: "crossref".to_string(),
+    });
+    sections.content_index.read = IndexReadStep::Hit {
+        evidence: EvidenceStep {
+            identifier: "doi:10.1039/c5ay00042d".to_string(),
+            origin: "extracted".to_string(),
+        },
+    };
     let event = Event::Resolved {
         path: PathBuf::from("papers/smith.pdf"),
         identifier: "doi:10.1039/c5ay00042d".to_string(),
@@ -3605,7 +3776,7 @@ fn human_line_of_resolved_shows_the_work_and_the_from_clause() {
     assert_eq!(
         human_line(&event).unwrap(),
         "papers/smith.pdf: resolved doi:10.1039/c5ay00042d to \"Determination of things\" \
-         (Smith, 2015) via crossref, from the content index"
+         (Smith, 2015) via crossref, from the response cache"
     );
 }
 
@@ -3842,7 +4013,7 @@ fn json_line_of_library_extraction_matches_design_d4_for_every_kind() {
         assert_eq!(
             value,
             serde_json::json!({
-                "schema": 4,
+                "schema": 5,
                 "event": "library-extraction",
                 "path": "sub/a.pdf",
                 "extraction": expected_extraction,
@@ -4036,7 +4207,7 @@ fn json_line_of_library_condition_matches_design_d3_for_every_kind() {
     let cases: Vec<(Event, String)> = vec![
         (
             library_condition("sub/new.pdf", Condition::Orphan),
-            r#"{"schema":4,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}"#
+            r#"{"schema":5,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}"#
                 .to_string(),
         ),
         (
@@ -4048,7 +4219,7 @@ fn json_line_of_library_condition_matches_design_d3_for_every_kind() {
                 },
             ),
             format!(
-                r#"{{"schema":4,"event":"library-condition","path":"gone.pdf","condition":{{"kind":"missing","id":"{COND_UUID_MISSING}","record":".borax/artifacts/{COND_UUID_MISSING}.toml"}}}}"#
+                r#"{{"schema":5,"event":"library-condition","path":"gone.pdf","condition":{{"kind":"missing","id":"{COND_UUID_MISSING}","record":".borax/artifacts/{COND_UUID_MISSING}.toml"}}}}"#
             ),
         ),
         (
@@ -4059,7 +4230,7 @@ fn json_line_of_library_condition_matches_design_d3_for_every_kind() {
                 },
             ),
             format!(
-                r#"{{"schema":4,"event":"library-condition","path":"items/milner1978.unlinked.toml","condition":{{"kind":"unlinked","id":"{COND_UUID_UNLINKED}"}}}}"#
+                r#"{{"schema":5,"event":"library-condition","path":"items/milner1978.unlinked.toml","condition":{{"kind":"unlinked","id":"{COND_UUID_UNLINKED}"}}}}"#
             ),
         ),
     ];
@@ -4077,7 +4248,46 @@ fn json_line_of_library_adoption_unindexed_matches_design_d6() {
 
     assert_eq!(
         json_line(&event),
-        r#"{"schema":4,"event":"library-adoption","path":"new.pdf","adoption":{"kind":"unindexed"}}"#
+        r#"{"schema":5,"event":"library-adoption","path":"new.pdf","adoption":{"kind":"unindexed"}}"#
+    );
+}
+
+/// design D8/D10: `Adoption::Recorded` carries `retrieval`, naming the
+/// response cache service the orphan's record was read from.
+#[test]
+fn json_line_of_library_adoption_recorded_carries_its_retrieval() {
+    let event = library_adoption(
+        "new.pdf",
+        Adoption::Recorded {
+            id: "art-1".to_string(),
+            item: "item-1".to_string(),
+            retrieval: RetrievedFrom::ServiceCache {
+                service: "crossref".to_string(),
+            },
+        },
+    );
+
+    assert_eq!(
+        json_line(&event),
+        r#"{"schema":5,"event":"library-adoption","path":"new.pdf","adoption":{"kind":"recorded","id":"art-1","item":"item-1","retrieval":{"kind":"service-cache","service":"crossref"}}}"#
+    );
+}
+
+/// design D8: `json_line` of `Event::LibraryAdoption` with
+/// `Adoption::Unanswered` is exactly the documented line: the content
+/// index's evidence with no record the response cache holds for it.
+#[test]
+fn json_line_of_library_adoption_unanswered_matches_design_d8() {
+    let event = library_adoption(
+        "scan.pdf",
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/z".to_string(),
+        },
+    );
+
+    assert_eq!(
+        json_line(&event),
+        r#"{"schema":5,"event":"library-adoption","path":"scan.pdf","adoption":{"kind":"unanswered","identifier":"doi:10.1000/z"}}"#
     );
 }
 
@@ -4125,6 +4335,12 @@ fn counts_observe_of_library_condition_counts_nothing_for_every_kind() {
 fn counts_observe_of_library_adoption_unindexed_counts_nothing() {
     let mut counts = Counts::default();
     counts.observe(&library_adoption("new.pdf", Adoption::Unindexed));
+    counts.observe(&library_adoption(
+        "new.pdf",
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/x".to_string(),
+        },
+    ));
     assert_eq!(counts, Counts::default(), "got {counts:?}");
 }
 
@@ -4187,6 +4403,25 @@ fn human_line_of_library_adoption_unindexed_matches_design_d7() {
     );
 }
 
+/// design D9: the exact human line for `Adoption::Unanswered` — the
+/// content index knows the bytes' identifier, but the response cache
+/// holds no record for it, so `borax resolve` is what fetches it.
+#[test]
+fn human_line_of_library_adoption_unanswered_matches_design_d9() {
+    let event = library_adoption(
+        "scan.pdf",
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/z".to_string(),
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "scan.pdf: the content index knows its bytes as doi:10.1000/z, but no response \
+         cache holds that record, so it is still an orphan; borax resolve fetches it"
+    );
+}
+
 /// design D7: a control character in a condition's `path` is written as
 /// `\xNN` on the human line, for every kind, while `json_line` of the
 /// same event carries the path unchanged.
@@ -4236,6 +4471,9 @@ fn human_line_of_library_adoption_escapes_control_characters_in_the_path_for_eve
         Adoption::Recorded {
             id: COND_UUID_MISSING.to_string(),
             item: COND_UUID_UNLINKED.to_string(),
+            retrieval: RetrievedFrom::ServiceCache {
+                service: "crossref".to_string(),
+            },
         },
         Adoption::Held {
             id: COND_UUID_MISSING.to_string(),
@@ -4247,6 +4485,9 @@ fn human_line_of_library_adoption_escapes_control_characters_in_the_path_for_eve
             message: "disk full".to_string(),
         },
         Adoption::Unindexed,
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/x".to_string(),
+        },
     ];
 
     for adoption in adoptions {
@@ -4272,6 +4513,9 @@ fn human_line_of_library_adoption_is_unchanged_for_a_path_with_no_control_charac
             Adoption::Recorded {
                 id: "art-1".to_string(),
                 item: "item-1".to_string(),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             },
             "paper.pdf: adopted as artifact art-1 of item item-1",
         ),
@@ -4315,6 +4559,13 @@ fn render_human_equals_human_line_for_every_library_condition_and_unindexed() {
         assert_eq!(render(Format::Human, &event), human_line(&event));
     }
     let event = library_adoption("new.pdf", Adoption::Unindexed);
+    assert_eq!(render(Format::Human, &event), human_line(&event));
+    let event = library_adoption(
+        "new.pdf",
+        Adoption::Unanswered {
+            identifier: "doi:10.1000/x".to_string(),
+        },
+    );
     assert_eq!(render(Format::Human, &event), human_line(&event));
 }
 
@@ -4837,7 +5088,7 @@ fn library_status_without_an_identity_is_written_without_an_id_key() {
 
     assert_eq!(
         json_line(&event),
-        r#"{"schema":4,"event":"library-status","root":"/lib","artifacts":3,"items":2,"records":2,"orphans":1,"nested":[],"identifiable":null}"#
+        r#"{"schema":5,"event":"library-status","root":"/lib","artifacts":3,"items":2,"records":2,"orphans":1,"nested":[],"identifiable":null}"#
     );
 }
 
@@ -4848,7 +5099,7 @@ fn library_status_carries_the_id_directly_after_the_root() {
     assert_eq!(
         json_line(&event),
         format!(
-            r#"{{"schema":4,"event":"library-status","root":"/lib","id":"{LIB_UUID}","artifacts":3,"items":2,"records":2,"orphans":1,"nested":[],"identifiable":null}}"#
+            r#"{{"schema":5,"event":"library-status","root":"/lib","id":"{LIB_UUID}","artifacts":3,"items":2,"records":2,"orphans":1,"nested":[],"identifiable":null}}"#
         )
     );
 }
@@ -4859,7 +5110,7 @@ fn library_validated_without_an_identity_is_written_without_an_id_key() {
 
     assert_eq!(
         json_line(&event),
-        r#"{"schema":4,"event":"library-validated","root":"/lib","findings":0,"orphans":0,"missing":0,"unlinked":0}"#
+        r#"{"schema":5,"event":"library-validated","root":"/lib","findings":0,"orphans":0,"missing":0,"unlinked":0}"#
     );
 }
 
@@ -4870,7 +5121,7 @@ fn library_validated_carries_the_id_directly_after_the_root() {
     assert_eq!(
         json_line(&event),
         format!(
-            r#"{{"schema":4,"event":"library-validated","root":"/lib","id":"{LIB_UUID}","findings":0,"orphans":0,"missing":0,"unlinked":0}}"#
+            r#"{{"schema":5,"event":"library-validated","root":"/lib","id":"{LIB_UUID}","findings":0,"orphans":0,"missing":0,"unlinked":0}}"#
         )
     );
 }

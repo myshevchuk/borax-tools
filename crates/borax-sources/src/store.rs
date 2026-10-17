@@ -1,10 +1,12 @@
-//! The cache on disk: where it lives, how a key becomes a file, and
-//! the index that recognises a file by its contents.
+//! The stores on disk: where the response cache and the content index
+//! live, how a key becomes a file, and the index that recognises a file
+//! by its contents.
 //!
-//! [`crate::cache`] defines what a cache is; this module is the one
-//! adapter that touches the filesystem. A read degrades to a miss and
+//! [`crate::cache`] defines what a cache is, and [`IndexStore`] where
+//! the content index's facts are kept; this module is the one adapter
+//! that touches the filesystem. A read degrades to a miss and
 //! a write to a reported [`CacheWrite::Failed`] rather than an error,
-//! so a cache directory that is unreadable, full, or half-written costs
+//! so a directory that is unreadable, full, or half-written costs
 //! round-trips and never a run.
 
 use std::ffi::OsString;
@@ -14,17 +16,26 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use borax_core::content::{ContentHash, Hasher};
+use borax_core::identifier::Identifier;
+use borax_core::index::{
+    Fact, IndexEntry, extracted_from_json, extracted_to_json, operator_from_json, operator_to_json,
+};
+use borax_core::library::IdentificationEvidence;
 use borax_core::record::Record;
 
 use crate::cache::{Cache, CacheWrite};
 
-/// The on-disk layout version, used as the last path segment of the
-/// default root.
+/// The response cache's on-disk layout version, used as the last path
+/// segment of the default cache root.
 ///
 /// Entries are serialized [`Record`]s, so a change to that model makes
 /// existing entries unreadable. Bumping this moves the cache to a fresh
 /// directory instead, leaving the old one to be cleared.
 pub const FORMAT_VERSION: &str = "v1";
+
+/// The content index's on-disk layout version, used as the last path
+/// segment of the default data root.
+pub const INDEX_FORMAT_VERSION: &str = "v2";
 
 /// The borax cache directory implied by `lookup`, which answers the way
 /// [`std::env::var_os`] does.
@@ -41,7 +52,17 @@ pub const FORMAT_VERSION: &str = "v1";
 /// Returns `None` when no candidate qualifies, which is the signal to
 /// run without persistence rather than to fail.
 pub fn cache_root(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let mut root = CANDIDATES.iter().find_map(|(name, suffix)| {
+    root_from(CANDIDATES, FORMAT_VERSION, lookup)
+}
+
+/// The first of `candidates` whose variable `lookup` gives a non-empty
+/// absolute path, with its suffix, `borax` and `version` appended.
+fn root_from(
+    candidates: &[(&str, Option<&str>)],
+    version: &str,
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    let mut root = candidates.iter().find_map(|(name, suffix)| {
         let base = PathBuf::from(lookup(name)?);
         if !base.is_absolute() {
             return None;
@@ -54,7 +75,7 @@ pub fn cache_root(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> 
     })?;
 
     root.push("borax");
-    root.push(FORMAT_VERSION);
+    root.push(version);
     Some(root)
 }
 
@@ -71,6 +92,40 @@ const CANDIDATES: &[(&str, Option<&str>)] = &[("LOCALAPPDATA", None), ("XDG_CACH
 /// [`cache_root`] applied to this process's environment.
 pub fn default_cache_root() -> Option<PathBuf> {
     cache_root(|name| std::env::var_os(name))
+}
+
+/// The borax data directory implied by `lookup`, which answers the way
+/// [`std::env::var_os`] does: where the content index lives.
+///
+/// The candidates are tried in order and the first whose value is a
+/// non-empty absolute path is taken: on Unix `XDG_DATA_HOME`, then
+/// `HOME` (as `HOME/.local/share`); on Windows `APPDATA`, then
+/// `XDG_DATA_HOME`. A variable that is unset, empty, or relative is
+/// skipped rather than fatal.
+///
+/// The returned path ends in `borax/<INDEX_FORMAT_VERSION>` and is
+/// neither created nor checked for existence.
+///
+/// Returns `None` when no candidate qualifies, which is the signal to
+/// keep the index in memory for the run rather than to fail.
+pub fn data_root(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    root_from(DATA_CANDIDATES, INDEX_FORMAT_VERSION, lookup)
+}
+
+/// The variables that may name a data directory, in the order they are
+/// tried, each with what to append to its value.
+#[cfg(not(windows))]
+const DATA_CANDIDATES: &[(&str, Option<&str>)] =
+    &[("XDG_DATA_HOME", None), ("HOME", Some(".local/share"))];
+
+/// The variables that may name a data directory, in the order they are
+/// tried, each with what to append to its value.
+#[cfg(windows)]
+const DATA_CANDIDATES: &[(&str, Option<&str>)] = &[("APPDATA", None), ("XDG_DATA_HOME", None)];
+
+/// [`data_root`] applied to this process's environment.
+pub fn default_data_root() -> Option<PathBuf> {
+    data_root(|name| std::env::var_os(name))
 }
 
 /// Where the entry for `key` lives under `root`.
@@ -111,20 +166,51 @@ fn is_safe_segment(segment: &str) -> bool {
             .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '.' | '-' | '_'))
 }
 
-/// The key a record resolved from a file with hash `hash` is stored
-/// under.
+/// `content/<hash>`: the key under which the entry for `hash` keeps
+/// its facts ([`extracted_key`], [`operator_key`]).
 ///
-/// Formed as `content/<hash>`, which shares the store with the
-/// identifier-keyed entries without colliding: no source is named
-/// `content`.
+/// No source is named `content`, so the key never collides with an
+/// identifier-keyed response under the same root.
 pub fn content_key(hash: &ContentHash) -> String {
     format!("content/{hash}")
 }
 
-/// A [`Cache`] backed by a directory of JSON files.
+/// The key the extracted fact of the entry for `hash` is kept under:
+/// `content/<hash>/extracted`, the file `content/<hash>/extracted.json`
+/// under a [`FileCache`]'s root.
+pub fn extracted_key(hash: &ContentHash) -> String {
+    format!("content/{hash}/extracted")
+}
+
+/// The key the operator fact of the entry for `hash` is kept under:
+/// `content/<hash>/operator`, the file `content/<hash>/operator.json`
+/// under a [`FileCache`]'s root.
+pub fn operator_key(hash: &ContentHash) -> String {
+    format!("content/{hash}/operator")
+}
+
+/// Where content-index facts are kept: text by key, each fact whole.
+///
+/// `Sync` for the reason [`Cache`] is: resolution shares one index
+/// across a pool of threads.
+pub trait IndexStore: Sync {
+    /// The text of the fact under `key`: `None` when there is none, and
+    /// `Some(Err(message))` when one is there and cannot be read.
+    fn read_fact(&self, key: &str) -> Option<Result<String, String>>;
+
+    /// Replace the fact under `key` whole with `text`, atomically, and
+    /// say whether it was written.
+    ///
+    /// A failure is returned as [`CacheWrite::Failed`], never raised,
+    /// and leaves the fact as it was.
+    fn write_fact(&self, key: &str, text: &str) -> CacheWrite;
+}
+
+/// A [`Cache`] and an [`IndexStore`] backed by a directory of JSON
+/// files.
 ///
 /// The directory is created lazily, on the first successful write. A
-/// [`FileCache`] over a path that cannot be created is a cache that
+/// [`FileCache`] over a path that cannot be created is a store that
 /// always misses, and whose every write reports
 /// [`CacheWrite::Failed`].
 #[derive(Debug, Clone)]
@@ -198,6 +284,42 @@ impl Cache for FileCache {
             }
         };
         match write_atomically(&path, &json) {
+            Ok(()) => CacheWrite::Written,
+            Err(error) => CacheWrite::Failed {
+                message: format!("cannot write {}: {error}", path.display()),
+            },
+        }
+    }
+}
+
+impl IndexStore for FileCache {
+    /// The text of the file [`entry_path`] gives for `key`. A key it
+    /// rejects, a file that cannot be read for any reason but its
+    /// absence, and bytes that are not UTF-8 are `Some(Err(_))`.
+    fn read_fact(&self, key: &str) -> Option<Result<String, String>> {
+        let Some(path) = entry_path(&self.root, key) else {
+            return Some(Err(format!("invalid index key {key:?}")));
+        };
+        match fs::read(&path) {
+            Ok(bytes) => Some(
+                String::from_utf8(bytes)
+                    .map_err(|_| format!("{} is not UTF-8 text", path.display())),
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => Some(Err(format!("cannot read {}: {error}", path.display()))),
+        }
+    }
+
+    /// Write `text` to the file [`entry_path`] gives for `key` through
+    /// [`write_atomically`], creating the entry's directory. A key it
+    /// rejects and every write failure are [`CacheWrite::Failed`].
+    fn write_fact(&self, key: &str, text: &str) -> CacheWrite {
+        let Some(path) = entry_path(&self.root, key) else {
+            return CacheWrite::Failed {
+                message: format!("invalid index key {key:?}"),
+            };
+        };
+        match write_atomically(&path, text.as_bytes()) {
             Ok(()) => CacheWrite::Written,
             Err(error) => CacheWrite::Failed {
                 message: format!("cannot write {}: {error}", path.display()),
@@ -350,34 +472,82 @@ fn temporary_name() -> String {
     )
 }
 
-/// Records indexed by the content hash of the file they were resolved
-/// from.
+/// What is known about files by the content hash of their bytes.
 ///
-/// A file that has been resolved once is answered for under any name,
-/// as long as its bytes are unchanged — which is what lets a second run
-/// over a renamed file skip both extraction and the network. Wrapping a
-/// [`Cache`] rather than owning storage means the index is persistent
-/// or in-memory exactly as the cache it is given is.
+/// A file that has been resolved once is recognised under any name, as
+/// long as its bytes are unchanged. Each hash's entry holds
+/// identification evidence as two facts, read and written through an
+/// [`IndexStore`]: the extracted identifier and the operator's
+/// evidence, each replaced whole by its own writer and never merged
+/// with the other. No record is kept. The index is persistent or
+/// in-memory exactly as the store it is given is.
 #[derive(Debug)]
-pub struct ContentIndex<C> {
-    cache: C,
+pub struct ContentIndex<S> {
+    store: S,
 }
 
-impl<C: Cache> ContentIndex<C> {
-    /// An index storing its entries in `cache`.
-    pub fn new(cache: C) -> ContentIndex<C> {
-        ContentIndex { cache }
+impl<S> ContentIndex<S> {
+    /// An index keeping its entries in `store`.
+    pub fn new(store: S) -> ContentIndex<S> {
+        ContentIndex { store }
+    }
+}
+
+impl<S: IndexStore> ContentIndex<S> {
+    /// Both facts of `hash`'s entry, each parsed. A fact that cannot be
+    /// read, or whose text does not parse, is [`Fact::Unreadable`].
+    pub fn entry(&self, hash: &ContentHash) -> IndexEntry {
+        IndexEntry {
+            extracted: self.fact(&extracted_key(hash), extracted_from_json),
+            operator: self.fact(&operator_key(hash), operator_from_json),
+        }
     }
 
-    /// The record indexed for `hash`, if any.
-    pub fn get(&self, hash: &ContentHash) -> Option<Record> {
-        self.cache.get(&content_key(hash))
+    /// Replace `hash`'s extracted fact with `identifier`, leaving its
+    /// operator fact as it is, and return what the store's write
+    /// returned.
+    pub fn put_extracted(&self, hash: &ContentHash, identifier: &Identifier) -> CacheWrite {
+        self.store
+            .write_fact(&extracted_key(hash), &extracted_to_json(identifier))
     }
 
-    /// Index `record` as the answer for any file hashing to `hash`, and
-    /// return what the underlying cache's write returned.
-    pub fn put(&self, hash: &ContentHash, record: &Record) -> CacheWrite {
-        self.cache.put(&content_key(hash), record)
+    /// Replace `hash`'s operator fact with `evidence`, leaving its
+    /// extracted fact as it is, and return what the store's write
+    /// returned.
+    ///
+    /// Evidence whose origin is not an operator's (`supplied` or
+    /// `overridden`) is [`CacheWrite::Failed`], and nothing is written.
+    pub fn put_operator(
+        &self,
+        hash: &ContentHash,
+        evidence: &IdentificationEvidence,
+    ) -> CacheWrite {
+        if !evidence.origin.is_operator() {
+            return CacheWrite::Failed {
+                message: format!(
+                    "evidence of origin {} is not an operator's",
+                    evidence.origin
+                ),
+            };
+        }
+        self.store
+            .write_fact(&operator_key(hash), &operator_to_json(evidence))
+    }
+
+    /// The fact under `key`, parsed by `parse`.
+    fn fact<T, E: std::fmt::Display>(
+        &self,
+        key: &str,
+        parse: impl Fn(&str) -> Result<T, E>,
+    ) -> Fact<T> {
+        match self.store.read_fact(key) {
+            None => Fact::Absent,
+            Some(Err(message)) => Fact::Unreadable(message),
+            Some(Ok(text)) => match parse(&text) {
+                Ok(value) => Fact::Held(value),
+                Err(error) => Fact::Unreadable(error.to_string()),
+            },
+        }
     }
 }
 

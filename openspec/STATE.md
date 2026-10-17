@@ -6,8 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-13, at 0.9.0 with `separate-change-from-acceptance`
-merged and `library-identity` implemented on its branch.
+Last reviewed: 2026-10-17, at 0.9.0 with `library-identity` merged and
+`reduce-content-index` implemented on its branch.
 
 ## What is built
 
@@ -175,8 +175,9 @@ not only to the files that resolved, which is where the hit rate
 actually went. The operator can give a file an identifier by hand,
 accept a record over a conflict, ask the services again after an
 outage, or keep the name an already-named file has. A record accepted
-this way is written to the content index on the move, so later runs,
-batch included, are answered without asking.
+this way is written to the content index on the move, as its
+identifier, since `reduce-content-index`, so later runs, batch
+included, are answered without asking.
 
 The measured problem it addresses: on a slice of eight files from the
 real corpus, two resolve unaided. Of the six that do not, three carry
@@ -525,6 +526,50 @@ root rewrote stale records there, against the `library` requirement
 that such a run writes no library state, and would have minted an
 identity too. It is now refused before it starts, as `adopt` is.
 
+`reduce-content-index` is implemented on top, as change 13a and the
+third of Phase 4, and moves the event stream to schema 5. The content
+index lives under the data directory (`store::data_root`:
+`XDG_DATA_HOME`, then `HOME/.local/share` on Unix, `APPDATA`, then
+`XDG_DATA_HOME` on Windows, with `borax/v2` appended), apart from the
+response cache, so `borax cache --clear` removes service responses
+only; with no data directory the index is held in memory, unreported.
+It keeps identification evidence and no record. An entry is the
+directory `content/<hash>/`: `extracted.json`, written by a resolution
+that extracted an identifier and confirmed it by a lookup, and
+`operator.json`, an identifier with origin `supplied` or `overridden`,
+written by `pipeline::remember` at the move and by `reconcile`. Each
+file has one writer and is replaced whole, nothing reads one to write
+the other, an operator fact answers before an extracted one, and an
+unreadable operator fact answers with nothing. `v1` entries under the
+cache root are read by nothing and go with `cache --clear`. An index
+answer is looked up through the run's sources, response cache first,
+with `lookup.origin` `content-index`, no extraction and no title
+check, and is `unresolvable` when no service holds it; Retry of such a
+lookup goes through `pipeline::resolve_indexed_again`, keeping its
+origin and earlier rounds, checking no title and writing nothing.
+History entries carry `identifier` and `origin` (`extracted`,
+`supplied`, `overridden`, `adopted`) after `item`, both or neither, and
+an admission whose decision carries evidence appends unless the newest
+entry already holds the same bytes, item and evidence, so
+re-identifying the newest bytes now appends one entry. `reconcile`
+restores to `operator.json` every operator decision the library's
+histories hold and the index does not (`library::operator_decisions`,
+the record read last winning a disagreement), each reported as
+`content-index-write` before the totals; nothing else restores, and
+`status` and `validate` still write nothing. `adopt` reads the index's
+identifier, then the response cache under `cache_root` in
+`dispatch::priority` order whatever `sources` says, records the entry
+as `adopted`, and writes nothing to the index; evidence no cached
+response answers is the new `unanswered`, and `recorded` gains
+`retrieval`. `content_index.read` `hit` carries `evidence`,
+`content-index-write` gains `hash` and `entry`, and `record_retrieval`
+loses `content-index`. A hand check over a copy of the real corpus
+traced resolve, clear, an interactive supply, deletion of the data
+directory then reconcile, and adoption into a second library.
+Library references — reading, agreement, writing, restoration, root
+repair, and adoption through one — are `index-references-libraries`,
+change 13b, which follows.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
@@ -592,6 +637,18 @@ identity too. It is now refused before it starts, as `adopt` is.
   retry adds another `no-eligible-service` round to `lookup.earlier`.
   `operator-input-evidence` left when Retry is offered out of scope;
   a fix is its own change.
+
+- **On Windows, `borax cache --clear` removes the run logs of runs
+  outside a library.** The run-log state root (`runlog::state_root`)
+  and the response cache root (`store::cache_root`) are both
+  `LOCALAPPDATA\borax\v1` there, and clearing the cache removes that
+  whole directory. That goes against the `cli` requirement that `cache`
+  clears the response cache and the `run-logs` requirement that such a
+  run leaves a readable record. `reduce-content-index` found it while
+  choosing where the index lives, put the index under `APPDATA` out of
+  its reach, and deferred the collision itself: the fix is a
+  restoration of its own. Not verified on Windows, which CI does not
+  run.
 
 - **Adoption's `unreadable` and `unwritten` messages reach the terminal
   unescaped.** The `library-adoption` human line escapes its path, but

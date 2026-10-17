@@ -420,6 +420,29 @@ written: nothing rewrites it, and where it decides which item answers
 for its bytes, the record's link answers, as the `resolution`
 capability states.
 
+Each entry borax writes SHALL also carry the identification evidence of
+its bytes, where the bytes were identified: the identifier they were
+identified by and its origin — `extracted`, `supplied`, `overridden` or
+`adopted`, as the `resolution` capability's "The content index keeps
+identification evidence, one fact per file" defines the first three.
+That is
+the identifier an applying run's record was reached by, with the origin
+of how it was reached (an identifier the content index held keeps the
+origin it was written under); the identifier reconciliation accepted
+changed bytes on, `extracted`; and the identifier an adoption's record
+was found by, `adopted`. An entry for bytes no identifier established
+carries none: an acceptance by `borax reconcile --accept`, a
+restatement, and an admission whose record the library's own item
+supplied. The
+identifier and the origin are kept together or not at all. An entry
+holding one without the other, an identifier that does not parse, or
+an origin outside those four makes its record a file that does not
+parse. An entry recorded before entries carried evidence carries none,
+and SHALL remain valid and readable exactly as it was written. This is
+where an operator's decision about a file lives inside a library: the
+content index keeps a copy of it, which "A library's operator decisions
+are restored to the content index" puts back from here.
+
 Every decision about which item a record's bytes belong to SHALL be
 tied to those bytes. The bytes a record holds answer as follows:
 
@@ -435,8 +458,13 @@ Two rules keep this true, and both keep the history append-only:
   belong to an item, it SHALL append an entry for those bytes under
   that item. That covers accepting changed bytes, re-identifying a file,
   re-linking a record, and giving an item to a record that linked none.
-  The one exception is bytes that are already the newest entry's and
-  already answer with that item once the admission is made.
+  The one exception is bytes that are already the newest entry's,
+  already answer with that item once the admission is made, and whose
+  newest entry already carries the identification evidence the
+  decision carries, where it carries any. A decision carrying an
+  operator's evidence that the newest entry does not carry is recorded,
+  so that the operator's identifier reaches the library even when the
+  link alone would have said the rest.
 - **A hand correction is restated.** This is judged on the record as it
   was read, before the admission changes its link. When that record
   links an item, its newest entry names another item or none, and the
@@ -498,14 +526,33 @@ itself.
   that its size or modification time changed, its text still carrying
   the DOI its item carries, and `borax reconcile` runs
 - **THEN** its record is the same file under the same artifact UUID, its
-  new hash is appended with the run that recorded it and the item it
-  was accepted under, and its earlier hashes and their provenance are
-  still there
+  new hash is appended with the run that recorded it, the item it was
+  accepted under, and the DOI with origin `extracted`, and its earlier
+  hashes and their provenance are still there
+
+#### Scenario: Re-identifying the newest bytes records the identifier
+- **WHEN** a record's newest bytes, accepted under item X with an
+  extracted DOI, are re-identified in an applying run from a DOI the
+  operator supplied, which item Y carries
+- **THEN** the link moves to Y and the history gains one entry for
+  those bytes naming Y, the supplied DOI and `supplied`
+
+#### Scenario: An operator's identifier is recorded with its bytes
+- **WHEN** an interactive run inside a library renames a file from an
+  identifier the operator supplied
+- **THEN** the history entry for the file's bytes names the item, the
+  supplied identifier, and the origin `supplied`
+
+#### Scenario: An accepted change names no identifier
+- **WHEN** `borax reconcile --accept` accepts a pending change at a
+  scan from which nothing was extracted
+- **THEN** its history entry names the record's item and carries no
+  identifier and no origin
 
 #### Scenario: A record written before entries named items
 - **WHEN** an artifact record whose every history entry was written by
-  an earlier release, naming no item, is read, validated and reconciled
-  over a library in which nothing has changed
+  an earlier release, naming no item and no identifier, is read,
+  validated and reconciled over a library in which nothing has changed
 - **THEN** it parses, `borax validate` reports no finding about it,
   `borax reconcile` writes nothing to it, and its file is
   byte-identical afterwards
@@ -597,8 +644,14 @@ listing and a validation are each a walk of the tree and a read of the
 store.
 
 Deleting any derived state SHALL change no answer about a library. The
-response cache and the content index are caches, so clearing them costs
-round trips and loses no library content; a citation sidecar is derived
+response cache is a cache, so clearing it costs round trips and loses
+no library content. The content index is not a cache, but what it
+holds about a library's files is derived from the library: the
+operator identifiers it keeps for them are in their history entries
+too. So deleting the content index loses no library content either,
+and costs answers outside the library until `borax reconcile` writes
+those identifiers again and runs over the files extract theirs again.
+A citation sidecar is derived
 output, so deleting every sidecar in a library changes no item, no
 artifact record and no count. The identity file is not derived state:
 deleting it loses the library's identity, which nothing reconstructs
@@ -615,6 +668,12 @@ against.
   sidecar in a library are deleted and `borax status` runs
 - **THEN** the artifact, item, record and orphan counts are what they
   were, and so is the library's identity
+
+#### Scenario: The index is rebuilt from the library
+- **WHEN** the content index is deleted and `borax reconcile` runs over
+  a library whose records hold bytes operators identified
+- **THEN** the operators' identifiers for those bytes are in the
+  content index again
 
 #### Scenario: A text editor is a peer
 - **WHEN** an item's title is corrected in a text editor and `borax
@@ -859,6 +918,16 @@ ordinary operation, and the entry still records what those bytes were
 accepted as. An entry whose item is not a canonical UUID makes its
 record a file that does not parse, and is reported as such a file is.
 
+The identification evidence a history entry carries SHALL NOT be a
+finding either, nor its absence: an entry with no identifier and no
+origin is valid, as every entry recorded before entries carried
+evidence is. An entry holding an identifier without an origin, or an
+origin without an identifier, or an identifier that does not parse, or
+an origin other than `extracted`, `supplied`, `overridden` and
+`adopted`, makes its record a file that does not parse, and is reported
+as such a file is. Whether the content index holds a record's
+evidence is not validated: the content index is not the library's.
+
 A library with no identity file SHALL NOT be a finding or a condition:
 it is the healthy state of a library no borax store write has reached
 since identities were introduced. An identity file that cannot be read
@@ -953,6 +1022,14 @@ like any other.
   carries
 - **THEN** no finding is reported about either entry, and the run exits
   0
+
+#### Scenario: Evidence on history entries
+- **WHEN** `borax validate` runs over a library holding an artifact
+  record whose first entry carries no identifier and whose second
+  carries a DOI with origin `supplied`, and another record whose entry
+  carries an origin of `guessed`
+- **THEN** no finding is reported about the first record, and the second
+  is reported as a file that does not parse
 
 #### Scenario: An identity file that does not parse
 - **WHEN** `borax validate` runs over a library whose records and items
@@ -1090,8 +1167,13 @@ items; an item nothing links to afterwards is an ordinary library state
 that `borax validate` counts.
 
 A re-identification SHALL write the file's hash into the history under
-the item it selected, unless those bytes are already the newest entry's
-and answer with that item once the link has moved. "An artifact record
+the item it selected, with the operator's identifier and its origin,
+`supplied` or `overridden`, unless those bytes are already the newest
+entry's, answer with that item once the link has moved, and that newest
+entry already carries the same identifier and origin. So re-identifying
+the newest bytes appends an entry even where the link alone would have
+moved, because without it the operator's identifier would reach the
+library nowhere: the entry is where the library keeps it. "An artifact record
 is authoritative state keyed by an artifact identity" requires this of
 every decision about an item. A restored version re-identified as the
 very item the link already names is therefore still written, because
@@ -1268,7 +1350,13 @@ damage.
   re-linked to the item for the supplied record, the file's bytes
   answer with that item from then on, the run reports both
   items, and the item it left is counted by `borax validate` as an item
-  nothing links to
+  nothing links to; the history gains one entry for the file's bytes,
+  naming the new item, the supplied identifier and `supplied`
+
+#### Scenario: The same correction made twice
+- **WHEN** the same identifier is supplied for the same file in a
+  second interactive run
+- **THEN** no entry is appended the second time
 
 #### Scenario: A second artifact of one item
 - **WHEN** an operator accepts, in an interactive run, a second PDF of a
@@ -1394,22 +1482,43 @@ and consult the content index for that hash. Where the index holds the
 record borax resolved for those bytes, the run SHALL write an artifact
 record for the artifact and link it to the item the library already
 holds for one of that record's identifiers, or to one it mints from
-that record. Where the index holds nothing, the artifact SHALL remain
+that record. The record is found without the network, through the
+identifier the content index answers with for those bytes, the
+operator's before the extracted one, from the response cache: the
+answer a service gave for that identifier, read for each service in
+the priority order resolution asks them in for that kind of
+identifier, whatever services the run's configuration names, the first
+one held being taken.
+
+The adopted record's history entry SHALL name the identifier it was
+found by, with the origin `adopted`. The run SHALL report where the
+record came from: the service whose response cache held it. Adoption
+writes nothing to the content index: the identifier it used is already
+there, and its own origin belongs to the library.
+
+Where the index holds nothing for the bytes, the artifact SHALL remain
 an orphan, and the run SHALL report it, naming the artifact, as an
-orphan the content index holds no record for.
+orphan the content index holds no record for. Where the index answers
+with an identifier and the response cache holds no record for it, the
+artifact SHALL remain an orphan too, reported as one the content index
+could not answer for, with that identifier. `borax
+resolve` over such a file fetches the record its identifier names, and
+an adoption afterwards records it.
 
 Every orphan the run reaches SHALL be reported by exactly one
 `library-adoption` event, whose kind says what became of it: recorded,
-held by an existing record, unreadable, unwritten, or `unindexed` when
-the content index holds nothing for its bytes. No orphan is left an
+held by an existing record, unreadable, unwritten, `unindexed` when
+the content index holds nothing for its bytes, or `unanswered` when it
+holds an identifier whose record the response cache does not hold. No orphan is left an
 orphan silently, and the number of orphans the run reports as left
 SHALL equal the number of its `library-adoption` events that did not
-record the artifact. The human line for an unindexed orphan names its
-path, with control characters written out, and says that it is still
-an orphan. An orphan is reported `unindexed` only when it was readable
-and no artifact record holds its bytes, since only then is the content
-index asked about it. Such an orphan is not a skip or a finding, and
-the run's exit status does not depend on it.
+record the artifact. The human line for an unindexed or unanswered
+orphan names its path, with control characters written out, and says
+that it is still an orphan. An orphan is reported `unindexed` or
+`unanswered` only when it was readable and no artifact record holds its
+bytes, since only then is the content index asked about it. Such an
+orphan is not a skip or a finding, and the run's exit status does not
+depend on it.
 
 An orphan whose content hash is already held in the history of an
 artifact record SHALL NOT be adopted, whatever the index holds for it,
@@ -1436,16 +1545,19 @@ it twice SHALL write no library state the second time.
 decision; the second is the retired ledger, which this change neither
 migrates nor consults. Both are left exactly where they are.
 
-The content index is a cache, and this requirement does not pretend
+The response cache is a cache, and this requirement does not pretend
 otherwise: `borax cache --clear` empties it, and adoption after that
-records nothing. What `borax adopt` offers is not a guarantee of
-recovery but the one path that records a library without querying a
-service and without moving a file, which `borax rename --apply` cannot
-promise.
+records nothing until the records are fetched again. The content index
+is not a cache, and survives it, so the identifiers adoption needs are
+kept. What `borax adopt` offers is not a
+guarantee of recovery but the one path that records a library without
+querying a service and without moving a file, which `borax rename
+--apply` cannot promise.
 
 #### Scenario: A library borax has seen before
 - **WHEN** `borax adopt` runs over a library whose files borax resolved
-  on an earlier run, so the content index answers for their hashes
+  on an earlier run, so the content index answers for their hashes and
+  the response cache holds their records
 - **THEN** each of those artifacts gains an artifact record and an item
   holding the cached record, no service is queried, and no file is
   renamed, moved or deleted
@@ -1475,11 +1587,13 @@ promise.
   both the sidecars and the ledger file are byte-identical afterwards
 
 #### Scenario: Adoption after the cache is cleared
-- **WHEN** `borax cache --clear` runs and then `borax adopt`
+- **WHEN** `borax cache --clear` runs and then `borax adopt`, over a
+  library whose orphans' entries hold identifiers
 - **THEN** nothing is adopted and the run reports every artifact as an
   orphan, rather than reporting a failure; each orphan that is readable
   and whose bytes no artifact record holds is reported by its own event
-  as one the content index holds no record for, and the run exits 0
+  as one the content index could not answer for, naming the identifier
+  the index holds, and the run exits 0
 
 #### Scenario: Every orphan is accounted for
 - **WHEN** `borax adopt` runs over a library holding one orphan the
@@ -1935,4 +2049,76 @@ No event reports a mint, and none reports that warning.
 - **THEN** both files are recorded, the identity file is byte-identical,
   stderr carries exactly one warning naming the file and `borax
   validate`, and `borax validate` reports the file as unreadable
+
+### Requirement: A library's operator decisions are restored to the content index
+`borax reconcile` SHALL write to the content index, for every hash an artifact record's history holds, the operator's identification evidence that the newest entry for that hash with an operator's origin names, wherever the content index holds no operator evidence for that hash or holds different evidence.
+
+An operator's decision about a file in a library is written in two
+places, in this order: the artifact record's history entry, by the
+admission, and then the content index's operator evidence for the
+file's bytes, when the run remembers the answer at the move. The
+library is authoritative for the bytes its records hold. An
+interruption between the two writes leaves the decision in the library
+alone, and an outside answer for those bytes then looks up whatever
+the content index held before, which may be the extracted identifier
+the operator corrected.
+
+So, after its own writes, `borax reconcile` SHALL read every artifact
+record of the library and, for each distinct hash its history holds,
+take the newest entry holding that hash whose origin is `supplied` or
+`overridden`. Where there is one, and the content index's operator
+evidence for that hash is absent, cannot be read, or names another
+identifier or origin, it SHALL write that entry's identifier and origin
+as the hash's operator evidence. Where records disagree about the same
+hash, the record read last, in the order of their files' paths, is the
+one written. Where there is none, it SHALL write nothing for that hash, and SHALL leave any operator evidence the
+content index holds for it as it is: those bytes may have been answered
+for outside the library.
+
+The library's decision wins over a different operator decision the
+content index holds for the same bytes, so a later reconcile replaces
+an identifier an operator supplied for a copy outside the library with
+the one the library recorded. Between the two, the content index
+answers with the latest operator decision written.
+
+Restoration SHALL write nothing else: no extracted evidence, and no
+library state, so a reconcile over a library nothing has touched still
+leaves every file of the item store and of `.borax/artifacts/`
+byte-identical. It does not depend on the library's identity. Each
+restoration is reported as a `content-index-write` event, and one that
+fails costs nothing else: the reconcile's repairs stand, and its exit
+status does not depend on it. A run that is not a reconcile restores
+nothing: `borax status` and `borax validate` read only the library, and
+an applying run writes an operator's evidence only for a decision it
+made itself.
+
+#### Scenario: An interrupted operator admission is completed
+- **WHEN** a file's bytes have extracted evidence `doi:10.1000/x` in the
+  content index, an interactive run in a library renames it from the
+  operator's `doi:10.1000/y`, writes its artifact record, and stops
+  before remembering the answer, and `borax reconcile` then runs
+- **THEN** the content index's operator evidence for those bytes is
+  `doi:10.1000/y` with origin `supplied`, its extracted evidence is
+  still `doi:10.1000/x`, and an outside run over a copy of the file
+  looks up `doi:10.1000/y`, as it would had the run not stopped
+
+#### Scenario: A restored index writes nothing the second time
+- **WHEN** `borax reconcile` runs twice over a library nothing has
+  touched
+- **THEN** the second run writes no content-index file and reports no
+  `content-index-write` event
+
+#### Scenario: The index deleted
+- **WHEN** the content index is deleted and `borax reconcile` runs over
+  a library one of whose records holds bytes an operator identified
+- **THEN** the operator's identifier for those bytes is in the content
+  index again, and nothing is written for bytes whose entries name no
+  operator's origin
+
+#### Scenario: The library's decision wins
+- **WHEN** the content index's operator evidence for a recorded file's
+  bytes names `doi:10.1000/z`, supplied for a copy outside the library,
+  while the record's newest operator entry for them names
+  `doi:10.1000/y`, and `borax reconcile` runs
+- **THEN** the operator evidence names `doi:10.1000/y` afterwards
 

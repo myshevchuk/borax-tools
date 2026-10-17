@@ -13,6 +13,7 @@ use borax_core::identifier::Identifier;
 use borax_core::record::Record;
 
 use crate::source::{Fetched, Retrieval, Source, SourceError, SourceName};
+use crate::store::IndexStore;
 
 /// The filename-safe key a source's answer about an identifier is
 /// stored under.
@@ -90,10 +91,13 @@ pub trait Cache: Sync {
     fn put(&self, key: &str, record: &Record) -> CacheWrite;
 }
 
-/// A [`Cache`] held in memory for the life of the process.
+/// A [`Cache`] held in memory for the life of the process, which is
+/// also an [`IndexStore`] keeping content-index facts apart from its
+/// records.
 #[derive(Debug, Default)]
 pub struct MemoryCache {
     entries: Mutex<BTreeMap<String, Record>>,
+    facts: Mutex<BTreeMap<String, String>>,
 }
 
 impl MemoryCache {
@@ -132,6 +136,31 @@ impl Cache for MemoryCache {
             }
             Err(error) => CacheWrite::Failed {
                 message: format!("memory cache unavailable: {error}"),
+            },
+        }
+    }
+}
+
+impl IndexStore for MemoryCache {
+    /// The fact held under `key`. A poisoned lock is `Some(Err(_))`.
+    fn read_fact(&self, key: &str) -> Option<Result<String, String>> {
+        match self.facts.lock() {
+            Ok(facts) => facts.get(key).cloned().map(Ok),
+            Err(error) => Some(Err(format!("memory index unavailable: {error}"))),
+        }
+    }
+
+    /// Hold `text` under `key`. A lock poisoned by a thread that
+    /// panicked while holding it is [`CacheWrite::Failed`], and nothing
+    /// is held.
+    fn write_fact(&self, key: &str, text: &str) -> CacheWrite {
+        match self.facts.lock() {
+            Ok(mut facts) => {
+                facts.insert(key.to_string(), text.to_string());
+                CacheWrite::Written
+            }
+            Err(error) => CacheWrite::Failed {
+                message: format!("memory index unavailable: {error}"),
             },
         }
     }

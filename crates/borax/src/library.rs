@@ -26,11 +26,12 @@ use std::time::UNIX_EPOCH;
 use borax_core::content::ContentHash;
 use borax_core::identifier::{Identifier, supplied};
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, LibraryId, LibraryIdentity, RunId,
-    is_library_relative, is_well_formed_hash, name_uuid,
+    ArtifactId, ArtifactRecord, EvidenceOrigin, HashEntry, IdentificationEvidence, Item, ItemId,
+    LibraryId, LibraryIdentity, RunId, is_library_relative, is_well_formed_hash, name_uuid,
 };
 use borax_core::record::Record;
 use borax_core::template::slug;
+use borax_sources::source::SourceName;
 use borax_sources::store::{create_atomically, hash_file, write_atomically};
 use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, value};
 use uuid::Uuid;
@@ -38,7 +39,7 @@ use uuid::Uuid;
 use crate::config::OVERRIDE_FILE;
 use crate::event::{
     AcceptedBy, AcceptedItemCause, Admission, Adoption, Condition, Diagnostic, Event, Extraction,
-    Finding, Level, LibraryAnswer, Repair,
+    Finding, Level, LibraryAnswer, Repair, RetrievedFrom,
 };
 use crate::paths::{lexical, same_name};
 use crate::run::documents;
@@ -1430,12 +1431,16 @@ impl Stores {
 /// `link_as_read` is the link the record carried as it was read,
 /// before the admission assigned one. Bytes the history already holds
 /// are appended only when the admission decided which item they belong
-/// to, and they do not already answer with it as the newest entry: a
-/// re-identification of restored bytes, or a record that linked no
-/// item gaining one. Bytes the history does not hold are always
-/// appended, the caller having accepted them. The entry names the
-/// record's link, and [`ArtifactRecord::append`] restates the newest
-/// bytes first where the link as read was corrected by hand.
+/// to — a re-identification, or a record that linked no item gaining
+/// one — and are not already the newest entry answering with that item
+/// and carrying the admission's evidence. So a re-identification of
+/// restored bytes appends, and so does one of the newest bytes whose
+/// evidence the newest entry does not already carry; the same decision
+/// made again appends nothing. Bytes the history does not hold are
+/// always appended, the caller having accepted them. The entry names
+/// the record's link and carries [`Admitting::evidence`], and
+/// [`ArtifactRecord::append`] restates the newest bytes first where the
+/// link as read was corrected by hand.
 fn settle_history(
     record: &mut ArtifactRecord,
     admitting: &Admitting<'_>,
@@ -1444,7 +1449,14 @@ fn settle_history(
     let held = record.holds(admitting.hash);
     let decided = admitting.reidentified || link_as_read.is_none();
     let answered = record.current_hash() == Some(admitting.hash)
-        && record.item_for(admitting.hash) == record.item.as_ref();
+        && record.item_for(admitting.hash) == record.item.as_ref()
+        && admitting.evidence.is_none_or(|evidence| {
+            record
+                .history
+                .last()
+                .and_then(|newest| newest.evidence.as_ref())
+                == Some(evidence)
+        });
     if held && (!decided || answered) {
         return;
     }
@@ -1454,6 +1466,7 @@ fn settle_history(
         timestamp: admitting.timestamp.to_string(),
         tool_version: admitting.tool_version.to_string(),
         item: record.item.clone(),
+        evidence: admitting.evidence.cloned(),
     };
     record.append(entry, link_as_read);
 }
@@ -2038,7 +2051,9 @@ fn describes(record: &ArtifactRecord, path: &Path) -> bool {
 }
 
 /// `entry` as the table an artifact record writes a history entry as.
-/// An entry naming no item is written with no `item` key.
+/// An entry naming no item is written with no `item` key, and one
+/// carrying no evidence with neither `identifier` nor `origin`; the
+/// evidence's two keys follow `item`.
 fn history_table(entry: &HashEntry) -> Table {
     let mut table = Table::new();
     table["hash"] = value(entry.hash.as_str());
@@ -2047,6 +2062,10 @@ fn history_table(entry: &HashEntry) -> Table {
     table["tool_version"] = value(entry.tool_version.as_str());
     if let Some(item) = &entry.item {
         table["item"] = value(item.to_string());
+    }
+    if let Some(evidence) = &entry.evidence {
+        table["identifier"] = value(evidence.identifier.to_string());
+        table["origin"] = value(evidence.origin.as_str());
     }
     table
 }
@@ -2529,12 +2548,28 @@ pub fn reconcile(root: &Path, reconciling: &Reconciling<'_>) -> Reconciliation {
                 (to.clone(), Some(repair))
             }
             Decided::Changed { hash, accepted } => {
+                // Only bytes accepted on the identifier extraction found
+                // in them carry evidence: bytes accepted on the
+                // operator's word were accepted as the artifact, not on
+                // any identifier.
+                let evidence = match accepted {
+                    AcceptedBy::Extracted { identifier } => {
+                        supplied(identifier)
+                            .ok()
+                            .map(|identifier| IdentificationEvidence {
+                                identifier,
+                                origin: EvidenceOrigin::Extracted,
+                            })
+                    }
+                    AcceptedBy::Supplied { .. } | AcceptedBy::Operator => None,
+                };
                 let entry = HashEntry {
                     hash: hash.clone(),
                     run: reconciling.run.clone(),
                     timestamp: reconciling.timestamp.to_string(),
                     tool_version: reconciling.tool_version.to_string(),
                     item: original.item.clone(),
+                    evidence,
                 };
                 record.append(entry, original.item.as_ref());
                 refresh(root, &mut record);
@@ -2665,6 +2700,55 @@ pub fn reconciliation_events(reconciliation: &Reconciliation) -> Vec<Event> {
     events
 }
 
+/// An operator decision a library's records hold for some bytes, as
+/// the content index is owed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorDecision {
+    /// The artifact the record holding the decision names, as a full
+    /// path.
+    pub path: PathBuf,
+    /// The bytes the decision is about.
+    pub hash: ContentHash,
+    /// The decision: evidence of origin `supplied` or `overridden`.
+    pub evidence: IdentificationEvidence,
+}
+
+/// Every operator decision the artifact records of the library rooted
+/// at `root` hold: one per distinct hash, with the newest operator
+/// evidence a record's history holds for it
+/// ([`ArtifactRecord::operator_evidence_for`]).
+///
+/// A hash no entry gives operator evidence for has no decision. Where
+/// several records hold decisions for the same hash, the record read
+/// last in path order gives it. Decisions are listed in the order their
+/// hashes were first met, records in path order and each history oldest
+/// first. The store is read afresh; a record file that cannot be read
+/// costs its own decisions and no other. Nothing is written.
+pub fn operator_decisions(root: &Path) -> Vec<OperatorDecision> {
+    let mut decisions: Vec<OperatorDecision> = Vec::new();
+    let mut at: BTreeMap<ContentHash, usize> = BTreeMap::new();
+    for record in ArtifactStore::read(root).iter() {
+        for entry in &record.history {
+            let Some(evidence) = record.operator_evidence_for(&entry.hash) else {
+                continue;
+            };
+            let decision = OperatorDecision {
+                path: relative_to(root, &record.path),
+                hash: entry.hash.clone(),
+                evidence: evidence.clone(),
+            };
+            match at.get(&entry.hash) {
+                Some(&index) => decisions[index] = decision,
+                None => {
+                    at.insert(entry.hash.clone(), decisions.len());
+                    decisions.push(decision);
+                }
+            }
+        }
+    }
+    decisions
+}
+
 /// The artifact record naming `path` in the library rooted at `root`,
 /// or `None` when no record names it.
 ///
@@ -2765,6 +2849,14 @@ pub struct Admitting<'a> {
     /// The one thing that moves an existing record's item link. An
     /// ordinary re-run never moves one, whatever the file resolves to.
     pub reidentified: bool,
+    /// The evidence the record identifies the file's bytes by, written
+    /// on any history entry the admission appends, and `None` when the
+    /// record was reached by no identifier the admission is to record.
+    ///
+    /// Evidence is part of the decision: re-identifying the newest
+    /// bytes with evidence their newest entry does not carry appends an
+    /// entry even when the item they answer with is unchanged.
+    pub evidence: Option<&'a IdentificationEvidence>,
     /// The citation key an item minted here is named by, as the
     /// templates rendered it and before [`item_file_name`] folds it.
     pub key: Option<&'a str>,
@@ -2914,6 +3006,7 @@ pub fn admit(
         timestamp: admitting.timestamp.to_string(),
         tool_version: admitting.tool_version.to_string(),
         item: Some(item.clone()),
+        evidence: admitting.evidence.cloned(),
     };
 
     let Some(held) = admitting.held else {
@@ -3098,20 +3191,46 @@ impl Adoptions {
     }
 }
 
+/// The record an adoption lookup found for an orphan's bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Adopted {
+    /// The record found.
+    pub record: Record,
+    /// The identifier the record was found by: the one the content
+    /// index answers with for the bytes.
+    pub identifier: Identifier,
+    /// The service whose stored answer the record is.
+    pub service: SourceName,
+}
+
+/// Why an adoption lookup found no record for an orphan's bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unadopted {
+    /// The content index answers with no evidence for the bytes.
+    Unindexed,
+    /// The content index answers with `identifier`, and no stored
+    /// answer holds a record for it.
+    Unanswered { identifier: Identifier },
+}
+
 /// Adopt the orphans of the library rooted at `root`: record each one
-/// whose bytes `lookup` has a record for.
+/// whose bytes `lookup` finds a record for.
 ///
 /// Each orphan ([`orphans`]) is hashed and its hash handed to
-/// `lookup`, which is the content index in a run. Where it answers, the
-/// orphan is admitted exactly as an applying run admits a file it
-/// found already named ([`admit`], with no held record and no
-/// re-identification): the item the library holds for one of the
-/// record's identifiers is linked, or one is minted from the record
-/// and written at the name `key` renders for it. The store is re-read
-/// on every admission, so a second orphan of the work a first one
-/// minted an item for links to that item. Where `lookup` answers
-/// nothing, the orphan is left as it is and reported
-/// [`Adoption::Unindexed`].
+/// `lookup`, which in a run reads the content index's evidence and the
+/// response cache. Where it finds a record, the orphan is admitted
+/// exactly as an applying run admits a file it found already named
+/// ([`admit`], with no held record and no re-identification), and its
+/// history entry carries the identifier the record was found by, with
+/// origin `adopted`: the item the library holds for one of the
+/// record's identifiers is linked, or one is minted from the record and
+/// written at the name `key` renders for it. The store is re-read on
+/// every admission, so a second orphan of the work a first one minted
+/// an item for links to that item. [`Adoption::Recorded`] names the
+/// service's response cache as the record's retrieval. Where `lookup`
+/// finds none, the orphan is left as it is and reported
+/// [`Adoption::Unindexed`] or [`Adoption::Unanswered`], as `lookup`
+/// says.
 ///
 /// An orphan whose hash is in the history of a record already in the
 /// store, or of one this run wrote for an earlier orphan, is left an
@@ -3135,7 +3254,7 @@ impl Adoptions {
 /// written [`Adoption::Unwritten`], each still an orphan afterwards.
 pub fn adopt(
     root: &Path,
-    lookup: &dyn Fn(&ContentHash) -> Option<Record>,
+    lookup: &dyn Fn(&ContentHash) -> Result<Adopted, Unadopted>,
     key: &mut dyn FnMut(&Record, &ContentHash) -> Option<String>,
     run: RunId,
     timestamp: &str,
@@ -3169,9 +3288,22 @@ pub fn adopt(
             adoptions.push((relative, Adoption::Held { id }));
             continue;
         }
-        let Some(record) = lookup(&hash) else {
-            adoptions.push((relative, Adoption::Unindexed));
-            continue;
+        let found = match lookup(&hash) {
+            Ok(found) => found,
+            Err(Unadopted::Unindexed) => {
+                adoptions.push((relative, Adoption::Unindexed));
+                continue;
+            }
+            Err(Unadopted::Unanswered { identifier }) => {
+                let identifier = identifier.to_string();
+                adoptions.push((relative, Adoption::Unanswered { identifier }));
+                continue;
+            }
+        };
+        let record = found.record;
+        let evidence = IdentificationEvidence {
+            identifier: found.identifier,
+            origin: EvidenceOrigin::Adopted,
         };
 
         let key = key(&record, &hash);
@@ -3183,6 +3315,7 @@ pub fn adopt(
                 hash: &hash,
                 held: None,
                 reidentified: false,
+                evidence: Some(&evidence),
                 key: key.as_deref(),
                 run: run.clone(),
                 timestamp,
@@ -3196,6 +3329,9 @@ pub fn adopt(
                 Adoption::Recorded {
                     id: admitted.artifact.to_string(),
                     item: admitted.item.to_string(),
+                    retrieval: RetrievedFrom::ServiceCache {
+                        service: found.service.as_str().to_string(),
+                    },
                 }
             }
             Err(unrecorded) => Adoption::Unwritten {

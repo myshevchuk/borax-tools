@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Artifact-record history entries now carry the identifier that identified
+  their bytes and its origin: `extracted`, `supplied`, `overridden`, or
+  `adopted`. Older entries remain valid without either field. Re-identifying
+  a file's newest bytes with new evidence now appends an entry, while an
+  ordinary re-run still appends nothing.
+
+- `borax reconcile` now restores each supplied or overridden identifier in
+  library history to a missing, unreadable, or different content-index
+  operator fact. The library's decision wins over one made for the same
+  bytes outside it. Each restoration emits a `content-index-write` event;
+  a failed restoration alters no library file and does not fail the run.
+
+- `borax adopt` now reports `unanswered`, with the identifier, when the
+  content index identifies an orphan but the response cache has no record
+  for it. Run `borax resolve` to fetch the record before adopting it.
+
 - Libraries now have a stable UUID in `.borax/library.toml`. The first item
   or artifact-record write creates it, including an applying rename that
   records a file, an adoption, or a reconciliation write; runs that write no
@@ -23,9 +39,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The `library-status` and `library-validated` JSONL events now carry `id`
   immediately after `root` when the library has a readable identity. This is
-  additive, so the event schema remains at version 4.
+  additive; the schema version change is described below.
 
 ### Changed
+
+- The content index now keeps an identifier and its origin for each content
+  hash instead of a whole record. Extracted evidence lives in
+  `content/<hash>/extracted.json`; identifiers supplied by the operator or
+  accepted over title conflicts live in `content/<hash>/operator.json`, and
+  the operator fact wins when both exist. An index hit looks that identifier
+  up through the response cache or network without extracting again or
+  checking titles. A lookup with no record is an `unresolvable` skip, and
+  human `resolve` output now ends `from the response cache` or `from the
+  network` rather than `from the content index`.
+
+- The content index has moved out of the cache directory to
+  `$XDG_DATA_HOME/borax/v2/`, falling back to
+  `~/.local/share/borax/v2/` on Unix, and to `%APPDATA%\borax\v2\` on
+  Windows with `XDG_DATA_HOME` as its fallback. If no data directory is
+  available, the run uses an in-memory index without warning. `borax cache
+  --clear` now removes service responses only. Old `v1` entries remain
+  unread and unmigrated; `borax cache` still counts them and `--clear`
+  removes them.
+
+- Interactive rename now remembers identifiers rather than records:
+  supplied and overridden identifiers become operator facts, while a
+  successful retry of the file's own extracted lookup becomes an extracted
+  fact. Retrying an inconclusive index-held lookup preserves its
+  `content-index` origin and earlier rounds, makes no title check, and writes
+  nothing. Interactive descriptions distinguish identifiers found,
+  supplied, or accepted over a title conflict in an earlier run.
+
+- `--no-cache` now skips reading the content index but still writes an
+  extracted fact. That fact cannot displace an operator's identifier because
+  the two have separate files.
+
+- `borax adopt` now reads the index's operator fact before its extracted
+  fact, then searches the response cache in service-priority order regardless
+  of `sources`. It still queries no service and now writes nothing to the
+  index. Adopted history entries use origin `adopted`; `unindexed` now means
+  that the index has no evidence. After `cache --clear`, evidence survives
+  and affected orphans are `unanswered` until `resolve` fetches their records.
+  The `adopt` and `reconcile` help text reflects these behaviours.
+
+- **BREAKING:** JSONL events now use schema 5. A content-index read `hit`
+  carries `evidence`; `lookup.origin` adds `content-index`;
+  `record_retrieval` no longer has `content-index`;
+  `content-index-write` adds `hash` and `entry`, and reconciliation emits it
+  with the artifact's path. A recorded `library-adoption` gains `retrieval`
+  of kind `service-cache`; the new adoption kind `unanswered` carries its
+  identifier, and `unindexed` now means that no evidence exists.
 
 - `borax reconcile` now refuses to run over a directory outside any library
   before it reads or writes anything, because reconciliation writes library
@@ -59,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer add duplicate history entries. Work-duplicate detection also
   excludes the item the file's own record answers with.
 
-- Schema 4 gains additive `accepted`, `pending`, and `accepted_under` fields;
+- Schema 5 includes additive `accepted`, `pending`, and `accepted_under` fields;
   `library-repair` gains acceptance details and pending outcomes, while
   `library-admission` gains changed, pending, and separated outcomes. It also
   gains the `accepted-item-unavailable` library answer and the `not-pending`

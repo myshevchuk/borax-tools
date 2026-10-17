@@ -1,0 +1,178 @@
+## MODIFIED Requirements
+
+### Requirement: An interactive question shows what the answer rests on
+Before an interactive run puts a question about a resolved file, it SHALL show the operator a description of that file comprising, as far as the run knows them: the file's name and its position among the run's files; the identifier used and where it was found; the services that supplied the record; the record's type, title, authors, date of issue, container title, volume, issue and pages; every title the file claims for itself, with where each was read; and the proposed name.
+
+A field the record does not hold, or holds as text that is empty or
+only spaces, SHALL be left out rather than shown empty. A field the
+record does hold SHALL be shown whether or not its neighbours are: a
+volume and pages are reported when the record names no container to
+have them.
+
+The identifier SHALL be named with where it was found only where the
+run found it, or where the content index held it for the file's bytes.
+The description SHALL then name it as an earlier run's: found by an
+earlier run, supplied in an earlier run, or accepted over a title
+conflict in an earlier run, as the origin the content index kept it
+under says, and SHALL NOT name a pass of this run. Where the library
+answered and nothing was looked up, the description SHALL name the
+record's own identifier without claiming where it came from. No title SHALL be truncated, and no identifier SHALL be broken
+across lines: one that cannot be read back in one piece is no longer
+evidence.
+
+The file SHALL be named as the run names it elsewhere, so that two
+files sharing a name in different directories are told apart by the
+question rather than only by their place in the run. When the proposed name carries a
+collision suffix, the description SHALL say which rendered name was
+taken.
+
+The description SHALL show nothing about the resolution that the file's
+`resolved` event does not carry, so that a reader of the stream and the
+operator at the terminal are told the same things about a file. What
+belongs to the question rather than to the resolution — the file's
+position in the run, the proposed name, the note saying which
+rendered name a collision suffix stepped around, and that a record
+reached from an identifier the operator supplied is still pending their
+answer — is the question's to show and is not held to that. A pending
+record is a fact about the question being put: the verdict reported
+after the answer says what the answer made of it.
+
+The identifier the description names SHALL be the one the run looked
+up, with the pass that found it. A record may carry identifiers that
+were not looked up, and naming one of those as found would be evidence
+the run does not have.
+
+The description SHALL be written where the question is written, so that
+a run whose standard output is redirected still asks its questions with
+the evidence attached.
+
+Every value taken from a record or from a file's own metadata SHALL be
+escaped before it is written, so that a control character is shown
+rather than acted on. A file's metadata is written by whoever made the
+file; an escape sequence in a title must not be able to redraw the
+question the operator is answering.
+
+No line SHALL exceed the width the description is rendered to, except
+an identifier, which is never broken.
+
+The description SHALL appear only in interactive runs, and SHALL NOT
+change which questions are put or what their answers do.
+
+#### Scenario: Deciding with the record in view
+- **WHEN** an interactive run is about to ask whether to rename a file
+  resolved through Crossref from a DOI in its text layer
+- **THEN** the operator is shown the DOI, that it came from the text
+  layer, that Crossref supplied the record, the record's title and
+  authors, the titles the file's metadata claims, and the proposed name,
+  before the question
+
+#### Scenario: A suffixed proposal
+- **WHEN** the proposed name is `smith2024a.pdf` because `smith2024.pdf`
+  is taken
+- **THEN** the description says that `smith2024.pdf` is taken
+
+#### Scenario: A record from an earlier run
+- **WHEN** the content index answers for the file with the DOI an
+  earlier run extracted from it, and Crossref's response cache holds
+  that DOI's record
+- **THEN** the description names the DOI as found by an earlier run,
+  names Crossref as the service that supplied the record, and says no
+  title was read from the file
+
+#### Scenario: The record's identifier is not the one that was found
+- **WHEN** a file's arXiv identifier is found in its text layer and the
+  record resolved for it carries a DOI as well
+- **THEN** the description names the arXiv identifier as the one found
+  in the text layer
+
+#### Scenario: Redirected output still asks with evidence
+- **WHEN** an interactive run's standard output is redirected to a file
+- **THEN** each question and its description appear at the terminal,
+  and the file receives the event stream
+
+#### Scenario: Two files of one name
+- **WHEN** a run spans two directories that each hold `paper.pdf` and
+  both are proposed a move
+- **THEN** the two questions name their files distinguishably
+
+#### Scenario: A title carrying terminal escapes
+- **WHEN** a file's embedded title contains an escape sequence that
+  would clear the screen
+- **THEN** the description shows the sequence as text and the question
+  above it stays on the screen
+
+#### Scenario: A record with no container
+- **WHEN** a record holds a volume and pages but names no container
+- **THEN** the description reports the volume and the pages
+
+#### Scenario: A cached answer names no origin
+- **WHEN** the content index answers for a file
+- **THEN** the description names the identifier it looked up without
+  naming an extraction pass of this run as where it was found, and
+  says it comes from an earlier run
+
+#### Scenario: An operator's answer from an earlier run
+- **WHEN** the content index answers for a file with a DOI an operator
+  supplied in an earlier run
+- **THEN** the description names the DOI as supplied in an earlier run
+
+#### Scenario: A candidate is described as pending
+- **WHEN** an interactive run describes the record a supplied DOI
+  reached, before the operator answers
+- **THEN** the description says the record is pending, although the
+  file's `resolved` event, once the operator renames from it, reports
+  it as accepted
+
+### Requirement: An interactive question says whether the library answered
+The description an interactive run shows before a question SHALL say when the file's record is its library item's, and SHALL state what the library could not answer for when it could not.
+
+Where the file's `resolved` event reports `library` as its
+`record_retrieval`, the description SHALL name the record's own
+identifier without claiming
+where it was found, since nothing was looked up; SHALL name on its
+`record` line the services the item's provenance records followed by
+`from the library`, or the library alone where the provenance names no
+service; and SHALL show that no title was read from the file. It SHALL
+NOT describe a library answer as coming from the file or from an
+earlier run.
+
+Where the file's resolution event reports a library answer of a kind the
+library could not answer with, the description SHALL carry a line
+labelled `library` stating the problem as the file's human output line
+states it — after the `record` line for a resolved file, and after the
+reason for a file that was skipped.
+
+The description SHALL remain a rendering of the file's resolution
+event: it shows what that event's `library` and `record_retrieval`
+carry, and nothing the event does not. What the questions offer and what their
+answers do SHALL NOT change: a file the library answered for is asked
+about its move as any resolved file is, and one already named is passed
+over under `rename.skip-named` as any already-named file is.
+
+#### Scenario: Deciding on a library answer
+- **WHEN** an interactive run is about to ask whether to rename a
+  tracked file whose item's provenance names Crossref
+- **THEN** the description names the item's DOI without saying where it
+  was found, its `record` line reads `Crossref, from the library`, and
+  it says nothing was read from the file
+
+#### Scenario: A library that could not answer
+- **WHEN** an interactive run is about to ask about a file whose record
+  links to an item the library does not hold, and which resolved from
+  the content index instead, by the identifier an earlier run extracted
+- **THEN** the description carries a `library` line naming the artifact
+  and the missing item, and its identifier line says the identifier
+  comes from an earlier run
+
+#### Scenario: A file nothing identified, whose library could not answer
+- **WHEN** an interactive run offers to supply an identifier for a file
+  that carries none and whose record links an item the library does not
+  hold
+- **THEN** the description carries a `library` line naming the artifact
+  and the missing item after the reason the file was not identified
+
+#### Scenario: A tracked file already named is passed over
+- **WHEN** an interactive run with `rename.skip-named` on reaches a
+  tracked file that already carries the name its item's record implies
+- **THEN** nothing is shown or asked about it, and its `resolved` and
+  `already-named` events are in the run log

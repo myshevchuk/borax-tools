@@ -15,18 +15,17 @@ use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
-use borax_core::library::DuplicateReason;
+use borax_core::library::{DuplicateReason, EvidenceOrigin, IdentificationEvidence};
 use borax_core::record::Record;
 use borax_pdf::pure::PurePdf;
 use borax_pdf::scan::xmp_title;
 use borax_pdf::source::{ExtractionError, PdfSource};
 use borax_pdf::tiered::{Extracted, ExtractionConfig, extract};
-use borax_sources::cache::Cache;
 use borax_sources::conflict::{Conflict, TitleCheck, check_title};
 use borax_sources::dispatch::{Resolved, Unresolved, resolve};
 use borax_sources::pace::map_bounded;
 use borax_sources::source::Source;
-use borax_sources::store::{ContentIndex, hash_file};
+use borax_sources::store::{ContentIndex, IndexStore, hash_file};
 
 use crate::event::{
     Acceptance, Claim, ClaimOrigin, Counts, Event, Extraction, LibraryAnswer, ServiceAnswer,
@@ -45,8 +44,8 @@ use crate::library::{Account, Consulted, Stores, WorkDuplicate};
 /// read through, and [`crate::library`] is the tree they sit in.
 ///
 /// The one seam to the filesystem. A run hashes a file before it opens
-/// it, because a hash its library tracks, or one that matches the
-/// content index, makes opening it unnecessary.
+/// it, because a hash its library tracks, or one the content index
+/// answers for, makes opening it unnecessary.
 ///
 /// `Sync` because resolution runs files on a bounded pool of threads
 /// ([`borax_sources::pace::map_bounded`]) that share one reader.
@@ -118,7 +117,8 @@ impl FileRecord {
     ///   [`Acceptance::Accepted`] once [`FileRecord::accepted`] is set
     ///   and [`Acceptance::Pending`] until then;
     /// - [`Acceptance::Automatic`] for any other record: the file's own
-    ///   lookup, retried or not, or none.
+    ///   lookup, retried or not, a lookup of the content index's
+    ///   identifier, or none.
     pub fn acceptance(&self) -> Acceptance {
         let supplied = matches!(
             self.evidence.lookup,
@@ -133,6 +133,39 @@ impl FileRecord {
             (false, true, false) => Acceptance::Pending,
             (false, false, _) => Acceptance::Automatic,
         }
+    }
+
+    /// The evidence the record identifies the file's bytes by, or
+    /// `None` when no lookup reached it.
+    ///
+    /// The identifier is the lookup's, and the origin is, the first
+    /// that holds:
+    ///
+    /// - `overridden` when [`FileRecord::overridden`] is set;
+    /// - `supplied` for a lookup an operator supplied;
+    /// - `extracted` for the file's own lookup, retried or not;
+    /// - the answering fact's own origin for a lookup of the content
+    ///   index's identifier.
+    ///
+    /// A record the library supplied was reached by no lookup, and has
+    /// none.
+    pub fn identification(&self) -> Option<IdentificationEvidence> {
+        let LookupEvidence::Attempted {
+            identifier, origin, ..
+        } = &self.evidence.lookup
+        else {
+            return None;
+        };
+        let origin = match (self.overridden, origin) {
+            (true, _) => EvidenceOrigin::Overridden,
+            (false, Origin::Operator) => EvidenceOrigin::Supplied,
+            (false, Origin::Extracted(_)) => EvidenceOrigin::Extracted,
+            (false, Origin::Indexed(origin)) => *origin,
+        };
+        Some(IdentificationEvidence {
+            identifier: identifier.clone(),
+            origin,
+        })
     }
 }
 
@@ -160,69 +193,99 @@ pub struct ResolveConfig {
     pub cache: bool,
 }
 
-/// The content-index pass: the record the index holds for a file, and
-/// what reading the index came to.
+/// The content-index pass: what reading the index for a file came to.
 ///
 /// `hash` is the file's content hash, or the message of the error that
 /// kept it from being computed. In order:
 ///
-/// - a file with no hash gives no record and [`IndexRead::Unavailable`]
-///   with that message, whatever [`ResolveConfig::cache`] says;
+/// - a file with no hash gives [`IndexRead::Unavailable`] with that
+///   message, whatever [`ResolveConfig::cache`] says;
 /// - [`ResolveConfig::cache`] `false` — the `--no-cache` bypass — gives
-///   no record and [`IndexRead::Bypassed`], and the index is not read;
-/// - otherwise the index is read: [`IndexRead::Hit`] with its record,
-///   or [`IndexRead::Miss`].
+///   [`IndexRead::Bypassed`], and the index is not read;
+/// - otherwise the hash's entry is read: [`IndexRead::Hit`] with the
+///   evidence it answers with ([`borax_core::index::IndexEntry::answer`]),
+///   or [`IndexRead::Miss`] when it answers with none.
 ///
-/// A hit means the file need not be opened at all, since a record is
-/// served for its content under any name.
-pub fn index_read<C: Cache>(
+/// A hit means the file need not be opened at all: the evidence's
+/// identifier is looked up instead of one extracted from the file.
+pub fn index_read<S: IndexStore>(
     hash: Result<&ContentHash, &str>,
-    index: &ContentIndex<C>,
+    index: &ContentIndex<S>,
     config: &ResolveConfig,
-) -> (Option<Record>, IndexRead) {
+) -> IndexRead {
     let hash = match hash {
         Ok(hash) => hash,
         Err(message) => {
-            return (
-                None,
-                IndexRead::Unavailable {
-                    message: message.to_string(),
-                },
-            );
+            return IndexRead::Unavailable {
+                message: message.to_string(),
+            };
         }
     };
     if !config.cache {
-        return (None, IndexRead::Bypassed);
+        return IndexRead::Bypassed;
     }
-    match index.get(hash) {
-        Some(record) => (Some(record), IndexRead::Hit),
-        None => (None, IndexRead::Miss),
+    match index.entry(hash).answer() {
+        Some(evidence) => IndexRead::Hit(evidence),
+        None => IndexRead::Miss,
     }
 }
 
-/// The record a content-index hit stands for, with `library` as what
-/// the library said before the index was read.
+/// The standing of a file the content index answered for with
+/// `evidence`, with `library` as what the library said before the index
+/// was read: `evidence`'s identifier looked up through `sources`, with
+/// origin [`Origin::Indexed`].
 ///
-/// Nothing was read from the file and nothing was looked up, so every
-/// later step is not attempted because the index answered.
-fn indexed_record(record: Record, hash: Option<ContentHash>, library: Consultation) -> FileRecord {
+/// Nothing is read from the file and no title check is made, whatever
+/// the evidence's origin, and nothing is written to the index: each is
+/// not attempted because the index answered. A record found goes
+/// through the library's work check as any other does. A lookup no
+/// service answered is [`SkipReason::Unresolvable`] with its attempts,
+/// and the file is not extracted instead.
+fn indexed_standing(
+    path: &Path,
+    evidence: IdentificationEvidence,
+    hash: Option<ContentHash>,
+    sources: &[&dyn Source],
+    account: Option<&Account<'_>>,
+    library: Consultation,
+) -> Standing {
     let reason = Unattempted::ContentIndexHit;
-    FileRecord {
-        record,
-        hash,
-        evidence: Evidence {
-            library,
-            content_index: IndexEvidence {
-                read: IndexRead::Hit,
-                write: IndexWrite::NotAttempted(reason),
-            },
-            identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
-            ..Evidence::not_attempted(reason)
+    let origin = Origin::Indexed(evidence.origin);
+    let identifier = evidence.identifier.clone();
+    let looked_up = from_sources(sources, &identifier);
+    let base = Evidence {
+        library,
+        content_index: IndexEvidence {
+            read: IndexRead::Hit(evidence),
+            write: IndexWrite::NotAttempted(reason),
         },
-        // A record served from the index was accepted by whatever run
-        // put it there, not by this one.
-        overridden: false,
-        accepted: false,
+        identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
+        ..Evidence::not_attempted(reason)
+    };
+    match looked_up {
+        Ok(resolved) => {
+            let file = FileRecord {
+                hash,
+                evidence: Evidence {
+                    lookup: found_lookup(identifier, origin, &resolved, Vec::new()),
+                    ..base
+                },
+                record: resolved.record,
+                // The decision the evidence records was made by the run
+                // that wrote it, not by this one.
+                overridden: false,
+                accepted: false,
+            };
+            Standing::of(path, file, account)
+        }
+        Err(unresolved) => Standing::skipped(
+            SkipReason::Unresolvable,
+            hash,
+            Evidence {
+                lookup: unheld_lookup(&identifier, origin, &unresolved, Vec::new()),
+                ..base
+            },
+        ),
     }
 }
 
@@ -371,11 +434,14 @@ pub fn title_check(titles: &Titles, record: &Record) -> MatchCheck {
 ///    A library that cannot answer for the file says why, and the
 ///    passes below run as for a file it does not track. This function
 ///    passes no library, so it starts at the content index.
-/// 2. **Content index**: the file's hash is looked up ([`index_read`]),
-///    and a hit is returned without opening the file at all. Skipped
-///    entirely when [`ResolveConfig::cache`] is `false`, and treated as
-///    a miss when the file cannot be hashed — a hash failure is not yet
-///    a reason to give up, since opening the file reports a better one.
+/// 2. **Content index**: the file's hash is looked up ([`index_read`]).
+///    On a hit, the identifier the index answers with is looked up over
+///    `sources` without opening the file or checking its titles, and
+///    what that lookup reaches is the result: the record, or
+///    [`SkipReason::Unresolvable`]. Skipped entirely when
+///    [`ResolveConfig::cache`] is `false`, and treated as a miss when
+///    the file cannot be hashed — a hash failure is not yet a reason to
+///    give up, since opening the file reports a better one.
 /// 3. **Extraction**: [`borax_pdf::tiered::extract`] over the opened
 ///    file.
 /// 4. **Resolution**: [`borax_sources::dispatch::resolve`] over
@@ -386,16 +452,16 @@ pub fn title_check(titles: &Titles, record: &Record) -> MatchCheck {
 ///    disagreement is a skip, not a result: a record for the wrong work
 ///    is worse than no record.
 ///
-/// A successful resolution by the last three passes is written to the
-/// content index under the file's hash, so a later run recognises the
-/// file under any name. A record the conflict check refused is never
-/// written, and what the index held for the hash is left as it was. A
-/// write that fails is kept as evidence and changes nothing else.
-/// The write happens even when [`ResolveConfig::cache`] is `false`:
-/// the bypass forces a live answer, and the point of forcing one is
-/// usually that the stored answer was wrong, so the fresh record
-/// replaces it. A run that must leave the cache untouched clears it
-/// instead.
+/// A successful resolution by the last three passes writes the
+/// identifier it looked up to the content index, as the extracted
+/// evidence for the file's hash, so a later run recognises the file
+/// under any name. The operator's evidence for the hash is never
+/// touched. A record the conflict check refused writes nothing, and
+/// what the index held for the hash is left as it was. A write that
+/// fails is kept as evidence and changes nothing else. The write
+/// happens even when [`ResolveConfig::cache`] is `false`: the bypass
+/// forces a fresh extraction, and the point of forcing one is usually
+/// that the stored identifier was wrong, so the fresh one replaces it.
 ///
 /// Each extraction failure is a skip of its own kind:
 /// [`ExtractionError::NoTextLayer`] is [`SkipReason::NoTextLayer`],
@@ -413,11 +479,11 @@ pub fn title_check(titles: &Titles, record: &Record) -> MatchCheck {
 /// The verdict of [`standing`], which runs the same passes and keeps
 /// what they produced along the way. A caller that acts on the verdict
 /// alone wants this one.
-pub fn resolve_file<C: Cache>(
+pub fn resolve_file<S: IndexStore>(
     path: &Path,
     documents: &dyn Documents,
     sources: &[&dyn Source],
-    index: &ContentIndex<C>,
+    index: &ContentIndex<S>,
     config: &ResolveConfig,
 ) -> FileOutcome {
     standing(path, documents, sources, index, config, None, None).verdict
@@ -581,11 +647,11 @@ fn duplicate(reason: DuplicateReason, existing: &Path) -> SkipReason {
 /// Every verdict carries the evidence of the steps that ran before it,
 /// and says of each step that did not run why it did not
 /// ([`Standing::evidence`]).
-pub fn standing<C: Cache>(
+pub fn standing<S: IndexStore>(
     path: &Path,
     documents: &dyn Documents,
     sources: &[&dyn Source],
-    index: &ContentIndex<C>,
+    index: &ContentIndex<S>,
     config: &ResolveConfig,
     account: Option<&Account<'_>>,
     library: Option<&Stores>,
@@ -642,24 +708,24 @@ pub fn standing<C: Cache>(
 /// instead, or why it was not asked, carried onto the evidence of
 /// every verdict reached here.
 #[allow(clippy::too_many_arguments)]
-fn beyond_library<C: Cache>(
+fn beyond_library<S: IndexStore>(
     path: &Path,
     hashed: Result<&ContentHash, String>,
     documents: &dyn Documents,
     sources: &[&dyn Source],
-    index: &ContentIndex<C>,
+    index: &ContentIndex<S>,
     config: &ResolveConfig,
     account: Option<&Account<'_>>,
     library: Consultation,
 ) -> Standing {
     let hash = hashed.as_ref().ok().map(|hash| (*hash).clone());
-    let (indexed, read) = index_read(
+    let read = index_read(
         hashed.as_ref().map(|hash| *hash).map_err(String::as_str),
         index,
         config,
     );
-    if let Some(record) = indexed {
-        return Standing::of(path, indexed_record(record, hash, library), account);
+    if let IndexRead::Hit(evidence) = read {
+        return indexed_standing(path, evidence, hash, sources, account, library);
     }
 
     let FileRead { extracted, titles } = from_file(path, documents, &config.extraction);
@@ -709,11 +775,11 @@ fn beyond_library<C: Cache>(
 
     let match_check = title_check(&extraction.titles, &resolved.record);
     let refused = matches!(match_check, MatchCheck::Conflict(_));
-    // A refused record is never written under the file's hash: a later
+    // A refused record writes no evidence for the file's hash: a later
     // run checks the file again rather than being answered for it.
     let write = match (refused, hash.as_ref()) {
         (true, _) => IndexWrite::NotAttempted(Unattempted::Refused),
-        (false, Some(hash)) => IndexWrite::Attempted(index.put(hash, &resolved.record)),
+        (false, Some(hash)) => IndexWrite::Attempted(index.put_extracted(hash, &looked_up)),
         (false, None) => IndexWrite::NotAttempted(Unattempted::Unhashable),
     };
     let file = FileRecord {
@@ -814,8 +880,9 @@ pub fn titles_of(path: &Path, documents: &dyn Documents) -> Titles {
 /// A lookup of the file's own identifier made again — an
 /// [`Origin::Extracted`] origin over a `prior` whose lookup of the same
 /// identifier was attempted — keeps `prior`'s rounds: its `earlier` is
-/// `prior`'s earlier rounds followed by `prior`'s current one. Any
-/// other lookup, every operator's included, has no earlier rounds.
+/// `prior`'s earlier rounds followed by `prior`'s current one. An
+/// operator's lookup has no earlier rounds. A lookup of the content
+/// index's identifier made again is [`resolve_indexed_again`]'s.
 ///
 /// Nothing is written to the content index here. A record reached this
 /// way is a candidate until somebody accepts it, and [`remember`] is
@@ -871,21 +938,92 @@ pub fn resolve_supplied(
     })
 }
 
+/// Look up again `identifier`, the identifier the content index
+/// answered with for a file, whose evidence has origin `origin`, on top
+/// of the file's existing evidence `prior`.
+///
+/// The same services in the same order as any lookup, with origin
+/// [`Origin::Indexed`]. No file is opened and no title check is made,
+/// whatever `origin` is: `prior`'s extraction, titles and title check
+/// stay as they are, not attempted because the index answered. The
+/// content-index write is not attempted for the same reason
+/// ([`Unattempted::ContentIndexHit`]), since the index already holds
+/// the evidence. What the library said, what the index read came to,
+/// and the operator's input stay as `prior` has them.
+///
+/// The lookup keeps `prior`'s rounds when `prior` looked up the same
+/// identifier: its `earlier` is `prior`'s earlier rounds followed by
+/// `prior`'s current one.
+///
+/// The record found is neither overridden nor accepted, and its hash is
+/// `None`: the caller, which holds the file's hash, sets it.
+///
+/// Fails with what every service answered when none holds the
+/// identifier; [`unheld_evidence`] gives that lookup its evidence.
+pub fn resolve_indexed_again(
+    identifier: &Identifier,
+    origin: EvidenceOrigin,
+    sources: &[&dyn Source],
+    prior: &Evidence,
+) -> Result<FileRecord, Unresolved> {
+    let resolved = from_sources(sources, identifier)?;
+    let origin = Origin::Indexed(origin);
+
+    Ok(FileRecord {
+        hash: None,
+        evidence: Evidence {
+            content_index: IndexEvidence {
+                read: prior.content_index.read.clone(),
+                write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
+            },
+            lookup: found_lookup(
+                identifier.clone(),
+                origin,
+                &resolved,
+                rounds_before(prior, identifier, origin),
+            ),
+            ..prior.clone()
+        },
+        record: resolved.record,
+        // The decision the evidence records was made by the run that
+        // wrote it, not by this one.
+        overridden: false,
+        accepted: false,
+    })
+}
+
 /// The evidence of a lookup of `identifier`, which came from `origin`,
 /// that no service answered: `prior` with the lookup set to
 /// `unresolved`'s attempts, in order, and the title check and the
 /// content-index write not attempted because there is no record
 /// ([`Unattempted::NoRecord`]). Every other section is `prior`'s.
 ///
+/// For an [`Origin::Indexed`] lookup, the title check and the
+/// content-index write stay as `prior` has them instead: neither is
+/// made for a lookup of the index's own identifier, record or none.
+///
 /// The lookup keeps `prior`'s rounds exactly as [`resolve_supplied`]'s
-/// does: only a lookup of the file's own identifier made again has
-/// earlier rounds.
+/// and [`resolve_indexed_again`]'s do: only a lookup of the file's own
+/// identifier, or of the content index's, made again has earlier
+/// rounds.
 pub fn unheld_evidence(
     prior: &Evidence,
     identifier: &Identifier,
     origin: Origin,
     unresolved: &Unresolved,
 ) -> Evidence {
+    let lookup = unheld_lookup(
+        identifier,
+        origin,
+        unresolved,
+        rounds_before(prior, identifier, origin),
+    );
+    if let Origin::Indexed(_) = origin {
+        return Evidence {
+            lookup,
+            ..prior.clone()
+        };
+    }
     let reason = Unattempted::NoRecord;
     Evidence {
         library: prior.library.clone(),
@@ -895,20 +1033,15 @@ pub fn unheld_evidence(
         },
         extraction: prior.extraction.clone(),
         identifier_input: prior.identifier_input.clone(),
-        lookup: unheld_lookup(
-            identifier,
-            origin,
-            unresolved,
-            rounds_before(prior, identifier, origin),
-        ),
+        lookup,
         match_check: MatchCheck::NotAttempted(reason),
     }
 }
 
 /// The rounds a new lookup of `identifier` from `origin` follows: every
 /// round of `prior`'s lookup, oldest first, when `origin` is an
-/// extraction pass and `prior` looked up the same identifier, and none
-/// otherwise.
+/// extraction pass or the content index and `prior` looked up the same
+/// identifier, and none otherwise.
 fn rounds_before(prior: &Evidence, identifier: &Identifier, origin: Origin) -> Vec<LookupRound> {
     match (&prior.lookup, origin) {
         (
@@ -918,7 +1051,7 @@ fn rounds_before(prior: &Evidence, identifier: &Identifier, origin: Origin) -> V
                 earlier,
                 ..
             },
-            Origin::Extracted(_),
+            Origin::Extracted(_) | Origin::Indexed(_),
         ) if before == identifier => earlier
             .iter()
             .cloned()
@@ -954,25 +1087,49 @@ pub fn accept(file: FileRecord) -> FileRecord {
     accepted
 }
 
-/// Keep `record` as what the file at `hash` is, so that no later run
-/// asks about it again, and say what became of the write.
+/// Keep what identifies `file`'s bytes in the content index, so that
+/// a later run recognises them, and say what became of the write.
 ///
-/// [`IndexWrite::Attempted`] with the store's result, or
-/// [`IndexWrite::NotAttempted`] with [`Unattempted::Unhashable`] when
-/// the file has no hash to be remembered under.
+/// [`FileRecord::identification`] is written through the writer for
+/// its origin, under `file`'s hash:
 ///
-/// Best-effort, as every write to the response cache is: an entry that
+/// - `supplied` or `overridden` replaces the hash's operator evidence;
+/// - `extracted`, which reaches here for a successful retry of the
+///   file's own lookup, replaces its extracted evidence.
+///
+/// Each leaves the other fact as it was. [`IndexWrite::Attempted`]
+/// carries the store's result. Nothing is written, and the write is
+/// [`IndexWrite::NotAttempted`], for [`Unattempted::Unhashable`] when
+/// `file` has no hash; for [`Unattempted::ContentIndexHit`] when the
+/// record was reached by a lookup of the index's own identifier, which
+/// the index already holds; and, when no lookup reached the record, for
+/// the reason the lookup was not made.
+///
+/// Best-effort, as every write to the response cache is: evidence that
 /// cannot be written leaves the file to be asked about next time,
 /// which is the safe way to lose an answer, and a failed write is
 /// never a failure of the rename it followed.
-pub fn remember<C: Cache>(
-    index: &ContentIndex<C>,
-    hash: Option<&ContentHash>,
-    record: &Record,
-) -> IndexWrite {
-    match hash {
-        Some(hash) => IndexWrite::Attempted(index.put(hash, record)),
-        None => IndexWrite::NotAttempted(Unattempted::Unhashable),
+pub fn remember<S: IndexStore>(index: &ContentIndex<S>, file: &FileRecord) -> IndexWrite {
+    let Some(hash) = &file.hash else {
+        return IndexWrite::NotAttempted(Unattempted::Unhashable);
+    };
+    match (&file.evidence.lookup, file.identification()) {
+        (LookupEvidence::NotAttempted(reason), _) => IndexWrite::NotAttempted(*reason),
+        (
+            LookupEvidence::Attempted {
+                origin: Origin::Indexed(_),
+                ..
+            },
+            _,
+        ) => IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
+        (_, Some(evidence)) if evidence.origin.is_operator() => {
+            IndexWrite::Attempted(index.put_operator(hash, &evidence))
+        }
+        (_, Some(evidence)) => {
+            IndexWrite::Attempted(index.put_extracted(hash, &evidence.identifier))
+        }
+        // An attempted lookup always identifies the record it reached.
+        (_, None) => IndexWrite::NotAttempted(Unattempted::NoRecord),
     }
 }
 
@@ -1239,11 +1396,11 @@ pub struct Run {
 /// from becoming rudeness — it lives in the sources, one interval per
 /// service, so however many threads are running no service is asked
 /// faster than it allows.
-pub fn resolve_batch<C: Cache>(
+pub fn resolve_batch<S: IndexStore>(
     paths: &[PathBuf],
     documents: &dyn Documents,
     sources: &[&dyn Source],
-    index: &ContentIndex<C>,
+    index: &ContentIndex<S>,
     library: Option<&Stores>,
     config: &(dyn Fn(&Path) -> ResolveConfig + Sync),
     concurrency: usize,
