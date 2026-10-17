@@ -15,11 +15,11 @@ use std::path::PathBuf;
 
 use borax::describe::{DEFAULT_WIDTH, Position, Proposal, describe};
 use borax::event::{
-    Acceptance, Claim, ClaimOrigin, ContentIndexSection, Displaced, Event, ExtractionResultStep,
-    ExtractionSection, FetchedFrom, IdentifierInputStep, IdentifierOrigin, IndexReadStep,
-    LibraryAnswer, LibraryStep, LookupRound, LookupStep, MatchCheckStep, RetrievedFrom, Sections,
-    ServiceAnswer, ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome,
-    SyntaxStep, TitlesStep, WriteStep,
+    Acceptance, Claim, ClaimOrigin, ContentIndexSection, Displaced, Event, EvidenceStep,
+    ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep, IdentifierOrigin,
+    IndexReadStep, LibraryAnswer, LibraryStep, LookupRound, LookupStep, MatchCheckStep,
+    RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Submission,
+    SubmissionAcceptance, SubmissionOutcome, SyntaxStep, TitlesStep, WriteStep,
 };
 use borax_core::identifier::{ArxivId, Doi};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
@@ -45,6 +45,10 @@ struct Fixture {
     claims: Vec<Claim>,
     tier: Option<String>,
     cached: bool,
+    /// The content-index evidence's own origin — `extracted`,
+    /// `supplied` or `overridden` — read only when `tier` is `None` and
+    /// `cached` is `true`.
+    evidence_origin: String,
 }
 
 impl Fixture {
@@ -57,6 +61,7 @@ impl Fixture {
             claims: Vec::new(),
             tier: Some("text-layer".to_string()),
             cached: false,
+            evidence_origin: "extracted".to_string(),
         }
     }
 
@@ -81,7 +86,12 @@ impl Fixture {
                     reason: "no-library".to_string(),
                 },
                 content_index: ContentIndexSection {
-                    read: IndexReadStep::Hit,
+                    read: IndexReadStep::Hit {
+                        evidence: EvidenceStep {
+                            identifier: self.found.clone(),
+                            origin: self.evidence_origin.clone(),
+                        },
+                    },
                     write: WriteStep::NotAttempted {
                         reason: "content-index-hit".to_string(),
                     },
@@ -97,10 +107,21 @@ impl Fixture {
                 identifier_input: IdentifierInputStep::NotAttempted {
                     reason: "not-asked".to_string(),
                 },
-                lookup: LookupStep::NotAttempted {
-                    reason: "content-index-hit".to_string(),
+                lookup: LookupStep::Attempted {
+                    identifier: self.found.clone(),
+                    origin: IdentifierOrigin::ContentIndex,
+                    attempts: vec![ServiceAnswer {
+                        service: self.source.clone(),
+                        outcome: ServiceOutcome::Found {
+                            retrieval: FetchedFrom::ServiceCache,
+                            stored: None,
+                        },
+                    }],
+                    earlier: vec![],
                 },
-                record_retrieval: Some(RetrievedFrom::ContentIndex),
+                record_retrieval: Some(RetrievedFrom::ServiceCache {
+                    service: self.source.clone(),
+                }),
                 match_check: MatchCheckStep::NotAttempted {
                     reason: "content-index-hit".to_string(),
                 },
@@ -499,11 +520,14 @@ fn a_content_index_answer_is_d1s_worked_example() {
         vec![
             rule(3, 17, DEFAULT_WIDTH),
             label_line("file", "50-Article Text-95-2-10-20240507.pdf"),
-            // Nothing was looked up, so nothing is said about where
-            // the identifier came from; the record is what came from
-            // an earlier run.
-            label_line("identifier", "doi:10.15407/bioorganica2023.01.010"),
-            label_line("record", "Crossref, from an earlier run"),
+            // The content index answered, so the identifier line names
+            // it as found by an earlier run, and the lookup that
+            // answered now names the service directly.
+            label_line(
+                "identifier",
+                "doi:10.15407/bioorganica2023.01.010, found by an earlier run"
+            ),
+            label_line("record", "Crossref"),
             label_line("type", "journal article"),
             "title       Applications of chiral sulfinyl auxiliaries in the asymmetric".to_string(),
             continuation("synthesis of fluorinated amines and amino acids"),
@@ -973,13 +997,111 @@ fn a_cached_answer_names_no_origin_for_its_identifier() {
     );
 
     assert!(
-        lines.contains(&label_line("identifier", "doi:10.1234/published.2024")),
-        "a cached answer must name the identifier without claiming where \
-         it was found: got {lines:#?}"
+        lines.contains(&label_line(
+            "identifier",
+            "doi:10.1234/published.2024, found by an earlier run"
+        )),
+        "an evidence answer names its identifier as found by an earlier run: \
+         got {lines:#?}"
     );
     assert!(
-        lines.contains(&label_line("record", "Crossref, from an earlier run")),
-        "the record is what came from an earlier run: got {lines:#?}"
+        lines.contains(&label_line("record", "Crossref")),
+        "the record line names the service that answered, as for any lookup: \
+         got {lines:#?}"
+    );
+}
+
+#[test]
+fn an_evidence_answer_names_its_identifier_as_found_by_an_earlier_run() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Title".to_string());
+    record.doi = Some(Doi::parse("10.1000/evidence-extracted").unwrap());
+
+    let mut fixture = Fixture::new(record, "doi:10.1000/evidence-extracted");
+    fixture.tier = None;
+    fixture.cached = true;
+    fixture.evidence_origin = "extracted".to_string();
+
+    let lines = describe(
+        &fixture.event(),
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line(
+            "identifier",
+            "doi:10.1000/evidence-extracted, found by an earlier run"
+        )),
+        "got {lines:#?}"
+    );
+}
+
+#[test]
+fn an_evidence_answer_names_a_supplied_identifier_as_supplied_in_an_earlier_run() {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Title".to_string());
+    record.doi = Some(Doi::parse("10.1000/evidence-supplied").unwrap());
+
+    let mut fixture = Fixture::new(record, "doi:10.1000/evidence-supplied");
+    fixture.tier = None;
+    fixture.cached = true;
+    fixture.evidence_origin = "supplied".to_string();
+
+    let lines = describe(
+        &fixture.event(),
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line(
+            "identifier",
+            "doi:10.1000/evidence-supplied, supplied in an earlier run"
+        )),
+        "got {lines:#?}"
+    );
+}
+
+#[test]
+fn an_evidence_answer_names_an_overridden_identifier_as_accepted_over_a_title_conflict_in_an_earlier_run()
+ {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("A Title".to_string());
+    record.doi = Some(Doi::parse("10.1000/evidence-overridden").unwrap());
+
+    let mut fixture = Fixture::new(record, "doi:10.1000/evidence-overridden");
+    fixture.tier = None;
+    fixture.cached = true;
+    fixture.evidence_origin = "overridden".to_string();
+
+    let lines = describe(
+        &fixture.event(),
+        "paper.pdf",
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    );
+
+    assert!(
+        lines.contains(&label_line(
+            "identifier",
+            "doi:10.1000/evidence-overridden, accepted over a title conflict in an earlier run"
+        )),
+        "got {lines:#?}"
     );
 }
 

@@ -19,7 +19,8 @@ use borax::event::{
     Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep,
     IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
     MatchCheckStep, Repair, RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome,
-    SkipReason, Submission, SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep, human_line,
+    SkipReason, Submission, SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep, WrittenEntry,
+    human_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -30,16 +31,18 @@ use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier, Isbn};
+use borax_core::index::Fact;
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, DuplicateReason, HashEntry, Item, ItemId, RunId as LibraryRunId,
+    ArtifactId, ArtifactRecord, DuplicateReason, EvidenceOrigin, HashEntry, IdentificationEvidence,
+    Item, ItemId, RunId as LibraryRunId,
 };
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source as FieldSource};
 use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
 use borax_core::template::RenderInput;
 use borax_pdf::source::{ExtractionError, InfoMetadata, PdfSource};
-use borax_sources::cache::{CacheWrite, MemoryCache};
+use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
 use borax_sources::source::{Fetched, Source, SourceError, SourceName};
-use borax_sources::store::ContentIndex;
+use borax_sources::store::{ContentIndex, IndexStore};
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
@@ -450,29 +453,10 @@ fn record_by(family: &str, year: i32, doi_value: &str) -> Record {
 /// lookup; `tier: None, cached: true` becomes a content-index hit.
 fn sections_for(identifier: &str, source: &str, tier: Option<&str>, cached: bool) -> Sections {
     match (tier, cached) {
-        (None, true) => {
-            let reason = || "content-index-hit".to_string();
-            Sections {
-                library: LibraryStep::NotAttempted {
-                    reason: "no-library".to_string(),
-                },
-                content_index: ContentIndexSection {
-                    read: IndexReadStep::Hit,
-                    write: WriteStep::NotAttempted { reason: reason() },
-                },
-                extraction: ExtractionSection {
-                    result: ExtractionResultStep::NotAttempted { reason: reason() },
-                    titles: TitlesStep::NotAttempted { reason: reason() },
-                },
-                identifier_input: IdentifierInputStep::NotAttempted {
-                    reason: "not-asked".to_string(),
-                },
-                lookup: LookupStep::NotAttempted { reason: reason() },
-                record_retrieval: Some(RetrievedFrom::ContentIndex),
-                match_check: MatchCheckStep::NotAttempted { reason: reason() },
-                acceptance: Acceptance::Automatic,
-            }
-        }
+        // No caller reaches a content-index retrieval here any more: an
+        // evidence answer is now always a real lookup, with its own
+        // shape built where a test needs one.
+        (None, true) => unreachable!("no caller reaches a content-index retrieval here"),
         (Some(tier), _) => {
             let origin = if tier == "supplied" {
                 IdentifierOrigin::Operator
@@ -4634,8 +4618,12 @@ fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
         ..BoraxExt::default()
     };
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(&hash, &record);
-    let sources: Vec<&dyn Source> = Vec::new();
+    let _ = index.put_extracted(
+        &hash,
+        &Identifier::Doi(doi("10.1000/batch-cached-provenance")),
+    );
+    let crossref = fake_source(SourceName::Crossref, Ok(record.clone()));
+    let sources: Vec<&dyn Source> = vec![&crossref];
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let effective = effective_with_default_template("[auth][year]");
@@ -4667,7 +4655,7 @@ fn a_batch_cached_resolution_names_its_provenance_not_the_cache() {
 
     let text = String::from_utf8(out).unwrap();
     assert!(
-        text.contains("via crossref, from the content index"),
+        text.contains("via crossref, from the network"),
         "a cached hit whose provenance names Crossref must say so, not \
          name the content index as a service: got {text:?}"
     );
@@ -5499,9 +5487,285 @@ fn a_rename_from_a_supplied_identifier_is_written_to_the_content_index() {
     .unwrap();
 
     assert_eq!(
-        fixture.index.get(&hash),
-        Some(record_by("Smith", 2024, "10.1000/d7-write-on-rename")),
-        "the accepted record must be written under the file's hash"
+        fixture.index.entry(&hash).operator,
+        Fact::Held(IdentificationEvidence {
+            identifier: Identifier::Doi(doi("10.1000/d7-write-on-rename")),
+            origin: EvidenceOrigin::Supplied,
+        }),
+        "the operator's identifier must be written under the file's hash"
+    );
+}
+
+/// design D6, D11 sequence (b): once an operator's identifier is
+/// remembered outside any library, a later batch run over the renamed
+/// file is answered from the evidence alone — no extraction, and no
+/// question, since nothing is asked in a batch run.
+#[test]
+fn a_supplied_identifier_renamed_outside_a_library_is_resolved_by_a_later_batch_run_without_extraction_or_question()
+ {
+    let hash = hash_for("later-batch-no-extraction");
+    let documents = FakeDocuments::new()
+        .with_file("/lib/paper.pdf", hash.clone(), pdf_with_no_identifier())
+        .with_open_error(
+            "/lib/Smith2024.pdf",
+            hash.clone(),
+            ExtractionError::Unreadable {
+                message: "must never be opened".to_string(),
+            },
+        );
+    let fixture = SupplyFixture::new(documents);
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/later-batch-no-extraction",
+        record_by("Smith", 2024, "10.1000/later-batch-no-extraction"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with_default_template("[auth][year]");
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/later-batch-no-extraction".to_string())]);
+
+    events_for(
+        &Command::rename(vec![fixture.path.clone()], false),
+        &Configs::uniform(effective.clone()),
+        &fixture.adapters(&sources),
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let renamed_path = PathBuf::from("/lib/Smith2024.pdf");
+    let events = events_for(
+        &Command::resolve(vec![renamed_path]),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    match events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { .. }))
+    {
+        Some(Event::Resolved { sections, .. }) => {
+            assert_eq!(
+                sections.extraction.result,
+                ExtractionResultStep::NotAttempted {
+                    reason: "content-index-hit".to_string()
+                }
+            );
+            assert_eq!(
+                sections.identifier_input,
+                IdentifierInputStep::NotAttempted {
+                    reason: "not-asked".to_string()
+                }
+            );
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+/// design D11 sequence (c): `--no-cache` over operator evidence reads
+/// the file's own identifier instead, and writes `extracted.json`
+/// beside the untouched `operator.json`.
+#[test]
+fn an_operators_answer_survives_a_no_cache_resolve() {
+    let hash = hash_for("no-cache-survives-operator");
+    let fixture = SupplyFixture::new(FakeDocuments::new().with_file(
+        "/lib/paper.pdf",
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/no-cache-survives-y"),
+    ));
+    let operator_evidence = IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/no-cache-survives-x")),
+        origin: EvidenceOrigin::Supplied,
+    };
+    let _ = fixture.index.put_operator(&hash, &operator_evidence);
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/no-cache-survives-y",
+        record_by("Doe", 2024, "10.1000/no-cache-survives-y"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let effective = effective_with(|layer| {
+        layer.network = Some(NetworkLayer {
+            cache: Some(false),
+            ..NetworkLayer::default()
+        });
+    });
+
+    events_for(
+        &Command::resolve(vec![fixture.path.clone()]),
+        &Configs::uniform(effective),
+        &fixture.adapters(&sources),
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let entry = fixture.index.entry(&hash);
+    assert_eq!(
+        entry.extracted,
+        Fact::Held(Identifier::Doi(doi("10.1000/no-cache-survives-y"))),
+        "the file's own identifier is written even under --no-cache"
+    );
+    assert_eq!(
+        entry.operator,
+        Fact::Held(operator_evidence),
+        "the operator's evidence is left untouched"
+    );
+}
+
+/// design D4: a retry of the file's own extracted lookup that then
+/// succeeds is written as extracted evidence at the move, never as an
+/// operator fact.
+#[test]
+fn an_outage_then_a_successful_retry_then_rename_writes_extracted_json_and_no_operator_json() {
+    let path = PathBuf::from("/lib/outage-retry.pdf");
+    let hash = hash_for("outage-retry-extracted");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/outage-retry-extracted"),
+    );
+    let crossref = FlakySource::new(
+        SourceName::Crossref,
+        1,
+        record_by("Smith", 2024, "10.1000/outage-retry-extracted"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let effective = effective_with_default_template("[auth][year]");
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Retry, Answer::Rename]);
+
+    let events = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ContentIndexWrite {
+                entry: WrittenEntry::Evidence { origin, .. },
+                ..
+            } if origin == "extracted"
+        )),
+        "got {events:?}"
+    );
+    let entry = index.entry(&hash);
+    assert_eq!(
+        entry.extracted,
+        Fact::Held(Identifier::Doi(doi("10.1000/outage-retry-extracted")))
+    );
+    assert_eq!(entry.operator, Fact::Absent);
+}
+
+/// A `Cache`/`IndexStore` stand-in over a `MemoryCache` that also
+/// checks, each time `operator` is written, whether the library
+/// already holds an artifact record at `root` — proving the record
+/// lands before the operator fact (design D4).
+struct RecordOrderStore<'a> {
+    root: &'a Path,
+    inner: MemoryCache,
+    record_existed_first: Mutex<Option<bool>>,
+}
+
+impl<'a> RecordOrderStore<'a> {
+    fn new(root: &'a Path) -> RecordOrderStore<'a> {
+        RecordOrderStore {
+            root,
+            inner: MemoryCache::new(),
+            record_existed_first: Mutex::new(None),
+        }
+    }
+
+    fn record_existed_first(&self) -> Option<bool> {
+        *self.record_existed_first.lock().unwrap()
+    }
+}
+
+impl Cache for RecordOrderStore<'_> {
+    fn get(&self, key: &str) -> Option<Record> {
+        self.inner.get(key)
+    }
+
+    fn put(&self, key: &str, record: &Record) -> CacheWrite {
+        self.inner.put(key, record)
+    }
+}
+
+impl IndexStore for RecordOrderStore<'_> {
+    fn read_fact(&self, key: &str) -> Option<Result<String, String>> {
+        self.inner.read_fact(key)
+    }
+
+    fn write_fact(&self, key: &str, text: &str) -> CacheWrite {
+        if key.ends_with("/operator") {
+            *self.record_existed_first.lock().unwrap() =
+                Some(!library::ArtifactStore::read(self.root).is_empty());
+        }
+        self.inner.write_fact(key, text)
+    }
+}
+
+/// design D4: inside a library, the admission's item and record are
+/// written before `remember`'s operator fact, so the library holds the
+/// decision first.
+#[test]
+fn an_interactive_supplied_rename_in_a_library_writes_the_operator_fact_after_the_record() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"task-g1 write-order bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g1 write-order bytes"),
+        pdf_with_no_identifier(),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/g1-write-order",
+        record_by("Smith", 2024, "10.1000/g1-write-order"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = RecordOrderStore::new(&root);
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/g1-write-order".to_string())]);
+
+    let _ = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    assert_eq!(
+        index.record_existed_first(),
+        Some(true),
+        "the library's record must be written before the operator fact"
     );
 }
 
@@ -5523,8 +5787,8 @@ fn skipping_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
         },
     );
     let fixture = SupplyFixture::new(documents);
-    let already_held = record_by("Roe", 2019, "10.1000/d7-already-held");
-    let _ = fixture.index.put(&hash, &already_held);
+    let already_held = Identifier::Doi(doi("10.1000/d7-already-held"));
+    let _ = fixture.index.put_extracted(&hash, &already_held);
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/d7-wrong-candidate",
         record_by("Doe", 2023, "10.1000/d7-wrong-candidate"),
@@ -5562,10 +5826,11 @@ fn skipping_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
         other => panic!("a move that was on offer and then abandoned is declined: got {other:?}"),
     }
     assert_eq!(
-        fixture.index.get(&hash),
-        Some(already_held),
-        "the record the file already carried must be left exactly as it was"
+        fixture.index.entry(&hash).extracted,
+        Fact::Held(already_held),
+        "the identifier the file already carried must be left exactly as it was"
     );
+    assert_eq!(fixture.index.entry(&hash).operator, Fact::Absent);
 }
 
 // ---------------------------------------------------------------------
@@ -5733,7 +5998,7 @@ fn skipping_a_conflict_that_could_have_been_overridden_writes_nothing() {
         "got {events:?}"
     );
     assert_eq!(
-        index.get(&hash),
+        index.entry(&hash).answer(),
         None,
         "a conflict the operator declined to override must not be remembered"
     );
@@ -5842,7 +6107,9 @@ fn a_supplied_identifier_resolving_into_a_taken_target_reports_and_reasks() {
         "the file's own, undisturbed situation is what a plain skip reports: got {events:?}"
     );
     assert_eq!(
-        index.get(&hash_for("d1-transition-target-taken")),
+        index
+            .entry(&hash_for("d1-transition-target-taken"))
+            .answer(),
         None,
         "a candidate that led to a taken target is never remembered"
     );
@@ -6097,8 +6364,8 @@ fn quitting_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
         },
     );
     let fixture = SupplyFixture::new(documents);
-    let already_held = record_by("Roe", 2019, "10.1000/d7-quit-already-held");
-    let _ = fixture.index.put(&hash, &already_held);
+    let already_held = Identifier::Doi(doi("10.1000/d7-quit-already-held"));
+    let _ = fixture.index.put_extracted(&hash, &already_held);
     let crossref = KeyedSource::new(SourceName::Crossref).answering(
         "doi:10.1000/d7-quit-candidate",
         record_by("Doe", 2023, "10.1000/d7-quit-candidate"),
@@ -6117,10 +6384,11 @@ fn quitting_after_a_supplied_identifier_leaves_the_content_index_as_it_was() {
     .unwrap();
 
     assert_eq!(
-        fixture.index.get(&hash),
-        Some(already_held),
-        "the record the file already carried must be left exactly as it was"
+        fixture.index.entry(&hash).extracted,
+        Fact::Held(already_held),
+        "the identifier the file already carried must be left exactly as it was"
     );
+    assert_eq!(fixture.index.entry(&hash).operator, Fact::Absent);
 }
 
 // ---------------------------------------------------------------------
@@ -6297,6 +6565,18 @@ impl borax_sources::cache::Cache for WriteFailingCache {
     }
 }
 
+impl borax_sources::store::IndexStore for WriteFailingCache {
+    fn read_fact(&self, _key: &str) -> Option<Result<String, String>> {
+        None
+    }
+
+    fn write_fact(&self, _key: &str, _text: &str) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+}
+
 #[test]
 fn a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_next_time() {
     let path = PathBuf::from("/lib/paper.pdf");
@@ -6341,8 +6621,8 @@ fn a_content_index_write_that_fails_leaves_the_rename_standing_and_asks_again_ne
         "the rename must stand even though the index write failed: got {events:?}"
     );
     assert_eq!(
-        index.get(&hash),
-        None,
+        index.entry(&hash).operator,
+        Fact::Absent,
         "the write is not kept — this is the failure being modelled"
     );
 
@@ -6614,9 +6894,11 @@ fn a_resolved_candidate_that_led_nowhere_leaves_the_files_own_record_to_cite() {
         "the discarded candidate must be cited nowhere: got {events:?}"
     );
     assert_eq!(
-        index.get(&hash_for("resolved-candidate-discarded")),
-        Some(record_by("Smith", 2024, "10.1000/the-files-own")),
-        "the file keeps the record its own resolution wrote, not the candidate's"
+        index
+            .entry(&hash_for("resolved-candidate-discarded"))
+            .extracted,
+        Fact::Held(Identifier::Doi(doi("10.1000/the-files-own"))),
+        "the file keeps the identifier its own resolution wrote, not the candidate's"
     );
 }
 
@@ -7184,6 +7466,7 @@ fn lib_hash_entry(seed: &str, run: &str) -> HashEntry {
         timestamp: "2026-01-01T00:00:00Z".to_string(),
         tool_version: "0.6.0-test".to_string(),
         item: None,
+        evidence: None,
     }
 }
 
@@ -10606,6 +10889,7 @@ fn hash_entry_for(hash: ContentHash, run: &str) -> HashEntry {
         timestamp: "2026-01-01T00:00:00Z".to_string(),
         tool_version: "0.6.0-test".to_string(),
         item: None,
+        evidence: None,
     }
 }
 
@@ -12456,8 +12740,12 @@ fn a_content_index_answer_at_a_recorded_path_with_changed_bytes_is_gated_on_extr
         pdf_with_embedded_doi("10.1000/task-g7-index-gate"),
     );
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(&hash, &record_by("Cached", 2020, "10.1000/task-g7-cached"));
-    let sources: Vec<&dyn Source> = Vec::new();
+    let _ = index.put_extracted(&hash, &Identifier::Doi(doi("10.1000/task-g7-cached")));
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Cached", 2020, "10.1000/task-g7-cached")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
         documents: &documents,
@@ -12508,11 +12796,12 @@ fn an_untracked_file_answered_by_the_content_index_is_not_opened_for_the_gate() 
         },
     );
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(
-        &hash,
-        &record_by("Cached", 2020, "10.1000/task-g7-untracked"),
+    let _ = index.put_extracted(&hash, &Identifier::Doi(doi("10.1000/task-g7-untracked")));
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Cached", 2020, "10.1000/task-g7-untracked")),
     );
-    let sources: Vec<&dyn Source> = Vec::new();
+    let sources: Vec<&dyn Source> = vec![&crossref];
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
@@ -13023,7 +13312,7 @@ fn a_reidentified_restored_version_gains_an_entry_under_the_new_item() {
 /// design D6: re-identifying the newest version moves the link and
 /// appends nothing.
 #[test]
-fn a_reidentified_newest_version_moves_the_link_and_appends_nothing() {
+fn a_reidentified_newest_version_moves_the_link_and_records_the_supplied_identifier() {
     let library = real_library();
     let root = library.path().to_path_buf();
     let path = write_real_file(&root, "original.pdf", b"bytes a");
@@ -13075,7 +13364,19 @@ fn a_reidentified_newest_version_moves_the_link_and_appends_nothing() {
         .by_id(&lib_artifact_id(G7_UUID_A))
         .unwrap()
         .clone();
-    assert_eq!(after.history, vec![entry_a], "got {:?}", after.history);
+    assert_eq!(after.history.len(), 2, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(after.history[1].hash, entry_a.hash);
+    assert_eq!(
+        after.history[1].evidence,
+        Some(IdentificationEvidence {
+            identifier: Identifier::Doi(doi("10.1000/task-g7-reidentify-newest")),
+            origin: EvidenceOrigin::Supplied,
+        }),
+        "the operator's supplied identifier must be recorded, got {:?}",
+        after.history
+    );
+    assert_eq!(after.item, after.history[1].item);
 }
 
 /// design D5: an interactive Keep of a replacement reports it pending
@@ -17170,6 +17471,7 @@ fn seed_tracked_file(root: &Path, relative: &str, hash: ContentHash, record: Rec
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             tool_version: "0.6.0-test".to_string(),
             item: None,
+            evidence: None,
         }],
     };
     let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
@@ -17199,11 +17501,11 @@ fn resolve_reports_the_librarys_corrected_item_over_a_stale_index_entry() {
     corrected.title = Some("REVIEW CORRECTION: Klykov et al.".to_string());
     seed_tracked_file(&root, "klykov.pdf", hash.clone(), corrected.clone());
 
-    let stale = record_by("Klykov", 2020, "10.1000/klykov");
+    let stale = Identifier::Doi(doi("10.1000/klykov"));
     let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
     let sources: Vec<&dyn Source> = Vec::new();
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(&hash, &stale);
+    let _ = index.put_extracted(&hash, &stale);
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
@@ -17253,8 +17555,8 @@ fn resolve_reports_the_librarys_corrected_item_over_a_stale_index_entry() {
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
     assert_eq!(
-        index.get(&hash),
-        Some(stale),
+        index.entry(&hash).extracted,
+        Fact::Held(stale),
         "a library answer must leave the content index exactly as it was (design D6)"
     );
 }
@@ -17319,7 +17621,7 @@ fn resolve_no_cache_still_reads_the_library_and_writes_nothing_to_the_index() {
         other => panic!("expected Event::Resolved, got {other:?}"),
     }
     assert_eq!(
-        index.get(&hash),
+        index.entry(&hash).answer(),
         None,
         "nothing must be written to the index"
     );
@@ -17335,11 +17637,13 @@ fn resolve_reports_untracked_for_an_unrecorded_file_inside_a_library() {
     let root = library.path().to_path_buf();
     let path = write_real_file(&root, "unrecorded.pdf", b"unrecorded bytes");
     let hash = hash_bytes(b"unrecorded bytes");
+    let cached_identifier = Identifier::Doi(doi("10.1000/unrecorded"));
     let cached_record = record_by("Doe", 2023, "10.1000/unrecorded");
     let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
-    let sources: Vec<&dyn Source> = Vec::new();
+    let crossref = fake_source(SourceName::Crossref, Ok(cached_record));
+    let sources: Vec<&dyn Source> = vec![&crossref];
     let index = ContentIndex::new(MemoryCache::new());
-    let _ = index.put(&hash, &cached_record);
+    let _ = index.put_extracted(&hash, &cached_identifier);
     let filesystem = FakeFilesystem::new();
     let bib_files = FakeBibFiles::new();
     let adapters = Adapters {
@@ -17367,7 +17671,12 @@ fn resolve_reports_untracked_for_an_unrecorded_file_inside_a_library() {
         .find(|event| matches!(event, Event::Resolved { .. }))
     {
         Some(Event::Resolved { sections, .. }) => {
-            assert_eq!(sections.record_retrieval, Some(RetrievedFrom::ContentIndex));
+            assert_eq!(
+                sections.record_retrieval,
+                Some(RetrievedFrom::Network {
+                    service: "crossref".to_string()
+                })
+            );
             assert_eq!(library_of(sections), Some(LibraryAnswer::Untracked));
         }
         other => panic!("expected Event::Resolved, got {other:?}"),
@@ -17710,6 +18019,7 @@ fn resolve_answers_restored_bytes_from_the_item_they_were_accepted_under() {
         timestamp: "2026-01-01T00:00:00Z".to_string(),
         tool_version: "0.6.0-test".to_string(),
         item: Some(x_item.id.clone()),
+        evidence: None,
     };
     let entry_y = HashEntry {
         hash: hash_bytes(b"bytes y"),
@@ -17717,6 +18027,7 @@ fn resolve_answers_restored_bytes_from_the_item_they_were_accepted_under() {
         timestamp: "2026-01-02T00:00:00Z".to_string(),
         tool_version: "0.6.0-test".to_string(),
         item: Some(y_item.id.clone()),
+        evidence: None,
     };
     let artifact = ArtifactRecord {
         id: ArtifactId::from_uuid(uuid::Uuid::now_v7()),
@@ -17811,6 +18122,7 @@ fn seed_artifact_record(root: &Path, relative: &str, hash: ContentHash, item: Op
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             tool_version: "0.6.0-test".to_string(),
             item: None,
+            evidence: None,
         }],
     };
     let records = root.join(STATE_DIR).join(ARTIFACT_STORE);
@@ -18339,7 +18651,7 @@ fn interactive_tracked_file_offers_the_move_question_and_writes_nothing_to_the_i
         "the tracked file must still move"
     );
     assert_eq!(
-        index.get(&hash),
+        index.entry(&hash).answer(),
         None,
         "a library answer must write nothing to the content index"
     );
@@ -19492,7 +19804,7 @@ fn tracked_file_already_named_reports_already_named_and_writes_nothing() {
             .any(|event| matches!(event, Event::AlreadyNamed { path: p } if *p == path)),
         "got {events:?}"
     );
-    assert_eq!(index.get(&hash), None);
+    assert_eq!(index.entry(&hash).answer(), None);
     assert!(filesystem.renames().is_empty());
 }
 
@@ -20884,7 +21196,7 @@ fn a_rejected_candidate_is_never_written_to_the_content_index() {
         "a candidate the operator skipped must never reach the content index"
     );
     assert_eq!(
-        index.get(&hash),
+        index.entry(&hash).answer(),
         None,
         "a candidate the operator skipped must leave the content index unchanged"
     );
@@ -20941,14 +21253,20 @@ fn a_rejected_candidate_is_never_written_to_the_content_index() {
     .unwrap();
 
     assert_eq!(
-        index_b.get(&hash_b),
-        Some(record_b),
-        "the accepted record must be written under the file's hash"
+        index_b.entry(&hash_b).operator,
+        Fact::Held(IdentificationEvidence {
+            identifier: Identifier::Doi(doi("10.1039/rejected-content-index-replaced-b")),
+            origin: EvidenceOrigin::Supplied,
+        }),
+        "the accepted identifier must be written under the file's hash"
     );
     assert_ne!(
-        index_b.get(&hash_b),
-        Some(record_a),
-        "the rejected candidate's record must never reach the content index"
+        index_b.entry(&hash_b).operator,
+        Fact::Held(IdentificationEvidence {
+            identifier: Identifier::Doi(doi("10.1039/rejected-content-index-replaced-a")),
+            origin: EvidenceOrigin::Supplied,
+        }),
+        "the rejected candidate's identifier must never reach the content index"
     );
 }
 
@@ -21648,6 +21966,230 @@ fn an_applying_rename_into_a_library_with_an_identity_leaves_it_byte_identical()
     .unwrap();
 
     assert_eq!(fs::read(library::identity_file(&root)).unwrap(), before);
+}
+
+#[test]
+fn an_applying_rename_records_the_extracted_identifier_on_the_new_entry() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"task-g1 extracted bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g1 extracted bytes"),
+        pdf_with_embedded_doi("10.1000/g1-apply-extracted"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Extracted", 2024, "10.1000/g1-apply-extracted")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+
+    events_for(
+        &Command::rename(vec![path.clone()], true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let records = library::ArtifactStore::read(&root);
+    assert_eq!(records.len(), 1, "got {records:?}");
+    let record = records.iter().next().unwrap();
+    assert_eq!(
+        record.history[0].evidence,
+        Some(IdentificationEvidence {
+            identifier: Identifier::Doi(doi("10.1000/g1-apply-extracted")),
+            origin: EvidenceOrigin::Extracted,
+        }),
+        "got {:?}",
+        record.history
+    );
+}
+
+#[test]
+fn an_interactive_rename_from_a_supplied_identifier_records_it_as_supplied() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"task-g1 supplied bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g1 supplied bytes"),
+        pdf_with_no_identifier(),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/g1-interactive-supplied",
+        record_by("Supplied", 2024, "10.1000/g1-interactive-supplied"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/g1-interactive-supplied".to_string())]);
+
+    let _ = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let records = library::ArtifactStore::read(&root);
+    assert_eq!(records.len(), 1, "got {records:?}");
+    let record = records.iter().next().unwrap();
+    assert_eq!(
+        record.history[0].evidence,
+        Some(IdentificationEvidence {
+            identifier: Identifier::Doi(doi("10.1000/g1-interactive-supplied")),
+            origin: EvidenceOrigin::Supplied,
+        }),
+        "got {:?}",
+        record.history
+    );
+}
+
+#[test]
+fn an_interactive_rename_over_a_conflict_records_it_as_overridden() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"task-g1 override bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g1 override bytes"),
+        pdf_with_embedded_doi("10.1000/g1-interactive-override")
+            .with_title("Old Title Extracted from the PDF"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/g1-interactive-override",
+        record_by_with_title(
+            "Smith",
+            2024,
+            "10.1000/g1-interactive-override",
+            "A Completely Different Title About Something Else",
+        ),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Override]);
+
+    let _ = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let records = library::ArtifactStore::read(&root);
+    assert_eq!(records.len(), 1, "got {records:?}");
+    let record = records.iter().next().unwrap();
+    assert_eq!(
+        record.history[0].evidence,
+        Some(IdentificationEvidence {
+            identifier: Identifier::Doi(doi("10.1000/g1-interactive-override")),
+            origin: EvidenceOrigin::Overridden,
+        }),
+        "got {:?}",
+        record.history
+    );
+}
+
+/// The operator supplies the identical identifier twice in a row — the
+/// second submission replaces the first, as
+/// `a_candidate_replaced_by_another_is_rejected_with_its_record` shows
+/// for two different candidates — and the single rename that follows
+/// must append exactly one entry, not one per submission.
+#[test]
+fn supplying_the_same_identifier_twice_for_a_tracked_file_appends_one_entry() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let path = write_real_file(&root, "original.pdf", b"task-g1 supply-twice bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_bytes(b"task-g1 supply-twice bytes"),
+        pdf_with_no_identifier(),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/g1-supply-twice",
+        record_by("Smith", 2024, "10.1000/g1-supply-twice"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Supply, Answer::Rename])
+        .with_texts(vec![
+            Some("10.1000/g1-supply-twice".to_string()),
+            Some("10.1000/g1-supply-twice".to_string()),
+        ]);
+
+    let _ = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let records = library::ArtifactStore::read(&root);
+    assert_eq!(records.len(), 1, "got {records:?}");
+    let record = records.iter().next().unwrap();
+    assert_eq!(record.history.len(), 1, "got {:?}", record.history);
+    assert_eq!(
+        record.history[0].evidence,
+        Some(IdentificationEvidence {
+            identifier: Identifier::Doi(doi("10.1000/g1-supply-twice")),
+            origin: EvidenceOrigin::Supplied,
+        }),
+        "got {:?}",
+        record.history
+    );
 }
 
 #[test]

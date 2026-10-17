@@ -28,7 +28,8 @@ use borax::library::{
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
 use borax_core::library::{
-    ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, LibraryId, LibraryIdentity, RunId,
+    ArtifactId, ArtifactRecord, EvidenceOrigin, HashEntry, IdentificationEvidence, Item, ItemId,
+    LibraryId, LibraryIdentity, RunId,
 };
 use borax_core::record::{EntryType, Record};
 use tempfile::tempdir;
@@ -105,6 +106,16 @@ fn hash_entry(seed: &str, run: &str) -> HashEntry {
         timestamp: "2026-01-01T00:00:00Z".to_string(),
         tool_version: "0.6.0-test".to_string(),
         item: None,
+        evidence: None,
+    }
+}
+
+/// `IdentificationEvidence { identifier, origin: Supplied }`, tasks.md's
+/// `s(x)` shorthand.
+fn s(identifier: Identifier) -> IdentificationEvidence {
+    IdentificationEvidence {
+        identifier,
+        origin: EvidenceOrigin::Supplied,
     }
 }
 
@@ -1319,6 +1330,58 @@ fn validate_reports_a_record_whose_entry_item_is_not_a_canonical_uuid_as_unreada
         matches!(result.findings[0].1, Finding::Unreadable { .. }),
         "a record whose entry item is not a canonical uuid does not parse, and is \
          reported as any unparseable record is: got {:?}",
+        result.findings
+    );
+}
+
+#[test]
+fn validate_reports_no_finding_for_entries_with_and_without_evidence() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut with_evidence = hash_entry("a", "run-1");
+    with_evidence.evidence = Some(s(doi_identifier("10.1000/x")));
+    let without_evidence = hash_entry("b", "run-2");
+    let record = artifact_record(
+        artifact_id(UUID_A),
+        None,
+        "a.pdf",
+        vec![with_evidence, without_evidence],
+    );
+    write_artifact_record(root, &record);
+
+    let result = validate(root);
+
+    assert!(result.findings.is_empty(), "got {:?}", result.findings);
+}
+
+#[test]
+fn validate_reports_a_record_with_an_unknown_origin_as_unreadable() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let text = format!(
+        "id = \"{UUID_A}\"\n\
+         path = \"a.pdf\"\n\
+         size = 1\n\
+         modified_millis = 0\n\n\
+         [[history]]\n\
+         hash = \"{}\"\n\
+         run = \"run-1\"\n\
+         timestamp = \"t1\"\n\
+         tool_version = \"v1\"\n\
+         identifier = \"doi:10.1000/x\"\n\
+         origin = \"accepted\"\n",
+        hash("a"),
+    );
+    let records_dir = root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records_dir).unwrap();
+    fs::write(records_dir.join(format!("{UUID_A}.toml")), &text).unwrap();
+
+    let result = validate(root);
+
+    assert_eq!(result.findings.len(), 1, "got {:?}", result.findings);
+    assert!(
+        matches!(result.findings[0].1, Finding::Unreadable { .. }),
+        "a record whose entry carries an unknown origin does not parse: got {:?}",
         result.findings
     );
 }
@@ -4054,6 +4117,81 @@ fn accept_of_a_change_the_identifier_accepted_reports_it_extracted() {
 }
 
 #[test]
+fn reconcile_accepting_a_change_on_its_extracted_identifier_records_it_as_extracted() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"replacement bytes");
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    write_item(root, "item.toml", &item_with_doi(item.clone(), "10.1000/x"));
+    write_artifact_record(
+        root,
+        &artifact_record(
+            id.clone(),
+            Some(item),
+            "paper.pdf",
+            vec![hash_entry("original bytes", "run-0")],
+        ),
+    );
+
+    let identifier = doi_identifier("10.1000/x");
+    let mut answers = BTreeMap::new();
+    answers.insert(
+        path.clone(),
+        Extraction::Found {
+            identifier: identifier.to_string(),
+            tier: "text-layer".to_string(),
+        },
+    );
+    let extractor = Extractor::with(answers);
+    let accept = vec![path];
+    let _ = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(
+        after.history.last().unwrap().evidence,
+        Some(IdentificationEvidence {
+            identifier,
+            origin: EvidenceOrigin::Extracted,
+        }),
+        "an accepted change on its extracted identifier must record it as extracted"
+    );
+}
+
+#[test]
+fn reconcile_accepting_a_named_path_records_no_evidence() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"replacement bytes");
+    let id = artifact_id(UUID_A);
+    let item = item_id(UUID_B);
+    let record = artifact_record(
+        id.clone(),
+        Some(item),
+        "paper.pdf",
+        vec![hash_entry("original bytes", "run-0")],
+    );
+    write_artifact_record(root, &record);
+
+    let extractor = Extractor::default();
+    let accept = vec![path];
+    let _ = reconcile(
+        root,
+        &reconciling(false, "run-1", &accept, &|p| extractor.extract(p)),
+    );
+
+    let after = ArtifactStore::read(root).by_id(&id).unwrap().clone();
+    assert_eq!(
+        after.history.last().unwrap().evidence,
+        None,
+        "accepting a named path accepts bytes as the artifact, not an identifier"
+    );
+}
+
+#[test]
 fn accept_of_a_confirmed_path_reports_nothing_and_writes_nothing() {
     let dir = tempdir().unwrap();
     let root = dir.path();
@@ -4508,6 +4646,7 @@ fn admit_mints_an_item_and_an_artifact_record_for_a_new_file() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -4567,6 +4706,7 @@ fn admit_reuses_the_item_the_library_already_holds_for_the_records_identifier() 
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -4606,6 +4746,7 @@ fn admit_gives_two_files_with_no_identifier_two_different_items() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -4625,6 +4766,7 @@ fn admit_gives_two_files_with_no_identifier_two_different_items() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -4678,6 +4820,7 @@ fn admit_keeps_the_held_records_item_link_over_three_ordinary_reruns() {
                 run: RunId::new(format!("run-{run}")),
                 timestamp: TIMESTAMP,
                 tool_version: TOOL_VERSION,
+                evidence: None,
             },
             &store_write,
         )
@@ -4744,6 +4887,7 @@ fn admit_relinks_to_the_supplied_records_item_when_reidentified() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -4796,6 +4940,7 @@ fn admit_mints_a_record_whose_entry_names_its_item() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -4842,6 +4987,7 @@ fn admit_of_bytes_already_held_appends_nothing() {
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -4896,6 +5042,7 @@ fn admit_of_the_newest_bytes_on_a_rerun_appends_nothing() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -4909,7 +5056,65 @@ fn admit_of_the_newest_bytes_on_a_rerun_appends_nothing() {
 }
 
 #[test]
-fn admit_reidentifying_the_newest_bytes_moves_the_link_and_appends_nothing() {
+fn an_ordinary_rerun_with_extracted_evidence_appends_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x_record = record_with_doi("10.1000/ordinary-rerun-extracted");
+    let x = Item {
+        id: item_id(UUID_B),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_B}.toml"), &x);
+    let extracted_evidence = IdentificationEvidence {
+        identifier: doi_identifier("10.1000/ordinary-rerun-extracted"),
+        origin: EvidenceOrigin::Extracted,
+    };
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    entry_a.evidence = Some(extracted_evidence.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(x.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: Some(&extracted_evidence),
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after.history,
+        vec![entry_a],
+        "an ordinary rerun that merely restates the same evidence must append nothing: got {:?}",
+        after.history
+    );
+}
+
+#[test]
+fn admit_reidentifying_the_newest_bytes_moves_the_link_and_records_the_operators_evidence() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let path = write_file(root, "paper.pdf", b"bytes a");
@@ -4921,6 +5126,9 @@ fn admit_reidentifying_the_newest_bytes_moves_the_link_and_appends_nothing() {
         record: y_record.clone(),
     };
     write_item(root, &format!("y.{UUID_D}.toml"), &y);
+    let y_evidence = s(Identifier::Doi(
+        Doi::parse("10.1000/admit-transition-y").unwrap(),
+    ));
 
     let mut entry_a = hash_entry("bytes a", "run-0");
     entry_a.item = Some(x.clone());
@@ -4944,6 +5152,7 @@ fn admit_reidentifying_the_newest_bytes_moves_the_link_and_appends_nothing() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: Some(&y_evidence),
         },
         &store_write,
     )
@@ -4956,13 +5165,213 @@ fn admit_reidentifying_the_newest_bytes_moves_the_link_and_appends_nothing() {
         .by_id(&artifact_id(UUID_A))
         .unwrap()
         .clone();
+    let appended = HashEntry {
+        hash: hash_a,
+        run: RunId::new("run-1"),
+        timestamp: TIMESTAMP.to_string(),
+        tool_version: TOOL_VERSION.to_string(),
+        item: Some(y.id.clone()),
+        evidence: Some(y_evidence),
+    };
     assert_eq!(
         after.history,
-        vec![entry_a],
-        "no entry must be appended, got {:?}",
+        vec![entry_a, appended],
+        "the operator's evidence must be appended as a new entry, got {:?}",
         after.history
     );
     assert_eq!(after.item, Some(y.id));
+}
+
+#[test]
+fn admit_writes_the_evidence_it_is_given_on_a_minted_records_entry() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = record_with_doi("10.1000/admit-mint-evidence");
+    let hash = hash("paper bytes");
+    let evidence = IdentificationEvidence {
+        identifier: doi_identifier("10.1000/admit-mint-evidence"),
+        origin: EvidenceOrigin::Extracted,
+    };
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: Some("smith2024"),
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: Some(&evidence),
+        },
+        &store_write,
+    )
+    .expect("admission of a plain new file must succeed");
+
+    let saved = ArtifactStore::read(root)
+        .by_id(&admitted.artifact)
+        .expect("the minted artifact record must be found")
+        .clone();
+    assert_eq!(saved.history[0].evidence, Some(evidence));
+}
+
+#[test]
+fn admit_with_no_evidence_writes_an_entry_with_neither_key() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"paper bytes");
+    let record = record_with_doi("10.1000/admit-no-evidence");
+    let hash = hash("paper bytes");
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: Some("no-evidence"),
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: None,
+        },
+        &store_write,
+    )
+    .expect("admission must succeed");
+
+    let file = root
+        .join(STATE_DIR)
+        .join(ARTIFACT_STORE)
+        .join(format!("{}.toml", admitted.artifact));
+    let text = fs::read_to_string(&file).unwrap();
+    let history_start = text.find("[[history]]").expect("a history table");
+    let history_text = &text[history_start..];
+    assert!(
+        !history_text.contains("identifier") && !history_text.contains("origin"),
+        "an admission with no evidence must write neither key: {text}"
+    );
+}
+
+#[test]
+fn admit_reidentifying_the_newest_bytes_with_the_same_evidence_appends_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let y_record = record_with_doi("10.1000/admit-same-evidence-y");
+    let y = Item {
+        id: item_id(UUID_D),
+        record: y_record.clone(),
+    };
+    write_item(root, &format!("y.{UUID_D}.toml"), &y);
+    let y_evidence = s(doi_identifier("10.1000/admit-same-evidence-y"));
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(y.id.clone());
+    entry_a.evidence = Some(y_evidence.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &y_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: Some(&y_evidence),
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        after.history,
+        vec![entry_a],
+        "the same evidence on the newest bytes must append nothing: got {:?}",
+        after.history
+    );
+}
+
+#[test]
+fn admit_reidentifying_the_newest_bytes_as_their_own_item_with_new_operator_evidence_appends_one_entry()
+ {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x_record = record_with_doi("10.1000/admit-new-evidence-x");
+    let x = Item {
+        id: item_id(UUID_C),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_C}.toml"), &x);
+    let x1_evidence = s(doi_identifier("10.1000/admit-new-evidence-x1"));
+    let x2_evidence = s(doi_identifier("10.1000/admit-new-evidence-x2"));
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    entry_a.evidence = Some(x1_evidence);
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(x.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: Some(&x2_evidence),
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.item, x.id);
+    assert_eq!(
+        admitted.relinked_from, None,
+        "the item does not change, only the operator's identifier does"
+    );
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 2, "got {:?}", after.history);
+    assert_eq!(after.history[1].hash, hash_a);
+    assert_eq!(after.history[1].item, Some(x.id));
+    assert_eq!(after.history[1].evidence, Some(x2_evidence));
 }
 
 #[test]
@@ -5004,6 +5413,7 @@ fn admit_reidentifying_restored_bytes_appends_an_entry_under_the_new_item() {
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5055,6 +5465,7 @@ fn admit_reidentifying_the_newest_bytes_as_the_item_they_already_answer_with_app
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5109,6 +5520,7 @@ fn admit_reidentifying_restored_bytes_as_the_item_they_already_answer_with_appen
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5161,6 +5573,7 @@ fn admit_captures_the_link_as_read_before_assigning_the_new_one() {
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5179,6 +5592,69 @@ fn admit_captures_the_link_as_read_before_assigning_the_new_one() {
         vec![entry_a, entry_b, expected_new],
         "no restatement of b: its own entry already names y, the link as read"
     );
+}
+
+#[test]
+fn admit_writes_no_evidence_on_a_restatement() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes b");
+    let hash_b = hash("bytes b");
+    let x_record = record_with_doi("10.1000/admit-restatement-x");
+    let x = Item {
+        id: item_id(UUID_B),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_B}.toml"), &x);
+    let y = item_id(UUID_C);
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(y.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(x.id.clone()),
+        "paper.pdf",
+        vec![entry_a.clone()],
+    );
+    write_artifact_record(root, &held);
+    let evidence = s(doi_identifier("10.1000/admit-restatement-x"));
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_b,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: Some(&evidence),
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(
+        after.history[1].hash, entry_a.hash,
+        "the restatement names a's bytes"
+    );
+    assert_eq!(after.history[1].item, Some(x.id.clone()));
+    assert_eq!(
+        after.history[1].evidence, None,
+        "the restatement carries no evidence: it keeps the earlier entry's own"
+    );
+    assert_eq!(after.history[2].hash, hash_b);
+    assert_eq!(after.history[2].item, Some(x.id));
+    assert_eq!(after.history[2].evidence, Some(evidence));
 }
 
 #[test]
@@ -5226,6 +5702,7 @@ fn admit_of_accepted_changed_bytes_whose_record_write_fails_leaves_the_record_un
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &write,
     );
@@ -5269,6 +5746,7 @@ fn admit_of_accepted_changed_bytes_appends_an_entry_naming_the_linked_item() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5280,6 +5758,54 @@ fn admit_of_accepted_changed_bytes_appends_an_entry_naming_the_linked_item() {
         .clone();
     assert_eq!(after.history.len(), 2, "got {:?}", after.history);
     assert_eq!(after.history[1].item, Some(item.id));
+}
+
+#[test]
+fn admit_writes_the_evidence_it_is_given_on_an_appended_entry() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes b");
+    let hash_b = hash("bytes b");
+    let item = Item {
+        id: item_id(UUID_A),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, &format!("item.{UUID_A}.toml"), &item);
+    let held = artifact_record(
+        artifact_id(UUID_B),
+        Some(item.id.clone()),
+        "paper.pdf",
+        vec![entry_naming(hash_entry("bytes a", "run-0"), &item.id)],
+    );
+    write_artifact_record(root, &held);
+    let evidence = IdentificationEvidence {
+        identifier: doi_identifier("10.1000/admit-append-evidence"),
+        origin: EvidenceOrigin::Extracted,
+    };
+
+    let _ = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &item.record,
+            hash: &hash_b,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: Some(&evidence),
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_B))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history[1].evidence, Some(evidence));
 }
 
 #[test]
@@ -5313,6 +5839,7 @@ fn learn_takes_in_no_entry_for_bytes_already_held() {
         run: RunId::new("run-1"),
         timestamp: TIMESTAMP,
         tool_version: TOOL_VERSION,
+        evidence: None,
     };
     let admitted = Admitted {
         artifact: held.id.clone(),
@@ -5361,6 +5888,7 @@ fn foresee_takes_in_no_entry_for_bytes_already_held() {
         run: RunId::new("run-1"),
         timestamp: TIMESTAMP,
         tool_version: TOOL_VERSION,
+        evidence: None,
     };
     let admitted = stores
         .foresee(&admitting)
@@ -5406,6 +5934,7 @@ fn admit_giving_a_record_with_no_link_an_item_appends_an_entry_under_it() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5464,6 +5993,7 @@ fn transition_a_reidentifying_restored_bytes_leaves_newer_bytes_with_their_item(
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5488,6 +6018,7 @@ fn transition_a_reidentifying_restored_bytes_leaves_newer_bytes_with_their_item(
             run: RunId::new("run-3"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5505,6 +6036,68 @@ fn transition_a_reidentifying_restored_bytes_leaves_newer_bytes_with_their_item(
     assert_eq!(after.item, Some(x.id.clone()));
     assert_eq!(after.item_for(&hash_a), Some(&x.id), "a: x");
     assert_eq!(after.item_for(&hash_b), Some(&y), "b: y");
+}
+
+#[test]
+fn admit_reidentifying_restored_bytes_with_evidence_still_appends_as_before() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let hash_b = hash("bytes b");
+    let x_record = record_with_doi("10.1000/admit-restored-evidence-x");
+    let x = Item {
+        id: item_id(UUID_C),
+        record: x_record.clone(),
+    };
+    write_item(root, &format!("x.{UUID_C}.toml"), &x);
+    let y = item_id(UUID_D);
+    let x_evidence = s(doi_identifier("10.1000/admit-restored-evidence-x"));
+
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.id.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.clone()),
+        "paper.pdf",
+        vec![entry_a.clone(), entry_b.clone()],
+    );
+    write_artifact_record(root, &held);
+
+    // Restore a; re-identify it as x, with the operator's evidence.
+    fs::write(&path, b"bytes a").unwrap();
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &x_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: Some(&x_evidence),
+        },
+        &store_write,
+    )
+    .unwrap();
+    assert_eq!(admitted.item, x.id);
+
+    let after = ArtifactStore::read(root)
+        .by_id(&artifact_id(UUID_A))
+        .unwrap()
+        .clone();
+    assert_eq!(after.history.len(), 3, "got {:?}", after.history);
+    assert_eq!(after.history[0], entry_a);
+    assert_eq!(after.history[1], entry_b);
+    assert_eq!(after.history[2].hash, hash_a);
+    assert_eq!(after.history[2].item, Some(x.id.clone()));
+    assert_eq!(after.history[2].evidence, Some(x_evidence));
+    assert_eq!(after.item_for(&hash_b), Some(&y), "b still answers y");
 }
 
 #[test]
@@ -5556,6 +6149,7 @@ fn transition_b_a_hand_correction_survives_an_edit_and_a_restore() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5628,6 +6222,7 @@ fn transition_c_relink_then_restore_then_re_edit() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5650,6 +6245,7 @@ fn transition_c_relink_then_restore_then_re_edit() {
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5759,6 +6355,7 @@ fn transition_d_a_correction_made_while_an_older_version_is_restored_is_credited
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5830,6 +6427,7 @@ fn transition_e_a_pre_change_record_pins_its_newest_bytes_at_its_first_acceptanc
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5852,6 +6450,7 @@ fn transition_e_a_pre_change_record_pins_its_newest_bytes_at_its_first_acceptanc
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -5883,7 +6482,7 @@ fn transition_e_a_pre_change_record_pins_its_newest_bytes_at_its_first_acceptanc
 }
 
 #[test]
-fn transition_f_relinking_the_newest_bytes_appends_nothing_until_later_bytes_restate_it() {
+fn transition_f_relinking_the_newest_bytes_records_the_operators_evidence_at_once() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let path = write_file(root, "paper.pdf", b"bytes a");
@@ -5896,6 +6495,9 @@ fn transition_f_relinking_the_newest_bytes_appends_nothing_until_later_bytes_res
         record: y_record.clone(),
     };
     write_item(root, &format!("y.{UUID_D}.toml"), &y);
+    let y_evidence = s(Identifier::Doi(
+        Doi::parse("10.1000/transition-f-y").unwrap(),
+    ));
 
     let mut entry_a = hash_entry("bytes a", "run-0");
     entry_a.item = Some(x);
@@ -5919,6 +6521,7 @@ fn transition_f_relinking_the_newest_bytes_appends_nothing_until_later_bytes_res
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: Some(&y_evidence),
         },
         &store_write,
     )
@@ -5930,10 +6533,21 @@ fn transition_f_relinking_the_newest_bytes_appends_nothing_until_later_bytes_res
         .clone();
     assert_eq!(
         after_relink.history,
-        vec![entry_a.clone()],
-        "re-identifying the newest bytes appends nothing"
+        vec![
+            entry_a.clone(),
+            HashEntry {
+                hash: hash_a,
+                run: RunId::new("run-1"),
+                timestamp: TIMESTAMP.to_string(),
+                tool_version: TOOL_VERSION.to_string(),
+                item: Some(y.id.clone()),
+                evidence: Some(y_evidence.clone()),
+            },
+        ],
+        "the operator's evidence must be recorded at once, not deferred to a restatement"
     );
     assert_eq!(after_relink.item, Some(y.id.clone()));
+    assert_eq!(after_relink.history[1].evidence, Some(y_evidence));
 
     fs::write(&path, b"bytes b").unwrap();
     let _ = admit(
@@ -5948,6 +6562,7 @@ fn transition_f_relinking_the_newest_bytes_appends_nothing_until_later_bytes_res
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -6009,6 +6624,7 @@ fn transition_g_ten_ordinary_reruns_over_a_restored_file_append_nothing() {
                 run: RunId::new(format!("run-{run}")),
                 timestamp: TIMESTAMP,
                 tool_version: TOOL_VERSION,
+                evidence: None,
             },
             &store_write,
         )
@@ -6065,6 +6681,7 @@ fn transition_h_restored_bytes_reidentified_as_the_links_own_item_are_appended()
             run: RunId::new("run-2"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &store_write,
     )
@@ -6118,6 +6735,7 @@ fn admit_writes_no_artifact_record_when_the_item_write_fails() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &write,
     );
@@ -6165,6 +6783,7 @@ fn admit_leaves_the_item_when_the_artifact_write_fails() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &write,
     );
@@ -6227,6 +6846,7 @@ fn admit_leaves_the_previous_record_untouched_when_the_write_is_interrupted() {
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &write,
     );
@@ -9283,6 +9903,7 @@ fn admit_through_a_store_writer_creates_the_identity_before_the_item_and_the_rec
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &|p, b| writer.write(p, b),
     )
@@ -9324,6 +9945,7 @@ fn admit_through_a_store_writer_whose_mint_fails_writes_nothing_and_names_the_id
             run: RunId::new("run-1"),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         },
         &|p, b| writer.write(p, b),
     )
@@ -9362,6 +9984,7 @@ fn an_admission_that_rewrites_nothing_mints_nothing() {
             run: RunId::new(run),
             timestamp: TIMESTAMP,
             tool_version: TOOL_VERSION,
+            evidence: None,
         }
     }
     let admitting = |held, run| admitting(&path, &record, &hash, held, run);

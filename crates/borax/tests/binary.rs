@@ -404,6 +404,7 @@ fn seed_tracked_binary_fixture(root: &Path, relative: &str, bytes: &[u8], title:
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             tool_version: "0.6.0-test".to_string(),
             item: None,
+            evidence: None,
         }],
     };
     let records = root.join(".borax").join("artifacts");
