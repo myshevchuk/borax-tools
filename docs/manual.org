@@ -18,6 +18,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-07 Wed] -- gated change acceptance
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-13 Tue] -- library identity
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-14 Wed] -- reconcile outside a library
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-17 Sat] -- reduced content index
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -40,17 +41,22 @@ how to install it, and a handful of examples.
      record. borax does not open the file, extract anything, ask a
      service or either cache, compare titles, or update the content
      index for that file.
-  3. *Otherwise, extract an identifier.* borax first asks the content
-     index unless you used ~--no-cache~. On a miss, the cheap passes run
-     and the first hit wins: the PDF's embedded metadata — the XMP
-     packet, then the Info dictionary — and after that the page text
-     layer, reading as many pages from the front as
-     ~extraction.page-limit~ allows. What it is looking for is a DOI or
-     an arXiv id.
+  3. *Otherwise, find an identifier.* Unless you used ~--no-cache~,
+     borax first asks the content index whether an earlier run identified
+     these bytes. The index holds the identifier and whether it was
+     extracted, supplied by you, or accepted over a title conflict. On a
+     miss, the cheap extraction passes run and the first hit wins: the
+     PDF's embedded metadata — the XMP packet, then the Info dictionary
+     — and after that the page text layer, reading as many pages from the
+     front as ~extraction.page-limit~ allows. What it is looking for is a
+     DOI or an arXiv id.
   4. *Resolve that identifier to a record.* The enabled services are
      asked in turn — Crossref, OpenAlex, arXiv — through an on-disk
-     response cache, and no faster than the pacing allows. What comes
-     back is normalized into one record model, a superset of CSL-JSON.
+     response cache, and no faster than the pacing allows. An index hit
+     also takes this step: the index does not hold the record. borax does
+     not extract from the file or compare titles again for that answer.
+     What comes back is normalized into one record model, a superset of
+     CSL-JSON.
   5. *Render a name, a citation key, or both.* The record's entry type
      chooses the template; the template renders a string; sanitization
      makes that string a legal file name on every supported platform.
@@ -73,14 +79,20 @@ how to install it, and a handful of examples.
   compared as the same path. Every history entry counts. The record's
   link decides for its newest bytes, so a link corrected by hand still
   decides. Restored older bytes resolve from the item named by the newest
-  history entry that holds them: the item they were accepted under. An
-  entry written by an earlier borax release names no item, so the
-  record's current link decides for those bytes. borax checks that link
-  before an older entry's item; a damaged link is therefore reported as
-  before, whichever version of the file is present. A pending change is
-  not in the history and resolves as unrecognised content. A
-  byte-identical copy at another path, or a file moved without ~borax
-  reconcile~, is untracked and follows the ordinary resolution path.
+  history entry that holds them: the item they were accepted under. A
+  new history entry also carries the identifier that identified those
+  bytes and an origin of ~extracted~, ~supplied~, ~overridden~, or
+  ~adopted~, or it carries neither field. An entry written by an earlier
+  borax release may name neither an item nor identification evidence. It
+  reads unchanged, and the record's current link decides for those
+  bytes when no item is present. Re-identifying the newest bytes with
+  new evidence appends an entry; an ordinary re-run appends nothing.
+  borax checks the link before an older entry's item; a damaged link is
+  therefore reported as before, whichever version of the file is
+  present. A pending change is not in the history and resolves as
+  unrecognised content. A byte-identical copy at another path, or a file
+  moved without ~borax reconcile~, is untracked and follows the ordinary
+  resolution path.
 
   The library may fail to answer because records at the path do not hold
   these bytes, several records match, the matching record's link has no
@@ -153,9 +165,9 @@ how to install it, and a handful of examples.
    #+end_src
 
    Resolves each file to a record and reports what was found, changing
-   nothing on disk beyond the caches and the run log. This is the
-   command to reach for when you want to know whether borax can identify
-   a batch at all.
+   nothing on disk beyond the response cache, the content index, and the
+   run log. This is the command to reach for when you want to know
+   whether borax can identify a batch at all.
 
    Inside a library, ~resolve~ asks the library before the content
    index. Every successful resolution reads
@@ -165,12 +177,17 @@ how to install it, and a handful of examples.
    followed by ~et al.~ for three or more. ~via~ names Crossref,
    OpenAlex, arXiv, DataCite, PubMed, and a sidecar in that order,
    leaving out any the record does not name.
-   ~<where>~ is ~the library~, ~the content index~, ~the response
-   cache~, or ~the network~. A tracked file therefore ends with ~from
+   ~<where>~ is ~the library~, ~the response cache~, or ~the network~.
+   The content index holds an identifier rather than a record, so an
+   index answer ends with the service retrieval place: ~from the
+   response cache~ or ~from the network~. A tracked file ends with ~from
    the library~. If the library cannot answer, borax appends ~; the
    library could not answer: <what>~ to the ordinary resolution or skip
    line after the fallback. ~--no-cache~ still asks the library because
    the library is authoritative state, not a cache.
+
+   If an index-held identifier reaches no record, the file is skipped as
+   ~unresolvable~. borax does not fall back to extracting the same file.
 
    A resolution skip reads ~<path>: skipped, <clause>~. Extraction
    failures say ~no identifier found; the pages read hold no text~, ~no
@@ -306,14 +323,15 @@ how to install it, and a handful of examples.
     The rule gives this file's position in the run. ~file~ names it as
     the run does: relative to where you started the run, or in full when
     it lies outside. ~identifier~ is the identifier borax looked up and
-    says whether it came from embedded metadata or the text layer. It is
-    kept on one line. For a library answer, it names the item's
-    identifier without an origin clause because nothing was looked up.
-    ~record~ names the service or services that supplied the record. It
-    adds ~from an earlier run~ when the content index answered, and
-    ~from the library~ when an item's provenance names services. If a
-    content-index record names no service, it reads ~an earlier run~. If
-    a library item names no service, it reads ~the library~.
+    says whether it came from embedded metadata or the text layer. For
+    an identifier the content index held, the line instead ends ~found
+    by an earlier run~, ~supplied in an earlier run~, or ~accepted over
+    a title conflict in an earlier run~. It is kept on one line. For a
+    library answer, it names the item's identifier without an origin
+    clause because nothing was looked up. ~record~ names the service or
+    services that supplied the record. It adds ~from the library~ when
+    an item's provenance names services. If a library item names no
+    service, it reads ~the library~.
 
     When the library could not answer, a ~library~ line states the
     problem. It follows ~record~ for a resolved file and follows the
@@ -404,8 +422,11 @@ how to install it, and a handful of examples.
     when the services were unavailable, rate-limited, or returned
     unusable data. It does not appear when every service confirmed that
     it did not hold the identifier. This choice depends only on the
-    latest attempt. The run log keeps every earlier attempt in
-    ~lookup.earlier~.
+    latest attempt. It is also offered when an inconclusive lookup of an
+    identifier from the content index failed. That retry keeps the
+    content index as the identifier's origin and retains the earlier
+    rounds. It does not compare titles or write the evidence again. The
+    run log keeps every earlier attempt in ~lookup.earlier~.
 
     *Supplying an identifier.* Choose ~Supply an identifier~ when you
     know what the file is but borax did not find the right identifier.
@@ -461,11 +482,14 @@ how to install it, and a handful of examples.
     must provide the identifier yourself.
 
     *Remembering your answer.* After you rename a file from a supplied
-    identifier, from a lookup you asked borax to retry, or by accepting a
-    title conflict, borax stores the record under the file's content hash
-    in the content index. A later interactive or batch run can use that
-    record without extraction, a service lookup, a conflict check, or
-    another question.
+    identifier or by accepting a title conflict, borax stores that
+    identifier under the file's content hash as operator evidence. Its
+    origin is ~supplied~ or ~overridden~. After a successful retry of the
+    file's own extracted identifier, it instead stores extracted
+    evidence. A retry of an identifier the index already held writes
+    nothing. The content index stores no record: a later run looks the
+    remembered identifier up through the response cache or the network,
+    without extraction or another title check.
 
     Inside a library, the applying rename also links the artifact record
     to the item for the accepted record. Supplying a different identifier
@@ -479,15 +503,16 @@ how to install it, and a handful of examples.
     produces no sidecar or master-bibliography entry for that candidate.
     The file's verdict still reports the candidate as a submission with
     ~acceptance~ ~rejected~ and includes the record it reached. It never
-    reports that candidate as the file's resolution. A record the
+    reports that candidate as the file's resolution. Evidence the
     content index already held for the file remains there.
 
     The verdict's ~content_index.write~ first reads ~not-attempted~ with
     reason ~awaiting-acceptance~. When borax makes the write, its JSONL
     stream emits a ~content-index-write~ event after ~renamed~ and any
     ~library-admission~ event. The event names the file at its path after
-    the move and reports ~written~ or ~failed~ with a message. A file
-    with no hash produces no such event.
+    the move, its hash, the identifier and origin written, and reports
+    ~written~ or ~failed~ with a message. A file with no hash produces no
+    such event.
 
     A successful write prints nothing in human output. A failed write
     prints ~<path>: the content index could not keep this answer
@@ -495,9 +520,11 @@ how to install it, and a handful of examples.
     makes the rename fail.
 
     This memory is best-effort. If the content index cannot be written,
-    or borax falls back to an in-memory cache, a later run asks again.
-    ~borax cache --clear~ removes stored answers. ~--no-cache~ bypasses
-    the read but still writes the accepted answer.
+    or borax falls back to an in-memory index, a later run asks again.
+    ~borax cache --clear~ leaves the index in place. ~--no-cache~ skips
+    reading it, but a resolved extracted identifier is still written to
+    ~extracted.json~. That write never displaces an operator's identifier,
+    which lives in a separate ~operator.json~ file.
 
     By default, an interactive run passes over a file that already
     carries its rendered name without showing its resolution, outcome,
@@ -590,7 +617,21 @@ how to install it, and a handful of examples.
      borax cache --clear
    #+end_src
 
-   Reports what the on-disk response cache holds, or empties it.
+   Reports what the on-disk response cache holds, or empties it. The
+   content index is separate and ~--clear~ leaves it in place. Old ~v1~
+   index entries under the cache directory are still counted as cache
+   files and removed by ~--clear~, but borax does not read or migrate
+   them.
+
+   On Unix, the content index is under
+   ~$XDG_DATA_HOME/borax/v2/~, or =~/.local/share/borax/v2/= when
+   ~XDG_DATA_HOME~ is unavailable. On Windows, it is under
+   =%APPDATA%\borax\v2\=, falling back to ~XDG_DATA_HOME~. Each content
+   hash has a directory under ~content/~. Its ~extracted.json~ and
+   ~operator.json~ files hold the two independent facts, and operator
+   evidence wins when both exist. If the platform provides no data
+   directory, borax keeps the index in memory for that run without a
+   warning.
 
    The four library commands below each accept
    ~--run-log~/~--no-run-log~ and ~--json~. ~--identify~ and ~--rehash~
@@ -791,6 +832,18 @@ how to install it, and a handful of examples.
    or parsed is left unchanged. The repair proceeds, and the run prints
    one warning on standard error directing you to ~borax validate~.
 
+   After this pass, ~reconcile~ restores every supplied or overridden
+   identifier recorded in the library's histories when the corresponding
+   ~operator.json~ is absent, unreadable, or different. Bytes with no
+   operator decision are left alone. The library's decision overwrites a
+   different decision made for the same bytes outside the library.
+
+   Each restoration emits a ~content-index-write~ event after the
+   per-object events and before the totals. A successful restoration is
+   silent in human output. A failure prints ~<path>: the content index
+   could not keep this answer (<message>)~, but does not fail the run.
+   Restoring the index does not alter any library file.
+
 ** borax adopt
 
    #+begin_src sh
@@ -798,18 +851,28 @@ how to install it, and a handful of examples.
    #+end_src
 
    Records orphans from facts borax already knows locally. For each
-   orphan, it hashes the file and asks the content index, the local cache
-   of records borax resolved before. When the index answers, borax writes
+   orphan, it hashes the file and asks the content index for an
+   identifier, checking operator evidence before extracted evidence. It
+   then reads the response cache in the usual service-priority order,
+   whatever ~sources~ names. When a cached response answers, borax writes
    an artifact record and links it to an existing item or creates an
-   item. It queries no service, opens no document, and moves, renames,
-   and deletes nothing.
+   item. The history entry records the identifier with origin ~adopted~.
+   Adoption writes nothing to the content index. It queries no service,
+   opens no document, and moves, renames, and deletes nothing.
 
    Every orphan gets one report. An orphan is reported as ~unindexed~
    when borax can read it, no artifact record holds its bytes, and the
-   content index holds no record for them. Human output says:
+   content index holds no evidence for them. Human output says:
 
    #+begin_example
      <path>: the content index holds no record of its bytes, so it is still an orphan
+   #+end_example
+
+   An index identifier with no matching response in the response cache
+   is ~unanswered~. Human output says:
+
+   #+begin_example
+     <path>: the content index knows its bytes as <identifier>, but no response cache holds that record, so it is still an orphan; borax resolve fetches it
    #+end_example
 
    An orphan whose bytes already occur in an artifact record's hash
@@ -821,9 +884,9 @@ how to install it, and a handful of examples.
    messages are unchanged.
 
    Running ~adopt~ again does not change records it already wrote. After
-   ~borax cache --clear~, the content index is empty, so adoption records
-   nothing. It reports each readable orphan whose bytes no artifact
-   record holds as ~unindexed~ and still succeeds.
+   ~borax cache --clear~, identification evidence survives but the
+   response cache is empty. Such an orphan is ~unanswered~ until
+   ~borax resolve~ fetches the record again. Adoption still succeeds.
 
    ~adopt~ neither reads citation sidecars nor the retired
    ~.borax/ledger.jsonl~. It refuses to run outside a library established
@@ -840,8 +903,10 @@ how to install it, and a handful of examples.
 
 ** Choosing how to record existing files
 
-   Use ~adopt~ when borax resolved the same bytes on an earlier run and
-   you want an offline operation that cannot rename anything. Use
+   Use ~adopt~ when the content index has an identifier for the same
+   bytes and the response cache still has the corresponding record. It
+   is an offline operation that cannot rename anything. If adoption
+   reports ~unanswered~, run ~resolve~ first to fetch the record. Use
    ~rename --apply~ when an orphan is unknown to the content index: it
    can extract an identifier, query services, rename the file under the
    current templates, and record it. Use ~reconcile~ when a record
@@ -978,9 +1043,10 @@ how to install it, and a handful of examples.
    - ~mailto~ :: The contact address sent to the polite pools. Setting
      it is how you get the better rate limits, and it is good manners.
    - ~network.cache~ :: Whether resolving reads and writes the on-disk
-     response cache. Turning it off also bypasses the content index, but
-     it does not bypass a library item because the library is not a
-     cache.
+     response cache. Turning it off also skips reading the content index,
+     but it does not bypass a library item because the library is not a
+     cache. A resolved extracted identifier is still written to the
+     index. Its separate file never displaces an operator's identifier.
    - ~network.concurrency~ :: How many files ~resolve~ may work on at
      once.
    - ~network.min-interval-ms~ :: The floor on the gap between two
@@ -1659,7 +1725,7 @@ how to install it, and a handful of examples.
   skipped, not renamed.
 
   The JSONL stream records the result of each decision, not the question
-  that led to it. Every event now carries ~"schema":4~. A ~resolved~
+  that led to it. Every event now carries ~"schema":5~. A ~resolved~
   event keeps ~path~, ~identifier~, and the full CSL-JSON ~record~. The
   identifier is the record's preferred identifier; the identifier borax
   looked up is in ~lookup~. The removed ~found~, ~cached~, ~source~,
@@ -1715,8 +1781,9 @@ how to install it, and a handful of examples.
 
   ~content_index~ has separate ~read~ and ~write~ steps. A read is ~hit~,
   ~miss~, ~bypassed~, ~unavailable~ with a message, or
-  ~not-attempted~. A write is ~written~, ~failed~ with a message, or
-  ~not-attempted~.
+  ~not-attempted~. A hit carries ~evidence~ with its ~identifier~ and
+  ~origin~. A write is ~written~, ~failed~ with a message, or
+  ~not-attempted~, and writes extracted evidence rather than a record.
 
   ~extraction.result~ is ~found~ with an ~identifier~ and an
   ~embedded-metadata~ or ~text-layer~ tier; ~no-text-layer~,
@@ -1771,8 +1838,9 @@ how to install it, and a handful of examples.
      "used":null,"displaced":null}
   #+end_example
 
-  ~lookup~ is ~attempted~ with the identifier, its ~extracted~ or
-  ~operator~ origin, and every service attempt in order. It is
+  ~lookup~ is ~attempted~ with the identifier, its ~extracted~,
+  ~operator~, or ~content-index~ origin, and every service attempt in
+  order. It is
   ~no-eligible-service~ when no configured service supports the
   identifier, or ~not-attempted~ when no lookup ran. Each attempt has a
   service and a structured outcome: ~found~, ~not-found~, ~unavailable~,
@@ -1787,8 +1855,9 @@ how to install it, and a handful of examples.
   lookup; the rest of ~lookup~ describes the latest round.
 
   ~record_retrieval~ says where the record came from: ~library~ with the
-  artifact and the item whose record was returned, ~content-index~,
-  ~service-cache~ with the service, or ~network~ with the service. For
+  artifact and the item whose record was returned, ~service-cache~ with
+  the service, or ~network~ with the service. The content index holds no
+  record and is never a retrieval place. For
   restored bytes, the library item is the item they were accepted under,
   not necessarily the artifact record's link. It is ~null~ when no record
   was reached.
@@ -1820,11 +1889,15 @@ how to install it, and a handful of examples.
   ~record_retrieval~ is ~null~, and its ~acceptance~ is
   ~not-applicable~. Work duplicates carry the record's evidence.
 
-  A ~content-index-write~ event reports the rename-time write for a
-  record you supplied, retried, or accepted over a conflict. It follows
-  ~renamed~ and any ~library-admission~, carries the path after the move,
-  and has a ~write~ status of ~written~ or ~failed~ with a message. It
-  changes no count and cannot make the rename fail.
+  A ~content-index-write~ event reports an evidence write made after a
+  verdict: a rename-time write for an identifier you supplied, a
+  retried extracted lookup, an answer accepted over a conflict, or a
+  restoration by ~reconcile~. It carries ~hash~ and an ~entry~ naming
+  the identifier and origin. A rename-time event follows ~renamed~ and
+  any ~library-admission~ and carries the path after the move. A
+  reconcile event follows its per-object events and precedes its totals.
+  Its ~write~ status is ~written~ or ~failed~ with a message. It changes
+  no count and cannot make the rename or reconciliation fail.
 
   ~run-started~ includes the Boolean ~interactive~; an
   interactive run also reports ~applying: true~. A declined proposal is
@@ -1836,9 +1909,9 @@ how to install it, and a handful of examples.
   identifier does not produce a second verdict. Questions are not
   events, and neither are answers. What you typed is instead carried by
   the file's verdict in ~identifier_input~. Resolution and skip evidence
-  use the schema-4 sections above.
+  use the schema-5 sections above.
 
-  These additions keep the schema at 4. ~status --identify~ emits one
+  These fields are unchanged in schema 5. ~status --identify~ emits one
   ~library-extraction~ event for each surveyed artifact as its
   extraction finishes, in survey order. Its ~path~ is library-relative
   and ~/~ separated. Its ~extraction~ object is tagged by ~kind~:
@@ -1884,16 +1957,15 @@ how to install it, and a handful of examples.
   #+end_src
 
   The corresponding ~library-condition~ and ~library-repair~ events name
-  the affected objects. These additions do not change the event schema
-  version.
+  the affected objects. These fields are unchanged in schema 5.
 
   ~library-status~ carries ~root~, optional ~id~, ~artifacts~, ~items~,
   ~records~, ~orphans~, ~nested~, and ~identifiable~.
   ~library-finding~ carries ~path~ and ~finding~, and
   ~library-validated~ carries ~root~, optional ~id~, ~findings~,
   ~orphans~, ~missing~, and ~unlinked~. The ~id~ is present only when
-  the library has a readable identity. These additions keep the event
-  schema at 4. ~library-repair~
+  the library has a readable identity. These fields are unchanged in
+  schema 5. ~library-repair~
   carries ~id~, ~path~, and ~repair~. A ~changed~ repair carries ~hash~
   and ~accepted~. The latter is tagged by ~by~: ~extracted~ carries its
   ~identifier~, while ~operator~ names acceptance through ~--accept~. A
@@ -1910,8 +1982,12 @@ how to install it, and a handful of examples.
   ~supplied~, and carries the identifier.
   Adoption emits one ~library-adoption~ event per orphan, with ~path~ and
   an ~adoption~ whose ~kind~ is ~recorded~, ~held~, ~unreadable~,
-  ~unwritten~, or ~unindexed~. A consumer that counts these events
-  should dispatch on ~adoption.kind~. The events are followed by
+  ~unwritten~, ~unindexed~, or ~unanswered~. ~recorded~ carries
+  ~retrieval~ of kind ~service-cache~ with its service. ~unanswered~
+  carries the identifier that lacked a cached response. ~unindexed~ now
+  means the content index held no evidence for the bytes. A consumer
+  that counts these events should dispatch on ~adoption.kind~. The
+  events are followed by
   ~library-adopted~ with ~root~, ~adopted~, and ~orphans~; its ~orphans~
   count equals the number of adoption events whose kind is not
   ~recorded~. The ~ledger-rebuilt~ event is gone. A ~skipped~ event may
