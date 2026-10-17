@@ -19,6 +19,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-13 Tue] -- library identity
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-14 Wed] -- reconcile outside a library
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-17 Sat] -- reduced content index
+#+AI_PASS: fact-check claude-opus-5-5 [2026-10-17 Sat] -- remaining JSONL examples moved to schema 5
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -1921,7 +1922,7 @@ how to install it, and a handful of examples.
   ~unreadable~, which carries ~message~.
 
   #+begin_src json
-    {"schema":4,"event":"library-extraction","path":"sub/a.pdf","extraction":{"kind":"found","identifier":"doi:10.1234/x","tier":"text-layer"}}
+    {"schema":5,"event":"library-extraction","path":"sub/a.pdf","extraction":{"kind":"found","identifier":"doi:10.1234/x","tier":"text-layer"}}
   #+end_src
 
   JSON fields keep their raw values, with any required escaping supplied
@@ -1942,9 +1943,9 @@ how to install it, and a handful of examples.
   separator.
 
   #+begin_src json
-    {"schema":4,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}
-    {"schema":4,"event":"library-condition","path":"gone.pdf","condition":{"kind":"missing","id":"0190c3a2-…","record":".borax/artifacts/0190c3a2-….toml"}}
-    {"schema":4,"event":"library-condition","path":"items/milner1978.0190c3a3-….toml","condition":{"kind":"unlinked","id":"0190c3a3-…"}}
+    {"schema":5,"event":"library-condition","path":"sub/new.pdf","condition":{"kind":"orphan"}}
+    {"schema":5,"event":"library-condition","path":"gone.pdf","condition":{"kind":"missing","id":"0190c3a2-…","record":".borax/artifacts/0190c3a2-….toml"}}
+    {"schema":5,"event":"library-condition","path":"items/milner1978.0190c3a3-….toml","condition":{"kind":"unlinked","id":"0190c3a3-…"}}
   #+end_src
 
   Conditions do not change a command's exit status. A script that needs
@@ -2006,7 +2007,7 @@ how to install it, and a handful of examples.
 
    #+begin_example
      {
-       "schema": 4,
+       "schema": 5,
        "event": "renamed",
        "path": "/papers/reviewed-final.pdf",
        "target": "/papers/smith2024_AwesomePaperBorax.pdf",
