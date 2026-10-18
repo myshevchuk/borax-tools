@@ -1322,3 +1322,117 @@ fn two_keeps_at_live_roots_racing_over_one_stale_reference_keep_both_and_remove_
         "both writers removed S, the second finding it already absent"
     );
 }
+
+/// What [`HookStore`] runs, once, over its inner store.
+type Hook = Box<dyn FnOnce(&MemoryCache) + Send>;
+
+/// A [`MemoryCache`] that runs `hook` once, the first time a fact is
+/// written under `trigger`, after that write lands: a second run acting
+/// between `keep`'s write of its own reference and its removal of a
+/// stale one.
+struct HookStore {
+    inner: MemoryCache,
+    trigger: String,
+    hook: Mutex<Option<Hook>>,
+}
+
+impl IndexStore for HookStore {
+    fn read_fact(&self, key: &str) -> Option<Result<String, String>> {
+        self.inner.read_fact(key)
+    }
+
+    fn write_fact(&self, key: &str, text: &str) -> CacheWrite {
+        let write = self.inner.write_fact(key, text);
+        if key == self.trigger
+            && let Some(hook) = self.hook.lock().unwrap().take()
+        {
+            hook(&self.inner);
+        }
+        write
+    }
+
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        self.inner.list_facts(prefix)
+    }
+
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        self.inner.remove_fact(key)
+    }
+}
+
+/// An index over a [`HookStore`] holding `stale`, whose hook runs once
+/// `wanted` is written.
+fn hooked(
+    hash: &ContentHash,
+    stale: &LibraryReference,
+    wanted: &LibraryReference,
+    hook: Hook,
+) -> ContentIndex<HookStore> {
+    let index = ContentIndex::new(HookStore {
+        inner: MemoryCache::new(),
+        trigger: key_of(hash, wanted),
+        hook: Mutex::new(Some(hook)),
+    });
+    let _ = index.put_reference(hash, stale);
+    index
+}
+
+/// A root found stale when the entry was listed, which holds its
+/// library again by the time `keep` would remove its reference — a
+/// remounted volume, or a copy restored meanwhile — keeps that
+/// reference: it now names a live location.
+#[test]
+fn keep_leaves_a_stale_reference_whose_root_holds_its_library_again() {
+    let live = library_with_identity(LIBRARY);
+    let (_guard, gone) = missing_root();
+    let hash = hash("keep stale root revived");
+    let stale = reference(LIBRARY, &gone, ARTIFACT, ITEM);
+    let wanted = reference(LIBRARY, live.path(), ARTIFACT, ITEM);
+    let revived = gone.clone();
+    let index = hooked(
+        &hash,
+        &stale,
+        &wanted,
+        Box::new(move |_| write_identity(&revived, LIBRARY)),
+    );
+    let libraries = Libraries::new();
+    // The run reads the stale root before the hook revives it.
+    assert!(libraries.is_stale(&gone, &library_id(LIBRARY)));
+
+    let kept = keep(&index, &hash, &wanted, &libraries).expect("a write is reported");
+
+    assert!(matches!(kept.write, CacheWrite::Written), "got {kept:?}");
+    assert!(kept.repaired_from.is_empty(), "got {kept:?}");
+    assert_eq!(index.reference(&hash, &stale), Fact::Held(stale));
+}
+
+/// A stale reference that another run rewrote — with another item —
+/// between `keep`'s listing and its removal is not the reference `keep`
+/// judged stale, and is left as that run wrote it.
+#[test]
+fn keep_leaves_a_stale_reference_another_run_rewrote_meanwhile() {
+    let live = library_with_identity(LIBRARY);
+    let (_guard, gone) = missing_root();
+    let hash = hash("keep stale rewritten");
+    let stale = reference(LIBRARY, &gone, ARTIFACT, ITEM);
+    let wanted = reference(LIBRARY, live.path(), ARTIFACT, ITEM);
+    let rewritten = reference(LIBRARY, &gone, ARTIFACT, ITEM + 1);
+    let (key, text) = (
+        key_of(&hash, &rewritten),
+        borax_core::index::reference_to_json(&rewritten).unwrap(),
+    );
+    let index = hooked(
+        &hash,
+        &stale,
+        &wanted,
+        Box::new(move |inner| {
+            let _ = inner.write_fact(&key, &text);
+        }),
+    );
+
+    let kept = keep(&index, &hash, &wanted, &Libraries::new()).expect("a write is reported");
+
+    assert!(matches!(kept.write, CacheWrite::Written), "got {kept:?}");
+    assert!(kept.repaired_from.is_empty(), "got {kept:?}");
+    assert_eq!(index.reference(&hash, &stale), Fact::Held(rewritten));
+}
