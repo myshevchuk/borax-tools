@@ -31,7 +31,6 @@ use borax_core::library::{
 };
 use borax_core::record::Record;
 use borax_core::template::slug;
-use borax_sources::source::SourceName;
 use borax_sources::store::{create_atomically, hash_file, write_atomically};
 use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, value};
 use uuid::Uuid;
@@ -42,6 +41,7 @@ use crate::event::{
     Finding, Level, LibraryAnswer, Repair, RetrievedFrom,
 };
 use crate::paths::{lexical, same_name};
+use crate::references::ReferenceRead;
 use crate::run::documents;
 
 pub use crate::config::library_root;
@@ -3251,6 +3251,11 @@ pub struct Adoptions {
     pub adoptions: Vec<(String, Adoption)>,
     /// How many orphans the library held before the run.
     pub orphans: usize,
+    /// The reference to the library the content index is owed for each
+    /// orphan the run recorded, in the order they were recorded: the
+    /// orphan as a full path, its hash, the artifact record written for
+    /// it, and the item that record answers with for its bytes.
+    pub owed: Vec<OwedReference>,
     /// The library's identity file as the run's first write found it
     /// unreadable, when it did: the fault
     /// [`identity_fault_warning`] reports. `None` for a run that
@@ -3274,50 +3279,62 @@ pub struct Adopted {
     /// The record found.
     pub record: Record,
     /// The identifier the record was found by: the one the content
-    /// index answers with for the bytes.
-    pub identifier: Identifier,
-    /// The service whose stored answer the record is.
-    pub service: SourceName,
+    /// index answers with for the bytes. `None` when no identifier
+    /// found it, as for a record a reference to another library
+    /// answered with.
+    pub identifier: Option<Identifier>,
+    /// Where the record was read: another library, or a service's
+    /// response cache.
+    pub retrieval: RetrievedFrom,
 }
 
 /// Why an adoption lookup found no record for an orphan's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unadopted {
-    /// The content index answers with no evidence for the bytes.
+    /// The content index answers with no evidence and holds no readable
+    /// reference for the bytes.
     Unindexed,
-    /// The content index answers with `identifier`, and no stored
-    /// answer holds a record for it.
-    Unanswered { identifier: Identifier },
+    /// The content index answered with nothing that led to a record:
+    /// none of its `references` answered, and either it answers with
+    /// `identifier` and no stored answer holds a record for it, or it
+    /// answers with no evidence and `identifier` is `None`.
+    Unanswered {
+        identifier: Option<Identifier>,
+        references: Vec<ReferenceRead>,
+    },
 }
 
 /// Adopt the orphans of the library rooted at `root`: record each one
 /// whose bytes `lookup` finds a record for.
 ///
 /// Each orphan ([`orphans`]) is hashed and its hash handed to
-/// `lookup`, which in a run reads the content index's evidence and the
-/// response cache. Where it finds a record, the orphan is admitted
-/// exactly as an applying run admits a file it found already named
-/// ([`admit`], with no held record and no re-identification), and its
-/// history entry carries the identifier the record was found by, with
-/// origin `adopted`: the item the library holds for one of the
+/// `lookup`, which in a run reads the content index's references and
+/// evidence and the response cache. Where it finds a record, the orphan
+/// is admitted exactly as an applying run admits a file it found
+/// already named ([`admit`], with no held record and no
+/// re-identification), and its history entry carries the identifier
+/// the record was found by, with origin `adopted`, or no evidence when
+/// no identifier found it: the item the library holds for one of the
 /// record's identifiers is linked, or one is minted from the record and
 /// written at the name `key` renders for it. The store is re-read on
 /// every admission, so a second orphan of the work a first one minted
-/// an item for links to that item. [`Adoption::Recorded`] names the
-/// service's response cache as the record's retrieval. Where `lookup`
-/// finds none, the orphan is left as it is and reported
-/// [`Adoption::Unindexed`] or [`Adoption::Unanswered`], as `lookup`
-/// says.
+/// an item for links to that item. [`Adoption::Recorded`] names where
+/// `lookup` says the record was read. Where `lookup` finds none, the
+/// orphan is left as it is and reported [`Adoption::Unindexed`] or
+/// [`Adoption::Unanswered`], as `lookup` says. Each orphan recorded is
+/// listed in [`Adoptions::owed`].
 ///
 /// An orphan whose hash is in the history of a record already in the
 /// store, or of one this run wrote for an earlier orphan, is left an
 /// orphan and reported [`Adoption::Held`], and `lookup` is not asked
 /// about it.
 ///
-/// Nothing but the two stores and the library's identity is written:
-/// the identity is minted before the first record when the library has
-/// none ([`StoreWriter`]), no file is opened beyond being hashed, and
-/// none is moved, renamed or deleted. A record that
+/// Nothing but the two stores and the library's identity is written,
+/// and nothing to the content index, whose references a caller writes
+/// from [`Adoptions::owed`]: the identity is minted before the first
+/// record when the library has none ([`StoreWriter`]), no file is
+/// opened beyond being hashed, and none is moved, renamed or deleted.
+/// A record that
 /// already names a path is not an orphan's, so it is left exactly as it
 /// is, and a second run over a library the first left alone finds
 /// nothing to write.
@@ -3341,6 +3358,7 @@ pub fn adopt(
     let orphans = orphans(root, &walk(root).0, &store);
     let mut written: BTreeMap<ContentHash, ArtifactId> = BTreeMap::new();
     let mut adoptions = Vec::new();
+    let mut owed = Vec::new();
     let writer = StoreWriter::new(root, &store_create, &store_write);
 
     for path in &orphans {
@@ -3371,17 +3389,23 @@ pub fn adopt(
                 adoptions.push((relative, Adoption::Unindexed));
                 continue;
             }
-            Err(Unadopted::Unanswered { identifier }) => {
-                let identifier = identifier.to_string();
-                adoptions.push((relative, Adoption::Unanswered { identifier }));
+            Err(Unadopted::Unanswered {
+                identifier,
+                references,
+            }) => {
+                let adoption = Adoption::Unanswered {
+                    identifier: identifier.as_ref().map(Identifier::to_string),
+                    references: references.iter().map(ReferenceRead::step).collect(),
+                };
+                adoptions.push((relative, adoption));
                 continue;
             }
         };
         let record = found.record;
-        let evidence = IdentificationEvidence {
-            identifier: found.identifier,
+        let evidence = found.identifier.map(|identifier| IdentificationEvidence {
+            identifier,
             origin: EvidenceOrigin::Adopted,
-        };
+        });
 
         let key = key(&record, &hash);
         let admitted = admit(
@@ -3392,7 +3416,7 @@ pub fn adopt(
                 hash: &hash,
                 held: None,
                 reidentified: false,
-                evidence: Some(&evidence),
+                evidence: evidence.as_ref(),
                 key: key.as_deref(),
                 run: run.clone(),
                 timestamp,
@@ -3402,13 +3426,17 @@ pub fn adopt(
         );
         let adoption = match admitted {
             Ok(admitted) => {
+                owed.push(OwedReference {
+                    path: path.clone(),
+                    hash: hash.clone(),
+                    artifact: admitted.artifact.clone(),
+                    item: admitted.answers_with.clone(),
+                });
                 written.insert(hash, admitted.artifact.clone());
                 Adoption::Recorded {
                     id: admitted.artifact.to_string(),
                     item: admitted.item.to_string(),
-                    retrieval: RetrievedFrom::ServiceCache {
-                        service: found.service.as_str().to_string(),
-                    },
+                    retrieval: found.retrieval,
                 }
             }
             Err(unrecorded) => Adoption::Unwritten {
@@ -3422,6 +3450,7 @@ pub fn adopt(
         root: root.to_path_buf(),
         adoptions,
         orphans: orphans.len(),
+        owed,
         identity_fault: writer.identity_fault(),
     }
 }

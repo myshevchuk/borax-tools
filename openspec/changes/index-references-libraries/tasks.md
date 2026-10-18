@@ -306,7 +306,7 @@ pair: pipeline, evidence, event, describe and run, and the test sites D13
 lists. Nothing writes references yet, so every existing run behaves as
 before.
 
-- [ ] 4.1 Red. Make the group-4 D13 edits.
+- [x] 4.1 Red. Make the group-4 D13 edits.
 
       In `crates/borax/tests/pipeline.rs`:
       - `a_reachable_reference_answers_without_opening_the_file_or_asking_a_service`:
@@ -362,7 +362,7 @@ before.
       - `resolve_batch_reads_a_referenced_library_once_for_two_files`:
         D4's snapshot rule, at concurrency 1.
       - `an_interactive_question_over_a_reference_answer_names_the_library_at_its_root`.
-- [ ] 4.2 Green:
+- [x] 4.2 Green:
       - `IndexRead::Referenced`, `IndexEvidence::references`,
         `RecordRetrieval::LibraryReference`, and `Evidence::retrieval`
         for it;
@@ -380,7 +380,7 @@ before.
 Green point: additive behaviour through the event shapes group 4 fixed.
 `WrittenEntry` gains a variant, and no test matches it exhaustively.
 
-- [ ] 5.1 Red.
+- [x] 5.1 Red.
 
       In `crates/borax/tests/dispatch.rs`, the rename driver:
       - `an_applying_rename_writes_a_reference_for_the_admitted_bytes`.
@@ -452,7 +452,7 @@ Green point: additive behaviour through the event shapes group 4 fixed.
         the file is not a PDF and the binary has no transport, so only a
         reference can answer.
       - `cache_clear_leaves_the_content_index_so_a_reference_still_answers`.
-- [ ] 5.2 Green:
+- [x] 5.2 Green:
       - `WrittenEntry::Reference`, and the failed-write human line;
       - the rename driver reads the identity and `keep`s after each
         admission it records, before `remember`;
@@ -468,7 +468,7 @@ Green point: `Adopted`, `Unadopted::Unanswered` and
 `Adoption::Unanswered` change shape, with every consumer: `held_answer`,
 `adopt`, `what_was_adopted` and the adoption tests D13 lists.
 
-- [ ] 6.1 Red. Make the group-6 D13 edits, and the (b) rename of
+- [x] 6.1 Red. Make the group-6 D13 edits, and the (b) rename of
       `adopt_writes_nothing_to_the_content_index`.
 
       In `crates/borax/tests/dispatch.rs`:
@@ -495,7 +495,7 @@ Green point: `Adopted`, `Unadopted::Unanswered` and
       - `json_line_of_library_adoption_unanswered_with_references_and_no_identifier`.
       - `human_line_of_library_adoption_unanswered_with_no_identifier_matches_design_d8`.
       - `human_line_of_library_adoption_unanswered_with_an_identifier_and_references_ends_with_the_clauses`.
-- [ ] 6.2 Green:
+- [x] 6.2 Green:
       - `Adopted` and `Unadopted::Unanswered` reshaped, and
         `Adoptions::owed`;
       - `held_answer` settles the entry's references first;
@@ -508,13 +508,13 @@ Green point: `Adopted`, `Unadopted::Unanswered` and
 
 ## 7. Audit and verification
 
-- [ ] 7.1 Audit every edit to a pre-existing test against the preamble's
+- [x] 7.1 Audit every edit to a pre-existing test against the preamble's
       rules and D13. Report any test that needed anything else.
-- [ ] 7.2 Run `cargo test --workspace`, `cargo clippy --workspace
+- [x] 7.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`. Run all
       three at the end of every group too, since each group is a green
       point.
-- [ ] 7.3 Search `crates/*/src/` for what this change makes false. Each
+- [x] 7.3 Search `crates/*/src/` for what this change makes false. Each
       search must find nothing, or a hit the report justifies:
       - `refs/` described as reserved, or as written by nothing;
       - "evidence-first" in a docstring or comment;
@@ -527,9 +527,9 @@ Green point: `Adopted`, `Unadopted::Unanswered` and
         nothing to the content index;
       - `borax_core::index`'s module docstring naming two facts as the
         whole entry.
-- [ ] 7.4 Run `openspec validate index-references-libraries --strict` and
+- [x] 7.4 Run `openspec validate index-references-libraries --strict` and
       `python3 scripts/check-spec-deltas.py`.
-- [ ] 7.5 By hand, over copies of a library built from the real-PDF
+- [x] 7.5 By hand, over copies of a library built from the real-PDF
       corpus, which lives outside the repository:
       1. `borax reconcile` in the library, and check that `refs/`
          appears under the data directory for its files' hashes.
@@ -588,7 +588,7 @@ Green point: `Adopted`, `Unadopted::Unanswered` and
       anything invented and for anything dropped from the old text.
       Check the `#+AI_PASS` line the doc writer adds. Answer or remove
       every `TODO(docs)`.
-- [ ] 8.4 Implementer, in `openspec/STATE.md`:
+- [x] 8.4 Implementer, in `openspec/STATE.md`:
       - add a paragraph for this change after the
         `reduce-content-index` paragraph;
       - in that paragraph, replace the closing sentence naming

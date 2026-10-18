@@ -278,8 +278,8 @@ pub enum Command {
         run_log: RunLogOptions,
     },
     /// Bring artifact records back into agreement with the library's
-    /// tree, and restore the operator decisions they hold to the
-    /// content index.
+    /// tree, and restore to the content index the operator decisions
+    /// they hold and the references to this library they owe.
     Reconcile {
         /// The library to reconcile, as `status` takes it.
         #[arg(value_name = "PATH")]
@@ -302,9 +302,10 @@ pub enum Command {
         #[command(flatten)]
         run_log: RunLogOptions,
     },
-    /// Record the artifacts the content index already knows, from the
-    /// response cache's record for the identifier it knows them by,
-    /// querying nothing and moving nothing.
+    /// Record the artifacts the content index already knows, from
+    /// another library it references for their bytes or the response
+    /// cache's record for the identifier it knows them by, querying
+    /// nothing and moving nothing.
     Adopt {
         /// The library to adopt into, as `status` takes it.
         #[arg(value_name = "PATH")]

@@ -21,7 +21,7 @@ use borax_core::library::{Item, LibraryId};
 use borax_sources::cache::CacheWrite;
 use borax_sources::store::{ContentIndex, IndexStore, reference_key};
 
-use crate::event::AcceptedItemCause;
+use crate::event::{AcceptedItemCause, ReferenceStatusStep, ReferenceStep, UnavailableCause};
 use crate::library::{Identity, ItemStore, identity};
 use crate::pipeline::preferred_identifier;
 
@@ -79,6 +79,51 @@ pub enum ReferenceStatus {
 pub struct ReferenceRead {
     pub reference: LibraryReference,
     pub status: ReferenceStatus,
+}
+
+impl ReferenceRead {
+    /// This reference as the stream carries it: its identities as
+    /// canonical UUID text, its root, and its status, with an
+    /// identifier as it displays.
+    pub fn step(&self) -> ReferenceStep {
+        let reference = &self.reference;
+        ReferenceStep {
+            library: reference.library.to_string(),
+            root: reference.root.clone(),
+            artifact: reference.artifact.to_string(),
+            item: reference.item.to_string(),
+            status: match &self.status {
+                ReferenceStatus::Answered => ReferenceStatusStep::Answered,
+                ReferenceStatus::Agreed => ReferenceStatusStep::Agreed,
+                ReferenceStatus::Disagreeing { identifier } => ReferenceStatusStep::Disagreeing {
+                    identifier: identifier.as_ref().map(Identifier::to_string),
+                },
+                ReferenceStatus::Unavailable(cause) => ReferenceStatusStep::Unavailable {
+                    cause: match cause {
+                        Unavailable::Missing => UnavailableCause::Missing,
+                        Unavailable::OtherLibrary { found } => UnavailableCause::OtherLibrary {
+                            found: found.as_ref().map(LibraryId::to_string),
+                        },
+                        Unavailable::Unreadable { path, message } => UnavailableCause::Unreadable {
+                            path: path.clone(),
+                            message: message.clone(),
+                        },
+                    },
+                },
+                ReferenceStatus::ItemUnavailable(cause) => ReferenceStatusStep::ItemUnavailable {
+                    cause: cause.clone(),
+                },
+            },
+        }
+    }
+}
+
+/// Whether any of `reads` answered: the reference
+/// [`ReferenceStatus::Answered`], when one did.
+pub fn answered(reads: &[ReferenceRead]) -> Option<&ReferenceRead> {
+    reads
+        .iter()
+        .find(|read| read.status == ReferenceStatus::Answered)
 }
 
 /// The roots one run has read, so that each is read at most once.
