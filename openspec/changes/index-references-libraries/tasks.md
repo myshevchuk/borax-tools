@@ -125,7 +125,7 @@ Green point: additive except `IndexStore`'s two new methods. Every
 implementor changes in this pair: `FileCache`, `MemoryCache`,
 `run::IndexHome`, and the six test stores D13 lists.
 
-- [ ] 1.1 Red. Make the group-1 D13 edits: the six test stores.
+- [x] 1.1 Red. Make the group-1 D13 edits: the six test stores.
 
       In `crates/borax-core/tests/index.rs`:
       - `reference_round_trips_through_json`.
@@ -167,7 +167,7 @@ implementor changes in this pair: `FileCache`, `MemoryCache`,
         `#[cfg(unix)]`.
       - `put_reference_with_a_root_that_is_not_utf8_fails_without_writing`,
         `#[cfg(unix)]`.
-- [ ] 1.2 Green:
+- [x] 1.2 Green:
       - `LibraryReference`, `reference_to_json`, `reference_from_json`,
         `name` and `same_key`;
       - `references_prefix`, `reference_key`;
@@ -184,7 +184,7 @@ Green point: `Admitted` gains a field. Its four `src` literals and
 patterns (`library.rs`, near lines 1356, 3027, 3054 and 3147) and its
 three test literals change in this pair. The rest is additive.
 
-- [ ] 2.1 Red. Make the group-2 D13 edits: the three `Admitted`
+- [x] 2.1 Red. Make the group-2 D13 edits: the three `Admitted`
       literals.
 
       In `crates/borax/tests/library.rs`:
@@ -209,7 +209,7 @@ three test literals change in this pair. The rest is additive.
       - `item_store_answer_is_unreadable_when_the_store_cannot_be_listed`,
         `#[cfg(unix)]`.
       - `item_store_answer_is_ambiguous_naming_every_file_carrying_it`.
-- [ ] 2.2 Green: `Admitted::answers_with`, set by `admit` and
+- [x] 2.2 Green: `Admitted::answers_with`, set by `admit` and
       `Stores::foresee`; `ItemStore::answer`, sharing `Stores::consult`'s
       attribution; `OwedReference` and `references_owed` (D2, D9).
 
@@ -217,7 +217,7 @@ three test literals change in this pair. The rest is additive.
 
 Green point: additive. Nothing calls `borax::references` yet.
 
-- [ ] 3.1 Red, in a new `crates/borax/tests/references.rs`.
+- [x] 3.1 Red, in a new `crates/borax/tests/references.rs`.
 
       Reaching (D4):
       - `a_reference_to_a_missing_root_is_unavailable_missing`.
@@ -293,7 +293,7 @@ Green point: additive. Nothing calls `borax::references` yet.
             `repaired_from`;
           - the second removal found S already absent and was not an
             error.
-- [ ] 3.2 Green: `borax::references` (`Unavailable`, `Reach`,
+- [x] 3.2 Green: `borax::references` (`Unavailable`, `Reach`,
       `ReferenceStatus`, `ReferenceRead`, `Libraries`, `settle`, `read`,
       `Kept`, `keep`), and `pipeline::preferred_identifier` (D3, D4, D5,
       D9).

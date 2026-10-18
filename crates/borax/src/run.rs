@@ -4481,6 +4481,20 @@ impl IndexStore for IndexHome {
             IndexHome::Memory(store) => store.write_fact(key, text),
         }
     }
+
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        match self {
+            IndexHome::File(store) => store.list_facts(prefix),
+            IndexHome::Memory(store) => store.list_facts(prefix),
+        }
+    }
+
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        match self {
+            IndexHome::File(store) => store.remove_fact(key),
+            IndexHome::Memory(store) => store.remove_fact(key),
+        }
+    }
 }
 
 /// The content index's store for this process's environment: a

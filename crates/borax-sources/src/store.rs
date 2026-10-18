@@ -18,7 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use borax_core::content::{ContentHash, Hasher};
 use borax_core::identifier::Identifier;
 use borax_core::index::{
-    Fact, IndexEntry, extracted_from_json, extracted_to_json, operator_from_json, operator_to_json,
+    Fact, IndexEntry, LibraryReference, extracted_from_json, extracted_to_json, operator_from_json,
+    operator_to_json, reference_from_json, reference_to_json,
 };
 use borax_core::library::IdentificationEvidence;
 use borax_core::record::Record;
@@ -167,7 +168,8 @@ fn is_safe_segment(segment: &str) -> bool {
 }
 
 /// `content/<hash>`: the key under which the entry for `hash` keeps
-/// its facts ([`extracted_key`], [`operator_key`]).
+/// its facts ([`extracted_key`], [`operator_key`], and its references
+/// under [`references_prefix`]).
 ///
 /// No source is named `content`, so the key never collides with an
 /// identifier-keyed response under the same root.
@@ -189,6 +191,19 @@ pub fn operator_key(hash: &ContentHash) -> String {
     format!("content/{hash}/operator")
 }
 
+/// `content/<hash>/refs`: the prefix under which the entry for `hash`
+/// keeps its references, one fact each ([`reference_key`]).
+pub fn references_prefix(hash: &ContentHash) -> String {
+    format!("content/{hash}/refs")
+}
+
+/// The key of the reference named `name` in the entry for `hash`:
+/// `content/<hash>/refs/<name>`, the file
+/// `content/<hash>/refs/<name>.json` under a [`FileCache`]'s root.
+pub fn reference_key(hash: &ContentHash, name: &str) -> String {
+    format!("content/{hash}/refs/{name}")
+}
+
 /// Where content-index facts are kept: text by key, each fact whole.
 ///
 /// `Sync` for the reason [`Cache`] is: resolution shares one index
@@ -204,6 +219,19 @@ pub trait IndexStore: Sync {
     /// A failure is returned as [`CacheWrite::Failed`], never raised,
     /// and leaves the fact as it was.
     fn write_fact(&self, key: &str, text: &str) -> CacheWrite;
+
+    /// The keys of the facts directly under `prefix`, each the prefix,
+    /// `/` and one segment, sorted. A fact further down is not listed.
+    ///
+    /// `Ok(vec![])` when there are none or nothing is under `prefix`;
+    /// `Err(message)` when what is there cannot be listed.
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String>;
+
+    /// Remove the fact under `key`.
+    ///
+    /// [`CacheWrite::Written`] once it is gone, a fact already absent
+    /// included; [`CacheWrite::Failed`] otherwise, leaving it as it was.
+    fn remove_fact(&self, key: &str) -> CacheWrite;
 }
 
 /// A [`Cache`] and an [`IndexStore`] backed by a directory of JSON
@@ -326,6 +354,72 @@ impl IndexStore for FileCache {
             },
         }
     }
+
+    /// The keys of the files directly in the directory `prefix` names
+    /// under the root: each file whose name is a segment [`entry_path`]
+    /// admits followed by `.json`, so a temporary and any other name
+    /// is not listed. An absent directory is `Ok(vec![])`; a prefix
+    /// `entry_path` would reject, and a directory that cannot be read,
+    /// are `Err`.
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let directory = directory_path(&self.root, prefix)
+            .ok_or_else(|| format!("invalid index key {prefix:?}"))?;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(format!("cannot list {}: {error}", directory.display()));
+            }
+        };
+        let mut keys = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("cannot list {}: {error}", directory.display()))?;
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+                continue;
+            };
+            if is_safe_segment(stem) {
+                keys.push(format!("{prefix}/{stem}"));
+            }
+        }
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// Remove the file [`entry_path`] gives for `key`. An absent file
+    /// is [`CacheWrite::Written`]; a key it rejects and every other
+    /// failure are [`CacheWrite::Failed`], naming the file.
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        let Some(path) = entry_path(&self.root, key) else {
+            return CacheWrite::Failed {
+                message: format!("invalid index key {key:?}"),
+            };
+        };
+        match fs::remove_file(&path) {
+            Ok(()) => CacheWrite::Written,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => CacheWrite::Written,
+            Err(error) => CacheWrite::Failed {
+                message: format!("cannot remove {}: {error}", path.display()),
+            },
+        }
+    }
+}
+
+/// The directory `prefix` names under `root`, every segment checked as
+/// [`entry_path`] checks it; `None` for a prefix it would reject.
+fn directory_path(root: &Path, prefix: &str) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    for segment in prefix.split('/') {
+        if !is_safe_segment(segment) {
+            return None;
+        }
+        path.push(segment);
+    }
+    Some(path)
 }
 
 /// Write `content` to `path`, replacing whatever was there, without
@@ -479,7 +573,9 @@ fn temporary_name() -> String {
 /// identification evidence as two facts, read and written through an
 /// [`IndexStore`]: the extracted identifier and the operator's
 /// evidence, each replaced whole by its own writer and never merged
-/// with the other. No record is kept. The index is persistent or
+/// with the other. Beside them it holds references to the libraries
+/// holding the bytes, one fact per reference key under
+/// [`references_prefix`]. No record is kept. The index is persistent or
 /// in-memory exactly as the store it is given is.
 #[derive(Debug)]
 pub struct ContentIndex<S> {
@@ -532,6 +628,79 @@ impl<S: IndexStore> ContentIndex<S> {
         }
         self.store
             .write_fact(&operator_key(hash), &operator_to_json(evidence))
+    }
+
+    /// Every readable reference of `hash`'s entry, in entry order: by
+    /// root text, then library, then artifact, then item.
+    ///
+    /// A reference that cannot be read or does not parse is left out,
+    /// and an entry whose references cannot be listed has none.
+    pub fn references(&self, hash: &ContentHash) -> Vec<LibraryReference> {
+        let keys = self
+            .store
+            .list_facts(&references_prefix(hash))
+            .unwrap_or_default();
+        let mut references: Vec<LibraryReference> = keys
+            .iter()
+            .filter_map(|key| match self.fact(key, reference_from_json) {
+                Fact::Held(reference) => Some(reference),
+                Fact::Absent | Fact::Unreadable(_) => None,
+            })
+            .collect();
+        references.sort_by(|a, b| {
+            (a.root.as_os_str(), &a.library, &a.artifact, &a.item).cmp(&(
+                b.root.as_os_str(),
+                &b.library,
+                &b.artifact,
+                &b.item,
+            ))
+        });
+        references
+    }
+
+    /// The file `reference`'s key names in `hash`'s entry, parsed.
+    ///
+    /// [`Fact::Absent`] for a root that is not UTF-8 text, which no file
+    /// can be named for. A file that cannot be read, or does not parse,
+    /// is [`Fact::Unreadable`].
+    pub fn reference(
+        &self,
+        hash: &ContentHash,
+        reference: &LibraryReference,
+    ) -> Fact<LibraryReference> {
+        match reference.name() {
+            Some(name) => self.fact(&reference_key(hash, &name), reference_from_json),
+            None => Fact::Absent,
+        }
+    }
+
+    /// Replace the file `reference`'s key names in `hash`'s entry whole
+    /// with `reference`, leaving every other fact as it is, and return
+    /// what the store's write returned.
+    ///
+    /// A root that is not UTF-8 text is [`CacheWrite::Failed`], and
+    /// nothing is written.
+    pub fn put_reference(&self, hash: &ContentHash, reference: &LibraryReference) -> CacheWrite {
+        match (reference.name(), reference_to_json(reference)) {
+            (Some(name), Some(text)) => self.store.write_fact(&reference_key(hash, &name), &text),
+            _ => CacheWrite::Failed {
+                message: format!(
+                    "the library root {} is not UTF-8 text",
+                    reference.root.display()
+                ),
+            },
+        }
+    }
+
+    /// Remove the file `reference`'s key names from `hash`'s entry,
+    /// whatever item it holds, and return what the store's removal
+    /// returned. A root that is not UTF-8 text names no file, and its
+    /// removal is [`CacheWrite::Written`].
+    pub fn remove_reference(&self, hash: &ContentHash, reference: &LibraryReference) -> CacheWrite {
+        match reference.name() {
+            Some(name) => self.store.remove_fact(&reference_key(hash, &name)),
+            None => CacheWrite::Written,
+        }
     }
 
     /// The fact under `key`, parsed by `parse`.

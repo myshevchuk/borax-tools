@@ -4,17 +4,27 @@
 //! content hash, holds identification evidence as separate facts, each
 //! its own file with its own writer: `extracted`, the identifier an
 //! extraction found and a lookup confirmed, and `operator`, an
-//! operator's identifier with origin `supplied` or `overridden`. No fact
-//! holds a record.
+//! operator's identifier with origin `supplied` or `overridden`. Beside
+//! the evidence, an entry holds references to libraries, each its own
+//! file named for its key: a [`LibraryReference`] names a library, the
+//! root it was last known at, the artifact holding the bytes there, and
+//! the item that artifact answers with. No fact holds a record.
 //!
 //! This module is the half of the index that is values: a fact's JSON
-//! text, an entry's facts as read, and what an entry answers with.
-//! Reading and writing the facts belongs to the caller.
+//! text, a reference's JSON text and name, an entry's evidence as read,
+//! and what that evidence answers with. Reading and writing the files
+//! belongs to the caller.
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::content::hash_bytes;
 use crate::identifier::{self, Identifier};
-use crate::library::{EvidenceOrigin, IdentificationEvidence, Malformed, evidence_from_text};
+use crate::library::{
+    ArtifactId, EvidenceOrigin, IdentificationEvidence, ItemId, LibraryId, Malformed,
+    evidence_from_text,
+};
 
 /// One fact of an entry, as read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +38,8 @@ pub enum Fact<T> {
     Unreadable(String),
 }
 
-/// Both facts of one content hash's entry.
+/// The evidence facts of one content hash's entry. Its references are
+/// read on their own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEntry {
     /// The identifier an extraction found and a lookup confirmed.
@@ -129,4 +140,82 @@ fn fact_text(file: &FactFile) -> String {
 /// The fact `text` states, before its strings are checked.
 fn fact_file(text: &str) -> Result<FactFile, Malformed> {
     serde_json::from_str(text).map_err(|error| Malformed::Toml(error.to_string()))
+}
+
+/// A content-index entry's reference to the library holding its bytes.
+///
+/// The library, the root and the artifact are the reference's key: one
+/// key names one file of the entry. The item is what the reference
+/// answers with, and replacing it keeps the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryReference {
+    /// The identity of the library holding the bytes.
+    pub library: LibraryId,
+    /// The root the library was last known at, absolute and normalised.
+    pub root: PathBuf,
+    /// The artifact the library holds the bytes as.
+    pub artifact: ArtifactId,
+    /// The item the artifact answers with for these bytes.
+    pub item: ItemId,
+}
+
+impl LibraryReference {
+    /// The name of the file this reference's key names: `sha256-` and
+    /// the lowercase hex SHA-256 of the library, the root and the
+    /// artifact, as text joined by NUL.
+    ///
+    /// `None` when `root` is not UTF-8 text. The item takes no part, so
+    /// two references differing only in their item share a name.
+    pub fn name(&self) -> Option<String> {
+        let root = self.root.to_str()?;
+        let key = format!("{}\0{root}\0{}", self.library, self.artifact);
+        Some(hash_bytes(key.as_bytes()).as_str().to_string())
+    }
+
+    /// Whether `other` names the same library, root and artifact,
+    /// whatever its item.
+    pub fn same_key(&self, other: &LibraryReference) -> bool {
+        self.library == other.library && self.root == other.root && self.artifact == other.artifact
+    }
+}
+
+/// The shape of a reference as JSON. Unknown keys are ignored.
+#[derive(Serialize, Deserialize)]
+struct ReferenceFile {
+    library: String,
+    root: String,
+    artifact: String,
+    item: String,
+}
+
+/// `reference` as the text of its file:
+/// `{"library":…,"root":…,"artifact":…,"item":…}`, the identities as
+/// canonical UUID text.
+///
+/// `None` when the root is not UTF-8 text, which JSON cannot hold.
+pub fn reference_to_json(reference: &LibraryReference) -> Option<String> {
+    let file = ReferenceFile {
+        library: reference.library.to_string(),
+        root: reference.root.to_str()?.to_string(),
+        artifact: reference.artifact.to_string(),
+        item: reference.item.to_string(),
+    };
+    serde_json::to_string(&file).ok()
+}
+
+/// The reference the text of a reference file states.
+///
+/// Fails with [`Malformed`] when `text` is not a JSON object, when any
+/// of `library`, `root`, `artifact` and `item` is absent or not a
+/// string, or when an identity is not canonical UUID text. Unknown keys
+/// are ignored.
+pub fn reference_from_json(text: &str) -> Result<LibraryReference, Malformed> {
+    let file: ReferenceFile =
+        serde_json::from_str(text).map_err(|error| Malformed::Toml(error.to_string()))?;
+    Ok(LibraryReference {
+        library: LibraryId::try_from(file.library)?,
+        root: PathBuf::from(file.root),
+        artifact: ArtifactId::try_from(file.artifact)?,
+        item: ItemId::try_from(file.item)?,
+    })
 }

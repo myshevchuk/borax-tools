@@ -1339,26 +1339,29 @@ pub fn resolved_event(path: &Path, file: &FileRecord) -> Event {
 }
 
 /// The identifier a record is reported under: its DOI, else its arXiv
-/// id, else its PMID, else its ISBN, and empty when the record carries
+/// id, else its PMID, else its ISBN, and `None` when the record carries
 /// none.
+///
+/// This is the `resolved` event's `identifier`, and the identifier
+/// several library references are compared by.
+pub fn preferred_identifier(record: &Record) -> Option<Identifier> {
+    record
+        .doi
+        .clone()
+        .map(Identifier::Doi)
+        .or_else(|| record.borax.arxiv.clone().map(Identifier::Arxiv))
+        .or_else(|| record.pmid.map(Identifier::Pmid))
+        .or_else(|| record.isbn.clone().map(Identifier::Isbn))
+}
+
+/// [`preferred_identifier`] as the `resolved` event's text, empty when
+/// the record carries none.
 ///
 /// Rendered through [`Identifier`]'s own `Display`, so the value
 /// carries its kind (`doi:10.1000/xyz`) rather than leaving a consumer
 /// to guess which of four kinds a bare string is.
 fn identifier_of(record: &Record) -> String {
-    record
-        .doi
-        .as_ref()
-        .map(|id| Identifier::Doi(id.clone()))
-        .or_else(|| {
-            record
-                .borax
-                .arxiv
-                .as_ref()
-                .map(|id| Identifier::Arxiv(id.clone()))
-        })
-        .or_else(|| record.pmid.as_ref().map(|id| Identifier::Pmid(*id)))
-        .or_else(|| record.isbn.as_ref().map(|id| Identifier::Isbn(id.clone())))
+    preferred_identifier(record)
         .map(|identifier| identifier.to_string())
         .unwrap_or_default()
 }

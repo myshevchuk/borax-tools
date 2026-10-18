@@ -164,6 +164,38 @@ impl IndexStore for MemoryCache {
             },
         }
     }
+
+    /// The keys held directly under `prefix`: the prefix, `/`, and one
+    /// segment with no `/` in it, sorted. A poisoned lock is `Err`.
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let facts = self
+            .facts
+            .lock()
+            .map_err(|error| format!("memory index unavailable: {error}"))?;
+        let below = format!("{prefix}/");
+        Ok(facts
+            .keys()
+            .filter(|key| {
+                key.strip_prefix(&below)
+                    .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Drop the fact under `key`, held or not. A poisoned lock is
+    /// [`CacheWrite::Failed`], and nothing is dropped.
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        match self.facts.lock() {
+            Ok(mut facts) => {
+                facts.remove(key);
+                CacheWrite::Written
+            }
+            Err(error) => CacheWrite::Failed {
+                message: format!("memory index unavailable: {error}"),
+            },
+        }
+    }
 }
 
 /// A [`Source`] that answers from a [`Cache`] before asking the source
