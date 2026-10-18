@@ -274,7 +274,9 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
                 reason: "no-library".to_string(),
             },
             content_index: ContentIndexSection {
-                read: IndexReadStep::Miss,
+                read: IndexReadStep::Miss {
+                    references: Vec::new(),
+                },
                 write: WriteStep::Written,
             },
             extraction: ExtractionSection {
@@ -326,7 +328,9 @@ fn text_without_identifier_skip(path: PathBuf) -> Event {
                 reason: "no-library".to_string(),
             },
             content_index: ContentIndexSection {
-                read: IndexReadStep::Miss,
+                read: IndexReadStep::Miss {
+                    references: Vec::new(),
+                },
                 write: WriteStep::NotAttempted {
                     reason: not_attempted(),
                 },

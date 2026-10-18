@@ -7,9 +7,10 @@ use borax::event::{
     ContentIndexSection, Counts, Diagnostic, Displaced, Event, EvidenceStep, Extraction,
     ExtractionResultStep, ExtractionSection, FetchedFrom, Format, IdentifierInputStep,
     IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
-    MatchCheckStep, Repair, RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome,
-    SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome, Summary, SyntaxStep,
-    TableUsed, TitlesStep, WriteStep, WrittenEntry, human_line, human_summary, json_line, render,
+    MatchCheckStep, ReferenceStatusStep, ReferenceStep, Repair, RetrievedFrom, SCHEMA, Sections,
+    ServiceAnswer, ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome,
+    Summary, SyntaxStep, TableUsed, TitlesStep, UnavailableCause, WriteStep, WrittenEntry,
+    human_line, human_summary, json_line, render,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
@@ -33,6 +34,7 @@ fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) 
         library: Consultation::NotConsulted(Unattempted::NoLibrary),
         content_index: IndexEvidence {
             read: IndexRead::Miss,
+            references: Vec::new(),
             write: IndexWrite::Attempted(CacheWrite::Written),
         },
         extraction: ExtractionEvidence {
@@ -72,6 +74,7 @@ fn evidence_via_content_index_hit() -> Evidence {
                 identifier: identifier.clone(),
                 origin: EvidenceOrigin::Extracted,
             }),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
         },
         extraction: ExtractionEvidence {
@@ -105,7 +108,9 @@ fn sections_via_network(service: &str, identifier: &str) -> Sections {
             reason: "no-library".to_string(),
         },
         content_index: ContentIndexSection {
-            read: IndexReadStep::Miss,
+            read: IndexReadStep::Miss {
+                references: Vec::new(),
+            },
             write: WriteStep::Written,
         },
         extraction: ExtractionSection {
@@ -150,10 +155,11 @@ fn sections_via_content_index() -> Sections {
         },
         content_index: ContentIndexSection {
             read: IndexReadStep::Hit {
-                evidence: EvidenceStep {
+                evidence: Some(EvidenceStep {
                     identifier: "doi:10.1000/cached-record".to_string(),
                     origin: "extracted".to_string(),
-                },
+                }),
+                references: Vec::new(),
             },
             write: WriteStep::NotAttempted {
                 reason: not_attempted(),
@@ -704,7 +710,8 @@ fn all_events() -> Vec<Event> {
         library_adoption(
             "new.pdf",
             Adoption::Unanswered {
-                identifier: "doi:10.1000/x".to_string(),
+                identifier: Some("doi:10.1000/x".to_string()),
+                references: Vec::new(),
             },
         ),
         library_status(Some(LIB_UUID)),
@@ -1411,7 +1418,9 @@ fn extraction_failure_sections(result: ExtractionResultStep) -> Sections {
             reason: "no-library".to_string(),
         },
         content_index: ContentIndexSection {
-            read: IndexReadStep::Miss,
+            read: IndexReadStep::Miss {
+                references: Vec::new(),
+            },
             write: WriteStep::NotAttempted {
                 reason: not_attempted(),
             },
@@ -1443,7 +1452,9 @@ fn unresolvable_sections() -> Sections {
             reason: "no-library".to_string(),
         },
         content_index: ContentIndexSection {
-            read: IndexReadStep::Miss,
+            read: IndexReadStep::Miss {
+                references: Vec::new(),
+            },
             write: WriteStep::NotAttempted {
                 reason: "no-record".to_string(),
             },
@@ -1490,7 +1501,9 @@ fn conflict_sections() -> Sections {
             reason: "no-library".to_string(),
         },
         content_index: ContentIndexSection {
-            read: IndexReadStep::Miss,
+            read: IndexReadStep::Miss {
+                references: Vec::new(),
+            },
             write: WriteStep::NotAttempted {
                 reason: "refused".to_string(),
             },
@@ -3335,10 +3348,11 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
             assert_eq!(
                 sections.content_index.read,
                 IndexReadStep::Hit {
-                    evidence: EvidenceStep {
+                    evidence: Some(EvidenceStep {
                         identifier: "doi:10.1000/cached-record".to_string(),
                         origin: "extracted".to_string(),
-                    }
+                    }),
+                    references: Vec::new(),
                 }
             );
         }
@@ -3761,10 +3775,11 @@ fn human_line_of_resolved_shows_the_work_and_the_from_clause() {
         service: "crossref".to_string(),
     });
     sections.content_index.read = IndexReadStep::Hit {
-        evidence: EvidenceStep {
+        evidence: Some(EvidenceStep {
             identifier: "doi:10.1039/c5ay00042d".to_string(),
             origin: "extracted".to_string(),
-        },
+        }),
+        references: Vec::new(),
     };
     let event = Event::Resolved {
         path: PathBuf::from("papers/smith.pdf"),
@@ -4281,7 +4296,8 @@ fn json_line_of_library_adoption_unanswered_matches_design_d8() {
     let event = library_adoption(
         "scan.pdf",
         Adoption::Unanswered {
-            identifier: "doi:10.1000/z".to_string(),
+            identifier: Some("doi:10.1000/z".to_string()),
+            references: Vec::new(),
         },
     );
 
@@ -4338,7 +4354,8 @@ fn counts_observe_of_library_adoption_unindexed_counts_nothing() {
     counts.observe(&library_adoption(
         "new.pdf",
         Adoption::Unanswered {
-            identifier: "doi:10.1000/x".to_string(),
+            identifier: Some("doi:10.1000/x".to_string()),
+            references: Vec::new(),
         },
     ));
     assert_eq!(counts, Counts::default(), "got {counts:?}");
@@ -4411,7 +4428,8 @@ fn human_line_of_library_adoption_unanswered_matches_design_d9() {
     let event = library_adoption(
         "scan.pdf",
         Adoption::Unanswered {
-            identifier: "doi:10.1000/z".to_string(),
+            identifier: Some("doi:10.1000/z".to_string()),
+            references: Vec::new(),
         },
     );
 
@@ -4486,7 +4504,8 @@ fn human_line_of_library_adoption_escapes_control_characters_in_the_path_for_eve
         },
         Adoption::Unindexed,
         Adoption::Unanswered {
-            identifier: "doi:10.1000/x".to_string(),
+            identifier: Some("doi:10.1000/x".to_string()),
+            references: Vec::new(),
         },
     ];
 
@@ -4563,7 +4582,8 @@ fn render_human_equals_human_line_for_every_library_condition_and_unindexed() {
     let event = library_adoption(
         "new.pdf",
         Adoption::Unanswered {
-            identifier: "doi:10.1000/x".to_string(),
+            identifier: Some("doi:10.1000/x".to_string()),
+            references: Vec::new(),
         },
     );
     assert_eq!(render(Format::Human, &event), human_line(&event));
@@ -5185,5 +5205,821 @@ fn human_line_of_library_validated_without_an_identity_is_unchanged() {
     assert_eq!(
         human_line(&event).unwrap(),
         "/lib: 0 findings, 0 orphans, 0 missing, 0 unlinked"
+    );
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 4.1: references on a content-index
+// read, and the library-reference retrieval (design D7, D8)
+// ---------------------------------------------------------------------
+
+const REF_LIBRARY: &str = "0190c3a2-7f21-7abc-8def-0123456789aa";
+const REF_ARTIFACT: &str = "0190c3a2-7f21-7abc-8def-0123456789ab";
+const REF_ITEM: &str = "0190c3a2-7f21-7abc-8def-0123456789ac";
+const REF_OTHER_ITEM: &str = "0190c3a2-7f21-7abc-8def-0123456789ad";
+
+/// One reference of an entry, at `root`, with `status`.
+fn reference_step(root: &str, status: ReferenceStatusStep) -> ReferenceStep {
+    ReferenceStep {
+        library: REF_LIBRARY.into(),
+        root: root.into(),
+        artifact: REF_ARTIFACT.into(),
+        item: REF_ITEM.into(),
+        status,
+    }
+}
+
+/// A reference that cannot be reached because its root is missing.
+fn missing_reference(root: &str) -> ReferenceStep {
+    reference_step(
+        root,
+        ReferenceStatusStep::Unavailable {
+            cause: UnavailableCause::Missing,
+        },
+    )
+}
+
+/// A reachable reference that the others disagree with.
+fn disagreeing_reference(root: &str, identifier: Option<&str>) -> ReferenceStep {
+    reference_step(
+        root,
+        ReferenceStatusStep::Disagreeing {
+            identifier: identifier.map(str::to_string),
+        },
+    )
+}
+
+/// The JSON a reference at `root` is written as, with `tail` as the
+/// keys after the four it always carries.
+fn reference_json(root: &str, tail: &str) -> String {
+    format!(
+        r#"{{"library":"{REF_LIBRARY}","root":"{root}","artifact":"{REF_ARTIFACT}","item":"{REF_ITEM}",{tail}}}"#
+    )
+}
+
+/// The retrieval a reference at `/home/u/papers` gives.
+fn library_reference_retrieval() -> RetrievedFrom {
+    RetrievedFrom::LibraryReference {
+        library: REF_LIBRARY.into(),
+        root: "/home/u/papers".into(),
+        artifact: REF_ARTIFACT.into(),
+        item: REF_ITEM.into(),
+    }
+}
+
+/// Every section as a reference answer reports them: nothing was
+/// extracted, looked up or checked, for `content-index-hit`, and the
+/// record came from the reference at `/home/u/papers`.
+fn sections_via_reference() -> Sections {
+    let not_attempted = || "content-index-hit".to_string();
+    let mut sections = sections_via_content_index();
+    sections.content_index.read = IndexReadStep::Hit {
+        evidence: None,
+        references: vec![reference_step(
+            "/home/u/papers",
+            ReferenceStatusStep::Answered,
+        )],
+    };
+    sections.lookup = LookupStep::NotAttempted {
+        reason: not_attempted(),
+    };
+    sections.record_retrieval = Some(library_reference_retrieval());
+    sections
+}
+
+/// A record the way a library item holds one that Crossref supplied.
+fn crossref_record() -> Record {
+    let mut record = record_with(Some("Determination of things"), &["Smith"], Some(2015));
+    record.borax = BoraxExt {
+        provenance: [("title".to_string(), Source::Crossref)]
+            .into_iter()
+            .collect(),
+        ..BoraxExt::default()
+    };
+    record
+}
+
+fn resolved_event_of(record: Record, sections: Sections) -> Event {
+    Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: "doi:10.1039/c5ay00042d".to_string(),
+        record: Box::new(record),
+        sections: Box::new(sections),
+    }
+}
+
+/// The text of `line` after its first `"content_index":` key.
+fn content_index_of(line: &str) -> &str {
+    let at = line.find(r#""content_index":"#).unwrap();
+    &line[at..]
+}
+
+/// The illustrative reference-answer line of design.md: `hit` carries
+/// `references` and no `evidence`, nothing was looked up, and the record
+/// was retrieved from the library reference. (`acceptance` is written as
+/// the object `{"status":"automatic"}` every schema-5 line carries, not
+/// as the bare string the illustration shows.)
+#[test]
+fn json_line_of_a_reference_hit_carries_references_and_no_evidence() {
+    let event = resolved_event_of(Record::new(EntryType::Article), sections_via_reference());
+
+    let line = json_line(&event);
+
+    let answered = reference_json("/home/u/papers", r#""status":"answered""#);
+    assert!(
+        line.contains(&format!(
+            r#""content_index":{{"read":{{"status":"hit","references":[{answered}]}},"write":{{"status":"not-attempted","reason":"content-index-hit"}}}}"#
+        )),
+        "got {line}"
+    );
+    assert!(
+        line.contains(r#""identifier_input":{"status":"not-attempted","reason":"not-asked"},"lookup":{"status":"not-attempted","reason":"content-index-hit"},"#),
+        "got {line}"
+    );
+    assert!(
+        line.contains(&format!(
+            r#""record_retrieval":{{"kind":"library-reference","library":"{REF_LIBRARY}","root":"/home/u/papers","artifact":"{REF_ARTIFACT}","item":"{REF_ITEM}"}},"match_check":{{"status":"not-attempted","reason":"content-index-hit"}},"acceptance":{{"status":"automatic"}}}}"#
+        )),
+        "got {line}"
+    );
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert!(
+        value["content_index"]["read"]
+            .as_object()
+            .unwrap()
+            .get("evidence")
+            .is_none(),
+        "got {line}"
+    );
+    let parsed: Event = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed, event);
+}
+
+/// The second illustrative line of design.md: the evidence answered
+/// after two references could not, so `hit` carries both, `evidence`
+/// first.
+#[test]
+fn json_line_of_an_evidence_hit_beside_references_carries_both() {
+    let mut sections = sections_via_content_index();
+    sections.content_index.read = IndexReadStep::Hit {
+        evidence: Some(EvidenceStep {
+            identifier: "doi:10.1000/y".to_string(),
+            origin: "supplied".to_string(),
+        }),
+        references: vec![
+            missing_reference("/media/old"),
+            ReferenceStep {
+                item: REF_OTHER_ITEM.into(),
+                ..reference_step(
+                    "/home/u/papers",
+                    ReferenceStatusStep::ItemUnavailable {
+                        cause: AcceptedItemCause::Dangling,
+                    },
+                )
+            },
+        ],
+    };
+    let event = resolved_event_of(Record::new(EntryType::Article), sections);
+
+    let line = json_line(&event);
+
+    let missing = reference_json("/media/old", r#""status":"unavailable","cause":"missing""#);
+    let dangling = format!(
+        r#"{{"library":"{REF_LIBRARY}","root":"/home/u/papers","artifact":"{REF_ARTIFACT}","item":"{REF_OTHER_ITEM}","status":"item-unavailable","cause":"dangling"}}"#
+    );
+    assert!(
+        line.contains(&format!(
+            r#""read":{{"status":"hit","evidence":{{"identifier":"doi:10.1000/y","origin":"supplied"}},"references":[{missing},{dangling}]}}"#
+        )),
+        "got {}",
+        content_index_of(&line)
+    );
+    let parsed: Event = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed, event);
+}
+
+/// A `miss` carries the references that did not answer, here the
+/// illustrative disagreement of design.md.
+#[test]
+fn json_line_of_a_miss_with_references_carries_them() {
+    let mut sections = sections_via_network("crossref", "doi:10.1000/y");
+    sections.content_index.read = IndexReadStep::Miss {
+        references: vec![
+            disagreeing_reference("/home/u/a", Some("doi:10.1000/x")),
+            ReferenceStep {
+                item: REF_OTHER_ITEM.into(),
+                ..disagreeing_reference("/home/u/b", Some("doi:10.1000/y"))
+            },
+        ],
+    };
+    let event = resolved_event_of(Record::new(EntryType::Article), sections);
+
+    let line = json_line(&event);
+
+    let first = reference_json(
+        "/home/u/a",
+        r#""status":"disagreeing","identifier":"doi:10.1000/x""#,
+    );
+    let second = format!(
+        r#"{{"library":"{REF_LIBRARY}","root":"/home/u/b","artifact":"{REF_ARTIFACT}","item":"{REF_OTHER_ITEM}","status":"disagreeing","identifier":"doi:10.1000/y"}}"#
+    );
+    assert!(
+        line.contains(&format!(
+            r#""read":{{"status":"miss","references":[{first},{second}]}}"#
+        )),
+        "got {}",
+        content_index_of(&line)
+    );
+    let parsed: Event = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed, event);
+}
+
+/// An entry with no readable reference gives the line a 13a build gave:
+/// no `references` key on a `hit` or a `miss`.
+#[test]
+fn json_line_of_a_read_with_no_references_has_no_references_key() {
+    let hit = json_line(&resolved_event_of(
+        Record::new(EntryType::Article),
+        sections_via_content_index(),
+    ));
+    assert!(
+        hit.contains(
+            r#""read":{"status":"hit","evidence":{"identifier":"doi:10.1000/cached-record","origin":"extracted"}},"write""#
+        ),
+        "got {hit}"
+    );
+    assert!(!hit.contains("references"), "got {hit}");
+
+    let miss = json_line(&resolved());
+    assert!(
+        miss.contains(r#""read":{"status":"miss"},"write""#),
+        "got {miss}"
+    );
+    assert!(!miss.contains("references"), "got {miss}");
+
+    let unanswered = json_line(&library_adoption(
+        "scan.pdf",
+        Adoption::Unanswered {
+            identifier: Some("doi:10.1000/z".to_string()),
+            references: Vec::new(),
+        },
+    ));
+    assert!(!unanswered.contains("references"), "got {unanswered}");
+}
+
+/// Every status and cause of a reference, as design D7 spells it.
+fn every_reference_status() -> Vec<(ReferenceStatusStep, &'static str)> {
+    vec![
+        (ReferenceStatusStep::Answered, r#""status":"answered""#),
+        (ReferenceStatusStep::Agreed, r#""status":"agreed""#),
+        (
+            ReferenceStatusStep::Disagreeing {
+                identifier: Some("doi:10.1000/x".to_string()),
+            },
+            r#""status":"disagreeing","identifier":"doi:10.1000/x""#,
+        ),
+        (
+            ReferenceStatusStep::Disagreeing { identifier: None },
+            r#""status":"disagreeing""#,
+        ),
+        (
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::Missing,
+            },
+            r#""status":"unavailable","cause":"missing""#,
+        ),
+        (
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::OtherLibrary { found: None },
+            },
+            r#""status":"unavailable","cause":"other-library""#,
+        ),
+        (
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::OtherLibrary {
+                    found: Some("0190c3a2-7f21-7abc-8def-0123456789ee".to_string()),
+                },
+            },
+            r#""status":"unavailable","cause":"other-library","found":"0190c3a2-7f21-7abc-8def-0123456789ee""#,
+        ),
+        (
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::Unreadable {
+                    path: "/media/old".into(),
+                    message: "permission denied".to_string(),
+                },
+            },
+            r#""status":"unavailable","cause":"unreadable","path":"/media/old","message":"permission denied""#,
+        ),
+        (
+            ReferenceStatusStep::ItemUnavailable {
+                cause: AcceptedItemCause::Dangling,
+            },
+            r#""status":"item-unavailable","cause":"dangling""#,
+        ),
+        (
+            ReferenceStatusStep::ItemUnavailable {
+                cause: AcceptedItemCause::Unreadable {
+                    path: "/media/old/items".into(),
+                    message: "no such directory".to_string(),
+                },
+            },
+            r#""status":"item-unavailable","cause":"unreadable","path":"/media/old/items","message":"no such directory""#,
+        ),
+        (
+            ReferenceStatusStep::ItemUnavailable {
+                cause: AcceptedItemCause::Ambiguous {
+                    files: vec![
+                        "/media/old/items/a.toml".into(),
+                        "/media/old/items/b.toml".into(),
+                    ],
+                },
+            },
+            r#""status":"item-unavailable","cause":"ambiguous","files":["/media/old/items/a.toml","/media/old/items/b.toml"]"#,
+        ),
+    ]
+}
+
+/// design D7: a reference is its four keys, then `status`, then what the
+/// status adds, and a `found` or an `identifier` that is absent is left
+/// out. Compared on the text, since the order is part of the contract.
+#[test]
+fn json_line_of_every_reference_status_and_cause_matches_design_d7() {
+    for (status, tail) in every_reference_status() {
+        let step = reference_step("/media/old", status);
+
+        assert_eq!(
+            serde_json::to_string(&step).unwrap(),
+            reference_json("/media/old", tail),
+        );
+    }
+}
+
+/// Every status and cause survives the flattened, doubly tagged shape:
+/// it parses back to the step it was written from, alone and on a read.
+#[test]
+fn reference_steps_round_trip_through_json_for_every_status_and_cause() {
+    for (status, _) in every_reference_status() {
+        let step = reference_step("/media/old", status);
+
+        let text = serde_json::to_string(&step).unwrap();
+
+        let parsed: ReferenceStep = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, step, "text {text}");
+
+        let read = IndexReadStep::Miss {
+            references: vec![step.clone()],
+        };
+        let text = serde_json::to_string(&read).unwrap();
+        let parsed: IndexReadStep = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, read, "text {text}");
+    }
+}
+
+/// design D7: `record_retrieval` gains `library-reference`, with the
+/// library, root, artifact and item.
+#[test]
+fn json_line_of_record_retrieval_library_reference_matches_design_d7() {
+    let retrieval = library_reference_retrieval();
+
+    let text = serde_json::to_string(&retrieval).unwrap();
+
+    assert_eq!(
+        text,
+        format!(
+            r#"{{"kind":"library-reference","library":"{REF_LIBRARY}","root":"/home/u/papers","artifact":"{REF_ARTIFACT}","item":"{REF_ITEM}"}}"#
+        )
+    );
+    let parsed: RetrievedFrom = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed, retrieval);
+}
+
+/// design D8: a reference answer's retrieval clause reads `from the
+/// library at <root>`, and `via` names the services the record's
+/// provenance names.
+#[test]
+fn human_line_of_a_reference_answer_ends_from_the_library_at_its_root() {
+    let event = resolved_event_of(crossref_record(), sections_via_reference());
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "paper.pdf: resolved doi:10.1039/c5ay00042d to \"Determination of things\" \
+         (Smith, 2015) via crossref, from the library at /home/u/papers"
+    );
+}
+
+/// design D8: after the library clause, a `; a library reference could
+/// not answer: ` clause for each reference that could not, in the words
+/// of its cause.
+#[test]
+fn human_line_names_each_reference_that_could_not_answer_after_the_library_clause() {
+    let found = "0190c3a2-7f21-7abc-8def-0123456789ee";
+    let cases: Vec<(ReferenceStatusStep, String)> = vec![
+        (
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::Missing,
+            },
+            "/media/old is missing".to_string(),
+        ),
+        (
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::OtherLibrary { found: None },
+            },
+            "/media/old holds no library".to_string(),
+        ),
+        (
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::OtherLibrary {
+                    found: Some(found.to_string()),
+                },
+            },
+            format!("/media/old holds another library ({found})"),
+        ),
+        (
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::Unreadable {
+                    path: "/media/old".into(),
+                    message: "permission denied".to_string(),
+                },
+            },
+            "/media/old could not be read (permission denied)".to_string(),
+        ),
+        (
+            ReferenceStatusStep::ItemUnavailable {
+                cause: AcceptedItemCause::Dangling,
+            },
+            format!("the library at /media/old holds no item {REF_ITEM}"),
+        ),
+        (
+            ReferenceStatusStep::ItemUnavailable {
+                cause: AcceptedItemCause::Unreadable {
+                    path: "/media/old/.borax/items".into(),
+                    message: "no such directory".to_string(),
+                },
+            },
+            "/media/old/.borax/items could not be read (no such directory)".to_string(),
+        ),
+        (
+            ReferenceStatusStep::ItemUnavailable {
+                cause: AcceptedItemCause::Ambiguous {
+                    files: vec!["/media/old/a.toml".into(), "/media/old/b.toml".into()],
+                },
+            },
+            format!("the library at /media/old holds item {REF_ITEM} in several files"),
+        ),
+    ];
+    for (status, wording) in cases {
+        let mut sections = sections_via_content_index();
+        sections.library = LibraryStep::Consulted {
+            answer: LibraryAnswer::DanglingItem {
+                artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
+                item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
+            },
+        };
+        sections.content_index.read = IndexReadStep::Hit {
+            evidence: Some(EvidenceStep {
+                identifier: "doi:10.1000/cached-record".to_string(),
+                origin: "extracted".to_string(),
+            }),
+            references: vec![
+                reference_step("/home/u/fine", ReferenceStatusStep::Agreed),
+                reference_step("/media/old", status.clone()),
+            ],
+        };
+        let event = Event::Resolved {
+            path: PathBuf::from("paper.pdf"),
+            identifier: "doi:10.1000/xyz123".to_string(),
+            record: Box::new(Record::new(EntryType::Article)),
+            sections: Box::new(sections),
+        };
+
+        assert_eq!(
+            human_line(&event).unwrap(),
+            format!(
+                "paper.pdf: resolved doi:10.1000/xyz123 via crossref, from the response \
+                 cache; the library could not answer: artifact \
+                 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f links to item \
+                 0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70, which the library does not hold; \
+                 a library reference could not answer: {wording}"
+            ),
+            "status {status:?}"
+        );
+    }
+}
+
+/// design D8: one clause names every disagreeing reference, `names no
+/// identifier` for one whose item carries none, and it comes before the
+/// rejected-candidate clause.
+#[test]
+fn human_line_names_disagreeing_references_once_before_rejected_candidates() {
+    let mut sections = sections_via_network("crossref", "doi:10.1000/y");
+    sections.content_index.read = IndexReadStep::Miss {
+        references: vec![
+            disagreeing_reference("/home/u/a", Some("doi:10.1000/x")),
+            disagreeing_reference("/home/u/b", Some("doi:10.1000/y")),
+            disagreeing_reference("/home/u/c", None),
+        ],
+    };
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![rejected_candidate_submission(1, "doi:10.1000/a")],
+        used: None,
+        displaced: None,
+    };
+    let event = resolved_event_of(Record::new(EntryType::Article), sections);
+
+    let line = human_line(&event).unwrap();
+
+    assert_eq!(
+        line,
+        "paper.pdf: resolved doi:10.1039/c5ay00042d via crossref, from the network; \
+         library references disagree: the library at /home/u/a names doi:10.1000/x, the \
+         library at /home/u/b names doi:10.1000/y, the library at /home/u/c names no \
+         identifier; candidate rejected: doi:10.1000/a"
+    );
+    assert_eq!(line.matches("disagree").count(), 1, "got {line}");
+}
+
+/// design D8: the clauses go on a resolution `skipped` line too, after
+/// its library clause.
+#[test]
+fn human_line_of_a_skip_carries_the_reference_clauses() {
+    let mut sections = no_text_layer_sections();
+    sections.library = LibraryStep::Consulted {
+        answer: LibraryAnswer::Ambiguous {
+            artifacts: vec!["a-id".to_string(), "b-id".to_string()],
+        },
+    };
+    sections.content_index.read = IndexReadStep::Miss {
+        references: vec![
+            missing_reference("/media/old"),
+            disagreeing_reference("/home/u/a", Some("doi:10.1000/x")),
+            disagreeing_reference("/home/u/b", Some("doi:10.1000/y")),
+        ],
+    };
+    let event = skipped_verdict(SkipReason::NoTextLayer, sections);
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "mystery.pdf: skipped, no identifier found; the pages read hold no text; the \
+         library could not answer: 2 artifact records claim this file: a-id, b-id; a \
+         library reference could not answer: /media/old is missing; library references \
+         disagree: the library at /home/u/a names doi:10.1000/x, the library at /home/u/b \
+         names doi:10.1000/y"
+    );
+}
+
+/// design D8: every value from a reference is escaped on the human
+/// line, and left whole in the JSON.
+#[test]
+fn human_line_of_a_reference_clause_escapes_control_characters() {
+    let mut sections = sections_via_network("crossref", "doi:10.1000/y");
+    sections.content_index.read = IndexReadStep::Miss {
+        references: vec![
+            missing_reference("/media/\u{1b}[2Jold"),
+            reference_step(
+                "/media/other",
+                ReferenceStatusStep::Unavailable {
+                    cause: UnavailableCause::Unreadable {
+                        path: "/media/other".into(),
+                        message: "bad\u{7}news".to_string(),
+                    },
+                },
+            ),
+            disagreeing_reference("/home/u/a\u{1b}[2J", Some("doi:10.1000/x\u{7}")),
+        ],
+    };
+    let event = resolved_event_of(Record::new(EntryType::Article), sections);
+
+    let line = human_line(&event).unwrap();
+
+    assert!(
+        line.contains("/media/\\x1b[2Jold is missing"),
+        "got {line:?}"
+    );
+    assert!(line.contains("(bad\\x07news)"), "got {line:?}");
+    assert!(
+        line.contains("/home/u/a\\x1b[2J names doi:10.1000/x\\x07"),
+        "got {line:?}"
+    );
+    assert!(
+        !line.chars().any(|character| character.is_control()),
+        "got {line:?}"
+    );
+    assert!(json_line(&event).contains(r"/media/\u001b[2Jold"));
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 5.1: a reference write (design D7,
+// D8)
+// ---------------------------------------------------------------------
+
+fn reference_write(repaired_from: Vec<PathBuf>, write: WriteStep) -> Event {
+    Event::ContentIndexWrite {
+        path: PathBuf::from("/home/u/papers/Smith2015.pdf"),
+        hash: "sha256-abc123".to_string(),
+        entry: WrittenEntry::Reference {
+            library: REF_LIBRARY.into(),
+            root: "/home/u/papers".into(),
+            artifact: REF_ARTIFACT.into(),
+            item: REF_ITEM.into(),
+            repaired_from,
+        },
+        write,
+    }
+}
+
+/// The first illustrative write line of design.md.
+#[test]
+fn json_line_of_a_reference_write_matches_design_d7() {
+    let event = reference_write(Vec::new(), WriteStep::Written);
+
+    assert_eq!(
+        json_line(&event),
+        format!(
+            r#"{{"schema":5,"event":"content-index-write","path":"/home/u/papers/Smith2015.pdf","hash":"sha256-abc123","entry":{{"kind":"reference","library":"{REF_LIBRARY}","root":"/home/u/papers","artifact":"{REF_ARTIFACT}","item":"{REF_ITEM}"}},"write":{{"status":"written"}}}}"#
+        )
+    );
+    let parsed: Event = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(parsed, event);
+}
+
+/// The second illustrative write line: the roots a repair removed.
+#[test]
+fn json_line_of_a_repair_carries_repaired_from() {
+    let event = reference_write(
+        vec![PathBuf::from("/media/old"), PathBuf::from("/media/older")],
+        WriteStep::Written,
+    );
+
+    assert_eq!(
+        json_line(&event),
+        format!(
+            r#"{{"schema":5,"event":"content-index-write","path":"/home/u/papers/Smith2015.pdf","hash":"sha256-abc123","entry":{{"kind":"reference","library":"{REF_LIBRARY}","root":"/home/u/papers","artifact":"{REF_ARTIFACT}","item":"{REF_ITEM}","repaired_from":["/media/old","/media/older"]}},"write":{{"status":"written"}}}}"#
+        )
+    );
+    let parsed: Event = serde_json::from_str(&json_line(&event)).unwrap();
+    assert_eq!(parsed, event);
+}
+
+#[test]
+fn json_line_of_a_reference_write_with_no_repair_has_no_repaired_from_key() {
+    for write in [
+        WriteStep::Written,
+        WriteStep::Failed {
+            message: "disk full".to_string(),
+        },
+    ] {
+        let line = json_line(&reference_write(Vec::new(), write));
+
+        assert!(!line.contains("repaired_from"), "got {line}");
+    }
+}
+
+/// design D8: a failed reference write names the library's root and
+/// escapes what the store said.
+#[test]
+fn human_line_of_a_failed_reference_write_names_the_librarys_root() {
+    let event = reference_write(
+        Vec::new(),
+        WriteStep::Failed {
+            message: "cannot write /data/x: No space\u{1b}[2J left on device".to_string(),
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "/home/u/papers/Smith2015.pdf: the content index could not keep its reference to \
+         the library at /home/u/papers (cannot write /data/x: No space\\x1b[2J left on \
+         device)"
+    );
+}
+
+#[test]
+fn human_line_of_a_written_reference_renders_nothing() {
+    assert_eq!(
+        human_line(&reference_write(Vec::new(), WriteStep::Written)),
+        None
+    );
+    assert_eq!(
+        human_line(&reference_write(
+            vec![PathBuf::from("/media/old")],
+            WriteStep::Written
+        )),
+        None
+    );
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 6.1: adoption through a reference
+// (design D7, D8)
+// ---------------------------------------------------------------------
+
+/// The illustrative recorded line of design.md.
+#[test]
+fn json_line_of_library_adoption_recorded_through_a_reference() {
+    let event = library_adoption(
+        "new.pdf",
+        Adoption::Recorded {
+            id: REF_ARTIFACT.to_string(),
+            item: REF_ITEM.to_string(),
+            retrieval: library_reference_retrieval(),
+        },
+    );
+
+    let line = json_line(&event);
+
+    assert_eq!(
+        line,
+        format!(
+            r#"{{"schema":5,"event":"library-adoption","path":"new.pdf","adoption":{{"kind":"recorded","id":"{REF_ARTIFACT}","item":"{REF_ITEM}","retrieval":{{"kind":"library-reference","library":"{REF_LIBRARY}","root":"/home/u/papers","artifact":"{REF_ARTIFACT}","item":"{REF_ITEM}"}}}}}}"#
+        )
+    );
+    let parsed: Event = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed, event);
+}
+
+/// The illustrative unanswered line of design.md: no `identifier` key
+/// when the entry held no evidence, and the `references` that could not
+/// answer.
+#[test]
+fn json_line_of_library_adoption_unanswered_with_references_and_no_identifier() {
+    let event = library_adoption(
+        "scan.pdf",
+        Adoption::Unanswered {
+            identifier: None,
+            references: vec![missing_reference("/media/old")],
+        },
+    );
+
+    let line = json_line(&event);
+
+    let missing = reference_json("/media/old", r#""status":"unavailable","cause":"missing""#);
+    assert_eq!(
+        line,
+        format!(
+            r#"{{"schema":5,"event":"library-adoption","path":"scan.pdf","adoption":{{"kind":"unanswered","references":[{missing}]}}}}"#
+        )
+    );
+    let parsed: Event = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed, event);
+
+    let with_identifier = json_line(&library_adoption(
+        "scan.pdf",
+        Adoption::Unanswered {
+            identifier: Some("doi:10.1000/z".to_string()),
+            references: vec![missing_reference("/media/old")],
+        },
+    ));
+    assert!(
+        with_identifier.contains(&format!(
+            r#""adoption":{{"kind":"unanswered","identifier":"doi:10.1000/z","references":[{missing}]}}"#
+        )),
+        "got {with_identifier}"
+    );
+}
+
+/// design D8: without an identifier, the line says no reference
+/// answered and the index holds no identifier, then the clauses.
+#[test]
+fn human_line_of_library_adoption_unanswered_with_no_identifier_matches_design_d8() {
+    let event = library_adoption(
+        "scan.pdf",
+        Adoption::Unanswered {
+            identifier: None,
+            references: vec![missing_reference("/media/old")],
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "scan.pdf: no library reference the content index holds for its bytes answered, \
+         and it holds no identifier for them, so it is still an orphan; a library \
+         reference could not answer: /media/old is missing"
+    );
+}
+
+/// design D8: with an identifier, 13a's line, then the clauses.
+#[test]
+fn human_line_of_library_adoption_unanswered_with_an_identifier_and_references_ends_with_the_clauses()
+ {
+    let event = library_adoption(
+        "scan.pdf",
+        Adoption::Unanswered {
+            identifier: Some("doi:10.1000/z".to_string()),
+            references: vec![
+                missing_reference("/media/old"),
+                disagreeing_reference("/home/u/a", Some("doi:10.1000/x")),
+                disagreeing_reference("/home/u/b", Some("doi:10.1000/y")),
+            ],
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        "scan.pdf: the content index knows its bytes as doi:10.1000/z, but no response \
+         cache holds that record, so it is still an orphan; borax resolve fetches it; a \
+         library reference could not answer: /media/old is missing; library references \
+         disagree: the library at /home/u/a names doi:10.1000/x, the library at /home/u/b \
+         names doi:10.1000/y"
     );
 }

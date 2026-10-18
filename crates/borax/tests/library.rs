@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borax::event::{
     AcceptedBy, AcceptedItemCause, Admission, Adoption, Condition, Event, Extraction, Finding,
-    Level, LibraryAnswer, Repair,
+    Level, LibraryAnswer, Repair, RetrievedFrom,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
@@ -32,7 +32,6 @@ use borax_core::library::{
     LibraryId, LibraryIdentity, RunId,
 };
 use borax_core::record::{EntryType, Record};
-use borax_sources::source::SourceName;
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
@@ -8477,6 +8476,7 @@ fn evidence_retrieval_names_the_item_answered_with_for_restored_bytes() {
         }),
         content_index: IndexEvidence {
             read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
         },
         extraction: ExtractionEvidence {
@@ -10334,8 +10334,10 @@ fn adopt_that_records_an_orphan_mints_the_identity() {
         if *candidate == orphan_hash {
             Ok(Adopted {
                 record: record_with_doi("10.1000/adopt-mints-identity"),
-                identifier: identifier.clone(),
-                service: SourceName::Crossref,
+                identifier: Some(identifier.clone()),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             })
         } else {
             Err(Unadopted::Unindexed)
@@ -10391,8 +10393,10 @@ fn adopt_into_a_library_with_a_faulty_identity_file_records_and_reports_the_faul
         if *candidate == orphan_hash {
             Ok(Adopted {
                 record: record_with_doi("10.1000/adopt-faulty-identity"),
-                identifier: identifier.clone(),
-                service: SourceName::Crossref,
+                identifier: Some(identifier.clone()),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             })
         } else {
             Err(Unadopted::Unindexed)
@@ -10447,8 +10451,10 @@ fn adopt_whose_mint_fails_records_nothing_and_reports_unwritten_naming_the_ident
         if *candidate == orphan_hash {
             Ok(Adopted {
                 record: record_with_doi("10.1000/adopt-mint-fails"),
-                identifier: identifier.clone(),
-                service: SourceName::Crossref,
+                identifier: Some(identifier.clone()),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             })
         } else {
             Err(Unadopted::Unindexed)
@@ -10498,8 +10504,10 @@ fn adopt_writes_the_lookups_identifier_as_adopted_on_the_adopted_entry() {
         if *candidate == orphan_hash {
             Ok(Adopted {
                 record: record_with_doi("10.1000/adopt-evidence"),
-                identifier: identifier.clone(),
-                service: SourceName::Crossref,
+                identifier: Some(identifier.clone()),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             })
         } else {
             Err(Unadopted::Unindexed)
@@ -10549,7 +10557,8 @@ fn adopt_reports_unanswered_as_the_lookup_says() {
     let identifier = Identifier::Doi(Doi::parse("10.1000/adopt-unanswered").unwrap());
     let lookup = |_hash: &ContentHash| -> Result<Adopted, Unadopted> {
         Err(Unadopted::Unanswered {
-            identifier: identifier.clone(),
+            identifier: Some(identifier.clone()),
+            references: Vec::new(),
         })
     };
     let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
@@ -10568,7 +10577,8 @@ fn adopt_reports_unanswered_as_the_lookup_says() {
     assert_eq!(
         result.adoptions[0].1,
         Adoption::Unanswered {
-            identifier: identifier.to_string(),
+            identifier: Some(identifier.to_string()),
+            references: Vec::new(),
         },
         "got {:?}",
         result.adoptions
@@ -11353,4 +11363,117 @@ fn item_store_answer_is_ambiguous_naming_every_file_carrying_it() {
         }
         other => panic!("expected ambiguous, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 6.1: adoption lists the references it
+// owes the content index, and writes no evidence for a lookup with no
+// identifier (design D2, D6)
+// ---------------------------------------------------------------------
+
+/// design D2: `adopt` lists, for each orphan it recorded, the reference
+/// the content index is owed: its full path, hash, the new artifact and
+/// the item it answers with. An orphan it left lists none.
+#[test]
+fn adopt_lists_the_reference_owed_for_each_orphan_it_records() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("one.pdf"), b"owed one").unwrap();
+    fs::write(root.join("two.pdf"), b"owed two").unwrap();
+    fs::write(root.join("three.pdf"), b"owed three, left").unwrap();
+    let lookup = |candidate: &ContentHash| -> Result<Adopted, Unadopted> {
+        let doi_value = match candidate {
+            found if *found == hash("owed one") => "10.1000/owed-one",
+            found if *found == hash("owed two") => "10.1000/owed-two",
+            _ => return Err(Unadopted::Unindexed),
+        };
+        Ok(Adopted {
+            record: record_with_doi(doi_value),
+            identifier: Some(Identifier::Doi(Doi::parse(doi_value).unwrap())),
+            retrieval: RetrievedFrom::ServiceCache {
+                service: "crossref".to_string(),
+            },
+        })
+    };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    assert_eq!(result.adopted(), 2, "got {result:?}");
+    let records = ArtifactStore::read(root);
+    let owed_for = |relative: &str, seed: &str| {
+        let record = records.by_path(relative).unwrap();
+        OwedReference {
+            path: root.join(relative),
+            hash: hash(seed),
+            artifact: record.id.clone(),
+            item: record.item.clone().unwrap(),
+        }
+    };
+    assert_eq!(
+        result.owed,
+        vec![
+            owed_for("one.pdf", "owed one"),
+            owed_for("two.pdf", "owed two")
+        ],
+        "in the order the orphans were recorded"
+    );
+}
+
+/// design D6: a lookup that reached its record through a library
+/// reference found no identifier, so the entry it writes carries no
+/// evidence.
+#[test]
+fn adopt_with_no_identifier_from_its_lookup_writes_no_evidence() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("orphan.pdf"), b"no identifier from the lookup").unwrap();
+    let orphan_hash = hash("no identifier from the lookup");
+    let lookup = |candidate: &ContentHash| -> Result<Adopted, Unadopted> {
+        match *candidate == orphan_hash {
+            true => Ok(Adopted {
+                record: record_with_doi("10.1000/no-identifier-from-lookup"),
+                identifier: None,
+                retrieval: RetrievedFrom::LibraryReference {
+                    library: UUID_A.into(),
+                    root: "/home/u/papers".into(),
+                    artifact: UUID_B.into(),
+                    item: UUID_C.into(),
+                },
+            }),
+            false => Err(Unadopted::Unindexed),
+        }
+    };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    assert_eq!(result.adopted(), 1, "got {result:?}");
+    let records = ArtifactStore::read(root);
+    let record = records
+        .by_hash(&orphan_hash)
+        .first()
+        .cloned()
+        .cloned()
+        .expect("the orphan must be recorded");
+    assert_eq!(record.history.len(), 1, "got {:?}", record.history);
+    assert_eq!(
+        record.history[0].evidence, None,
+        "no identifier was established, so none is recorded: got {:?}",
+        record.history[0]
+    );
 }

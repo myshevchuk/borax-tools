@@ -9,11 +9,11 @@ use std::thread;
 use std::time::Duration;
 
 use borax::event::{
-    Acceptance, Claim, ClaimOrigin, Counts, Event, EvidenceStep, Extraction, ExtractionResultStep,
-    FetchedFrom, IdentifierInputStep, IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep,
-    LookupRound, LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer,
-    ServiceOutcome, SkipReason, SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep,
-    human_line,
+    Acceptance, AcceptedItemCause, Claim, ClaimOrigin, Counts, Event, EvidenceStep, Extraction,
+    ExtractionResultStep, FetchedFrom, IdentifierInputStep, IdentifierOrigin, IndexReadStep,
+    LibraryAnswer, LibraryStep, LookupRound, LookupStep, MatchCheckStep, ReferenceStatusStep,
+    ReferenceStep, RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason,
+    SubmissionAcceptance, SyntaxStep, TitlesStep, UnavailableCause, WriteStep, human_line,
 };
 use borax::evidence::{
     CandidateDecision, Consultation, Displacement, Evidence, ExtractionEvidence, ExtractionStep,
@@ -21,19 +21,20 @@ use borax::evidence::{
     LookupRound as EvidenceLookupRound, MatchCheck, Origin, RecordRetrieval, ServiceAttempt,
     Titles, Unattempted,
 };
-use borax::library::{ArtifactStore, ItemStore, Stores};
+use borax::library::{ArtifactStore, ItemStore, Stores, identity_file};
 use borax::pipeline::{
     Documents, FileOutcome, FileRecord, RealDocuments, ResolveConfig, accept, attempts_of,
     extraction, extraction_of, from_file, preferred_identifier, remember, resolution_skip,
     resolve_batch, resolve_file, resolve_indexed_again, resolve_supplied, resolved_event, standing,
-    title_check, titles_of, unheld_evidence, verdict_event,
+    standing_in, title_check, titles_of, unheld_evidence, verdict_event,
 };
+use borax::references::{Libraries, ReferenceRead, ReferenceStatus, Unavailable};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, IdentifierKind, Isbn, Pmid, SuppliedError};
-use borax_core::index::Fact;
+use borax_core::index::{Fact, LibraryReference};
 use borax_core::library::{
     ArtifactId, ArtifactRecord, DuplicateReason, EvidenceOrigin, HashEntry, IdentificationEvidence,
-    Item, ItemId, RunId as LibraryRunId,
+    Item, ItemId, LibraryId, LibraryIdentity, RunId as LibraryRunId,
 };
 use borax_core::record::{EntryType, Record};
 use borax_pdf::scan::FoundIdentifier;
@@ -1067,10 +1068,11 @@ fn a_content_index_answer_reports_the_lookups_service_as_its_record_retrieval() 
             assert_eq!(
                 sections.content_index.read,
                 IndexReadStep::Hit {
-                    evidence: EvidenceStep {
+                    evidence: Some(EvidenceStep {
                         identifier: "doi:10.1000/cached-record".to_string(),
                         origin: "extracted".to_string(),
-                    }
+                    }),
+                    references: Vec::new(),
                 }
             );
             assert_eq!(
@@ -1188,6 +1190,7 @@ fn evidence_with(
 fn default_content_index() -> IndexEvidence {
     IndexEvidence {
         read: IndexRead::Miss,
+        references: Vec::new(),
         write: IndexWrite::Attempted(CacheWrite::Written),
     }
 }
@@ -1298,13 +1301,19 @@ fn sections_projects_every_index_read_and_write() {
                 origin: EvidenceOrigin::Extracted,
             }),
             IndexReadStep::Hit {
-                evidence: EvidenceStep {
+                evidence: Some(EvidenceStep {
                     identifier: "doi:10.1000/index-read-hit".to_string(),
                     origin: "extracted".to_string(),
-                },
+                }),
+                references: Vec::new(),
             },
         ),
-        (IndexRead::Miss, IndexReadStep::Miss),
+        (
+            IndexRead::Miss,
+            IndexReadStep::Miss {
+                references: Vec::new(),
+            },
+        ),
         (IndexRead::Bypassed, IndexReadStep::Bypassed),
         (
             IndexRead::Unavailable {
@@ -1326,6 +1335,7 @@ fn sections_projects_every_index_read_and_write() {
             Consultation::NotConsulted(Unattempted::NoLibrary),
             IndexEvidence {
                 read,
+                references: Vec::new(),
                 write: IndexWrite::Attempted(CacheWrite::Written),
             },
             default_extraction(),
@@ -1361,6 +1371,7 @@ fn sections_projects_every_index_read_and_write() {
             Consultation::NotConsulted(Unattempted::NoLibrary),
             IndexEvidence {
                 read: IndexRead::Miss,
+                references: Vec::new(),
                 write,
             },
             default_extraction(),
@@ -1688,6 +1699,7 @@ fn sections_projects_record_retrieval_for_every_place_and_none() {
         }),
         IndexEvidence {
             read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
         },
         ExtractionEvidence {
@@ -1758,6 +1770,7 @@ fn sections_projects_record_retrieval_for_every_place_and_none() {
         Consultation::NotConsulted(Unattempted::NoLibrary),
         IndexEvidence {
             read: IndexRead::Miss,
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::NoRecord),
         },
         default_extraction(),
@@ -1903,6 +1916,7 @@ fn every_reason_in_a_projected_sections_is_a_known_unattempted_reason() {
         Consultation::NotConsulted(Unattempted::OutsideLibrary),
         IndexEvidence {
             read: IndexRead::NotAttempted(Unattempted::Unhashable),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::Refused),
         },
         ExtractionEvidence {
@@ -4361,6 +4375,7 @@ fn prior_indexed_hit(identifier: Identifier, origin: EvidenceOrigin) -> Evidence
                 identifier: identifier.clone(),
                 origin,
             }),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
         },
         extraction: ExtractionEvidence {
@@ -5176,6 +5191,7 @@ fn evidence_via_lookup(service: SourceName, identifier: Identifier, tier: Tier) 
         library: Consultation::NotConsulted(Unattempted::NoLibrary),
         content_index: IndexEvidence {
             read: IndexRead::Miss,
+            references: Vec::new(),
             write: IndexWrite::Attempted(CacheWrite::Written),
         },
         extraction: ExtractionEvidence {
@@ -5211,6 +5227,7 @@ fn evidence_via_content_index_hit() -> Evidence {
                 identifier: Identifier::Doi(doi("10.1000/cached-record")),
                 origin: EvidenceOrigin::Extracted,
             }),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
         },
         extraction: ExtractionEvidence {
@@ -5256,6 +5273,7 @@ fn prior_content_index_hit() -> Evidence {
                 identifier: Identifier::Doi(doi("10.1000/prior-hit")),
                 origin: EvidenceOrigin::Extracted,
             }),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
         },
         extraction: ExtractionEvidence {
@@ -5286,6 +5304,7 @@ fn prior_tracked(artifact: &str, item: &str) -> Evidence {
         }),
         content_index: IndexEvidence {
             read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
         },
         extraction: ExtractionEvidence {
@@ -6336,10 +6355,11 @@ fn an_evidence_hit_reports_lookup_origin_content_index_and_the_evidence_on_the_r
     assert_eq!(
         sections.content_index.read,
         IndexReadStep::Hit {
-            evidence: EvidenceStep {
+            evidence: Some(EvidenceStep {
                 identifier: "doi:10.1000/evidence-hit-origin".to_string(),
                 origin: "extracted".to_string(),
-            }
+            }),
+            references: Vec::new(),
         }
     );
 }
@@ -6884,6 +6904,7 @@ fn remember_of_an_index_held_lookup_writes_nothing_and_is_not_attempted_for_cont
                     identifier: identifier.clone(),
                     origin: EvidenceOrigin::Extracted,
                 }),
+                references: Vec::new(),
                 write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
             },
             ExtractionEvidence {
@@ -6930,6 +6951,7 @@ fn identification_of_an_index_origin_lookup_carries_the_answering_facts_origin()
                         identifier: identifier.clone(),
                         origin,
                     }),
+                    references: Vec::new(),
                     write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
                 },
                 ExtractionEvidence {
@@ -6968,6 +6990,7 @@ fn sections_projects_a_hit_with_its_evidence() {
                 identifier: Identifier::Doi(doi("10.1000/sections-hit")),
                 origin: EvidenceOrigin::Overridden,
             }),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
         },
         default_extraction(),
@@ -6978,10 +7001,11 @@ fn sections_projects_a_hit_with_its_evidence() {
     assert_eq!(
         evidence.sections(Acceptance::Automatic).content_index.read,
         IndexReadStep::Hit {
-            evidence: EvidenceStep {
+            evidence: Some(EvidenceStep {
                 identifier: "doi:10.1000/sections-hit".to_string(),
                 origin: "overridden".to_string(),
-            }
+            }),
+            references: Vec::new(),
         }
     );
 }
@@ -6995,6 +7019,7 @@ fn retrieval_of_an_index_origin_lookup_is_its_service() {
                 identifier: Identifier::Doi(doi("10.1000/retrieval-index-origin")),
                 origin: EvidenceOrigin::Extracted,
             }),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
         },
         default_extraction(),
@@ -8710,5 +8735,1053 @@ fn preferred_identifier_takes_doi_then_arxiv_then_pmid_then_isbn() {
     assert_eq!(
         preferred_identifier(&with(false, false, false, false)),
         None
+    );
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 4.1: a library reference answers
+// before the entry's evidence (design D4, D5, D9)
+// ---------------------------------------------------------------------
+
+/// A library at `root` with a fresh identity and one item carrying
+/// `doi_value`, and a reference to that item from an artifact the
+/// library need not hold: reaching a reference reads the identity and
+/// the item store alone.
+struct Referenced {
+    item: Item,
+    reference: LibraryReference,
+}
+
+fn referenced_library_at(root: &Path, doi_value: &str) -> Referenced {
+    fs::create_dir_all(root.join(".borax")).unwrap();
+    let library = LibraryId::from_uuid(fresh_uuid());
+    fs::write(
+        identity_file(root),
+        LibraryIdentity {
+            id: library.clone(),
+        }
+        .to_toml(),
+    )
+    .unwrap();
+    let item = library_item(root, record_with_doi(doi_value));
+    let reference = LibraryReference {
+        library,
+        root: root.to_path_buf(),
+        artifact: ArtifactId::from_uuid(fresh_uuid()),
+        item: item.id.clone(),
+    };
+    Referenced { item, reference }
+}
+
+/// A reference to a library that is not at its root: nothing is there.
+fn missing_library_reference(parent: &Path) -> LibraryReference {
+    LibraryReference {
+        library: LibraryId::from_uuid(fresh_uuid()),
+        root: parent.join("never-created"),
+        artifact: ArtifactId::from_uuid(fresh_uuid()),
+        item: ItemId::from_uuid(fresh_uuid()),
+    }
+}
+
+/// `value` as the text an event field carries it as, whatever type
+/// that field has.
+fn text_field<T: From<String>>(value: impl ToString) -> T {
+    T::from(value.to_string())
+}
+
+/// `reference` as a read of an entry reports it.
+fn step_of(reference: &LibraryReference, status: ReferenceStatusStep) -> ReferenceStep {
+    ReferenceStep {
+        library: text_field(&reference.library),
+        root: text_field(reference.root.display()),
+        artifact: text_field(&reference.artifact),
+        item: text_field(&reference.item),
+        status,
+    }
+}
+
+fn read_of(reference: &LibraryReference, status: ReferenceStatus) -> ReferenceRead {
+    ReferenceRead {
+        reference: reference.clone(),
+        status,
+    }
+}
+
+/// A file at `path` that must never be opened, hashing to `hash`.
+fn unopenable(path: &Path, hash: &ContentHash) -> FakeDocuments {
+    FakeDocuments::new().with_open_error(
+        path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    )
+}
+
+fn doi_identifier(value: &str) -> Identifier {
+    Identifier::Doi(doi(value))
+}
+
+/// Every file under `root` with its bytes.
+fn files_under(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            match path.is_dir() {
+                true => walk(&path, out),
+                false => {
+                    out.insert(path.clone(), fs::read(&path).unwrap());
+                }
+            }
+        }
+    }
+    let mut found = BTreeMap::new();
+    walk(root, &mut found);
+    found
+}
+
+#[test]
+fn a_reachable_reference_answers_without_opening_the_file_or_asking_a_service() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-answers");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-answers");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
+    let file = resolved_outcome(outcome);
+
+    assert_eq!(file.record, referenced.item.record);
+    assert_eq!(documents.open_calls(), 0);
+}
+
+#[test]
+fn a_reference_answer_reads_hit_with_its_references_and_no_evidence() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-reads-hit");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-reads-hit");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert_eq!(file.evidence.content_index.read, IndexRead::Referenced);
+    assert_eq!(
+        file.evidence.content_index.references,
+        vec![read_of(&referenced.reference, ReferenceStatus::Answered)]
+    );
+    assert_eq!(
+        file.evidence
+            .sections(Acceptance::Automatic)
+            .content_index
+            .read,
+        IndexReadStep::Hit {
+            evidence: None,
+            references: vec![step_of(
+                &referenced.reference,
+                ReferenceStatusStep::Answered
+            )],
+        }
+    );
+}
+
+#[test]
+fn a_reference_answer_is_retrieved_from_the_library_reference() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-retrieved");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-retrieved");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert_eq!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::LibraryReference {
+            reference: referenced.reference.clone()
+        })
+    );
+    let reference = &referenced.reference;
+    assert_eq!(
+        file.evidence
+            .sections(Acceptance::Automatic)
+            .record_retrieval,
+        Some(RetrievedFrom::LibraryReference {
+            library: text_field(&reference.library),
+            root: text_field(reference.root.display()),
+            artifact: text_field(&reference.artifact),
+            item: text_field(&reference.item),
+        })
+    );
+}
+
+#[test]
+fn a_reference_answer_marks_extraction_titles_lookup_match_check_and_the_write_not_attempted_for_content_index_hit()
+ {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-not-attempted");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-not-attempted");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    let reason = Unattempted::ContentIndexHit;
+    let evidence = &file.evidence;
+    assert_eq!(
+        evidence.extraction.result,
+        ExtractionStep::NotAttempted(reason)
+    );
+    assert_eq!(evidence.extraction.titles, Titles::NotAttempted(reason));
+    assert_eq!(evidence.lookup, LookupEvidence::NotAttempted(reason));
+    assert_eq!(evidence.match_check, MatchCheck::NotAttempted(reason));
+    assert_eq!(
+        evidence.content_index.write,
+        IndexWrite::NotAttempted(reason)
+    );
+    assert_eq!(
+        evidence.identifier_input,
+        IdentifierInput::NotAttempted(Unattempted::NotAsked)
+    );
+}
+
+#[test]
+fn a_reference_answer_is_accepted_automatically() {
+    let path = PathBuf::from("paper.pdf");
+    let hash = hash_for("reference-automatic");
+    let documents = unopenable(&path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-automatic");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let file = resolved_outcome(resolve_file(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert!(!file.overridden && !file.accepted);
+    match resolved_event(&path, &file) {
+        Event::Resolved { sections, .. } => {
+            assert_eq!(sections.acceptance, Acceptance::Automatic);
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_reference_answers_before_the_entrys_operator_evidence() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-before-operator");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-wins");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/extracted-loses"));
+    let _ = index.put_operator(
+        &hash,
+        &IdentificationEvidence {
+            identifier: doi_identifier("10.1000/operator-loses"),
+            origin: EvidenceOrigin::Supplied,
+        },
+    );
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert_eq!(file.record, referenced.item.record);
+    assert_eq!(file.evidence.content_index.read, IndexRead::Referenced);
+    assert_eq!(
+        file.evidence.lookup,
+        LookupEvidence::NotAttempted(Unattempted::ContentIndexHit)
+    );
+}
+
+/// Two libraries under one parent, `a` before `b` in entry order, whose
+/// items carry different DOIs, with a reference to each from `hash`.
+fn two_disagreeing_references(
+    parent: &Path,
+    hash: &ContentHash,
+    index: &ContentIndex<MemoryCache>,
+) -> (Referenced, Referenced) {
+    let first = referenced_library_at(&parent.join("a"), "10.1000/disagree-x");
+    let second = referenced_library_at(&parent.join("b"), "10.1000/disagree-y");
+    let _ = index.put_reference(hash, &second.reference);
+    let _ = index.put_reference(hash, &first.reference);
+    (first, second)
+}
+
+#[test]
+fn disagreeing_references_fall_to_the_entrys_evidence_and_report_each_identifier() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("references-disagree-evidence");
+    let documents = unopenable(path, &hash);
+    let parent = tempdir().unwrap();
+    let index = ContentIndex::new(MemoryCache::new());
+    let (first, second) = two_disagreeing_references(parent.path(), &hash, &index);
+    let evidence = doi_identifier("10.1000/the-evidence");
+    let _ = index.put_extracted(&hash, &evidence);
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/the-evidence")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert_eq!(file.record, record_with_doi("10.1000/the-evidence"));
+    assert_eq!(
+        file.evidence.content_index.read,
+        IndexRead::Hit(IdentificationEvidence {
+            identifier: evidence,
+            origin: EvidenceOrigin::Extracted,
+        })
+    );
+    assert_eq!(
+        file.evidence.content_index.references,
+        vec![
+            read_of(
+                &first.reference,
+                ReferenceStatus::Disagreeing {
+                    identifier: Some(doi_identifier("10.1000/disagree-x"))
+                }
+            ),
+            read_of(
+                &second.reference,
+                ReferenceStatus::Disagreeing {
+                    identifier: Some(doi_identifier("10.1000/disagree-y"))
+                }
+            ),
+        ]
+    );
+    match &file.evidence.lookup {
+        LookupEvidence::Attempted { origin, .. } => {
+            assert_eq!(*origin, Origin::Indexed(EvidenceOrigin::Extracted));
+        }
+        other => panic!("expected an attempted lookup, got {other:?}"),
+    }
+    assert_eq!(documents.open_calls(), 0);
+}
+
+#[test]
+fn disagreeing_references_with_no_evidence_read_miss_and_extract() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("references-disagree-no-evidence");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/extracted-z"),
+    );
+    let parent = tempdir().unwrap();
+    let index = ContentIndex::new(MemoryCache::new());
+    let (first, second) = two_disagreeing_references(parent.path(), &hash, &index);
+    let (crossref, calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/extracted-z")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert_eq!(file.evidence.content_index.read, IndexRead::Miss);
+    assert_eq!(
+        file.evidence
+            .content_index
+            .references
+            .iter()
+            .map(|read| read.reference.clone())
+            .collect::<Vec<_>>(),
+        vec![first.reference.clone(), second.reference.clone()]
+    );
+    assert!(
+        file.evidence
+            .content_index
+            .references
+            .iter()
+            .all(|read| matches!(read.status, ReferenceStatus::Disagreeing { .. }))
+    );
+    assert_eq!(documents.open_calls(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(file.record, record_with_doi("10.1000/extracted-z"));
+    assert_eq!(
+        index.entry(&hash).extracted,
+        Fact::Held(doi_identifier("10.1000/extracted-z"))
+    );
+}
+
+#[test]
+fn an_unavailable_reference_falls_to_the_entrys_evidence_and_reports_its_cause() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-unavailable");
+    let documents = unopenable(path, &hash);
+    let parent = tempdir().unwrap();
+    let reference = missing_library_reference(parent.path());
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/unavailable-evidence"));
+    let _ = index.put_reference(&hash, &reference);
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/unavailable-evidence")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert!(matches!(
+        file.evidence.content_index.read,
+        IndexRead::Hit(_)
+    ));
+    assert_eq!(
+        file.evidence.content_index.references,
+        vec![read_of(
+            &reference,
+            ReferenceStatus::Unavailable(Unavailable::Missing)
+        )]
+    );
+    assert_eq!(file.record, record_with_doi("10.1000/unavailable-evidence"));
+}
+
+#[test]
+fn an_item_unavailable_reference_falls_to_the_entrys_evidence() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-item-unavailable");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/item-is-deleted");
+    fs::remove_file(
+        library
+            .path()
+            .join("items")
+            .join(format!("{}.toml", referenced.item.id)),
+    )
+    .unwrap();
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/item-unavailable-evidence"));
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/item-unavailable-evidence")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert!(matches!(
+        file.evidence.content_index.read,
+        IndexRead::Hit(_)
+    ));
+    assert_eq!(
+        file.evidence.content_index.references,
+        vec![read_of(
+            &referenced.reference,
+            ReferenceStatus::ItemUnavailable(AcceptedItemCause::Dangling)
+        )]
+    );
+    assert_eq!(
+        file.record,
+        record_with_doi("10.1000/item-unavailable-evidence")
+    );
+}
+
+/// The library's work check applies to a record a reference supplied,
+/// as it does to any other: an account whose library already holds a
+/// file of that work skips the incoming file as a work duplicate.
+#[test]
+fn a_reference_answer_goes_through_the_work_check() {
+    let parent = tempdir().unwrap();
+    let account_root = parent.path().join("account");
+    fs::create_dir_all(&account_root).unwrap();
+    let path = account_root.join("incoming.pdf");
+    let hash = hash_for("reference-work-check-incoming");
+    let documents = unopenable(&path, &hash);
+    let held = item_with(&account_root, "10.1000/reference-work");
+    record_at(
+        &account_root,
+        "archived/Work2024.pdf",
+        hash_for("reference-work-check-original"),
+        Some(held),
+    );
+    let referenced = referenced_library_at(&parent.path().join("other"), "10.1000/reference-work");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let stores = Stores::read(&account_root);
+    let exists = |_: &Path| true;
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        Some(&stores.account(&exists)),
+        None,
+    );
+
+    assert_eq!(
+        result.verdict,
+        FileOutcome::Skipped(SkipReason::Duplicate {
+            reason: DuplicateReason::Work,
+            existing_path: account_root.join("archived").join("Work2024.pdf"),
+        })
+    );
+    assert_eq!(result.evidence.content_index.read, IndexRead::Referenced);
+    assert!(result.duplicated.is_some());
+}
+
+#[test]
+fn a_tracked_file_reads_no_reference() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("paper.pdf");
+    let hash = hash_for("tracked-reads-no-reference");
+    let item = library_item(&root, record_with_doi("10.1000/tracked-wins"));
+    let stores = tracked_library(&root, "paper.pdf", hash.clone(), &item);
+    let referenced = referenced_library_at(&dir.path().join("other"), "10.1000/reference-loses");
+    let counting = CountingCache::new();
+    let index = ContentIndex::new(counting.clone());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let gets_after_seeding = counting.gets();
+    let puts_after_seeding = counting.puts();
+    let documents = FakeDocuments::new().with_file(&path, hash, pdf_with_no_text_layer());
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+
+    let file = resolved_outcome(result.verdict);
+    assert_eq!(file.record, item.record);
+    assert_eq!(
+        counting.gets(),
+        gets_after_seeding,
+        "no read of the entry, references included"
+    );
+    assert_eq!(counting.puts(), puts_after_seeding);
+}
+
+#[test]
+fn an_untracked_copy_inside_a_library_is_answered_by_its_reference_and_reported_untracked() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    fs::create_dir_all(&root).unwrap();
+    let hash = hash_for("untracked-copy-bytes");
+    let item = library_item(&root, record_with_doi("10.1000/the-original"));
+    let stores = tracked_library(&root, "original.pdf", hash.clone(), &item);
+    let copy = root.join("copy.pdf");
+    let documents = unopenable(&copy, &hash);
+    let referenced = referenced_library_at(&dir.path().join("other"), "10.1000/the-reference");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let result = standing(
+        &copy,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+        None,
+        Some(&stores),
+    );
+
+    assert_eq!(result.library().cloned(), Some(LibraryAnswer::Untracked));
+    assert_eq!(result.evidence.content_index.read, IndexRead::Referenced);
+    let file = resolved_outcome(result.verdict);
+    assert_eq!(file.record, referenced.item.record);
+    assert_eq!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::LibraryReference {
+            reference: referenced.reference
+        })
+    );
+}
+
+#[test]
+fn a_bypassed_index_reads_no_reference() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-bypassed");
+    let documents =
+        FakeDocuments::new().with_file(path, hash.clone(), pdf_with_embedded_doi("10.1000/live"));
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-ignored");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let (crossref, calls) = fake_source(SourceName::Crossref, Ok(record_with_doi("10.1000/live")));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(false),
+    ));
+
+    assert_eq!(file.evidence.content_index.read, IndexRead::Bypassed);
+    assert!(file.evidence.content_index.references.is_empty());
+    assert_eq!(file.record, record_with_doi("10.1000/live"));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn an_unhashable_file_reads_no_reference() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_hash_error(
+        path,
+        ExtractionError::Unreadable {
+            message: "cannot hash".to_string(),
+        },
+        pdf_with_embedded_doi("10.1000/unhashable-live"),
+    );
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-unseen");
+    let counting = CountingCache::new();
+    let index = ContentIndex::new(counting.clone());
+    let _ = index.put_reference(&hash_for("some-other-bytes"), &referenced.reference);
+    let gets_after_seeding = counting.gets();
+    let (crossref, _calls) = fake_source(
+        SourceName::Crossref,
+        Ok(record_with_doi("10.1000/unhashable-live")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert_eq!(
+        file.evidence.content_index.read,
+        IndexRead::Unavailable {
+            message: "cannot hash".to_string()
+        }
+    );
+    assert!(file.evidence.content_index.references.is_empty());
+    assert_eq!(counting.gets(), gets_after_seeding);
+    assert_eq!(file.record, record_with_doi("10.1000/unhashable-live"));
+}
+
+#[test]
+fn a_reference_answer_writes_nothing_to_the_content_index() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-writes-nothing");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-writes-nothing");
+    let index_root = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_root.path()));
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/the-extracted-fact"));
+    let _ = index.put_operator(
+        &hash,
+        &IdentificationEvidence {
+            identifier: doi_identifier("10.1000/the-operator-fact"),
+            origin: EvidenceOrigin::Supplied,
+        },
+    );
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let before = files_under(index_root.path());
+    assert_eq!(before.len(), 3, "extracted, operator and one reference");
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert_eq!(file.evidence.content_index.read, IndexRead::Referenced);
+    assert_eq!(files_under(index_root.path()), before);
+}
+
+#[test]
+fn identification_of_a_reference_answer_is_none() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-identification");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-identification");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/not-this-one"));
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+
+    assert_eq!(file.identification(), None);
+}
+
+#[test]
+fn remember_after_a_reference_answer_is_not_attempted_for_content_index_hit() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-remember");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-remember");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &config(true),
+    ));
+    let accepted = FileRecord {
+        accepted: true,
+        ..file
+    };
+
+    assert_eq!(
+        remember(&index, &accepted),
+        IndexWrite::NotAttempted(Unattempted::ContentIndexHit)
+    );
+    assert_eq!(index.entry(&hash).answer(), None);
+}
+
+/// design D4: one `Libraries` reads each root once. A second file whose
+/// reference names the same root is answered from the first read, even
+/// if the item file changed between the two.
+#[test]
+fn standing_in_answers_a_second_file_from_the_first_read_of_a_referenced_library() {
+    let library = tempdir().unwrap();
+    let root = library.path();
+    let first = referenced_library_at(root, "10.1000/first-item");
+    let second_item = library_item(root, record_with_doi("10.1000/second-item"));
+    let second = LibraryReference {
+        artifact: ArtifactId::from_uuid(fresh_uuid()),
+        item: second_item.id.clone(),
+        ..first.reference.clone()
+    };
+    let (path_one, path_two) = (Path::new("one.pdf"), Path::new("two.pdf"));
+    let (hash_one, hash_two) = (hash_for("first-file"), hash_for("second-file"));
+    let documents = unopenable(path_one, &hash_one).with_open_error(
+        path_two,
+        hash_two.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash_one, &first.reference);
+    let _ = index.put_reference(&hash_two, &second);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let libraries = Libraries::new();
+    let answer = |path: &Path, libraries: &Libraries| {
+        resolved_outcome(
+            standing_in(
+                path,
+                &documents,
+                &sources,
+                &index,
+                &config(true),
+                None,
+                None,
+                libraries,
+            )
+            .verdict,
+        )
+    };
+
+    assert_eq!(answer(path_one, &libraries).record, first.item.record);
+    let edited = Item {
+        id: second_item.id.clone(),
+        record: record_with_doi("10.1000/edited-after-the-first-read"),
+    };
+    fs::write(
+        root.join("items").join(format!("{}.toml", edited.id)),
+        edited.to_toml(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        answer(path_two, &libraries).record,
+        second_item.record,
+        "the root was read once, before the edit"
+    );
+    assert_eq!(
+        answer(path_two, &Libraries::new()).record,
+        edited.record,
+        "a fresh Libraries sees the edit"
+    );
+}
+
+#[test]
+fn sections_project_a_reference_hit_and_its_references() {
+    let library = LibraryId::from_uuid(fresh_uuid());
+    let reference = |root: &str| LibraryReference {
+        library: library.clone(),
+        root: PathBuf::from(root),
+        artifact: ArtifactId::from_uuid(fresh_uuid()),
+        item: ItemId::from_uuid(fresh_uuid()),
+    };
+    let answered = reference("/home/u/papers");
+    let agreed = reference("/home/u/copy");
+    let disagreeing = reference("/home/u/other");
+    let reads = vec![
+        read_of(&answered, ReferenceStatus::Answered),
+        read_of(&agreed, ReferenceStatus::Agreed),
+        read_of(
+            &disagreeing,
+            ReferenceStatus::Disagreeing {
+                identifier: Some(doi_identifier("10.1000/x")),
+            },
+        ),
+        read_of(
+            &disagreeing,
+            ReferenceStatus::Disagreeing { identifier: None },
+        ),
+        read_of(
+            &answered,
+            ReferenceStatus::Unavailable(Unavailable::Missing),
+        ),
+        read_of(
+            &answered,
+            ReferenceStatus::Unavailable(Unavailable::OtherLibrary { found: None }),
+        ),
+        read_of(
+            &answered,
+            ReferenceStatus::Unavailable(Unavailable::OtherLibrary {
+                found: Some(library.clone()),
+            }),
+        ),
+        read_of(
+            &answered,
+            ReferenceStatus::Unavailable(Unavailable::Unreadable {
+                path: PathBuf::from("/home/u/papers"),
+                message: "permission denied".to_string(),
+            }),
+        ),
+        read_of(
+            &answered,
+            ReferenceStatus::ItemUnavailable(AcceptedItemCause::Dangling),
+        ),
+        read_of(
+            &answered,
+            ReferenceStatus::ItemUnavailable(AcceptedItemCause::Ambiguous {
+                files: vec![PathBuf::from("/home/u/papers/items/a.toml")],
+            }),
+        ),
+    ];
+    let steps = vec![
+        step_of(&answered, ReferenceStatusStep::Answered),
+        step_of(&agreed, ReferenceStatusStep::Agreed),
+        step_of(
+            &disagreeing,
+            ReferenceStatusStep::Disagreeing {
+                identifier: Some("doi:10.1000/x".to_string()),
+            },
+        ),
+        step_of(
+            &disagreeing,
+            ReferenceStatusStep::Disagreeing { identifier: None },
+        ),
+        step_of(
+            &answered,
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::Missing,
+            },
+        ),
+        step_of(
+            &answered,
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::OtherLibrary { found: None },
+            },
+        ),
+        step_of(
+            &answered,
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::OtherLibrary {
+                    found: Some(library.to_string()),
+                },
+            },
+        ),
+        step_of(
+            &answered,
+            ReferenceStatusStep::Unavailable {
+                cause: UnavailableCause::Unreadable {
+                    path: "/home/u/papers".into(),
+                    message: "permission denied".to_string(),
+                },
+            },
+        ),
+        step_of(
+            &answered,
+            ReferenceStatusStep::ItemUnavailable {
+                cause: AcceptedItemCause::Dangling,
+            },
+        ),
+        step_of(
+            &answered,
+            ReferenceStatusStep::ItemUnavailable {
+                cause: AcceptedItemCause::Ambiguous {
+                    files: vec!["/home/u/papers/items/a.toml".into()],
+                },
+            },
+        ),
+    ];
+    let with_read = |read: IndexRead| {
+        evidence_with(
+            Consultation::NotConsulted(Unattempted::NoLibrary),
+            IndexEvidence {
+                read,
+                references: reads.clone(),
+                write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
+            },
+            default_extraction(),
+            LookupEvidence::NotAttempted(Unattempted::ContentIndexHit),
+            MatchCheck::NotAttempted(Unattempted::ContentIndexHit),
+        )
+        .sections(Acceptance::Automatic)
+        .content_index
+        .read
+    };
+
+    assert_eq!(
+        with_read(IndexRead::Referenced),
+        IndexReadStep::Hit {
+            evidence: None,
+            references: steps.clone(),
+        }
+    );
+    assert_eq!(
+        with_read(IndexRead::Hit(IdentificationEvidence {
+            identifier: doi_identifier("10.1000/sections-evidence"),
+            origin: EvidenceOrigin::Supplied,
+        })),
+        IndexReadStep::Hit {
+            evidence: Some(EvidenceStep {
+                identifier: "doi:10.1000/sections-evidence".to_string(),
+                origin: "supplied".to_string(),
+            }),
+            references: steps.clone(),
+        }
+    );
+    assert_eq!(
+        with_read(IndexRead::Miss),
+        IndexReadStep::Miss { references: steps }
     );
 }
