@@ -832,6 +832,18 @@ pub enum Unattempted {
     /// taken, it renders no name, or it renders the file's current
     /// name.
     NoMove,
+    /// The library's record carries no identifier a refresh could look
+    /// up again.
+    NoIdentifier,
+    /// The refreshed item is another library's, reached through a
+    /// reference, and only a run in that library can replace its
+    /// record.
+    AnotherLibrary,
+    /// The run records nothing, so no item's record is replaced.
+    NotRecording,
+    /// The operator already answered about the refreshed item at an
+    /// earlier file of the run.
+    AlreadyAsked,
 }
 
 impl Unattempted {
@@ -853,6 +865,10 @@ impl Unattempted {
             Unattempted::NotSupplied => "not-supplied",
             Unattempted::Unparsed => "unparsed",
             Unattempted::NoMove => "no-move",
+            Unattempted::NoIdentifier => "no-identifier",
+            Unattempted::AnotherLibrary => "another-library",
+            Unattempted::NotRecording => "not-recording",
+            Unattempted::AlreadyAsked => "already-asked",
         }
     }
 }

@@ -52,6 +52,11 @@ pub enum Event {
         /// file that changes, so a run log without this says what a run
         /// did and not why it did it.
         tables: Vec<TableUsed>,
+        /// Whether the run was given `--refresh`, so read no answer from
+        /// the response cache. Written as `refresh: true`, and left off
+        /// the line otherwise.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        refresh: bool,
     },
     /// A lookup found no row. Reported once per distinct table and
     /// input however many files hit it, because what it tells the user
@@ -1048,6 +1053,75 @@ pub enum SubmissionAcceptance {
     Rejected,
     /// It reached nothing to accept: `unparsed`, `no-record` or
     /// `no-move`.
+    NotAttempted { reason: String },
+}
+
+/// A fresh lookup of the record a library item answered a file with,
+/// and how it compares with the item's. Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum RefreshStep {
+    /// Nothing was looked up. `reason` is `no-identifier`: the item's
+    /// record carries no DOI, arXiv id, PMID or ISBN.
+    NotAttempted { reason: String },
+    /// No configured service supports `identifier`'s kind, so none was
+    /// asked.
+    NoEligibleService { identifier: String },
+    /// Every service asked about `identifier` failed, in `attempts`'
+    /// order.
+    Unresolved {
+        identifier: String,
+        attempts: Vec<ServiceAnswer>,
+    },
+    /// The record found for `identifier` equals the item's in every
+    /// compared field. A found attempt is the last of `attempts`.
+    Current {
+        identifier: String,
+        attempts: Vec<ServiceAnswer>,
+    },
+    /// The record found for `identifier`, `candidate`, differs from the
+    /// item's in each of `differences`, in field order. A found attempt
+    /// is the last of `attempts`. `acceptance` is what became of the
+    /// candidate.
+    Differs {
+        identifier: String,
+        attempts: Vec<ServiceAnswer>,
+        differences: Vec<DifferenceStep>,
+        candidate: Box<Record>,
+        acceptance: RefreshAcceptance,
+    },
+}
+
+/// One compared field whose value differs between a library item's
+/// record and a fresh one: the record key, then each record's value as
+/// the record serializes it, left off where that record has none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DifferenceStep {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<serde_json::Value>,
+}
+
+/// What became of a fresh record that differs from a library item's.
+/// Serialized with a `status` tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum RefreshAcceptance {
+    /// An operator is being asked. Carried only by the event a
+    /// question's description is rendered from, never by a reported
+    /// verdict.
+    Pending,
+    /// The operator replaced the item's record, and the write landed.
+    Accepted,
+    /// The operator chose to replace the item's record, and the write
+    /// failed or was refused for `message`; the item stands.
+    Unwritten { message: String },
+    /// The operator kept the item's record.
+    Declined,
+    /// Nobody was asked, for `reason`: `another-library`, `not-asked`,
+    /// `not-recording` or `already-asked`.
     NotAttempted { reason: String },
 }
 

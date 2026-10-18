@@ -16,6 +16,7 @@ pub mod library;
 pub mod paths;
 pub mod pipeline;
 pub mod references;
+pub mod refresh;
 pub mod renaming;
 pub mod run;
 pub mod runlog;

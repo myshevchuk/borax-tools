@@ -190,8 +190,14 @@ pub struct ResolveConfig {
     pub extraction: ExtractionConfig,
     /// Whether the caches may be read and written. `false` is the
     /// `--no-cache` bypass: every file is extracted and every
-    /// identifier asked about again.
+    /// identifier asked about again. It does not bypass the library.
     pub cache: bool,
+    /// Whether the run was given `--refresh`: a file a library item
+    /// answers for still resolves to the item's record, and the item's
+    /// preferred identifier is looked up again for a fresh record to
+    /// compare it with. That every lookup asks the service is the run's
+    /// sources' doing, not this setting's.
+    pub refresh: bool,
 }
 
 /// The content-index pass: what reading the index for a file came to.

@@ -1098,6 +1098,9 @@ impl Account<'_> {
 pub struct Stores {
     /// The library root the records' paths are relative to.
     root: PathBuf,
+    /// The library's identity as read with the stores, where it was
+    /// [`Identity::Present`].
+    identity: Option<LibraryId>,
     items: ItemStore,
     records: ArtifactStore,
 }
@@ -1110,6 +1113,10 @@ impl Stores {
     /// so every path the stores report is a full path however the root
     /// was spelled.
     ///
+    /// The library's identity is read with them, as [`identity`] reads
+    /// it: nothing is minted and nothing is warned about, and an absent
+    /// or faulty identity file is held as no identity.
+    ///
     /// Never fails, on [`ItemStore::read`]'s terms: a store directory
     /// that is not there is an empty store, so a directory borax has
     /// never written to reads as a library holding nothing, and one
@@ -1117,10 +1124,23 @@ impl Stores {
     pub fn read(root: &Path) -> Stores {
         let root = lexical(root).unwrap_or_else(|| root.to_path_buf());
         Stores {
+            identity: identity(&root).id().cloned(),
             items: ItemStore::read(&root),
             records: ArtifactStore::read(&root),
             root,
         }
+    }
+
+    /// The library root, normalised lexically, as [`Stores::read`]
+    /// holds it.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The identity [`identity`] gave for the root when these stores
+    /// were read, where it was [`Identity::Present`]; `None` otherwise.
+    pub fn identity(&self) -> Option<&LibraryId> {
+        self.identity.as_ref()
     }
 
     /// These stores as the account a check is made against, answering
