@@ -31,6 +31,21 @@ the alternatives rejected:
   (D4);
 - additions to schema 5 only (D5).
 
+**Settled by the maintainer after the critic gate**, and recorded
+below:
+
+- replacing field by field, as the designer proposed (D9);
+- the re-read narrows and does not close the race with a concurrent
+  write, which is stated, not locked against (D9, Risks);
+- a replacement whose fields carry, at any depth, a key the model does
+  not read or a comment is refused as a whole (D9, step 2);
+- a reference answer is the run's own library's only when its identity
+  and its lexically normalised root both match the run's library (D3),
+  and the run's view of its root is refreshed after a replacement
+  (D10);
+- a refresh run mints an identity exactly when it makes a store write
+  (D13 j).
+
 **Decided by the designer and recorded below:**
 
 - every lookup of the run is fresh, through a refreshing response cache
@@ -245,8 +260,32 @@ hold:
 
 - the run is an interactive `rename`;
 - the run records (`record` on);
-- the item is the run's own library's;
+- the item is the run's own library's (below);
 - the operator has not already answered for that item in this run.
+
+**Whose item it is.** An item is the run's own library's (`Whose::Own`)
+when:
+
+- the run's library answered for the file (`record_retrieval`
+  `library`); or
+- a content-index reference answered for it, the reference's `library`
+  equals the run's library's identity, and the reference's `root`,
+  normalised lexically, equals the run's library root, normalised
+  lexically (`Stores::root`). This is an untracked copy inside the run's
+  library, answered through a reference to that same library at that
+  same root.
+
+The run's library's identity is the one `library::identity` gives for
+its root when its stores are read (`Stores::identity`), `Present` only.
+A library with an absent or faulty identity can be named by no
+reference (13b writes references only for a `Present` one), so every
+reference answer in such a run is another library's. Every other
+reference answer is another library's (`Whose::Referenced`): another
+identity, or the same identity at another root, which is a copy of the
+library elsewhere. A self-reference is treated exactly as a library
+answer from here on: the same offer, the same item file
+(`Stores::item_file`), the same write path and the same once-per-item
+memory, keyed by the item's identity.
 
 Accepting replaces the item's record through the run's `StoreWriter`
 (D9). Declining leaves the item exactly as it was. Everywhere else the
@@ -255,7 +294,7 @@ reason that applies:
 
 | Order | Reason | Where |
 |---|---|---|
-| 1 | `another-library` | the item is another library's, reached through a reference (D4) |
+| 1 | `another-library` | the item is another library's: a reference to another identity, or to the run's library's identity at another root (D4) |
 | 2 | `not-asked` | there is nobody to ask: `resolve`, `bib`, a batch `rename`, previewing or applying |
 | 3 | `not-recording` | an interactive `rename` with `record` off (`--no-record` or configuration) |
 | 4 | `already-asked` | an interactive `rename` whose operator already answered for the item at an earlier file of this run (D10) |
@@ -286,12 +325,15 @@ command is Deferred.
 
 **Decision.**
 
-- **Through a reference.** A file answered by a reference to another
-  library (13b) gets a refresh of that library's item. Its candidate is
-  reported with `another-library` and never written: no run writes into
-  a library other than its own, and the referenced library may not even
-  be reachable for writing. The human line and the description name the
-  library that can take it, by its root.
+- **Through a reference.** A file answered by a reference (13b) gets a
+  refresh of the referenced item. Where the reference names the run's
+  own library at its own root, the item is the run's own (D3). Otherwise
+  its candidate is reported with `another-library` and never written: no
+  run writes into a library other than its own. The same identity at
+  another root is a copy of the library, which the run holds no
+  `StoreWriter` and no account for, and which may not even be reachable
+  for writing. The human line and the description name the library that
+  can take it, by its root.
 - **Evidence or extraction.** A file answered by the content index's
   evidence or by extraction gets no refresh. `--refresh` makes its
   lookup fresh, and the result is its ordinary resolution: the record
@@ -303,6 +345,12 @@ command is Deferred.
 - **Writing the candidate into the referenced library.** The run has
   no `StoreWriter` there and no account of it. The referenced library's
   own runs are where its items change.
+- **Judging a reference by its identity alone.** Two copies of one
+  library share an identity (change 12). A run in one copy writing into
+  the other would be a write into a library other than its own.
+- **Judging it by its root alone.** A root can hold another library
+  than the one the reference was written for. 13b reports that as
+  `other-library`, and it is not this run's item.
 - **Re-extracting evidence-answered files under `--refresh`.** That is
   `--no-cache`'s job. A refresh is about the record, not about which
   identifier names the file.
@@ -518,28 +566,84 @@ the same either way: `refresh` is one more top-level key.
    - its record is not `expected.record`, the record the candidate was
      compared with: `<file> changed after this run read it`.
 
-   That last refusal is what keeps a correction made while the question
-   was on screen, or by another run, from being overwritten.
-2. **Edit as a document.** It parses the text with `toml_edit` and,
-   within `[record]`, sets every key whose value differs between
-   `expected.record` and `record`, and removes every key `record` lacks
-   that `expected.record` has. Within `[record.borax]` and
-   `[record.borax.provenance]` it does the same, one level down. Keys
+   That last refusal catches an edit completed before the re-read: one
+   a person saved while the question was on screen, or another run's
+   replacement written before this one's check. It cannot catch one
+   that lands after it (below).
+2. **Refuse to discard annotations.** The keys to be replaced are those
+   whose value differs between `expected.record` and `record`: compared
+   fields in `[record]` (and `arxiv` in `[record.borax]`), and their
+   entries in `[record.borax.provenance]`. For each, the value the
+   re-read document holds is inspected. The replacement is refused as a
+   whole, writing nothing, when any of them is annotated:
+   `<file> holds notes in <fields> that replacing them would discard`,
+   naming every annotated key in D7's order, provenance entries as
+   `provenance.<field>`. A value is annotated when either of these
+   holds:
+   - **It holds a key the model does not read.** The keys the item's
+     serde shape reads inside a compared field are exactly: in an
+     `author` entry (an array of tables or of inline tables), `family`
+     and `given` (`Name`); in `issued` (a table or inline table),
+     `date-parts` (`DateParts`'s `Csl`). Every other field, and every
+     provenance entry, is a string and holds no keys. Any other key at
+     any depth inside the value is one the model does not read: `orcid`
+     in an author table, `circa` in `issued`, a stray key in a nested
+     inline table. Deserializing ignores such a key, so it would never
+     reach the description, and replacing the value would delete it.
+   - **It holds a comment.** That is any comment on a line the value
+     occupies: from its `key =` line, a comment trailing the value
+     included, to the value's last line. For a value written as a table
+     or an array of tables (`[record.issued]`, `[[record.author]]`), it
+     runs from the first header to the line before the next header or
+     key outside it, and takes in the comment lines directly above each
+     of its headers. A comment on the lines above a plain `key =` line
+     is the key's, not the value's: the key is kept where it is and the
+     comment with it.
+
+   A replaced value carrying neither is replaced as step 3 says. The
+   refusal is all-or-nothing, so that no item is left half replaced
+   with the operator told only about the half.
+3. **Edit as a document.** It parses the text with `toml_edit` and sets
+   every key step 2 named, or removes it where `record` lacks it. Keys
    holding the same value are not touched. These survive untouched,
    byte for byte:
    - `id`;
    - every key the record model does not know, in `[record]` or
-     elsewhere;
-   - comments, key order and formatting.
+     elsewhere, since step 2 refused any inside a replaced value;
+   - every comment, by the same rule, and the key order and formatting
+     of every key left alone.
 
    The file name never changes: it is a creation-time label (`library`
    requirement "An item file's name carries a legible key and its
    identity").
-3. **Write.** It writes the whole file through `write`, which is the
+4. **Write.** It writes the whole file through `write`, which is the
    run's `StoreWriter::write`. That ensures the library's identity
-   first, minting an absent one, and replaces the file atomically. A
-   failed mint, or a failed write, is the error the writer returns,
-   naming the identity file for a mint.
+   first, minting an absent one, and replaces the file atomically
+   (`write_atomically`, `crates/borax-sources/src/store.rs`, line 441:
+   a temporary renamed over the file). A failed mint, or a failed
+   write, is the error the writer returns, naming the identity file for
+   a mint.
+
+**The window that remains.** The rename in step 4 is an unconditional
+replacement: no portable filesystem operation replaces a file only if
+it still holds what was read. So between step 1's re-read and step 4's
+rename there is a window. An edit saved there, by a text editor or by
+another run's replacement, is overwritten by this write, and nothing
+reports the edit that was lost. borax takes no lock, since the library's
+writers are peers and a text editor takes none either.
+
+- **Protected:** every edit completed before the re-read, which refuses
+  the write and is reported as `failed`.
+- **Not protected:** an edit landing between the re-read and the rename.
+- **Beyond that window**, nothing is lost silently. Every write borax
+  makes is reported in a `library-replacement` event naming the file and
+  the fields, in the stream and the run log, and the file's previous
+  record is in that run's `resolved` event, `refresh.differences`
+  giving each replaced field's old value.
+
+The window is the time it takes to parse, edit and render one small
+file. An editor holding the file open and saving later overwrites
+borax's write in turn; most editors warn that the file changed on disk.
 
 **What `record` is.** `refresh::replaced(item, candidate)`, the item's
 record with:
@@ -564,8 +668,8 @@ provenance of the fields they were.
 - `path` is the file the question was about, where it is now.
 - `file` is the item file, as a full path.
 - `fields` are the differing fields' names, in D7 order.
-- `write` is `written`, or `failed` with the `message` from step 1 or
-  step 3.
+- `write` is `written`, or `failed` with the `message` from step 1,
+  step 2 or step 4.
 
 It is emitted when the write is made, at the answer (D10). It counts
 toward nothing, and a failure changes no exit status, as a failed
@@ -592,8 +696,19 @@ admission's does not.
   file goes on with the record that actually stands.
 - **Writing without re-reading.** The question can sit on screen while
   the operator edits the very item in another window.
+- **A lock file.** No other writer of the library, a text editor least
+  of all, would honour it, and a stale lock left by a killed run would
+  need its own recovery.
 - **Rewriting through `Item::to_toml`.** It would drop every unknown
   key and comment.
+- **Replacing the annotated fields' values and keeping their notes
+  somewhere.** There is nowhere in the candidate's value to keep an
+  `orcid` the record model does not hold, and a comment has no position
+  in a value rewritten whole.
+- **Replacing the unannotated fields and skipping the annotated ones.**
+  The item would then equal neither its old record nor the candidate,
+  and a refresh after it would differ again with no question settling
+  it. The operator answered about the whole candidate.
 
 ## D10. The interactive question, and the run around it
 
@@ -627,6 +742,14 @@ admission's does not.
      because a later file of the same item must be answered with what
      the item now holds, and the `ledger` requirement makes the work
      check answer from "the library as the run has left it so far".
+     The run's `references::Libraries` forgets the run's own root
+     (`Libraries::forget`), so a later file answered through a
+     self-reference (D3) reads that root's items afresh and meets the
+     replaced record. Forgetting rather than updating, because what
+     `Libraries` caches for a root is its whole item store as read, and
+     the file just written is what a fresh read finds. Another root,
+     including a copy of the run's library elsewhere, is not forgotten:
+     its item was not written.
   4. Failed or refused: the acceptance is `unwritten` with the message,
      and the file goes on with the item's record as the run read it.
   5. The file goes on to its own situation, which may now be a move to
@@ -640,8 +763,9 @@ admission's does not.
 - **Once per item.** The driver keeps, for the run, every item whose
   refresh question it put. A later file answered by such an item is not
   asked again:
-  - after Replace it is consulted against the item as replaced, so its
-    candidate is normally `current`;
+  - after Replace it is consulted against the item as replaced, by the
+    run's library or through a self-reference, so its candidate is
+    normally `current`;
   - after Keep, or after Replace that did not write, a candidate that
     still differs is reported with `already-asked`.
 - **Shown, not passed over.** Under `rename.skip-named`, an
@@ -808,8 +932,16 @@ pub enum Fresh {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision { NotAttempted(Unattempted), Pending, Accepted,
                     Unwritten { message: String }, Declined }
+/// Whose item a refresh was of (D3). `Own`: the run's library answered,
+/// or a reference whose `library` is the run's library's identity and
+/// whose root, normalised lexically, is the run's library root.
+/// `Referenced`: every other reference answer, another identity or the
+/// same identity at another root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Whose { Own, Referenced }
+/// Pure: D3's classification of a reference answer for a run whose
+/// library is `library` (`None` for a run in no library).
+pub fn whose(reference: &LibraryReference, library: Option<&Stores>) -> Whose;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Refresh { pub item: ItemId, pub whose: Whose, pub fresh: Fresh, pub decision: Decision }
 
@@ -830,7 +962,8 @@ pub struct ResolveConfig { pub extraction: ExtractionConfig, pub cache: bool, pu
 // FileRecord gains `pub refresh: Option<Refresh>`: Some exactly where D8
 // says the event carries `refresh`. standing_in attaches it, with
 // Decision::NotAttempted(NotAsked) for Whose::Own and
-// NotAttempted(AnotherLibrary) for Whose::Referenced.
+// NotAttempted(AnotherLibrary) for Whose::Referenced; a library answer
+// is Whose::Own, and a reference answer is `refresh::whose` of it.
 // resolved_event projects it. Every other signature is unchanged.
 ```
 
@@ -887,15 +1020,36 @@ pub enum RefreshAcceptance { Pending, Accepted, Unwritten { message: String }, D
 
 ```rust
 /// D9: replace the record of the item `expected` held in `file` with
-/// `record`, through `write`. `Err` names why nothing was written.
+/// `record`, through `write`. `Err` names why nothing was written:
+/// unreadable, another item, changed since read, or annotated keys
+/// (step 2), in that order of checking.
 pub fn replace_record(file: &Path, expected: &Item, record: &Record,
                       write: &dyn Fn(&Path, &[u8]) -> io::Result<()>) -> Result<(), Unrecorded>;
 impl Stores {
+    /// The library root, normalised lexically, as `Stores::read` holds it.
+    pub fn root(&self) -> &Path;
+    /// The identity `library::identity` gave for the root when these
+    /// stores were read, where it was `Present`; `None` otherwise.
+    pub fn identity(&self) -> Option<&LibraryId>;
     /// The file the item of identity `id` was read from.
     pub fn item_file(&self, id: &ItemId) -> Option<&Path>;
     /// Hold `item` in place of the held item of its identity, keeping
     /// that item's file; nothing when none is held.
     pub fn learn_item(&mut self, item: Item);
+}
+```
+
+`Stores::read` reads the identity file once, as `library::identity`
+does, and writes nothing: no mint, no warning. It is a private field,
+so no literal changes.
+
+`borax::references`:
+
+```rust
+impl Libraries {
+    /// Drop what this run read of `root`, so the next reference to it
+    /// reads it afresh. Nothing for a root not read.
+    pub fn forget(&self, root: &Path);
 }
 ```
 
@@ -915,7 +1069,9 @@ The private parts are the implementer's:
 record `A` for `R/Klykov2015.pdf` (bytes `H`), linked to item `I`, whose
 DOI is `doi:10.1039/c5ay00042d`. `I`'s file is
 `R/items/klykov2015.<I>.toml`. The filename template is
-`{author}{year}`, so the file is already named under any title.
+`[auth][year]`, which renders the first author's family name and the
+year: `Klykov2015`, so `Klykov2015.pdf` is already named under any
+title (the `templates` capability's bracket syntax).
 Crossref holds the DOI with title `Determination of things`.
 
 **(a) An item corrected by hand, then `rename --refresh --apply R`.**
@@ -966,19 +1122,34 @@ a terminal with `skip-named` on.
    emitted, with the human line `R/Klykov2015.pdf: replaced title in
    R/items/klykov2015.<I>.toml`.
 3. The consulted stores and the account learn `I` as replaced.
-4. The file goes on with the replaced record. `{author}{year}` renders
-   the same name: already named, settled.
+4. The file goes on with the replaced record. `[auth][year]` still
+   renders `Klykov2015`: already named, settled with no further
+   question.
 5. Events: `library-replacement`, `resolved` (with `record` the replaced
    one and `refresh.acceptance` `accepted`), `already-named`.
 6. State: `I`'s file differs from (b)'s by the `title` line alone. Its
    name, `id`, every other key and every comment are as they were.
 7. A later `rename --refresh R`: `current`, no question, passed over.
 
-Branch: with template `{title|slug}`, step 4 renders a new name, and the
-move question follows (Rename, Supply, Skip, Quit). Its description
-carries `decision  the library's record was replaced`. Quit there ends
-the run: `library-replacement` was already emitted, the file is counted
-unreached, and `I` stays replaced.
+Branch: with template `[title:slug]`, an earlier run named the file
+from the corrected record, `review-correction-determination-of-things.pdf`.
+Before step 1 the file is already named under that record, and the
+refresh question is put as in (b). After Replace, step 4 renders
+`determination-of-things` from the replaced record, so the plan is a
+move to `determination-of-things.pdf`, and the move question follows:
+Rename, Supply, Skip, Quit, with Rename the default. Its description
+carries `decision  the library's record was replaced` and `new name
+determination-of-things.pdf`.
+
+- **Rename:** `library-replacement`, `resolved` (`accepted`),
+  `renamed`; the summary is `1 resolved, 1 renamed, 0 skipped`.
+- **Skip:** `library-replacement`, `resolved` (`accepted`), `skipped`
+  `declined`; the file keeps the corrected record's name, the item holds
+  the replaced record, and the summary is `1 resolved, 0 renamed, 1
+  skipped`, exit 2. The next `rename` proposes the move again.
+- **Quit:** `library-replacement` only, already emitted at the answer.
+  The file keeps its name, `I` stays replaced, and `run-finished` counts
+  `unreached` 1, exit 2.
 
 **(d) A refresh whose fresh lookup fails.**
 
@@ -1055,7 +1226,15 @@ release wrote:
 - the `StoreWriter` mints `.borax/library.toml` before the item write;
 - where the mint fails, nothing is written, and the event's message
   names the identity file;
-- a run that only keeps, previews or refreshes in batch mints nothing.
+- a refresh run mints exactly when it makes a store write, as any run
+  does: a replacement, or an admission that writes an item or an
+  artifact record. A refresh run whose only store writes would be none
+  (`resolve`, `bib`, a preview, `--no-record`, an interactive run that
+  keeps every item's record and whose admissions all leave their
+  records exactly as they were) mints nothing;
+- references are written only for a `Present` identity (13b), so in
+  this library no reference can name it, and no reference answer in
+  the run is a self-reference (D3).
 
 **(k) `--refresh --no-cache` on an untracked file.**
 
@@ -1064,6 +1243,38 @@ release wrote:
   `cache-bypassed`.
 - No `refresh` key, since no item answered.
 - Its extracted evidence is written, as `--no-cache` always writes it.
+
+**(l) A self-reference, and a copy of the library.** `L` at `R` holds
+`A` (`R/Klykov2015.pdf`) and the content index holds the reference
+`(L, R, A, I)`. `C` is an untracked byte-identical copy at
+`R/inbox/Klykov2015.pdf`, so the library does not answer for it
+(untracked) and the reference does.
+
+1. Interactive `borax rename --refresh R`, reaching `A` first:
+   - `A` is a library answer, `Whose::Own`. Its refresh differs and the
+     question is put. Replace writes `I`.
+   - The consulted stores and the account learn `I`, and `Libraries`
+     forgets `R`.
+2. At `C`:
+   - `C`'s answer is the reference. Its `library` is `L`, which is
+     `Stores::identity`, and its root is `R`, which is `Stores::root`:
+     `Whose::Own`;
+   - `Libraries` reads `R` afresh and finds `I` as replaced. The refresh
+     is `current`, and nothing is asked, since `I` was already answered
+     for.
+3. Had `C` been reached first:
+   - its question would have been put as `A`'s, its Replace writing the
+     same item file through the same `StoreWriter`;
+   - `A` would then be consulted against `I` as replaced, through the
+     consulted stores.
+4. A copy of the library: `rsync -a R/ R2/`, and the content index also
+   holds `(L, R2, A, I)`.
+   - A run in `R` reaching an untracked file answered by the `R2`
+     reference: same identity, another root, so `Whose::Referenced`,
+     `another-library` naming `R2`, nothing written, and `Libraries`
+     does not forget `R2`.
+   - A run in a library `L2` reaching any reference to `L`: another
+     identity, so `another-library`.
 
 ## D14. Group boundaries and green points
 
@@ -1075,9 +1286,9 @@ whole suite green.
 |---|---|---|
 | 1 | `Cached::refreshing` | Additive |
 | 2 | `--refresh` on three commands; `refreshing`, `refreshes`; `ResolveConfig::refresh`, read by nothing yet; `run-started.refresh`; `polite` and `resolving` taking the selector | `ResolveConfig`'s one test literal and `RunStarted`'s two test literals change in the pair (D15). No resolution reads the field yet |
-| 3 | `borax::refresh`; the four `Unattempted` values; `RefreshStep`, `DifferenceStep`, `RefreshAcceptance` | Additive: nothing calls them, and `Event` is not touched |
+| 3 | `borax::refresh`, `refresh::whose` included; `Stores::root` and `Stores::identity`, with `Stores::read` reading the identity; the four `Unattempted` values; `RefreshStep`, `DifferenceStep`, `RefreshAcceptance` | Additive: nothing calls them, and `Event` is not touched. `Stores` has private fields, so reading one more file changes no literal |
 | 4 | `FileRecord::refresh`, `Event::Resolved::refresh`, `standing_in` attaching it, `resolved_event`, the human clause | Every `FileRecord` and `Event::Resolved` literal and full pattern changes in the pair (D15). The behaviour is behind `ResolveConfig::refresh`, false in every existing test |
-| 5 | `replace_record`, `Stores::item_file`, `Stores::learn_item`, `Event::LibraryReplacement` and its line | Additive: no driver calls them yet. `human_line`'s match gains the arm |
+| 5 | `replace_record` with its annotation check, `Stores::item_file`, `Stores::learn_item`, `Libraries::forget`, `Event::LibraryReplacement` and its line | Additive: no driver calls them yet. `human_line`'s match gains the arm |
 | 6 | `Answer::KeepRecord`, `Answer::Replace`; the driver's question, write, memory and passing over; the description lines | `Choice`'s `Display` gains the arms. No existing test answers a refresh question, because none passes `--refresh` |
 
 There is no interim state worth stating. After group 4, a refresh is
@@ -1210,8 +1421,24 @@ The proposal lists what was checked and left unchanged.
   some fields and not others must edit the item by hand (Deferred).
 - **The stale check compares records, not bytes.** An edit that changes
   only a comment or an unknown key while the question is up is not a
-  change of record. The write keeps it, since it edits the document as
-  re-read.
+  change of record. The write keeps it where it lies outside the
+  replaced values, since it edits the document as re-read, and refuses
+  the whole replacement where it lies inside one (D9, step 2).
+- **A window remains between the re-read and the rename** (D9). An edit
+  saved in it, by an editor or by another run's replacement, is
+  overwritten, and nothing reports the edit lost. An edit completed
+  before the re-read is protected and refuses the write. Outside that
+  window nothing is lost silently: every write is a
+  `library-replacement` event in the stream and the run log, and the
+  verdict's `refresh.differences` keep each replaced field's old value.
+  borax takes no lock, as change 13b took none for references, because
+  no filesystem offers a portable compare-and-replace and the library's
+  other writers, a text editor among them, honour none.
+- **Annotated fields refuse the whole replacement.** An item whose
+  authors carry `orcid` keys, or whose date carries a comment, cannot
+  be replaced in those fields by a refresh at all. The operator edits
+  the item by hand, or removes the notes and refreshes again. That is
+  the price of never discarding what was not shown.
 - **Unpaced refreshes across runs.** Two concurrent `--refresh` runs
   pace independently, as any two runs do today.
 
@@ -1239,6 +1466,7 @@ A difference with one side absent, and the acceptances:
 {"field":"volume","candidate":"7"}
 {"status":"accepted"}
 {"status":"unwritten","message":"/home/u/papers/items/klykov2015.0190c3a2-7f21-7abc-8def-0123456789ac.toml changed after this run read it"}
+{"status":"unwritten","message":"/home/u/papers/items/klykov2015.0190c3a2-7f21-7abc-8def-0123456789ac.toml holds notes in author, issued that replacing them would discard"}
 {"status":"declined"}
 {"status":"not-attempted","reason":"another-library"}
 ```
@@ -1306,3 +1534,26 @@ shelf = "B3"
 
 `shelf` is a key the record model does not know, and the comment is a
 person's. Both survive.
+
+The comment sits on the line above the plain `title =` key, so it is
+the key's and survives (D9, step 2). `shelf` is a key of `[record]`
+itself, not inside a replaced value, so it survives too.
+
+An item a replacement refuses. Its candidate differs in `author` and
+`issued`:
+
+```toml
+[[record.author]]
+family = "Klykov"
+given = "S."
+orcid = "0000-0002-1825-0097"
+
+[record.issued]
+date-parts = [[2015]]  # online first; print 2016
+```
+
+`orcid` is a key `Name` does not read, and the comment trails a value
+inside `issued`. Nothing is written, and the event's message is `<file>
+holds notes in author, issued that replacing them would discard`.
+Without `orcid` and the comment, `author` and `issued` are replaced as
+any other field.

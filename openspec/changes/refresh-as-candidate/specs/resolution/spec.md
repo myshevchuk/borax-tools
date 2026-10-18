@@ -60,6 +60,18 @@ applying, a rename that records nothing, and for an item of a library
 other than the run's own. No run writes into a library other than its
 own.
 
+An item SHALL be the run's own library's when the run's library
+answered for the file, or when a content-index reference answered for
+it whose library identity is the identity the run's library holds and
+whose root, normalised lexically, is the run's library root, normalised
+lexically. Such a self-reference answers for an untracked copy inside
+the run's library, and its item is treated exactly as an item the run's
+library answered with. Every other reference answer SHALL be another
+library's: a reference to another identity, or to the run's library's
+identity at another root, which is a copy of the library elsewhere. A
+run whose library has no readable identity has no self-reference, since
+no reference can name it.
+
 A refresh whose lookup no service answered SHALL leave the item as it
 is and report what each service said. Whether the services failed or
 said they do not hold the identifier, nothing is offered, and asking
@@ -98,6 +110,22 @@ again is a later run's.
 - **THEN** the candidate is reported with its acceptance not attempted
   because the item is another library's, and nothing is written in that
   library
+
+#### Scenario: A copy inside the library answered through its own library
+- **WHEN** a run in the library at `/home/u/papers` given `--refresh`
+  reaches an untracked copy of a tracked artifact, which a reference to
+  that library at `/home/u/papers` answers for, and the candidate
+  differs
+- **THEN** the item is the run's own library's, and in a batch run the
+  candidate's acceptance is not attempted because no question was put,
+  not because the item is another library's
+
+#### Scenario: A copy of the library is another library
+- **WHEN** the same run reaches a file answered by a reference to the
+  same library identity at `/media/backup/papers`
+- **THEN** the candidate is reported with its acceptance not attempted
+  because the item is another library's, and nothing is written at
+  either root
 
 #### Scenario: A file the content index answers for
 - **WHEN** a run given `--refresh` resolves an untracked file from the
@@ -164,6 +192,8 @@ serializes it, each left out where that record has no value.
 - `declined` when the operator kept the item's record;
 - `not-attempted`, with the first `reason` that applies:
   `another-library` for an item of a library other than the run's own,
+  as the requirement "A refresh looks a file's library item up again and
+  never replaces it" defines it,
   `not-asked` for a run with nobody to ask, `not-recording` for an
   interactive rename that records nothing, and `already-asked` for an
   item the operator already answered for at an earlier file of the run.

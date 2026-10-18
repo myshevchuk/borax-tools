@@ -78,7 +78,11 @@ rejected alternatives in design D1 to D5:
   a clause, and the interactive description gains `refresh`, `differs`
   and `decision` lines. Design D8 and D11.
 - **Accepting it.** Only an interactive `rename` that records into the
-  run's own library asks. A differing candidate puts a question first,
+  run's own library asks. An item is the run's own when the run's
+  library answered with it, or when a reference names the run's library
+  identity at the run's own root, normalised lexically. A reference to
+  the same identity at another root is a copy of the library, and is
+  another library's. A differing candidate puts a question first,
   before any question about the move, and even for a file that would
   otherwise be passed over. The choices are: keep the library's record
   (the default), replace it with the fresh record, or quit. Replacing
@@ -87,11 +91,20 @@ rejected alternatives in design D1 to D5:
   - only the differing fields and their provenance entries change;
   - the identity, the file name, every other key, unknown keys and
     comments survive;
-  - an item file that changed after the run read it is not written.
+  - the whole replacement is refused when a value it would replace
+    holds, at any depth, a key the record model does not read (an
+    `orcid` in an author table) or a comment, since replacing it would
+    discard what the operator was never shown;
+  - an item file whose record changed before the re-read made just
+    before the write is not written.
 
-  A `library-replacement` event reports the write, and the file goes on
-  with the item as replaced. An item is asked about once per run.
-  Design D3, D9 and D10.
+  The re-read narrows the race with a concurrent edit and does not close
+  it. An edit landing between the re-read and the atomic rename is
+  overwritten, and borax takes no lock. Beyond that window nothing is
+  lost silently. A `library-replacement` event reports every write, and
+  the file goes on with the item as replaced. The run's view of its own
+  root is refreshed after a replacement, and an item is asked about
+  once per run. Design D3, D9 and D10.
 - **Where nothing is written.** The candidate is reported and never
   written in `resolve`, `bib`, a batch `rename` (previewing or
   applying), a run with `--no-record`, and for another library's item.
@@ -110,8 +123,9 @@ rejected alternatives in design D1 to D5:
   - A new `borax::refresh` module.
   - `ResolveConfig::refresh` and `FileRecord::refresh`.
   - `Command::refreshing` and `Command::refreshes`.
-  - `library::replace_record`, `Stores::learn_item` and
-    `Stores::item_file`.
+  - `library::replace_record`, and `Stores::root`, `Stores::identity`,
+    `Stores::item_file` and `Stores::learn_item`.
+  - `refresh::whose` and `references::Libraries::forget`.
   - `Answer::KeepRecord` and `Answer::Replace`.
   - `Event::LibraryReplacement`, and `refresh` on `Event::Resolved` and
     `Event::RunStarted`.
@@ -157,7 +171,8 @@ None.
   - ADDED: "An item's record is replaced only when an operator accepts a
     refresh candidate"
   - MODIFIED: "A library's first store write mints its identity": the
-    replacement is a store write
+    replacement is a store write, and a refresh run mints exactly when it
+    makes one
 - `rename`:
   - ADDED: "An interactive run asks whether a differing refresh
     candidate replaces the library's record"
@@ -257,7 +272,7 @@ Requirements checked and left unchanged:
 - `crates/borax/src/refresh.rs` (new):
   - `Field`, `Difference`, `differences`, `replaced`;
   - `Fresh`, `Decision`, `Whose`, `Refresh`;
-  - `refresh`.
+  - `refresh` and `whose`.
 - `crates/borax/src/cli.rs`: `refresh` on `Command::Resolve`, `Rename`
   and `Bib`, with `Command::refreshing` and `Command::refreshes`.
 - `crates/borax/src/pipeline.rs`:
@@ -271,8 +286,12 @@ Requirements checked and left unchanged:
   - `Event::LibraryReplacement`;
   - `RefreshStep`, `DifferenceStep`, `RefreshAcceptance`;
   - the human lines.
-- `crates/borax/src/library.rs`: `replace_record`, `Stores::learn_item`
-  and `Stores::item_file`.
+- `crates/borax/src/library.rs`:
+  - `replace_record`, with its annotation check;
+  - `Stores::root` and `Stores::identity`, with `Stores::read` reading
+    the identity file, writing nothing;
+  - `Stores::item_file` and `Stores::learn_item`.
+- `crates/borax/src/references.rs`: `Libraries::forget`.
 - `crates/borax/src/session.rs`: `Answer::KeepRecord` and
   `Answer::Replace`, with their menu labels.
 - `crates/borax/src/describe.rs`: the `refresh`, `differs` and

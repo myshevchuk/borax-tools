@@ -3,6 +3,13 @@
 ### Requirement: An interactive run asks whether a differing refresh candidate replaces the library's record
 An interactive rename run given `--refresh` SHALL put a question to the operator about each file whose refresh candidate differs from the run's own library item, before any other question about that file, wherever the run records into its library and the operator has not yet answered for that item in the run.
 
+The run's own library item is the one the `resolution` capability's
+requirement "A refresh looks a file's library item up again and never
+replaces it" defines: one the run's library answered with, or one a
+reference to the run's library at its own root answered with. A
+self-reference's item is asked about, written and remembered exactly
+as a library answer's.
+
 The question SHALL be put whatever `rename.skip-named` says, and to an
 already-named file as to any other. Its choices SHALL be, in this
 order: keep the library's record, which is the default; replace it with
@@ -28,7 +35,10 @@ operator accepts a refresh candidate" states, and report it then.
   with the item's record as replaced: it is named and cited from it, and
   it is reported as its record. The library the run consults and the
   account its duplicate checks read SHALL both hold the item as
-  replaced from then on.
+  replaced from then on. What the run has read of its own root through
+  references SHALL be read afresh at the next reference to it, so a
+  later file answered through a self-reference meets the replaced
+  record too. Nothing the run read of any other root changes.
 - When the write fails or is refused, the candidate is `unwritten` with
   the reason. The file goes on with the item's record as the run read
   it, and the next question's description says why.
@@ -60,8 +70,9 @@ A differing candidate the run does not ask about is reported in the
 file's verdict and described in its own question, if it is put one:
 
 - a run that records nothing reports it with reason `not-recording`;
-- another library's item reached through a reference, with reason
-  `another-library`.
+- another library's item reached through a reference, to another
+  identity or to the run's library's identity at another root, with
+  reason `another-library`.
 
 Nothing is written for either.
 
@@ -81,10 +92,12 @@ Nothing is written for either.
   `accepted`
 
 #### Scenario: A replaced record renders another name
-- **WHEN** the filename template renders the title, and the operator
-  replaces the item's record
-- **THEN** the next question proposes the name the replaced record
-  renders
+- **WHEN** the filename template is `[title:slug]`, the file is named
+  `review-correction-determination-of-things.pdf` from the corrected
+  title, and the operator replaces the item's record with Crossref's
+  `Determination of things`
+- **THEN** the next question proposes `determination-of-things.pdf`,
+  with rename as its default
 
 #### Scenario: Quitting after replacing
 - **WHEN** the operator replaces the item's record and then quits at the
@@ -116,6 +129,25 @@ Nothing is written for either.
   already-named file while every service is unreachable
 - **THEN** no question is put, no retry is offered, and the file is
   shown rather than passed over
+
+#### Scenario: A copy inside the library, after a replacement
+- **WHEN** an interactive run given `--refresh` replaces an item's
+  record at its tracked artifact, and then reaches an untracked copy of
+  that artifact inside the same library, which a reference to that
+  library at its own root answers for
+- **THEN** the copy resolves to the record as replaced, its refresh is
+  current, and no question is put about the item
+
+#### Scenario: A copy inside the library, first
+- **WHEN** the untracked copy is reached first and its candidate differs
+- **THEN** the refresh question is put about it, and replacing writes
+  the item file of the run's own library
+
+#### Scenario: A reference to a copy of the library elsewhere
+- **WHEN** the run reaches a file answered by a reference to the same
+  library identity at another root
+- **THEN** no question is put about the candidate, it is reported with
+  reason `another-library`, and nothing is written at either root
 
 ## MODIFIED Requirements
 

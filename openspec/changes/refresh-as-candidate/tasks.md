@@ -17,7 +17,9 @@ Groups 1 to 6 are each a red/green pair:
   - 1.1's `new_cached_source_still_serves_a_held_answer_without_asking`;
   - 2.1's refusal tests and its unknown-key test, since `--refresh` is
     unknown everywhere today;
-  - 4.1's `…_without_refresh_…` tests.
+  - 3.1's `stores_read_creates_no_identity_file`;
+  - 4.1's `…_without_refresh_…` tests and
+    `resolve_and_preview_with_refresh_mint_no_identity`.
 
   The red report names them as pins, not as failures to explain. They
   hold the green task to adding the flag and the key where D1 and D8
@@ -218,6 +220,23 @@ types yet, and `Event` is unchanged.
       - `refresh_step_of_current_carries_no_acceptance`.
       - `refresh_step_of_no_identifier_is_not_attempted_no_identifier`.
 
+      Whose item it is (D3), each over `Stores::read` of a `tempdir`
+      library seeded with `.borax/library.toml`:
+      - `whose_of_a_reference_to_the_runs_identity_at_its_root_is_own`.
+      - `whose_of_a_reference_to_the_runs_identity_at_another_root_is_referenced`.
+      - `whose_of_a_reference_to_another_identity_at_the_runs_root_is_referenced`.
+      - `whose_compares_roots_normalised_lexically`: the run's root
+        spelled with `./` and `..` still matches.
+      - `whose_in_a_run_whose_library_has_no_identity_is_referenced`.
+      - `whose_in_a_run_whose_identity_is_faulty_is_referenced`.
+      - `whose_in_a_run_with_no_library_is_referenced`.
+
+      In `crates/borax/tests/library.rs`:
+      - `stores_root_is_the_root_normalised_lexically`.
+      - `stores_identity_is_the_present_identity_read_with_the_stores`.
+      - `stores_identity_of_an_absent_or_faulty_identity_file_is_none`.
+      - `stores_read_creates_no_identity_file`.
+
       In `crates/borax/tests/pipeline.rs`:
       - `unattempted_names_the_four_refresh_reasons`.
 
@@ -228,8 +247,11 @@ types yet, and `Event` is unchanged.
       - `difference_step_leaves_out_an_absent_side`.
       - `refresh_step_round_trips_every_status_and_acceptance`.
 - [ ] 3.2 Green:
+      - `Stores::root` and `Stores::identity`, `Stores::read` reading
+        the identity without writing;
       - `borax::refresh`: `Field`, `Difference`, `differences`,
-        `replaced`, `Fresh`, `Decision`, `Whose`, `Refresh`, `refresh`,
+        `replaced`, `Fresh`, `Decision`, `Whose`, `whose`, `Refresh`,
+        `refresh`,
         `Refresh::step`;
       - the four `Unattempted` values;
       - `RefreshStep`, `DifferenceStep` and `RefreshAcceptance`.
@@ -258,6 +280,11 @@ which every existing test leaves false.
       - `a_tracked_file_with_refresh_reports_decision_not_asked`.
       - `a_tracked_file_answered_under_an_earlier_item_refreshes_that_item`.
       - `a_reference_answer_with_refresh_refreshes_the_referenced_item_with_another_library`.
+      - `a_self_reference_answer_with_refresh_is_own_and_reports_not_asked`:
+        an untracked copy inside the run's library, answered by a
+        reference to that library at its own root (D13 l).
+      - `a_reference_to_a_copy_of_the_runs_library_with_refresh_reports_another_library`:
+        the same identity at another root (D13 l).
       - `an_evidence_answer_with_refresh_carries_no_refresh`.
       - `an_extracted_file_with_refresh_carries_no_refresh`.
       - `a_work_duplicate_verdict_with_refresh_carries_no_refresh`: a
@@ -293,6 +320,7 @@ which every existing test leaves false.
         (D13 f).
       - `rename_preview_with_refresh_writes_nothing_to_the_library`
         (D13 g).
+      - `resolve_and_preview_with_refresh_mint_no_identity` (D13 j).
       - `bib_with_refresh_cites_the_items_record_not_the_candidate`.
       - `refresh_with_no_cache_extracts_an_untracked_file_and_carries_no_refresh`
         (D13 k).
@@ -339,6 +367,30 @@ Green point: additive. No driver calls `replace_record` yet.
       - `stores_learn_item_keeps_the_items_file`.
       - `stores_learn_item_of_an_identity_not_held_changes_nothing`.
 
+      Annotations inside replaced values (D9, step 2):
+      - `replace_record_refuses_an_author_table_with_a_key_the_model_does_not_read`:
+        `orcid` in a `[[record.author]]` table; nothing written, the
+        message names `author`.
+      - `replace_record_refuses_a_comment_inside_issued`.
+      - `replace_record_replaces_a_clean_author_array`: tables holding
+        only `family` and `given` and no comment; every other line is
+        unchanged.
+      - `replace_record_refuses_an_unknown_key_in_an_inline_author_table`.
+      - `replace_record_refuses_a_comment_trailing_a_replaced_value`.
+      - `replace_record_refuses_a_comment_above_an_author_table_header`.
+      - `replace_record_keeps_a_comment_above_a_replaced_plain_key`.
+      - `replace_record_refuses_an_annotated_provenance_entry_of_a_replaced_field`:
+        the message names `provenance.title`.
+      - `replace_record_refusal_names_every_annotated_key_in_field_order_and_writes_nothing`.
+      - `replace_record_ignores_annotations_in_fields_it_does_not_replace`.
+
+      In `crates/borax/tests/references.rs`:
+      - `libraries_forget_makes_the_next_reach_read_the_root_afresh`: an
+        item file edited after a first `reach`, forgotten, then reached
+        again.
+      - `libraries_forget_leaves_every_other_root_as_read`.
+      - `libraries_forget_of_a_root_not_read_changes_nothing`.
+
       In `crates/borax/tests/event.rs`:
       - `json_line_of_library_replacement_matches_design_d9`.
       - `human_line_of_a_written_library_replacement_matches_design_d11`.
@@ -346,9 +398,9 @@ Green point: additive. No driver calls `replace_record` yet.
       - `human_line_of_library_replacement_escapes_after_the_path`.
       - `library_replacement_counts_toward_nothing`.
       - `library_replacement_round_trips`.
-- [ ] 5.2 Green: `replace_record`, `Stores::item_file`,
-      `Stores::learn_item`, `Event::LibraryReplacement` and its human
-      line (D9, D11, D12).
+- [ ] 5.2 Green: `replace_record` with its annotation check,
+      `Stores::item_file`, `Stores::learn_item`, `Libraries::forget`,
+      `Event::LibraryReplacement` and its human line (D9, D11, D12).
 
 ## 6. The interactive question
 
@@ -370,7 +422,10 @@ question changes.
       - `interactive_refresh_replace_emits_library_replacement_before_the_files_resolved_event`.
       - `interactive_refresh_replace_resolves_the_file_to_the_replaced_record`.
       - `interactive_refresh_replace_then_the_move_question_proposes_the_replaced_records_name`:
-        a template rendering the title.
+        template `[title:slug]`, the file named
+        `review-correction-determination-of-things.pdf`, and the move
+        question proposing `determination-of-things.pdf` with Rename
+        first (D13 c, branch).
       - `interactive_refresh_replace_then_quit_keeps_the_replacement_and_counts_the_file_unreached`.
       - `interactive_refresh_quit_at_the_refresh_question_writes_nothing`.
       - `interactive_refresh_replace_of_an_item_edited_meanwhile_is_unwritten`
@@ -396,6 +451,16 @@ question changes.
         (D13 e).
       - `interactive_refresh_offers_no_retry_after_a_refresh_outage`.
       - `interactive_refresh_replace_then_supply_keeps_the_refresh_on_the_supplied_verdict`.
+      - `interactive_refresh_of_a_self_reference_answer_puts_the_refresh_question`:
+        an untracked copy inside the library, reached first; Replace
+        writes the run's own item file (D13 l).
+      - `interactive_refresh_second_file_through_a_self_reference_after_replace_sees_the_replaced_record`:
+        Replace at the tracked artifact, then its untracked copy answered
+        through the self-reference is `current` and not asked (D13 l).
+      - `interactive_refresh_of_a_reference_to_a_copy_of_the_library_asks_nothing_and_reports_another_library`.
+      - `interactive_refresh_replace_refused_for_annotations_is_unwritten_and_names_the_fields`.
+      - `interactive_refresh_that_keeps_every_record_and_records_a_moved_file_mints_the_identity`
+        (D13 j).
       - `interactive_refresh_filed_work_duplicate_carries_no_refresh`: a
         reference answer the run's library holds the work of, filed as
         another artifact.
@@ -418,7 +483,8 @@ question changes.
         - the refresh question, first, with the hold ended;
         - the write at the answer, and its event;
         - the consulted stores and the account learning the
-          replacement;
+          replacement, and `Libraries` forgetting the run's own root;
+        - a self-reference treated as the run's own (`refresh::whose`);
         - the per-run item memory;
         - the decision reasons `not-recording` and `already-asked`;
         - passing over only files with nothing to report;
@@ -465,7 +531,10 @@ question changes.
          asked.
       5. With the network off, `borax resolve --refresh`: `unresolved`,
          and the item stands.
-      6. `borax resolve --refresh` a copy outside the library:
+      6. Add an `orcid` key to one author table of an item whose
+         candidate differs in `author`, and answer Replace: nothing is
+         written, and the line names `author`.
+      7. `borax resolve --refresh` a copy outside the library:
          `another-library`, naming the root.
 
       If this is not run, say so in the report.

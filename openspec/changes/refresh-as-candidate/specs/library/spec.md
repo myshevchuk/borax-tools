@@ -28,16 +28,48 @@ SHALL write nothing when:
 - its record is no longer the record the candidate was compared with,
   because a person or another run changed it after this run read it.
 
-So a correction made while the operator was deciding, in a text editor
-or by another run, is never overwritten by an answer given without
-seeing it.
+That protects every edit completed before the re-read, a correction a
+person saved while the question was on screen or another run's
+replacement included. It does not protect an edit landing between the
+re-read and the write's rename: the write replaces the file
+unconditionally, since no portable filesystem operation replaces a file
+only if it still holds what was read, and borax takes no lock, which a
+text editor would not honour. An edit saved in that window is
+overwritten, and nothing reports its loss. Beyond that window nothing
+is lost silently: every write is reported in a `library-replacement`
+event, and the file's `resolved` event keeps each replaced field's
+previous value under `refresh`.
+
+borax SHALL NOT discard what the operator was not shown. A replacement
+SHALL be refused as a whole, writing nothing, when the value the item
+file holds for any key it would replace, a compared field or a
+provenance entry of one, is annotated:
+
+- **It holds a key the record model does not read**, at any depth. The
+  keys the model reads inside a compared field are exactly `family` and
+  `given` in each entry of `author`, and `date-parts` in `issued`; every
+  other compared field and every provenance entry is a string and holds
+  none. Any other key within such a value, whether the value is written
+  as a table, an array of tables or an inline table, is one the model
+  does not read: reading the item ignores it, so it was never part of
+  what the operator was shown, and replacing the value would delete it.
+- **It holds a comment**: on any line the value occupies, from its key's
+  line, a comment trailing the value included, to its last line; and,
+  for a value written as a table or an array of tables, from its first
+  header to its last line, the comment lines directly above each of its
+  headers included. A comment on the lines above a plain `key =` line
+  belongs to the key, which stays where it is, and survives.
+
+The refusal SHALL name every annotated key, provenance entries as
+`provenance.<field>`. Values carrying neither are replaced as below.
 
 The write SHALL edit the file as a document, as artifact records are
 edited. Only the keys whose values change are set or removed, within
 `[record]`, its `borax` table and that table's `provenance`. The item's
 `id` SHALL survive, and so SHALL every key the record model does not
-know, every comment, the key order and the formatting of every key left
-alone. The file's name SHALL NOT change. The write SHALL go through the
+know and every comment, none of which can lie inside a value replaced,
+and the key order and the formatting of every key left alone. The
+file's name SHALL NOT change. The write SHALL go through the
 same writer as every other store write of the run, which mints the
 library's identity first where it has none, as the requirement "A
 library's first store write mints its identity" states. The file SHALL
@@ -56,7 +88,9 @@ event, when the write is made, carrying:
 - the item `file`, as a full path;
 - the `fields` replaced, by their keys, in the compared fields' order;
 - a `write` of `written`, or `failed` with a `message` saying why
-  nothing was written.
+  nothing was written: the file could not be read, holds another item,
+  changed after the run read it, holds notes in the fields named, or
+  could not be written.
 
 The event SHALL count toward no total, and a failure SHALL NOT change
 the run's exit status.
@@ -87,6 +121,30 @@ the run's exit status.
   item file and the fields replaced, with `write` `written`, and it is
   counted in no total
 
+#### Scenario: An author table carrying an identifier the model does not read
+- **WHEN** an operator accepts a candidate differing in `author`, and the
+  item file's `[[record.author]]` table holds `orcid` beside `family`
+  and `given`
+- **THEN** nothing is written, and the `library-replacement` event
+  reports `failed` with a message naming `author`
+
+#### Scenario: A comment inside the date of issue
+- **WHEN** the candidate differs in `issued`, and the item file's
+  `issued` value carries a trailing comment
+- **THEN** nothing is written, and the message names `issued`, along
+  with every other annotated field the replacement would have touched
+
+#### Scenario: A clean author list is replaced
+- **WHEN** the candidate differs in `author`, and the item file's
+  authors hold only `family` and `given` and no comment
+- **THEN** the item's authors are the candidate's afterwards, and every
+  other line of the file is as it was
+
+#### Scenario: A comment above a replaced key survives
+- **WHEN** the candidate differs in `title`, and a comment stands on the
+  line above the item file's `title =` line
+- **THEN** the title is replaced and the comment is still above it
+
 ## MODIFIED Requirements
 
 ### Requirement: A library's first store write mints its identity
@@ -114,7 +172,9 @@ That covers:
   is a store write;
 - an adoption that records nothing;
 - an admission that leaves its record exactly as it was;
-- a run given `--refresh` that replaces no item's record.
+- a run given `--refresh` that replaces no item's record and makes no
+  other store write. A refresh run that admits a file, or accepts a
+  replacement, mints exactly as any store write does.
 
 So every item and artifact record borax writes is written into a
 library that has an identity file at that moment, and nothing else
@@ -216,8 +276,14 @@ No event reports a mint, and none reports that warning.
 - **THEN** the identity file exists afterwards, created before the item
   file was replaced
 
-#### Scenario: A refresh that replaces nothing mints nothing
-- **WHEN** `borax resolve --refresh`, and an interactive `borax rename
-  --refresh` whose operator keeps every item's record, each run over a
-  library with no identity file
+#### Scenario: A refresh that writes nothing mints nothing
+- **WHEN** `borax resolve --refresh`, and a previewing `borax rename
+  --refresh --batch`, each run over a library with no identity file
 - **THEN** neither creates `.borax/library.toml`
+
+#### Scenario: A refresh run that records a file mints
+- **WHEN** an interactive `borax rename --refresh` over a library with no
+  identity file keeps every item's record and renames one file, which it
+  records
+- **THEN** the identity file exists afterwards, created before the
+  admission's first store write
