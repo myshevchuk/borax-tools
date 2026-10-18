@@ -285,6 +285,21 @@ libraries)`:
 
    There is no automatic pruning.
 
+**Two writers racing over one stale reference.** Writers at two live
+roots of one library may each find the same stale reference S, write
+their own key's file, and each remove S. Neither file is lost, because
+the two keys name different files. The second removal finds S absent,
+which counts as removed (D1), so both report `written` with S's root in
+`repaired_from`.
+
+The test makes the interleaving deterministic through the one seam
+`keep` reaches the store by, `IndexStore`. A test store wraps a
+`MemoryCache`, and its `remove_fact` waits on a shared
+`std::sync::Barrier` of two before removing. `keep` lists, then writes,
+then removes, so by the time either thread passes the barrier both have
+found S and written their own file. No sleep or retry is involved
+(task 3.1).
+
 `keep` returns what it wrote: the reference, the roots it removed as
 `repaired_from`, and the write's result. It returns nothing when step 1
 found the same item. Each return is one `content-index-write` event
@@ -477,7 +492,8 @@ reference that answers.
      references }`.
 3. **Else**:
    - references were read: `Unanswered { identifier: None, references }`;
-   - none: `Unindexed`, unchanged.
+   - none: `Unindexed`. Its meaning narrows (D7): no evidence that
+     answers and no readable reference, where 13a's was no evidence.
 
 After the pass, `Adoptions::owed` lists each recorded orphan's full
 path, hash, artifact and `answers_with`. `adopt_events` reads the
@@ -555,6 +571,18 @@ None counts toward `run-finished`, and a failure changes no exit status.
 | `content-index-write` | every evidence write after a verdict; none in a batch run or `adopt` | also every reference write: by an applying run, batch included, by `adopt`, and by `reconcile` |
 | `library-adoption` `unanswered` | evidence with no cached record; always `identifier` | the entry answered with nothing that produced a record; `identifier` when it held evidence |
 | `adopt` and the index | writes nothing to the index | writes references, never evidence |
+| `library-adoption` `unindexed` | the entry answers with no evidence | the entry answers with no evidence **and** holds no readable reference: an entry holding only references is `recorded` through one that answers, or `unanswered` |
+| `library-adoption` `recorded.retrieval` | only `service-cache` | also `library-reference` |
+| `content_index.read` `miss` | the entry answers with no evidence; nothing else was in it | neither a reference nor the evidence answered; it may carry the `references` that did not |
+| `record_retrieval` after a `hit` | always the lookup's service, `service-cache` or `network` | also `library-reference`, for a reference answer |
+
+**Re-checked and unchanged:** `lookup.origin` `content-index` still
+means a lookup of the entry's evidence, and is never reported for a
+reference answer, which makes no lookup. `content_index.write` keeps
+its meaning, and its `content-index-hit` reason now also follows a
+reference answer. `acceptance` `automatic` already covered a record no
+lookup reached. The `record_retrieval` kinds `library`, `service-cache`
+and `network` mean what they did.
 
 **Why without a bump.** The `cli` requirement fixes a schema version at
 the first release that emits it, and none has emitted 5. Every line a

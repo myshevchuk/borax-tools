@@ -277,6 +277,22 @@ Green point: additive. Nothing calls `borax::references` yet.
       - `keep_whose_removal_fails_reports_failed_naming_the_file_and_leaves_it`.
       - `keep_reads_and_writes_no_evidence_fact`: the logging store sees
         no `extracted` or `operator` key.
+      - `two_keeps_at_live_roots_racing_over_one_stale_reference_keep_both_and_remove_it`:
+        D3's concurrency seam.
+        - Setup: one hash, one reference S whose root is missing, and
+          two live roots A and B holding the same library. Two threads
+          each run `keep` for their own root's reference, each with its
+          own `Libraries`.
+        - The store is a test `IndexStore` over a `MemoryCache` whose
+          `remove_fact` first waits on a shared `Barrier::new(2)`. So
+          both writers have listed `refs/` and found S, and written
+          their own file, before either removes S.
+        - After both threads join:
+          - `refs/` holds A's and B's references, and not S;
+          - both `Kept` writes are `written`, each naming S's root in
+            `repaired_from`;
+          - the second removal found S already absent and was not an
+            error.
 - [ ] 3.2 Green: `borax::references` (`Unavailable`, `Reach`,
       `ReferenceStatus`, `ReferenceRead`, `Libraries`, `settle`, `read`,
       `Kept`, `keep`), and `pipeline::preferred_identifier` (D3, D4, D5,

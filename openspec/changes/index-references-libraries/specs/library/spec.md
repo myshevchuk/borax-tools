@@ -261,7 +261,9 @@ an adoption afterwards records it. Where the entry holds references and
 none answered, the orphan is reported as one the content index could
 not answer for as well, naming each reference with what became of it,
 and with the identifier only where the entry held one. An entry
-holding neither references nor evidence is one that holds nothing.
+holding no evidence that answers and no reference that can be read is
+one that holds nothing, and only such an orphan is reported
+`unindexed`.
 
 Every orphan the run reaches SHALL be reported by exactly one
 `library-adoption` event, whose kind says what became of it: recorded,
@@ -317,8 +319,9 @@ querying a service and without moving a file, which `borax rename
 
 #### Scenario: A library borax has seen before
 - **WHEN** `borax adopt` runs over a library whose files borax resolved
-  on an earlier run, so the content index answers for their hashes and
-  the response cache holds their records
+  on an earlier run, so the content index answers for their hashes
+  with identifiers, no library reference answering, and the response
+  cache holds their records
 - **THEN** each of those artifacts gains an artifact record and an item
   holding the cached record, no service is queried, and no file is
   renamed, moved or deleted

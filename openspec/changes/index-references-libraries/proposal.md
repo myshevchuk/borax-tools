@@ -147,6 +147,12 @@ The maintainer settled four further points for this change:
     - `content-index-write` reports reference writes, in batch renames
       and adoptions too;
     - `unanswered` may carry no `identifier`;
+    - `unindexed` narrows to an entry with neither evidence that
+      answers nor a readable reference;
+    - `recorded.retrieval` may be `library-reference`;
+    - a `miss` may carry `references`, and means neither a reference
+      nor the evidence answered;
+    - `record_retrieval` after a `hit` may be `library-reference`;
     - `adopt` writes to the index.
 
   Design D7.

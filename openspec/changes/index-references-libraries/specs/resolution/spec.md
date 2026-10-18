@@ -316,14 +316,19 @@ change no answer the library gives.
 #### Scenario: Clearing the cache spares the index
 - **WHEN** `borax cache --clear` runs after a file was resolved, and the
   file is resolved again
-- **THEN** it is not extracted, its identifier is looked up again over
-  the network, and the content index answered for it
+- **THEN** it is not extracted, and the content index answered for it:
+  where no library reference for its bytes answers, its identifier is
+  looked up again over the network; where one answers, nothing is
+  looked up and the record is the item's that reference names
 
 ### Requirement: A resolution reports the evidence it was checked against
 A `resolved` event SHALL carry every title the file claims for itself, each with where it was read — the XMP packet or the document information dictionary — in the order they were read, including claims the conflict check did not count as evidence, as the `claims` of its `extraction` section's `titles`. A file that was not opened, because the content index or the file's library item answered, SHALL carry its titles as not attempted, with that reason, and not as a file that claims none.
 
 A `resolved` event SHALL carry the identifier the run looked up, in its
-`lookup` section, alongside the identifiers the record itself holds. The
+`lookup` section, alongside the identifiers the record itself holds,
+wherever the run looked one up. A record the library or a library
+reference answered with was reached by no lookup, and its `lookup`
+section says so. The
 two are not always the same — a record resolved from an arXiv identifier
 may carry a DOI, which is what the event reports as the record's
 `identifier` — and only the former is evidence about the file.
@@ -348,8 +353,9 @@ reported separately, and so SHALL whether the library did.
   both titles, marked XMP and document information respectively
 
 #### Scenario: A content-index answer names its service
-- **WHEN** a file is resolved from the content index, by looking up the
-  DOI it holds, which Crossref's response cache answers
+- **WHEN** a file is resolved from the content index, with no library
+  reference for its bytes answering, by looking up the DOI it holds,
+  which Crossref's response cache answers
 - **THEN** its human line names Crossref as the service, its
   `resolved` event's `record_retrieval` is `service-cache` naming
   Crossref, and its titles are not attempted because the content index
@@ -410,9 +416,11 @@ kept, and it keeps it durably: the content index is not a cache,
 `borax cache --clear` leaves it, and an identifier extraction finds
 never takes the place of an operator's, as "The content index keeps
 identification evidence, one fact per file" states. A later run
-looks the operator's identifier up, so the record itself comes from
-the response cache, or from the services when the response cache does
-not hold it.
+looks the operator's identifier up wherever no library reference for
+the bytes answers, so the record itself comes from the response cache,
+or from the services when the response cache does not hold it. Where a
+reference answers, nothing is looked up and the record is the item's
+that reference names.
 
 No record SHALL be written for a file the operator did not rename: a
 record resolved from a supplied identifier and then skipped, abandoned
@@ -435,8 +443,9 @@ followed.
 - **THEN** the batch run resolves it without extraction and without a
   question — by looking up the identifier the content index holds, with
   no network request while the response cache holds it, or from its
-  library item where its library tracks it — and reports it already
-  named
+  library item where its library tracks it, or, with no lookup, from the
+  item a library reference names where one answers for its bytes — and
+  reports it already named
 
 #### Scenario: A wrong identifier abandoned
 - **WHEN** the operator supplies an identifier, sees a record for a
@@ -462,7 +471,8 @@ followed.
 #### Scenario: Clearing the cache forgets no answer
 - **WHEN** a file outside any library was renamed from a supplied
   identifier, `borax cache --clear` runs, and a batch run reaches the
-  file with the services reachable
+  file with the services reachable, no library reference for its bytes
+  answering
 - **THEN** the file is not asked about and not extracted, and the
   supplied identifier is looked up over the network
 
@@ -579,7 +589,9 @@ capability states.
 #### Scenario: An untracked file resolves as before
 - **WHEN** a PDF inside a library that no artifact record names is
   resolved and the content index holds its hash
-- **THEN** it resolves from the content index exactly as before, and its
+- **THEN** it resolves from the content index exactly as before — by
+  the item a library reference names where one answers, with no lookup,
+  and otherwise by looking up the identifier the entry holds — and its
   `resolved` event reports the library's answer as untracked
 
 #### Scenario: A copy is not the artifact
@@ -723,8 +735,9 @@ the provenance it was stored with.
   found it are retained as served by Crossref's response cache
 
 #### Scenario: A content-index answer
-- **WHEN** a file is resolved from the content index, by looking up the
-  identifier it holds, and Crossref's response cache answers
+- **WHEN** a file is resolved from the content index, with no library
+  reference for its bytes answering, by looking up the identifier it
+  holds, and Crossref's response cache answers
 - **THEN** its record is retained as served by Crossref's response
   cache, not as retrieved from the content index, and so is the attempt
   that found it
@@ -784,9 +797,9 @@ reason is the earliest one in the order the resolution runs:
 - the file has no content hash.
 
 #### Scenario: A hit and a miss
-- **WHEN** one file is resolved from the content index, and another,
-  whose hash the index does not hold, is extracted and resolved from a
-  service
+- **WHEN** one file is resolved from the content index's evidence, no
+  library reference for its bytes answering, and another, whose hash
+  the index does not hold, is extracted and resolved from a service
 - **THEN** the first retains the content index as having answered, with
   the identifier it held, and the second retains it as having held
   nothing and retains the write of its record as made
@@ -802,8 +815,8 @@ reason is the earliest one in the order the resolution runs:
 - **WHEN** the content index holds an identifier an operator supplied
   for a file, and a run with `--no-cache` extracts and resolves another
 - **THEN** its resolution retains the content index as bypassed and the
-  write of the extracted identifier as made, and the content index
-  still answers with the operator's identifier
+  write of the extracted identifier as made, and the content index's
+  evidence still answers with the operator's identifier
 
 #### Scenario: An unhashable file
 - **WHEN** a file cannot be hashed, with the cache on, and its DOI
@@ -871,7 +884,8 @@ verdict retains the evidence of every step that ran before it.
   taken because the library answered
 
 #### Scenario: A content-index answer
-- **WHEN** a file is resolved from the content index
+- **WHEN** a file is resolved from the content index's evidence, no
+  library reference for its bytes answering
 - **THEN** the titles, extraction, the title check and the
   content-index write are each retained as not taken because the
   content index answered, and the lookup of the identifier it held is
@@ -964,7 +978,9 @@ and it remained 4.
 Schema 4 was then released, in 0.9.0, and the content index stopped
 holding records, which changes what released values mean:
 `content_index.read` `hit` is an identifier the index answered with,
-which the resolution then looks up, rather than a record served;
+which the resolution then looks up, rather than a record served — where
+no library reference answers, as the paragraph on references below
+states;
 `content_index.write` writes identification evidence rather than a
 record; `record_retrieval` `content-index` is no longer emitted;
 `content-index-write` reports every evidence write made after a
@@ -984,7 +1000,7 @@ carried it. These are additions:
 - `content-index-write`'s entry kind `reference`, with `repaired_from`;
 - `references` on `library-adoption` `unanswered`.
 
-Four meanings schema 5 had given changed with them:
+These meanings schema 5 had given changed with them:
 
 - a `hit` answered by a reference carries no `evidence`, and no lookup
   follows it, so its `lookup` is not attempted with reason
@@ -993,6 +1009,16 @@ Four meanings schema 5 had given changed with them:
   run, batch runs included, by `borax adopt`, and by `borax reconcile`;
 - `library-adoption` `unanswered` carries no `identifier` where the
   entry held no evidence;
+- `library-adoption` `unindexed` narrows: it means the entry holds
+  neither evidence that answers nor a reference that can be read, since
+  an entry holding only references is `recorded` through one that
+  answers, or `unanswered`;
+- `library-adoption` `recorded` may carry `retrieval`
+  `library-reference`, where it was always a service's response cache;
+- a `miss` means that neither a reference nor the evidence answered,
+  and may carry the `references` that did not;
+- `record_retrieval` after a `hit` may be `library-reference`, where it
+  was always the lookup's service;
 - `borax adopt` writes to the content index.
 
 A line about an entry that holds no reference is written exactly as
@@ -1001,8 +1027,9 @@ version SHALL stay 5, as the requirement "JSON Lines output is
 first-class" allows for a schema no release has carried.
 
 #### Scenario: A content-index answer in sections
-- **WHEN** a run with no library resolves a file from the content index,
-  whose identifier Crossref's response cache answers for
+- **WHEN** a run with no library resolves a file from the content
+  index's evidence, no library reference for its bytes answering, and
+  Crossref's response cache answers for its identifier
 - **THEN** its `resolved` event carries schema version 5; `library` not
   attempted with reason `no-library`; `content_index` with `read` `hit`
   carrying that identifier and its origin as `evidence`, and `write`
@@ -1129,7 +1156,7 @@ status.
 
 #### Scenario: A hit names the evidence it answered with
 - **WHEN** a file's entry holds an extracted DOI and a DOI of origin
-  `supplied`
+  `supplied`, and no reference that answers
 - **THEN** `content_index.read` is `hit` with `evidence` naming the
   supplied DOI and `supplied`
 
@@ -1191,7 +1218,8 @@ though it were a service.
 
 #### Scenario: A content-index answer
 - **WHEN** a file outside any library is resolved by looking up the DOI
-  the content index holds for it, and Crossref answers over the network
+  the content index holds for it, no library reference for its bytes
+  answering, and Crossref answers over the network
 - **THEN** `record_retrieval` is `network` naming Crossref
 
 #### Scenario: A reference answer
@@ -1381,8 +1409,9 @@ reference to the library at the reference's root.
   `paper.pdf: resolved doi:10.1039/c5ay00042d to "Determination of things" (Smith, 2015) via crossref, from the network`
 
 #### Scenario: A content-index answer read by a person
-- **WHEN** the same file is resolved from the content index, by looking
-  up the DOI it holds, which Crossref's response cache answers
+- **WHEN** the same file is resolved from the content index, with no
+  library reference for its bytes answering, by looking up the DOI it
+  holds, which Crossref's response cache answers
 - **THEN** the line ends `via crossref, from the response cache`
 
 #### Scenario: A reference answer read by a person
@@ -1529,7 +1558,8 @@ item it names.
 #### Scenario: An operator's identifier outlasts a bypass
 - **WHEN** an operator supplied `doi:10.1000/x` for a file in an earlier
   run, `borax resolve --no-cache` extracts `doi:10.1000/y` from it and
-  resolves that, and a later run without `--no-cache` reaches the file
+  resolves that, and a later run without `--no-cache` reaches the file,
+  no library reference for its bytes answering
 - **THEN** the bypassing run writes `extracted.json` with
   `doi:10.1000/y`, `operator.json` still holds `doi:10.1000/x` with
   origin `supplied`, and the later run looks up `doi:10.1000/x`
@@ -1604,26 +1634,27 @@ for it, which already holds that evidence.
 
 #### Scenario: An evidence answer
 - **WHEN** a file outside any library, whose entry holds the DOI an
-  earlier run extracted, is resolved, and Crossref's response cache
-  holds that DOI
+  earlier run extracted and no reference that answers, is resolved, and
+  Crossref's response cache holds that DOI
 - **THEN** it resolves from Crossref's response cache with no request
   sent, its `lookup.origin` is `content-index`, and the file is not
   opened
 
 #### Scenario: The operator's identifier answers
 - **WHEN** the entry holds an extracted DOI and a DOI an operator
-  supplied
+  supplied, and no reference that answers
 - **THEN** the supplied DOI is the one looked up
 
 #### Scenario: An accepted conflict is looked up and not judged
-- **WHEN** the entry holds evidence of origin `overridden`, and the
-  file's titles conflict with the record its identifier reaches
+- **WHEN** the entry holds evidence of origin `overridden` and no
+  reference that answers, and the file's titles conflict with the
+  record its identifier reaches
 - **THEN** the file is not opened, its `match_check` is not attempted
   with reason `content-index-hit`, and it resolves with that record
 
 #### Scenario: Asking again about an operator's identifier
-- **WHEN** the entry holds evidence of origin `overridden`, its lookup
-  meets an outage, and the operator asks the services again, Crossref
+- **WHEN** the entry holds evidence of origin `overridden` and no
+  reference that answers, its lookup meets an outage, and the operator asks the services again, Crossref
   answers, and the operator renames the file
 - **THEN** the lookup's origin is still `content-index` with the outage
   kept as an earlier round, the titles are not read, the title check is
@@ -1631,7 +1662,8 @@ for it, which already holds that evidence.
   emitted, and the entry's evidence is unchanged
 
 #### Scenario: Offline with no response cache
-- **WHEN** the entry holds evidence, the response cache does not hold
-  its identifier, and no service can be reached
+- **WHEN** the entry holds evidence and no reference that answers, the
+  response cache does not hold its identifier, and no service can be
+  reached
 - **THEN** the file is skipped as `unresolvable` with each service
   reported unavailable, it is not extracted, and the entry is unchanged
