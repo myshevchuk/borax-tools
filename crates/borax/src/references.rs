@@ -227,11 +227,7 @@ impl Libraries {
     /// metadata or identity file cannot be read: a library that cannot
     /// be read is not known to be gone.
     pub fn is_stale(&self, root: &Path, library: &LibraryId) -> bool {
-        match self.root(root).holds(root) {
-            Holds::Missing | Holds::NotDirectory | Holds::Identity(Identity::Absent) => true,
-            Holds::Identity(Identity::Present(found)) => found != library,
-            Holds::Unreadable { .. } | Holds::Identity(Identity::Faulty(_)) => false,
-        }
+        self.root(root).holds(root).is_stale_for(library)
     }
 
     /// The record of `root`, made empty the first time it is asked for.
@@ -250,14 +246,32 @@ impl Libraries {
 impl Root {
     /// What the root at `path` holds, read the first time it is asked.
     fn holds(&self, path: &Path) -> &Holds {
-        self.holds.get_or_init(|| match fs::metadata(path) {
+        self.holds.get_or_init(|| Holds::read(path))
+    }
+}
+
+impl Holds {
+    /// What the root at `path` holds, read from disk now.
+    fn read(path: &Path) -> Holds {
+        match fs::metadata(path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Holds::Missing,
             Err(error) => Holds::Unreadable {
                 message: error.to_string(),
             },
             Ok(metadata) if !metadata.is_dir() => Holds::NotDirectory,
             Ok(_) => Holds::Identity(identity(path)),
-        })
+        }
+    }
+
+    /// Whether a root holding this no longer holds `library`: it is
+    /// missing, is not a directory, holds no identity, or holds another
+    /// one. A root that cannot be read is not stale.
+    fn is_stale_for(&self, library: &LibraryId) -> bool {
+        match self {
+            Holds::Missing | Holds::NotDirectory | Holds::Identity(Identity::Absent) => true,
+            Holds::Identity(Identity::Present(found)) => found != library,
+            Holds::Unreadable { .. } | Holds::Identity(Identity::Faulty(_)) => false,
+        }
     }
 }
 
@@ -365,8 +379,11 @@ pub struct Kept {
 /// - **No file.** The entry's readable references naming the same
 ///   library and artifact at another root that `libraries` finds stale
 ///   ([`Libraries::is_stale`]) are found first. `reference` is written,
-///   and only then is each of them removed. A write that fails removes
-///   nothing. A removal that fails leaves that file, and the result is
+///   and only then is each of them removed, if its file still holds
+///   that reference and its root, read again from disk, is still stale;
+///   one another run rewrote, or whose root holds the library again, is
+///   left and counts as neither removed nor failed. A write that fails
+///   removes nothing. A removal that fails leaves that file, and the result is
 ///   [`CacheWrite::Failed`] naming it; a reference already gone counts
 ///   as removed.
 ///
@@ -409,7 +426,16 @@ pub fn keep<S: IndexStore>(
 
     let mut repaired_from = Vec::new();
     let mut failures = Vec::new();
-    for old in stale {
+    // Another run may have acted since the entry was listed: it may
+    // have rewritten a stale reference, or its root may hold the
+    // library again. Each is checked afresh, from disk and not from the
+    // run's first read, just before it would be removed, and one that
+    // is no longer the stale reference listed is left.
+    let still_stale = |old: &LibraryReference| {
+        matches!(index.reference(hash, old), Fact::Held(held) if held == *old)
+            && Holds::read(&old.root).is_stale_for(&old.library)
+    };
+    for old in stale.into_iter().filter(still_stale) {
         match index.remove_reference(hash, &old) {
             CacheWrite::Written => repaired_from.push(old.root),
             CacheWrite::Failed { message } => failures.push(format!(

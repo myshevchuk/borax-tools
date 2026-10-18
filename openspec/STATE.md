@@ -613,6 +613,15 @@ reported `missing`, a reconcile at the moved root naming
 `repaired_from`, and after `cache --clear` an adoption into a third
 library recorded through the reference.
 
+Its review found that a stale-root repair could remove a reference
+another run had rewritten, or whose root held the library again,
+between the listing and the removal. `keep` now re-reads each stale
+reference and its root from disk just before removing it, and leaves
+one that changed. The window between that check and the removal
+remains, since no filesystem offers a portable compare-and-delete; a
+reference lost in it is restored by the next `reconcile` in the
+library it names.
+
 ## Not built yet
 
 - **The optional `pdfium` backend.** The pure-Rust `PdfSource` is the
