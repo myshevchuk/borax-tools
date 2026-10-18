@@ -1126,3 +1126,33 @@ fn cache_clear_leaves_the_content_index_so_a_reference_still_answers() {
     assert_eq!(resolved["record"]["title"], "The Surviving Title");
     assert_eq!(resolved["record_retrieval"]["kind"], "library-reference");
 }
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate, group 2: the flag reaches `run-started`
+// ---------------------------------------------------------------------
+
+/// design D8: `borax resolve --refresh --json` over an empty directory
+/// asks nothing and finds nothing, and still says on its first line why
+/// no answer came from the response cache.
+#[test]
+fn resolve_refresh_over_an_empty_directory_reports_refresh_on_run_started() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+
+    let output = borax_in(
+        &["resolve", "--refresh", "--json", "."],
+        library.path(),
+        config_home.path(),
+        cache_home.path(),
+        data_home.path(),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first = stdout.lines().next().expect("a first line");
+    assert!(first.contains(r#""event":"run-started""#), "got {first}");
+    assert!(first.ends_with(r#""refresh":true}"#), "got {first}");
+}

@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 use borax::event::{
     Acceptance, AcceptedBy, AcceptedItemCause, Admission, Adoption, Claim, ClaimOrigin, Condition,
-    ContentIndexSection, Counts, Diagnostic, Displaced, Event, EvidenceStep, Extraction,
-    ExtractionResultStep, ExtractionSection, FetchedFrom, Format, IdentifierInputStep,
+    ContentIndexSection, Counts, Diagnostic, DifferenceStep, Displaced, Event, EvidenceStep,
+    Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom, Format, IdentifierInputStep,
     IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
-    MatchCheckStep, ReferenceStatusStep, ReferenceStep, Repair, RetrievedFrom, SCHEMA, Sections,
-    ServiceAnswer, ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome,
-    Summary, SyntaxStep, TableUsed, TitlesStep, UnavailableCause, WriteStep, WrittenEntry,
-    human_line, human_summary, json_line, render,
+    MatchCheckStep, ReferenceStatusStep, ReferenceStep, RefreshAcceptance, RefreshStep, Repair,
+    RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Submission,
+    SubmissionAcceptance, SubmissionOutcome, Summary, SyntaxStep, TableUsed, TitlesStep,
+    UnavailableCause, WriteStep, WrittenEntry, human_line, human_summary, json_line, render,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
@@ -323,6 +323,7 @@ fn run_started() -> Event {
         applying: true,
         interactive: false,
         tables: Vec::new(),
+        refresh: false,
     }
 }
 
@@ -337,6 +338,7 @@ fn run_started_with_a_table() -> Event {
             path: PathBuf::from("/collection/journals.tsv"),
             digest: "sha256-abc123".to_string(),
         }],
+        refresh: false,
     }
 }
 
@@ -3082,6 +3084,255 @@ fn json_line_of_run_started_carries_an_empty_table_list_when_none_was_read() {
 #[test]
 fn human_line_of_run_started_is_silent_even_with_tables() {
     assert_eq!(human_line(&run_started_with_a_table()), None);
+}
+
+// --- run-started.refresh (design D8) ---
+
+fn run_started_refreshing() -> Event {
+    match run_started() {
+        Event::RunStarted {
+            command,
+            version,
+            applying,
+            interactive,
+            tables,
+            ..
+        } => Event::RunStarted {
+            command,
+            version,
+            applying,
+            interactive,
+            tables,
+            refresh: true,
+        },
+        other => panic!("expected RunStarted, got {other:?}"),
+    }
+}
+
+#[test]
+fn json_line_of_run_started_carries_refresh_true_only_when_set() {
+    let line = json_line(&run_started_refreshing());
+
+    assert!(
+        line.ends_with(r#""tables":[],"refresh":true}"#),
+        "got {line}"
+    );
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["refresh"], Value::Bool(true));
+}
+
+#[test]
+fn json_line_of_run_started_without_refresh_has_no_refresh_key() {
+    let line = json_line(&run_started());
+
+    assert!(!line.contains("refresh"), "got {line}");
+    assert!(line.ends_with(r#""tables":[]}"#), "got {line}");
+}
+
+#[test]
+fn run_started_round_trips_with_and_without_refresh() {
+    for event in [run_started(), run_started_refreshing()] {
+        let parsed: Event = serde_json::from_str(&json_line(&event)).unwrap();
+        assert_eq!(parsed, event);
+    }
+    let bare: Event = serde_json::from_str(
+        r#"{"event":"run-started","command":"rename","version":"0.1.0","applying":true,"interactive":false,"tables":[]}"#,
+    )
+    .unwrap();
+    assert_eq!(bare, run_started());
+}
+
+// --- the refresh key's value (design D8) ---
+
+const REFRESH_DOI: &str = "10.1039/c5ay00042d";
+
+fn crossref_wrote() -> ServiceAnswer {
+    ServiceAnswer {
+        service: "crossref".to_string(),
+        outcome: ServiceOutcome::Found {
+            retrieval: FetchedFrom::Network,
+            stored: Some(WriteStep::Written),
+        },
+    }
+}
+
+fn candidate_record() -> Record {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("Determination of things".to_string());
+    record.doi = Some(doi(REFRESH_DOI));
+    record
+}
+
+fn title_difference() -> DifferenceStep {
+    DifferenceStep {
+        field: "title".to_string(),
+        item: Some(Value::from("REVIEW CORRECTION: Determination of things")),
+        candidate: Some(Value::from("Determination of things")),
+    }
+}
+
+fn differs_with(acceptance: RefreshAcceptance) -> RefreshStep {
+    RefreshStep::Differs {
+        identifier: format!("doi:{REFRESH_DOI}"),
+        attempts: vec![crossref_wrote()],
+        differences: vec![title_difference()],
+        candidate: Box::new(candidate_record()),
+        acceptance,
+    }
+}
+
+fn every_refresh_step() -> Vec<RefreshStep> {
+    let identifier = format!("doi:{REFRESH_DOI}");
+    vec![
+        RefreshStep::NotAttempted {
+            reason: "no-identifier".to_string(),
+        },
+        RefreshStep::NoEligibleService {
+            identifier: identifier.clone(),
+        },
+        RefreshStep::Unresolved {
+            identifier: identifier.clone(),
+            attempts: vec![
+                ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Unavailable {
+                        message: "timed out".to_string(),
+                    },
+                },
+                ServiceAnswer {
+                    service: "openalex".to_string(),
+                    outcome: ServiceOutcome::NotFound,
+                },
+            ],
+        },
+        RefreshStep::Current {
+            identifier,
+            attempts: vec![crossref_wrote()],
+        },
+        differs_with(RefreshAcceptance::Pending),
+    ]
+}
+
+fn every_refresh_acceptance() -> Vec<RefreshAcceptance> {
+    vec![
+        RefreshAcceptance::Pending,
+        RefreshAcceptance::Accepted,
+        RefreshAcceptance::Unwritten {
+            message: "changed after this run read it".to_string(),
+        },
+        RefreshAcceptance::Declined,
+        RefreshAcceptance::NotAttempted {
+            reason: "another-library".to_string(),
+        },
+    ]
+}
+
+fn raw(value: &impl serde::Serialize) -> String {
+    serde_json::to_string(value).unwrap()
+}
+
+#[test]
+fn refresh_step_differs_serializes_as_design_d8() {
+    let step = differs_with(RefreshAcceptance::NotAttempted {
+        reason: "not-asked".to_string(),
+    });
+
+    assert_eq!(
+        raw(&step),
+        concat!(
+            r#"{"status":"differs","identifier":"doi:10.1039/c5ay00042d","#,
+            r#""attempts":[{"service":"crossref","outcome":{"status":"found","#,
+            r#""retrieval":"network","stored":{"status":"written"}}}],"#,
+            r#""differences":[{"field":"title","#,
+            r#""item":"REVIEW CORRECTION: Determination of things","#,
+            r#""candidate":"Determination of things"}],"#,
+            r#""candidate":{"type":"article-journal","title":"Determination of things","#,
+            r#""DOI":"10.1039/c5ay00042d"},"#,
+            r#""acceptance":{"status":"not-attempted","reason":"not-asked"}}"#,
+        )
+    );
+}
+
+#[test]
+fn refresh_step_of_each_status_serializes_as_design_d8() {
+    let steps = every_refresh_step();
+    let expected = [
+        r#"{"status":"not-attempted","reason":"no-identifier"}"#,
+        r#"{"status":"no-eligible-service","identifier":"doi:10.1039/c5ay00042d"}"#,
+        concat!(
+            r#"{"status":"unresolved","identifier":"doi:10.1039/c5ay00042d","attempts":["#,
+            r#"{"service":"crossref","outcome":{"status":"unavailable","message":"timed out"}},"#,
+            r#"{"service":"openalex","outcome":{"status":"not-found"}}]}"#,
+        ),
+        concat!(
+            r#"{"status":"current","identifier":"doi:10.1039/c5ay00042d","attempts":["#,
+            r#"{"service":"crossref","outcome":{"status":"found","retrieval":"network","#,
+            r#""stored":{"status":"written"}}}]}"#,
+        ),
+    ];
+
+    for (step, expected) in steps.iter().zip(expected) {
+        assert_eq!(raw(step), expected);
+    }
+    assert!(
+        raw(&steps[4]).starts_with(r#"{"status":"differs","#),
+        "got {}",
+        raw(&steps[4])
+    );
+}
+
+#[test]
+fn refresh_acceptance_of_each_status_serializes_as_design_d8() {
+    let expected = [
+        r#"{"status":"pending"}"#,
+        r#"{"status":"accepted"}"#,
+        r#"{"status":"unwritten","message":"changed after this run read it"}"#,
+        r#"{"status":"declined"}"#,
+        r#"{"status":"not-attempted","reason":"another-library"}"#,
+    ];
+
+    for (acceptance, expected) in every_refresh_acceptance().iter().zip(expected) {
+        assert_eq!(raw(acceptance), expected);
+    }
+}
+
+#[test]
+fn difference_step_leaves_out_an_absent_side() {
+    let candidate_only = DifferenceStep {
+        field: "volume".to_string(),
+        item: None,
+        candidate: Some(Value::from("7")),
+    };
+    let item_only = DifferenceStep {
+        field: "volume".to_string(),
+        item: Some(Value::from("7")),
+        candidate: None,
+    };
+
+    assert_eq!(
+        raw(&candidate_only),
+        r#"{"field":"volume","candidate":"7"}"#
+    );
+    assert_eq!(raw(&item_only), r#"{"field":"volume","item":"7"}"#);
+    let parsed: DifferenceStep =
+        serde_json::from_str(r#"{"field":"volume","candidate":"7"}"#).unwrap();
+    assert_eq!(parsed, candidate_only);
+}
+
+#[test]
+fn refresh_step_round_trips_every_status_and_acceptance() {
+    let mut steps = every_refresh_step();
+    steps.extend(every_refresh_acceptance().into_iter().map(differs_with));
+
+    for step in steps {
+        let text = raw(&step);
+        let parsed: RefreshStep = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, step, "text was {text}");
+    }
+    for acceptance in every_refresh_acceptance() {
+        let parsed: RefreshAcceptance = serde_json::from_str(&raw(&acceptance)).unwrap();
+        assert_eq!(parsed, acceptance);
+    }
 }
 
 // --- Diagnostic Display and Level ordering ---

@@ -1941,3 +1941,136 @@ fn status_reconcile_adopt_config_and_cache_summary_is_silent() {
     assert_eq!(parse(&["config"]).command.summary(), Summary::Silent);
     assert_eq!(parse(&["cache"]).command.summary(), Summary::Silent);
 }
+
+// ---------------------------------------------------------------------
+// --refresh: a selector on resolve, rename and bib (design D1)
+// ---------------------------------------------------------------------
+
+fn refused(args: &[&str]) -> String {
+    let mut full = vec!["borax"];
+    full.extend_from_slice(args);
+    let result = <Cli as Parser>::try_parse_from(full);
+    assert!(result.is_err(), "got {result:?}");
+    result.unwrap_err().to_string()
+}
+
+#[test]
+fn resolve_accepts_refresh() {
+    let cli = parse(&["resolve", "--refresh", "a.pdf"]);
+
+    assert_eq!(
+        cli.command,
+        Command::resolve(vec![PathBuf::from("a.pdf")]).refreshing(),
+        "got {:?}",
+        cli.command
+    );
+    assert!(cli.command.refreshes());
+}
+
+#[test]
+fn rename_accepts_refresh() {
+    let cli = parse(&["rename", "--refresh", "--apply", "f.pdf"]);
+
+    assert_eq!(
+        cli.command,
+        Command::rename(vec![PathBuf::from("f.pdf")], true).refreshing(),
+        "got {:?}",
+        cli.command
+    );
+    assert!(cli.command.refreshes());
+}
+
+#[test]
+fn bib_accepts_refresh() {
+    let cli = parse(&["bib", "--refresh", "a.pdf"]);
+
+    assert_eq!(
+        cli.command,
+        Command::bib(vec![PathBuf::from("a.pdf")]).refreshing(),
+        "got {:?}",
+        cli.command
+    );
+    assert!(cli.command.refreshes());
+}
+
+#[test]
+fn config_refuses_refresh_as_an_unknown_argument() {
+    let message = refused(&["config", "--refresh"]);
+    assert!(message.contains("--refresh"), "got {message:?}");
+}
+
+#[test]
+fn status_refuses_refresh_as_an_unknown_argument() {
+    let message = refused(&["status", "--refresh"]);
+    assert!(message.contains("--refresh"), "got {message:?}");
+}
+
+#[test]
+fn rename_refuses_no_refresh_as_an_unknown_argument() {
+    let message = refused(&["rename", "--no-refresh", "f.pdf"]);
+    assert!(message.contains("--no-refresh"), "got {message:?}");
+}
+
+#[test]
+fn refresh_sets_no_setting() {
+    let cli = parse(&["rename", "--refresh", "f.pdf"]);
+
+    assert_eq!(
+        cli.settings(),
+        Settings::default(),
+        "got {:?}",
+        cli.settings()
+    );
+}
+
+#[test]
+fn refresh_follows_its_subcommand() {
+    let message = refused(&["--refresh", "rename", "f.pdf"]);
+    assert!(message.contains("--refresh"), "got {message:?}");
+}
+
+#[test]
+fn command_refreshing_sets_refresh_on_resolve_rename_and_bib_only() {
+    let paths = || vec![PathBuf::from("f.pdf")];
+    for command in [
+        Command::resolve(paths()),
+        Command::rename(paths(), false),
+        Command::bib(paths()),
+    ] {
+        let refreshing = command.clone().refreshing();
+        assert!(refreshing.refreshes(), "got {refreshing:?}");
+        assert_ne!(refreshing, command);
+        assert_eq!(refreshing.clone().refreshing(), refreshing);
+    }
+
+    for command in [
+        Command::config(),
+        Command::cache(false),
+        Command::status(None, false),
+        Command::validate(None),
+        Command::reconcile(None, false),
+        Command::adopt(None),
+    ] {
+        assert_eq!(command.clone().refreshing(), command);
+        assert!(!command.refreshes(), "got {command:?}");
+    }
+}
+
+#[test]
+fn command_constructors_do_not_refresh() {
+    let paths = || vec![PathBuf::from("f.pdf")];
+    for command in [
+        Command::resolve(paths()),
+        Command::rename(paths(), true),
+        Command::bib(paths()),
+        Command::config(),
+        Command::cache(true),
+        Command::status(None, true),
+        Command::validate(None),
+        Command::reconcile(None, true),
+        Command::adopt(None),
+    ] {
+        assert!(!command.refreshes(), "got {command:?}");
+    }
+    assert!(!parse(&["resolve", "f.pdf"]).command.refreshes());
+}

@@ -473,3 +473,142 @@ fn resolving_twice_through_cached_gives_service_cache_the_second_time() {
     );
     assert_eq!(second.retrieval, Retrieval::ServiceCache);
 }
+
+// --- Cached::refreshing ---
+
+fn article_titled(doi_value: &str, title: &str) -> Record {
+    Record {
+        title: Some(title.to_string()),
+        ..article_with_doi(doi_value)
+    }
+}
+
+fn fake_answering(response: Result<Record, SourceError>, calls: &Arc<AtomicUsize>) -> FakeSource {
+    FakeSource {
+        name: SourceName::Crossref,
+        supports: true,
+        response,
+        calls: calls.clone(),
+    }
+}
+
+#[test]
+fn refreshing_cached_source_asks_the_source_when_the_cache_holds_the_key() {
+    let memory = MemoryCache::new();
+    let id = doi_identifier();
+    let held = article_titled("10.1038/171737a0", "Held");
+    let fresh = article_titled("10.1038/171737a0", "Fresh");
+    let _ = memory.put(&key(SourceName::Crossref, &id), &held);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let refreshing = Cached::refreshing(
+        fake_answering(Ok(fresh.clone()), &calls),
+        SharedCache::new(&memory),
+    );
+
+    let fetched = refreshing.fetch(&id).unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(fetched.record, fresh);
+}
+
+#[test]
+fn refreshing_cached_source_stores_the_fresh_answer_over_the_one_held() {
+    let memory = MemoryCache::new();
+    let id = doi_identifier();
+    let k = key(SourceName::Crossref, &id);
+    let held = article_titled("10.1038/171737a0", "Held");
+    let fresh = article_titled("10.1038/171737a0", "Fresh");
+    let _ = memory.put(&k, &held);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let refreshing = Cached::refreshing(
+        fake_answering(Ok(fresh.clone()), &calls),
+        SharedCache::new(&memory),
+    );
+
+    refreshing.fetch(&id).unwrap();
+
+    assert_eq!(memory.get(&k), Some(fresh));
+    assert_eq!(memory.len(), 1);
+}
+
+#[test]
+fn refreshing_cached_source_reports_a_network_retrieval_with_its_write() {
+    let memory = MemoryCache::new();
+    let id = doi_identifier();
+    let _ = memory.put(
+        &key(SourceName::Crossref, &id),
+        &article_titled("10.1038/171737a0", "Held"),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let refreshing = Cached::refreshing(
+        fake_answering(Ok(article_with_doi("10.1038/171737a0")), &calls),
+        SharedCache::new(&memory),
+    );
+
+    let first = refreshing.fetch(&id).unwrap();
+    let second = refreshing.fetch(&id).unwrap();
+
+    let expected = Retrieval::Network {
+        stored: Some(CacheWrite::Written),
+    };
+    assert_eq!(first.retrieval, expected);
+    assert_eq!(second.retrieval, expected);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn refreshing_cached_source_reports_a_failed_write_as_stored_failed() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let refreshing = Cached::refreshing(
+        fake_answering(Ok(article_with_doi("10.1038/171737a0")), &calls),
+        WriteFailingCache,
+    );
+
+    let fetched = refreshing.fetch(&doi_identifier()).unwrap();
+
+    assert!(matches!(
+        fetched.retrieval,
+        Retrieval::Network {
+            stored: Some(CacheWrite::Failed { .. })
+        }
+    ));
+}
+
+#[test]
+fn refreshing_cached_source_stores_nothing_for_a_failure() {
+    let memory = MemoryCache::new();
+    let id = doi_identifier();
+    let k = key(SourceName::Crossref, &id);
+    let held = article_titled("10.1038/171737a0", "Held");
+    let _ = memory.put(&k, &held);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let refreshing = Cached::refreshing(
+        fake_answering(Err(SourceError::NotFound), &calls),
+        SharedCache::new(&memory),
+    );
+
+    assert!(refreshing.fetch(&id).is_err());
+
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(memory.get(&k), Some(held));
+    assert_eq!(memory.len(), 1);
+}
+
+#[test]
+fn new_cached_source_still_serves_a_held_answer_without_asking() {
+    let memory = MemoryCache::new();
+    let id = doi_identifier();
+    let held = article_titled("10.1038/171737a0", "Held");
+    let _ = memory.put(&key(SourceName::Crossref, &id), &held);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let cached = Cached::new(
+        fake_answering(Ok(article_titled("10.1038/171737a0", "Fresh")), &calls),
+        SharedCache::new(&memory),
+    );
+
+    let fetched = cached.fetch(&id).unwrap();
+
+    assert_eq!(fetched.record, held);
+    assert_eq!(fetched.retrieval, Retrieval::ServiceCache);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}

@@ -423,6 +423,7 @@ fn config(cache: bool) -> ResolveConfig {
     ResolveConfig {
         extraction: ExtractionConfig::default(),
         cache,
+        refresh: false,
     }
 }
 
@@ -1880,6 +1881,16 @@ fn sections_passes_acceptance_through() {
 #[test]
 fn unattempted_cache_bypassed_as_str_is_cache_bypassed() {
     assert_eq!(Unattempted::CacheBypassed.as_str(), "cache-bypassed");
+}
+
+/// refresh-as-candidate design D8: the four reasons only a `refresh`
+/// carries, with the kebab-case names the stream writes.
+#[test]
+fn unattempted_names_the_four_refresh_reasons() {
+    assert_eq!(Unattempted::NoIdentifier.as_str(), "no-identifier");
+    assert_eq!(Unattempted::AnotherLibrary.as_str(), "another-library");
+    assert_eq!(Unattempted::NotRecording.as_str(), "not-recording");
+    assert_eq!(Unattempted::AlreadyAsked.as_str(), "already-asked");
 }
 
 /// design D1, D11: every reason string anywhere in a projected

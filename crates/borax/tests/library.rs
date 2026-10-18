@@ -11477,3 +11477,69 @@ fn adopt_with_no_identifier_from_its_lookup_writes_no_evidence() {
         record.history[0]
     );
 }
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate 3.1: what Stores holds of its library's root and
+// identity (design D3, D12)
+// ---------------------------------------------------------------------
+
+#[test]
+fn stores_root_is_the_root_normalised_lexically() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("sub")).unwrap();
+
+    for spelled in [
+        root.join("sub").join(".."),
+        root.join(".").join("sub").join("..").join("."),
+    ] {
+        let stores = Stores::read(&spelled);
+
+        assert_eq!(stores.root(), root, "for {spelled:?}");
+    }
+}
+
+#[test]
+fn stores_identity_is_the_present_identity_read_with_the_stores() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(identity_file(root), format!("id = \"{UUID_A}\"\n")).unwrap();
+
+    let stores = Stores::read(root);
+    fs::write(identity_file(root), format!("id = \"{UUID_B}\"\n")).unwrap();
+
+    assert_eq!(stores.identity(), Some(&LibraryId::parse(UUID_A).unwrap()));
+}
+
+#[test]
+fn stores_identity_of_an_absent_or_faulty_identity_file_is_none() {
+    let absent = tempdir().unwrap();
+    assert_eq!(Stores::read(absent.path()).identity(), None);
+
+    let malformed = tempdir().unwrap();
+    fs::create_dir_all(malformed.path().join(STATE_DIR)).unwrap();
+    fs::write(identity_file(malformed.path()), b"id = 7\n").unwrap();
+    assert_eq!(Stores::read(malformed.path()).identity(), None);
+
+    let directory = tempdir().unwrap();
+    fs::create_dir_all(identity_file(directory.path())).unwrap();
+    assert_eq!(Stores::read(directory.path()).identity(), None);
+}
+
+/// A pin: reading the stores has never minted an identity, and reading
+/// the identity with them must not start.
+#[test]
+fn stores_read_creates_no_identity_file() {
+    let absent = tempdir().unwrap();
+    let _ = Stores::read(absent.path());
+    assert!(!identity_file(absent.path()).exists());
+    assert!(!absent.path().join(STATE_DIR).exists());
+
+    let faulty = tempdir().unwrap();
+    fs::create_dir_all(faulty.path().join(STATE_DIR)).unwrap();
+    fs::write(identity_file(faulty.path()), b"id = 7\n").unwrap();
+    let before = snapshot(faulty.path());
+    let _ = Stores::read(faulty.path());
+    assert_eq!(snapshot(faulty.path()), before);
+}

@@ -27481,3 +27481,97 @@ fn adopt_human_mode_names_an_unavailable_reference_on_an_unanswered_orphan() {
         "got {lines:?}"
     );
 }
+
+// ---------------------------------------------------------------------
+// run-started.refresh (refresh-as-candidate, design D8)
+// ---------------------------------------------------------------------
+
+/// The raw first line of the JSON stream of `command` over one file
+/// whose DOI Crossref resolves.
+fn run_started_line_of(command: Command) -> String {
+    let path = PathBuf::from("/lib/paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash_for("run-started-refresh"),
+        pdf_with_embedded_doi("10.1000/run-started-refresh"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Smith", 2024, "10.1000/run-started-refresh")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    dispatch(
+        &cli(command, true),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+fn refresh_commands(refreshing: bool) -> Vec<(&'static str, Command)> {
+    let paths = || vec![PathBuf::from("/lib/paper.pdf")];
+    let commands = vec![
+        ("resolve", Command::resolve(paths())),
+        ("rename", Command::rename(paths(), false)),
+        ("bib", Command::bib(paths())),
+    ];
+    commands
+        .into_iter()
+        .map(|(name, command)| {
+            if refreshing {
+                (name, command.refreshing())
+            } else {
+                (name, command)
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_run_given_refresh_reports_refresh_on_run_started() {
+    for (name, command) in refresh_commands(true) {
+        let line = run_started_line_of(command);
+
+        assert!(line.contains(r#""event":"run-started""#), "{name}: {line}");
+        assert!(line.ends_with(r#""refresh":true}"#), "{name}: {line}");
+    }
+}
+
+#[test]
+fn a_run_not_given_refresh_carries_no_refresh_key_on_run_started() {
+    for (name, command) in refresh_commands(false) {
+        let line = run_started_line_of(command);
+
+        assert!(line.contains(r#""event":"run-started""#), "{name}: {line}");
+        assert!(!line.contains("refresh"), "{name}: {line}");
+    }
+}
