@@ -22,8 +22,8 @@ use borax::library::{
     admission_event, admit, adopt, artifacts, carries, contains, ensure_identity, excludes,
     extracted_identifier, extraction_event, identity, identity_fault_warning, identity_file,
     item_file_name, library_relative, missing, operator_decisions, orphan_events, orphans,
-    reconcile, reconciliation_events, recorded_at, references_owed, relative_to, status_event,
-    store_create, store_write, strands, survey, validate, validation_events,
+    reconcile, reconciliation_events, recorded_at, references_owed, relative_to, replace_record,
+    status_event, store_create, store_write, strands, survey, validate, validation_events,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
@@ -11542,4 +11542,736 @@ fn stores_read_creates_no_identity_file() {
     let before = snapshot(faulty.path());
     let _ = Stores::read(faulty.path());
     assert_eq!(snapshot(faulty.path()), before);
+}
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate 5.1: replacing an item's record (design D9)
+// ---------------------------------------------------------------------
+
+const REPLACED_ITEM: &str = UUID_C;
+
+/// An item file in the shape design D9 illustrates: a comment above a
+/// plain key, a key the record model does not know, and a `borax`
+/// table holding confidence, provenance and a source field. `extra`
+/// is added to `[record]` after `shelf`.
+fn replaceable_text(extra: &str) -> String {
+    format!(
+        "id = \"{REPLACED_ITEM}\"\n\
+         \n\
+         [record]\n\
+         type = \"article-journal\"\n\
+         # corrected by hand, 2026-10-12\n\
+         title = \"REVIEW CORRECTION: Determination of things\"\n\
+         DOI = \"10.1039/c5ay00042d\"\n\
+         shelf = \"B3\"\n\
+         {extra}\
+         \n\
+         [record.borax]\n\
+         confidence = 0.75\n\
+         \n\
+         [record.borax.provenance]\n\
+         DOI = \"crossref\"\n\
+         title = \"crossref\"\n\
+         \n\
+         [record.borax.source_fields]\n\
+         subject = \"[\\\"Chemistry\\\"]\"\n"
+    )
+}
+
+/// A library directory holding the item file `text`, the file's path,
+/// and the item `text` states: what a run would have read.
+fn item_file_holding(text: &str) -> (tempfile::TempDir, PathBuf, Item) {
+    let dir = tempdir().unwrap();
+    let file = dir
+        .path()
+        .join(ITEM_STORE)
+        .join(format!("klykov2015.{REPLACED_ITEM}.toml"));
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, text).unwrap();
+    (dir, file, Item::from_toml(text).unwrap().item)
+}
+
+fn retitled(item: &Item, title: &str) -> Record {
+    let mut record = item.record.clone();
+    record.title = Some(title.to_string());
+    record
+}
+
+fn lines_of(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn read_item(path: &Path) -> Item {
+    Item::from_toml(&fs::read_to_string(path).unwrap())
+        .unwrap()
+        .item
+}
+
+fn person(family: &str, given: &str) -> borax_core::record::Name {
+    borax_core::record::Name {
+        family: family.to_string(),
+        given: Some(given.to_string()),
+    }
+}
+
+#[test]
+fn replace_record_changes_only_the_lines_of_the_differing_keys() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    let before = lines_of(&file);
+
+    replace_record(
+        &file,
+        &item,
+        &retitled(&item, "Determination of things"),
+        &store_write,
+    )
+    .unwrap();
+
+    let after = lines_of(&file);
+    assert_eq!(after.len(), before.len(), "got {after:?}");
+    let changed: Vec<usize> = (0..before.len())
+        .filter(|&line| before[line] != after[line])
+        .collect();
+    assert_eq!(changed.len(), 1, "changed lines: {changed:?} in {after:?}");
+    assert!(before[changed[0]].starts_with("title = "));
+    assert_eq!(after[changed[0]], r#"title = "Determination of things""#);
+}
+
+#[test]
+fn replace_record_keeps_the_id_comments_and_unknown_keys() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+
+    replace_record(
+        &file,
+        &item,
+        &retitled(&item, "Determination of things"),
+        &store_write,
+    )
+    .unwrap();
+
+    let after = lines_of(&file);
+    for kept in [
+        format!("id = \"{REPLACED_ITEM}\""),
+        "# corrected by hand, 2026-10-12".to_string(),
+        "shelf = \"B3\"".to_string(),
+    ] {
+        assert!(after.contains(&kept), "lost {kept:?}: {after:?}");
+    }
+}
+
+#[test]
+fn replace_record_keeps_the_items_file_name() {
+    let (dir, file, item) = item_file_holding(&replaceable_text(""));
+    let names = |dir: &Path| -> Vec<String> {
+        let mut found: Vec<String> = fs::read_dir(dir.join(ITEM_STORE))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    };
+    let before = names(dir.path());
+
+    replace_record(
+        &file,
+        &item,
+        &retitled(&item, "Determination of things"),
+        &store_write,
+    )
+    .unwrap();
+
+    assert!(file.exists());
+    assert_eq!(names(dir.path()), before);
+}
+
+#[test]
+fn replace_record_removes_a_key_the_record_no_longer_holds() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text("volume = \"7\"\n"));
+    assert_eq!(item.record.volume.as_deref(), Some("7"));
+    let mut record = item.record.clone();
+    record.volume = None;
+
+    replace_record(&file, &item, &record, &store_write).unwrap();
+
+    let after = lines_of(&file);
+    assert!(
+        !after.iter().any(|line| line.starts_with("volume")),
+        "got {after:?}"
+    );
+    assert_eq!(read_item(&file).record.volume, None);
+}
+
+#[test]
+fn replace_record_adds_a_key_the_item_lacked() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    let mut record = item.record.clone();
+    record.volume = Some("7".to_string());
+
+    replace_record(&file, &item, &record, &store_write).unwrap();
+
+    assert_eq!(read_item(&file).record.volume.as_deref(), Some("7"));
+    let after = lines_of(&file);
+    for line in lines_of_text(&replaceable_text("")) {
+        assert!(after.contains(&line), "lost {line:?}: {after:?}");
+    }
+}
+
+fn lines_of_text(text: &str) -> Vec<String> {
+    text.lines().map(str::to_string).collect()
+}
+
+#[test]
+fn replace_record_updates_the_provenance_entries_of_the_fields_it_changes() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    let mut record = retitled(&item, "Determination of things");
+    record
+        .borax
+        .provenance
+        .insert("title".to_string(), borax_core::record::Source::OpenAlex);
+
+    replace_record(&file, &item, &record, &store_write).unwrap();
+
+    let read = read_item(&file);
+    assert_eq!(
+        read.record.borax.provenance.get("title"),
+        Some(&borax_core::record::Source::OpenAlex)
+    );
+    assert_eq!(
+        read.record.borax.provenance.get("DOI"),
+        Some(&borax_core::record::Source::Crossref),
+        "an entry of a field left alone stays"
+    );
+    assert!(
+        lines_of(&file).contains(&r#"DOI = "crossref""#.to_string()),
+        "got {:?}",
+        lines_of(&file)
+    );
+}
+
+#[test]
+fn replace_record_leaves_source_fields_and_confidence() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    let mut record = retitled(&item, "Determination of things");
+    record.borax.confidence = Some(0.1);
+    record.borax.source_fields.clear();
+
+    replace_record(&file, &item, &record, &store_write).unwrap();
+
+    let read = read_item(&file);
+    assert_eq!(read.record.borax.confidence, Some(0.75));
+    assert_eq!(
+        read.record.borax.source_fields,
+        item.record.borax.source_fields
+    );
+    assert!(!read.record.borax.source_fields.is_empty());
+}
+
+#[test]
+fn replace_record_read_back_is_the_replacement() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    let mut record = retitled(&item, "Determination of things");
+    record.volume = Some("7".to_string());
+    record.authors = vec![person("Klykov", "S.")];
+
+    replace_record(&file, &item, &record, &store_write).unwrap();
+
+    let read = read_item(&file);
+    assert_eq!(read.id, item.id);
+    assert_eq!(read.record, record);
+}
+
+#[test]
+fn replace_record_refuses_a_file_changed_since_it_was_read() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    let edited = replaceable_text("volume = \"8\"\n");
+    fs::write(&file, &edited).unwrap();
+
+    let error = replace_record(
+        &file,
+        &item,
+        &retitled(&item, "Determination of things"),
+        &store_write,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.message,
+        format!("{} changed after this run read it", file.display())
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), edited);
+}
+
+#[test]
+fn replace_record_refuses_a_file_holding_another_item() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    let refusal = format!("{} no longer holds item {REPLACED_ITEM}", file.display());
+    let other = replaceable_text("").replace(REPLACED_ITEM, UUID_D);
+
+    for text in [other.as_str(), "this is not an item file ["] {
+        fs::write(&file, text).unwrap();
+
+        let error = replace_record(
+            &file,
+            &item,
+            &retitled(&item, "Determination of things"),
+            &store_write,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, refusal, "for {text:?}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), text);
+    }
+}
+
+#[test]
+fn replace_record_refuses_a_file_that_cannot_be_read() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    fs::remove_file(&file).unwrap();
+
+    let error = replace_record(
+        &file,
+        &item,
+        &retitled(&item, "Determination of things"),
+        &store_write,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .message
+            .starts_with(&format!("{} could not be read (", file.display())),
+        "got {:?}",
+        error.message
+    );
+    assert!(!file.exists());
+}
+
+#[test]
+fn replace_record_reports_a_failed_write_and_leaves_the_file() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    let before = fs::read(&file).unwrap();
+    let failing =
+        |_: &Path, _: &[u8]| -> std::io::Result<()> { Err(std::io::Error::other("disk full")) };
+
+    let error = replace_record(
+        &file,
+        &item,
+        &retitled(&item, "Determination of things"),
+        &failing,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.message.contains("disk full"),
+        "got {:?}",
+        error.message
+    );
+    assert_eq!(fs::read(&file).unwrap(), before);
+}
+
+#[test]
+fn replace_record_through_a_store_writer_mints_an_absent_identity() {
+    let (dir, file, item) = item_file_holding(&replaceable_text(""));
+    let root = dir.path();
+    assert_eq!(identity(root), Identity::Absent);
+    let writer = StoreWriter::new(root, &store_create, &store_write);
+
+    replace_record(
+        &file,
+        &item,
+        &retitled(&item, "Determination of things"),
+        &|path, bytes| writer.write(path, bytes),
+    )
+    .unwrap();
+
+    assert!(matches!(identity(root), Identity::Present(_)));
+    assert_eq!(
+        read_item(&file).record.title.as_deref(),
+        Some("Determination of things")
+    );
+}
+
+#[test]
+fn replace_record_whose_mint_fails_writes_nothing_and_names_the_identity_file() {
+    let (dir, file, item) = item_file_holding(&replaceable_text(""));
+    let root = dir.path();
+    let before = fs::read(&file).unwrap();
+    let failing_mint =
+        |_: &Path, _: &[u8]| -> std::io::Result<()> { Err(std::io::Error::other("simulated")) };
+    let writer = StoreWriter::new(root, &failing_mint, &store_write);
+
+    let error = replace_record(
+        &file,
+        &item,
+        &retitled(&item, "Determination of things"),
+        &|path, bytes| writer.write(path, bytes),
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .message
+            .contains(&identity_file(root).display().to_string()),
+        "got {:?}",
+        error.message
+    );
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert!(!identity_file(root).exists());
+}
+
+#[test]
+fn stores_item_file_names_the_file_an_item_was_read_from() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = Item {
+        id: item_id(UUID_C),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, "klykov2015.toml", &item);
+    write_item(
+        root,
+        "other.toml",
+        &Item {
+            id: item_id(UUID_D),
+            record: minimal_record(EntryType::Book),
+        },
+    );
+
+    let stores = Stores::read(root);
+
+    assert_eq!(
+        stores.item_file(&item.id),
+        Some(root.join(ITEM_STORE).join("klykov2015.toml").as_path())
+    );
+    assert_eq!(
+        stores.item_file(&item_id(UUID_A)),
+        None,
+        "an item not held has no file"
+    );
+}
+
+/// A library holding the artifact record of `paper.pdf` linked to the
+/// item `UUID_C`, and the file's hash.
+fn library_tracking_an_item() -> (tempfile::TempDir, PathBuf, ContentHash, Item) {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"learn item bytes");
+    let item = Item {
+        id: item_id(UUID_C),
+        record: minimal_record(EntryType::Article),
+    };
+    write_item(root, "klykov2015.toml", &item);
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item.id.clone()),
+            "paper.pdf",
+            vec![hash_entry("learn item bytes", "run-0")],
+        ),
+    );
+    (dir, path, hash("learn item bytes"), item)
+}
+
+#[test]
+fn stores_learn_item_answers_a_later_consultation_with_the_learned_record() {
+    let (dir, path, hash, item) = library_tracking_an_item();
+    let mut stores = Stores::read(dir.path());
+    let learned = Item {
+        id: item.id.clone(),
+        record: retitled(&item, "Determination of things"),
+    };
+
+    stores.learn_item(learned.clone());
+
+    let found = stores.consult(&path, Some(&hash)).unwrap();
+    assert_eq!(found.item, Some(learned));
+    assert!(matches!(found.answer, LibraryAnswer::Tracked { .. }));
+}
+
+#[test]
+fn stores_learn_item_keeps_the_items_file() {
+    let (dir, _path, _hash, item) = library_tracking_an_item();
+    let mut stores = Stores::read(dir.path());
+    let before = stores.item_file(&item.id).map(Path::to_path_buf);
+    assert!(before.is_some());
+
+    stores.learn_item(Item {
+        id: item.id.clone(),
+        record: retitled(&item, "Determination of things"),
+    });
+
+    assert_eq!(stores.item_file(&item.id).map(Path::to_path_buf), before);
+}
+
+#[test]
+fn stores_learn_item_of_an_identity_not_held_changes_nothing() {
+    let (dir, path, hash, item) = library_tracking_an_item();
+    let mut stores = Stores::read(dir.path());
+    let before = stores.consult(&path, Some(&hash)).unwrap();
+
+    stores.learn_item(Item {
+        id: item_id(UUID_D),
+        record: minimal_record(EntryType::Book),
+    });
+
+    let after = stores.consult(&path, Some(&hash)).unwrap();
+    assert_eq!(after.answer, before.answer);
+    assert_eq!(after.item, Some(item));
+    assert_eq!(stores.item_file(&item_id(UUID_D)), None);
+}
+
+// --- annotations inside replaced values (design D9, step 2) ---
+
+fn annotated_refusal(file: &Path, fields: &str) -> String {
+    format!(
+        "{} holds notes in {fields} that replacing them would discard",
+        file.display()
+    )
+}
+
+/// An item file whose `[record]` is `body`, with the item's identity.
+fn annotated_text(body: &str) -> String {
+    format!("id = \"{REPLACED_ITEM}\"\n\n[record]\ntype = \"article-journal\"\n{body}")
+}
+
+#[test]
+fn replace_record_refuses_an_author_table_with_a_key_the_model_does_not_read() {
+    let text = annotated_text(
+        "title = \"Determination of things\"\n\
+         DOI = \"10.1039/c5ay00042d\"\n\
+         \n\
+         [[record.author]]\n\
+         family = \"Klykov\"\n\
+         given = \"S.\"\n\
+         orcid = \"0000-0002-1825-0097\"\n",
+    );
+    let (_dir, file, item) = item_file_holding(&text);
+    let mut record = item.record.clone();
+    record.authors = vec![person("Klykov", "S."), person("Petrov", "A.")];
+
+    let error = replace_record(&file, &item, &record, &store_write).unwrap_err();
+
+    assert_eq!(error.message, annotated_refusal(&file, "author"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn replace_record_refuses_a_comment_inside_issued() {
+    let text = annotated_text(
+        "title = \"Determination of things\"\n\
+         \n\
+         [record.issued]\n\
+         # online first\n\
+         date-parts = [[2015]]\n",
+    );
+    let (_dir, file, item) = item_file_holding(&text);
+    let mut record = item.record.clone();
+    record.issued = Some(borax_core::record::DateParts {
+        year: 2016,
+        month: None,
+        day: None,
+    });
+
+    let error = replace_record(&file, &item, &record, &store_write).unwrap_err();
+
+    assert_eq!(error.message, annotated_refusal(&file, "issued"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn replace_record_replaces_a_clean_author_array() {
+    let text = annotated_text(
+        "title = \"Determination of things\"\n\
+         # kept\n\
+         shelf = \"B3\"\n\
+         \n\
+         [[record.author]]\n\
+         family = \"Klykov\"\n\
+         given = \"S.\"\n\
+         \n\
+         [record.issued]\n\
+         date-parts = [[2015]]\n",
+    );
+    let (_dir, file, item) = item_file_holding(&text);
+    let mut record = item.record.clone();
+    record.authors = vec![person("Klykov", "S."), person("Petrov", "A.")];
+
+    replace_record(&file, &item, &record, &store_write).unwrap();
+
+    assert_eq!(read_item(&file).record.authors, record.authors);
+    let after = fs::read_to_string(&file).unwrap();
+    let (head, _) = text.split_once("[[record.author]]").unwrap();
+    let (_, tail) = text.split_once("[record.issued]").unwrap();
+    assert!(after.starts_with(head), "got {after:?}");
+    assert!(
+        after.ends_with(&format!("[record.issued]{tail}")),
+        "got {after:?}"
+    );
+}
+
+#[test]
+fn replace_record_refuses_an_unknown_key_in_an_inline_author_table() {
+    let text = annotated_text(
+        "title = \"Determination of things\"\n\
+         author = [{ family = \"Klykov\", given = \"S.\", orcid = \"0000-0002-1825-0097\" }]\n",
+    );
+    let (_dir, file, item) = item_file_holding(&text);
+    let mut record = item.record.clone();
+    record.authors = vec![person("Klykov", "S."), person("Petrov", "A.")];
+
+    let error = replace_record(&file, &item, &record, &store_write).unwrap_err();
+
+    assert_eq!(error.message, annotated_refusal(&file, "author"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn replace_record_refuses_a_comment_trailing_a_replaced_value() {
+    let text = annotated_text(
+        "title = \"Determination of things\"\n\
+         volume = \"7\" # check against the print copy\n",
+    );
+    let (_dir, file, item) = item_file_holding(&text);
+    let mut record = item.record.clone();
+    record.volume = Some("8".to_string());
+
+    let error = replace_record(&file, &item, &record, &store_write).unwrap_err();
+
+    assert_eq!(error.message, annotated_refusal(&file, "volume"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn replace_record_refuses_a_comment_above_an_author_table_header() {
+    let text = annotated_text(
+        "title = \"Determination of things\"\n\
+         \n\
+         # the corresponding author\n\
+         [[record.author]]\n\
+         family = \"Klykov\"\n\
+         given = \"S.\"\n",
+    );
+    let (_dir, file, item) = item_file_holding(&text);
+    let mut record = item.record.clone();
+    record.authors = vec![person("Petrov", "A.")];
+
+    let error = replace_record(&file, &item, &record, &store_write).unwrap_err();
+
+    assert_eq!(error.message, annotated_refusal(&file, "author"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn replace_record_keeps_a_comment_above_a_replaced_plain_key() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+
+    replace_record(
+        &file,
+        &item,
+        &retitled(&item, "Determination of things"),
+        &store_write,
+    )
+    .unwrap();
+
+    let after = lines_of(&file);
+    let comment = after
+        .iter()
+        .position(|line| line == "# corrected by hand, 2026-10-12")
+        .expect("the comment above the key must survive");
+    assert_eq!(after[comment + 1], r#"title = "Determination of things""#);
+}
+
+#[test]
+fn replace_record_refuses_an_annotated_provenance_entry_of_a_replaced_field() {
+    let text = annotated_text(
+        "title = \"Determination of things\"\n\
+         \n\
+         [record.borax.provenance]\n\
+         DOI = \"crossref\"\n\
+         title = \"crossref\" # verified by hand\n",
+    );
+    let (_dir, file, item) = item_file_holding(&text);
+    let mut record = retitled(&item, "A new title");
+    record
+        .borax
+        .provenance
+        .insert("title".to_string(), borax_core::record::Source::OpenAlex);
+
+    let error = replace_record(&file, &item, &record, &store_write).unwrap_err();
+
+    assert_eq!(error.message, annotated_refusal(&file, "provenance.title"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn replace_record_refusal_names_every_annotated_key_in_field_order_and_writes_nothing() {
+    // `issued` comes before `author` in the file; field order puts
+    // `author` first.
+    let text = annotated_text(
+        "title = \"Determination of things\" # keep this wording\n\
+         \n\
+         [record.issued]\n\
+         # online first\n\
+         date-parts = [[2015]]\n\
+         \n\
+         [[record.author]]\n\
+         family = \"Klykov\"\n\
+         orcid = \"0000-0002-1825-0097\"\n",
+    );
+    let (_dir, file, item) = item_file_holding(&text);
+    let mut record = retitled(&item, "A new title");
+    record.authors = vec![person("Petrov", "A.")];
+    record.issued = Some(borax_core::record::DateParts {
+        year: 2016,
+        month: None,
+        day: None,
+    });
+
+    let error = replace_record(&file, &item, &record, &store_write).unwrap_err();
+
+    assert_eq!(
+        error.message,
+        annotated_refusal(&file, "title, author, issued")
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn replace_record_ignores_annotations_in_fields_it_does_not_replace() {
+    let text = annotated_text(
+        "title = \"Determination of things\"\n\
+         volume = \"7\" # untouched\n\
+         \n\
+         [record.issued]\n\
+         # online first\n\
+         date-parts = [[2015]]\n\
+         \n\
+         [[record.author]]\n\
+         family = \"Klykov\"\n\
+         orcid = \"0000-0002-1825-0097\"\n",
+    );
+    let (_dir, file, item) = item_file_holding(&text);
+
+    replace_record(&file, &item, &retitled(&item, "A new title"), &store_write).unwrap();
+
+    let after = lines_of(&file);
+    for kept in [
+        "volume = \"7\" # untouched",
+        "# online first",
+        "orcid = \"0000-0002-1825-0097\"",
+    ] {
+        assert!(
+            after.contains(&kept.to_string()),
+            "lost {kept:?}: {after:?}"
+        );
+    }
+    assert_eq!(
+        read_item(&file).record.title.as_deref(),
+        Some("A new title")
+    );
 }

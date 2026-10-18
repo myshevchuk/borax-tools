@@ -15,12 +15,12 @@ use borax::config::{
     TableDeclaration, ValueKindName, resolve,
 };
 use borax::event::{
-    Acceptance, AcceptedBy, Admission, Adoption, Condition, ContentIndexSection, Displaced, Event,
-    Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep,
-    IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
-    MatchCheckStep, Repair, RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome,
-    SkipReason, Submission, SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep, WrittenEntry,
-    human_line, json_line,
+    Acceptance, AcceptedBy, Admission, Adoption, Condition, ContentIndexSection, Counts,
+    DifferenceStep, Displaced, Event, Extraction, ExtractionResultStep, ExtractionSection,
+    FetchedFrom, IdentifierInputStep, IdentifierOrigin, IndexReadStep, Level, LibraryAnswer,
+    LibraryStep, LookupRound, LookupStep, MatchCheckStep, RefreshAcceptance, RefreshStep, Repair,
+    RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Submission,
+    SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep, WrittenEntry, human_line, json_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -557,6 +557,7 @@ fn resolved_event(
         identifier: identifier.to_string(),
         record: Box::new(record.clone()),
         sections: Box::new(sections_for(identifier, source, tier, cached)),
+        refresh: None,
     }
 }
 
@@ -27574,4 +27575,1937 @@ fn a_run_not_given_refresh_carries_no_refresh_key_on_run_started() {
         assert!(line.contains(r#""event":"run-started""#), "{name}: {line}");
         assert!(!line.contains("refresh"), "{name}: {line}");
     }
+}
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate: fixtures (design D13)
+// ---------------------------------------------------------------------
+
+const KLYKOV_DOI: &str = "10.1039/c5ay00042d";
+const CORRECTED_TITLE: &str = "REVIEW CORRECTION: Determination of things";
+const FRESH_TITLE: &str = "Determination of things";
+
+/// The record of design D13: Klykov, 2015, with `title`, whose title and
+/// DOI Crossref supplied.
+fn klykov_record(title: &str) -> Record {
+    let mut record = record_by_with_title("Klykov", 2015, KLYKOV_DOI, title);
+    record
+        .borax
+        .provenance
+        .insert("title".to_string(), FieldSource::Crossref);
+    record
+        .borax
+        .provenance
+        .insert("DOI".to_string(), FieldSource::Crossref);
+    record
+}
+
+fn klykov_identifier() -> String {
+    format!("doi:{KLYKOV_DOI}")
+}
+
+/// A library at a fresh root holding one tracked file named
+/// `file_name`, whose item Klykov's record under a corrected title,
+/// with Crossref holding the same record under the title it was
+/// corrected from. Design D13's `L`, `A` and `I`.
+struct Klykov {
+    _library: tempfile::TempDir,
+    root: PathBuf,
+    path: PathBuf,
+    hash: ContentHash,
+    id: Option<LibraryId>,
+    item: Item,
+    item_file: PathBuf,
+    artifact: ArtifactRecord,
+    documents: FakeDocuments,
+    crossref: KeyedSource,
+}
+
+fn klykov_named(seed: &str, file_name: &str, with_identity: bool) -> Klykov {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let id = with_identity.then(|| seed_library_identity(&root));
+    let bytes = format!("refresh {seed} bytes");
+    let path = write_real_file(&root, file_name, bytes.as_bytes());
+    let hash = hash_bytes(bytes.as_bytes());
+    let (size, modified_millis) = real_stat(&path);
+    let item = Item {
+        id: ItemId::from_uuid(uuid::Uuid::now_v7()),
+        record: klykov_record(CORRECTED_TITLE),
+    };
+    write_lib_item(&root, "klykov2015", &item);
+    let item_file = root
+        .join(ITEM_STORE)
+        .join(format!("klykov2015.{}.toml", item.id));
+    let artifact = ArtifactRecord {
+        id: ArtifactId::from_uuid(uuid::Uuid::now_v7()),
+        item: Some(item.id.clone()),
+        path: file_name.to_string(),
+        size,
+        modified_millis,
+        history: vec![hash_entry_for(hash.clone(), "run-0")],
+    };
+    write_lib_artifact_record(&root, &artifact);
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(&klykov_identifier(), klykov_record(FRESH_TITLE));
+    Klykov {
+        _library: library,
+        root,
+        path,
+        hash,
+        id,
+        item,
+        item_file,
+        artifact,
+        documents,
+        crossref,
+    }
+}
+
+/// `Klykov2015.pdf` in a library with an identity: already named under
+/// `[auth][year]`.
+fn klykov(seed: &str) -> Klykov {
+    klykov_named(seed, "Klykov2015.pdf", true)
+}
+
+/// A [`Source`] failing every request with an outage.
+fn crossref_outage() -> FakeSource {
+    fake_source(
+        SourceName::Crossref,
+        Err(SourceError::Unavailable {
+            message: "timed out".to_string(),
+        }),
+    )
+}
+
+impl Klykov {
+    fn item_text(&self) -> String {
+        fs::read_to_string(&self.item_file).unwrap()
+    }
+
+    fn item_lines(&self) -> Vec<String> {
+        self.item_text().lines().map(str::to_string).collect()
+    }
+
+    /// A second tracked file of the same item, at `relative`.
+    fn also_tracking(&mut self, seed: &str, relative: &str) -> PathBuf {
+        let bytes = format!("refresh {seed} bytes");
+        let path = write_real_file(&self.root, relative, bytes.as_bytes());
+        let hash = hash_bytes(bytes.as_bytes());
+        let (size, modified_millis) = real_stat(&path);
+        write_lib_artifact_record(
+            &self.root,
+            &ArtifactRecord {
+                id: ArtifactId::from_uuid(uuid::Uuid::now_v7()),
+                item: Some(self.item.id.clone()),
+                path: relative.to_string(),
+                size,
+                modified_millis,
+                history: vec![hash_entry_for(hash.clone(), "run-0")],
+            },
+        );
+        self.documents = std::mem::replace(&mut self.documents, FakeDocuments::new()).with_file(
+            &path,
+            hash,
+            pdf_with_no_identifier(),
+        );
+        path
+    }
+
+    /// The reference the content index holds for the bytes of one of
+    /// this library's artifacts.
+    fn reference(&self) -> LibraryReference {
+        LibraryReference {
+            library: self.id.clone().expect("a library with an identity"),
+            root: self.root.clone(),
+            artifact: self.artifact.id.clone(),
+            item: self.item.id.clone(),
+        }
+    }
+
+    /// `command` as a batch run with this library's fixtures, through
+    /// `sources`.
+    fn batch_with(
+        &self,
+        sources: &[&dyn Source],
+        effective: Effective,
+        command: Command,
+    ) -> Vec<Event> {
+        let index = ContentIndex::new(MemoryCache::new());
+        run_in(
+            &self.root,
+            &index,
+            &self.documents,
+            sources,
+            effective,
+            &command,
+            &mut Session::batch(),
+        )
+    }
+
+    fn batch(&self, command: Command) -> Vec<Event> {
+        self.batch_with(
+            &[&self.crossref],
+            effective_with_default_template("[auth][year]"),
+            command,
+        )
+    }
+
+    /// `command` as an interactive run answered by `asker`.
+    fn asked_with(
+        &self,
+        sources: &[&dyn Source],
+        index: &ContentIndex<MemoryCache>,
+        effective: Effective,
+        command: Command,
+        asker: &mut dyn Asker,
+    ) -> Vec<Event> {
+        run_in(
+            &self.root,
+            index,
+            &self.documents,
+            sources,
+            effective,
+            &command,
+            &mut Session::interactive(asker),
+        )
+    }
+
+    /// `command` renaming `paths` interactively under `[auth][year]`
+    /// with `rename.skip-named` on, answered by `asker`.
+    fn asked(&self, paths: Vec<PathBuf>, asker: &mut dyn Asker) -> Vec<Event> {
+        self.asked_with(
+            &[&self.crossref],
+            &ContentIndex::new(MemoryCache::new()),
+            effective_skipping_named("[auth][year]", true),
+            Command::rename(paths, false).refreshing(),
+            asker,
+        )
+    }
+
+    /// The human output and outcome of an interactive `command`.
+    fn told(
+        &self,
+        sources: &[&dyn Source],
+        effective: Effective,
+        command: Command,
+        asker: &mut dyn Asker,
+    ) -> (Outcome, String) {
+        let index = ContentIndex::new(MemoryCache::new());
+        let bib_files = FakeBibFiles::new();
+        let state = tempdir().unwrap();
+        let adapters = Adapters {
+            documents: &self.documents,
+            sources,
+            index: &index,
+            filesystem: &RealFilesystem,
+            bib_files: &bib_files,
+            cache_root: None,
+            now: fixed_now,
+            collection_root: Some(self.root.clone()),
+            state_root: Some(state.path().to_path_buf()),
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = dispatch(
+            &cli(command, false),
+            &Configs::uniform(effective),
+            &adapters,
+            &mut Session::interactive(asker),
+            &mut Streams {
+                out: &mut out,
+                err: &mut err,
+            },
+        );
+        (outcome, String::from_utf8(out).unwrap())
+    }
+}
+
+fn resolved_at<'a>(events: &'a [Event], path: &Path) -> &'a Event {
+    events
+        .iter()
+        .find(|event| matches!(event, Event::Resolved { path: at, .. } if at == path))
+        .unwrap_or_else(|| panic!("no resolved event for {}: {events:?}", path.display()))
+}
+
+fn refresh_at<'a>(events: &'a [Event], path: &Path) -> &'a RefreshStep {
+    match resolved_at(events, path) {
+        Event::Resolved {
+            refresh: Some(step),
+            ..
+        } => step,
+        other => panic!("expected a refresh on {other:?}"),
+    }
+}
+
+fn no_refresh_at(events: &[Event], path: &Path) {
+    match resolved_at(events, path) {
+        Event::Resolved { refresh: None, .. } => {}
+        other => panic!("expected no refresh on {other:?}"),
+    }
+}
+
+/// The acceptance of a differing refresh in the title alone, after
+/// checking the rest of it as design D13 (a) states it.
+fn title_difference_acceptance(step: &RefreshStep) -> &RefreshAcceptance {
+    match step {
+        RefreshStep::Differs {
+            identifier,
+            attempts,
+            differences,
+            candidate,
+            acceptance,
+        } => {
+            assert_eq!(identifier, &klykov_identifier());
+            assert_eq!(attempts.len(), 1, "got {attempts:?}");
+            assert_eq!(attempts[0].service, "crossref");
+            assert!(
+                matches!(
+                    attempts[0].outcome,
+                    ServiceOutcome::Found {
+                        retrieval: FetchedFrom::Network,
+                        ..
+                    }
+                ),
+                "got {attempts:?}"
+            );
+            assert_eq!(
+                differences,
+                &vec![DifferenceStep {
+                    field: "title".to_string(),
+                    item: Some(serde_json::Value::from(CORRECTED_TITLE)),
+                    candidate: Some(serde_json::Value::from(FRESH_TITLE)),
+                }]
+            );
+            assert_eq!(**candidate, klykov_record(FRESH_TITLE));
+            acceptance
+        }
+        other => panic!("expected a refresh that differs, got {other:?}"),
+    }
+}
+
+fn not_attempted(reason: &str) -> RefreshAcceptance {
+    RefreshAcceptance::NotAttempted {
+        reason: reason.to_string(),
+    }
+}
+
+fn replacements(events: &[Event]) -> Vec<&Event> {
+    events
+        .iter()
+        .filter(|event| matches!(event, Event::LibraryReplacement { .. }))
+        .collect()
+}
+
+/// The order of the events a refresh run is about, by kind.
+fn flow(events: &[Event]) -> Vec<&'static str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::LibraryReplacement { .. } => Some("library-replacement"),
+            Event::Resolved { .. } => Some("resolved"),
+            Event::Planned { .. } => Some("planned"),
+            Event::Renamed { .. } => Some("renamed"),
+            Event::Skipped { .. } => Some("skipped"),
+            Event::AlreadyNamed { .. } => Some("already-named"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn finished_counts(events: &[Event]) -> Counts {
+    match events.last() {
+        Some(Event::RunFinished { counts }) => *counts,
+        other => panic!("expected RunFinished last, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate 4.1: a run reports a refresh (design D2, D3, D4,
+// D8, D13)
+// ---------------------------------------------------------------------
+
+#[test]
+fn resolve_with_refresh_reports_a_hand_corrected_item_as_differing_and_leaves_it_byte_identical() {
+    let klykov = klykov("hand-corrected");
+    let before = snapshot(&klykov.root);
+
+    let events = klykov.batch(Command::resolve(vec![klykov.path.clone()]).refreshing());
+
+    match resolved_at(&events, &klykov.path) {
+        Event::Resolved {
+            record, sections, ..
+        } => {
+            assert_eq!(record.title.as_deref(), Some(CORRECTED_TITLE));
+            assert!(
+                matches!(
+                    sections.record_retrieval,
+                    Some(RetrievedFrom::Library { .. })
+                ),
+                "got {:?}",
+                sections.record_retrieval
+            );
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &klykov.path)),
+        &not_attempted("not-asked")
+    );
+    assert_eq!(snapshot(&klykov.root), before, "a resolve writes nothing");
+}
+
+#[test]
+fn resolve_with_refresh_reports_current_for_an_item_the_services_agree_with() {
+    let klykov = klykov("agreeing");
+    let agreeing = KeyedSource::new(SourceName::Crossref)
+        .answering(&klykov_identifier(), klykov.item.record.clone());
+
+    let events = klykov.batch_with(
+        &[&agreeing],
+        effective_with_default_template("[auth][year]"),
+        Command::resolve(vec![klykov.path.clone()]).refreshing(),
+    );
+
+    match refresh_at(&events, &klykov.path) {
+        RefreshStep::Current {
+            identifier,
+            attempts,
+        } => {
+            assert_eq!(identifier, &klykov_identifier());
+            assert_eq!(attempts.len(), 1, "got {attempts:?}");
+        }
+        other => panic!("expected current, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_with_refresh_reports_an_outage_as_unresolved_and_the_item_stands() {
+    let klykov = klykov("outage");
+    let outage = crossref_outage();
+    let before = snapshot(&klykov.root);
+
+    let events = klykov.batch_with(
+        &[&outage],
+        effective_with_default_template("[auth][year]"),
+        Command::resolve(vec![klykov.path.clone()]).refreshing(),
+    );
+
+    match resolved_at(&events, &klykov.path) {
+        Event::Resolved { record, .. } => {
+            assert_eq!(record.title.as_deref(), Some(CORRECTED_TITLE))
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+    match refresh_at(&events, &klykov.path) {
+        RefreshStep::Unresolved {
+            identifier,
+            attempts,
+        } => {
+            assert_eq!(identifier, &klykov_identifier());
+            assert_eq!(
+                attempts,
+                &vec![ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Unavailable {
+                        message: "timed out".to_string(),
+                    },
+                }]
+            );
+        }
+        other => panic!("expected unresolved, got {other:?}"),
+    }
+    assert_eq!(snapshot(&klykov.root), before);
+}
+
+#[test]
+fn resolve_with_refresh_reports_not_found_as_unresolved() {
+    let klykov = klykov("not-found");
+    let holding_nothing = KeyedSource::new(SourceName::Crossref);
+
+    let events = klykov.batch_with(
+        &[&holding_nothing],
+        effective_with_default_template("[auth][year]"),
+        Command::resolve(vec![klykov.path.clone()]).refreshing(),
+    );
+
+    match refresh_at(&events, &klykov.path) {
+        RefreshStep::Unresolved { attempts, .. } => assert_eq!(
+            attempts,
+            &vec![ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: ServiceOutcome::NotFound,
+            }]
+        ),
+        other => panic!("expected unresolved, got {other:?}"),
+    }
+    let line = human_line(resolved_at(&events, &klykov.path)).unwrap();
+    assert!(
+        line.contains("; no fresh record: no source had a record for doi:10.1039/c5ay00042d (crossref: not found)"),
+        "got {line}"
+    );
+}
+
+/// A [`Source`] answering per identifier after a delay, so the first
+/// file's lookup finishes last.
+struct SlowKeyedSource {
+    inner: KeyedSource,
+    delays_ms: BTreeMap<String, u64>,
+}
+
+impl Source for SlowKeyedSource {
+    fn name(&self) -> SourceName {
+        self.inner.name()
+    }
+
+    fn supports(&self, identifier: &Identifier) -> bool {
+        self.inner.supports(identifier)
+    }
+
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
+        let delay = self
+            .delays_ms
+            .get(&identifier.to_string())
+            .copied()
+            .unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        self.inner.fetch(identifier)
+    }
+}
+
+#[test]
+fn resolve_with_refresh_reports_in_input_order_under_concurrency() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let mut documents = FakeDocuments::new();
+    let mut crossref = KeyedSource::new(SourceName::Crossref);
+    let mut delays_ms = BTreeMap::new();
+    let mut paths = Vec::new();
+    for (position, delay) in [300_u64, 150, 0].into_iter().enumerate() {
+        let doi_value = format!("10.1000/ordered-{position}");
+        let name = format!("Ordered{position}.pdf");
+        let bytes = format!("ordered refresh bytes {position}");
+        let path = write_real_file(&root, &name, bytes.as_bytes());
+        let hash = hash_bytes(bytes.as_bytes());
+        seed_tracked_file(
+            &root,
+            &name,
+            hash.clone(),
+            record_by_with_title("Ordered", 2000 + position as i32, &doi_value, "Corrected"),
+        );
+        documents = documents.with_file(&path, hash, pdf_with_no_identifier());
+        crossref = crossref.answering(
+            &format!("doi:{doi_value}"),
+            record_by_with_title("Ordered", 2000 + position as i32, &doi_value, "Fresh"),
+        );
+        delays_ms.insert(format!("doi:{doi_value}"), delay);
+        paths.push(path);
+    }
+    let slow = SlowKeyedSource {
+        inner: crossref,
+        delays_ms,
+    };
+    let sources: Vec<&dyn Source> = vec![&slow];
+    let index = ContentIndex::new(MemoryCache::new());
+    let effective = effective_with(|layer| {
+        layer.network = Some(NetworkLayer {
+            concurrency: Some(8),
+            ..NetworkLayer::default()
+        });
+    });
+
+    let events = run_in(
+        &root,
+        &index,
+        &documents,
+        &sources,
+        effective,
+        &Command::resolve(paths.clone()).refreshing(),
+        &mut Session::batch(),
+    );
+
+    let reported: Vec<&PathBuf> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Resolved { path, .. } => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reported, paths.iter().collect::<Vec<_>>());
+    for (position, path) in paths.iter().enumerate() {
+        match refresh_at(&events, path) {
+            RefreshStep::Differs { identifier, .. } => {
+                assert_eq!(identifier, &format!("doi:10.1000/ordered-{position}"))
+            }
+            other => panic!("expected differs, got {other:?}"),
+        }
+    }
+}
+
+/// A file outside any library whose bytes the content index holds a
+/// reference to the item of another library for, as design D13 (e)
+/// sets it up.
+struct Referenced {
+    _dirs: Vec<tempfile::TempDir>,
+    run_root: PathBuf,
+    other_root: PathBuf,
+    path: PathBuf,
+    hash: ContentHash,
+    other: ReferencedLibrary,
+    documents: FakeDocuments,
+    crossref: KeyedSource,
+}
+
+/// `file_name` under a run root that is a library with an identity when
+/// `in_library` and a bare directory otherwise, whose bytes reference
+/// the item of a library elsewhere.
+fn copy_of_a_referenced_item(seed: &str, file_name: &str, in_library: bool) -> Referenced {
+    let (run_dir, other_dir) = (real_library(), tempdir().unwrap());
+    let run_root = run_dir.path().to_path_buf();
+    if in_library {
+        seed_library_identity(&run_root);
+    } else {
+        fs::remove_file(run_root.join(".borax.toml")).unwrap();
+    }
+    let other_root = other_dir.path().join("papers");
+    let other = referenced_library(&other_root, klykov_record(CORRECTED_TITLE));
+    let bytes = format!("refresh {seed} copy bytes");
+    let path = write_real_file(&run_root, file_name, bytes.as_bytes());
+    let hash = hash_bytes(bytes.as_bytes());
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(&klykov_identifier(), klykov_record(FRESH_TITLE));
+    Referenced {
+        _dirs: vec![run_dir, other_dir],
+        run_root,
+        other_root,
+        path,
+        hash,
+        other,
+        documents,
+        crossref,
+    }
+}
+
+impl Referenced {
+    fn index(&self) -> ContentIndex<MemoryCache> {
+        let index = ContentIndex::new(MemoryCache::new());
+        let _ = index.put_reference(&self.hash, &self.other.reference);
+        index
+    }
+}
+
+#[test]
+fn resolve_with_refresh_through_a_reference_writes_nothing_to_the_referenced_library() {
+    let copy = copy_of_a_referenced_item("through-reference", "paper.pdf", false);
+    let before = snapshot(&copy.other_root);
+    let sources: Vec<&dyn Source> = vec![&copy.crossref];
+    let index = copy.index();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &copy.documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::resolve(vec![copy.path.clone()]).refreshing(),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    match resolved_at(&events, &copy.path) {
+        Event::Resolved { sections, .. } => match &sections.record_retrieval {
+            Some(RetrievedFrom::LibraryReference { root, item, .. }) => {
+                assert_eq!(root, &copy.other_root);
+                assert_eq!(item, &copy.other.item.id.to_string());
+            }
+            other => panic!("expected a library reference, got {other:?}"),
+        },
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &copy.path)),
+        &not_attempted("another-library")
+    );
+    assert_eq!(
+        human_line(resolved_at(&events, &copy.path)).unwrap(),
+        format!(
+            "{}: resolved doi:10.1039/c5ay00042d to \"{CORRECTED_TITLE}\" (Klykov, 2015) via \
+             crossref, from the library at {root}; a fresh record from crossref differs in \
+             title; only a rename in the library at {root} can take it",
+            copy.path.display(),
+            root = copy.other_root.display(),
+        )
+    );
+    assert_eq!(snapshot(&copy.other_root), before);
+}
+
+#[test]
+fn rename_apply_with_refresh_writes_no_item_and_reports_not_asked() {
+    let klykov = klykov("apply-not-asked");
+    let before = klykov.item_text();
+
+    let events = klykov.batch(Command::rename(vec![klykov.path.clone()], true).refreshing());
+
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &klykov.path)),
+        &not_attempted("not-asked")
+    );
+    assert_eq!(
+        flow(&events),
+        vec!["resolved", "already-named"],
+        "got {events:?}"
+    );
+    assert_eq!(
+        human_line(resolved_at(&events, &klykov.path)).unwrap(),
+        format!(
+            "{}: resolved doi:10.1039/c5ay00042d to \"{CORRECTED_TITLE}\" (Klykov, 2015) via \
+             crossref, from the library; a fresh record from crossref differs in title; the \
+             library's record is unchanged",
+            klykov.path.display()
+        )
+    );
+    assert_eq!(klykov.item_text(), before);
+    assert!(replacements(&events).is_empty());
+}
+
+#[test]
+fn rename_apply_with_refresh_and_no_record_reports_not_asked() {
+    let klykov = klykov_named("apply-no-record", "Klykov2015.pdf", false);
+    let before = snapshot(&klykov.root);
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.record = Some(false);
+    });
+
+    let events = klykov.batch_with(
+        &[&klykov.crossref],
+        effective,
+        Command::rename(vec![klykov.path.clone()], true).refreshing(),
+    );
+
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &klykov.path)),
+        &not_attempted("not-asked"),
+        "D3's order puts not-asked before not-recording"
+    );
+    assert_eq!(snapshot(&klykov.root), before);
+}
+
+#[test]
+fn rename_preview_with_refresh_writes_nothing_to_the_library() {
+    let klykov = klykov_named("preview", "original.pdf", false);
+    let before = snapshot(&klykov.root);
+
+    let events = klykov.batch(Command::rename(vec![klykov.path.clone()], false).refreshing());
+
+    assert_eq!(flow(&events), vec!["resolved", "planned"], "got {events:?}");
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &klykov.path)),
+        &not_attempted("not-asked")
+    );
+    assert_eq!(snapshot(&klykov.root), before, "a preview writes nothing");
+}
+
+#[test]
+fn resolve_and_preview_with_refresh_mint_no_identity() {
+    let klykov = klykov_named("no-mint", "original.pdf", false);
+
+    klykov.batch(Command::resolve(vec![klykov.path.clone()]).refreshing());
+    klykov.batch(Command::rename(vec![klykov.path.clone()], false).refreshing());
+
+    assert_eq!(
+        library::identity(&klykov.root),
+        library::Identity::Absent,
+        "neither run makes a store write"
+    );
+}
+
+#[test]
+fn bib_with_refresh_cites_the_items_record_not_the_candidate() {
+    let klykov = klykov("bib");
+    let bib_path = klykov.root.join("library.bib");
+    let effective = effective_with(|layer| {
+        layer.bib = Some(BibLayer {
+            path: Some(bib_path.clone()),
+            duplicates: None,
+            sidecars: None,
+        });
+    });
+    let index = ContentIndex::new(MemoryCache::new());
+    let bib_files = FakeBibFiles::new();
+    let sources: Vec<&dyn Source> = vec![&klykov.crossref];
+    let adapters = Adapters {
+        documents: &klykov.documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(klykov.root.clone()),
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::bib(vec![klykov.path.clone()]).refreshing(),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &klykov.path)),
+        &not_attempted("not-asked")
+    );
+    let written = bib_files.writes();
+    let content = &written.last().expect("the master file is written").1;
+    assert!(content.contains(CORRECTED_TITLE), "got {content}");
+    assert_eq!(
+        content.matches(FRESH_TITLE).count(),
+        content.matches(CORRECTED_TITLE).count(),
+        "the candidate's title is never cited: got {content}"
+    );
+}
+
+#[test]
+fn refresh_with_no_cache_extracts_an_untracked_file_and_carries_no_refresh() {
+    let path = PathBuf::from("/lib/untracked.pdf");
+    let hash = hash_for("refresh-no-cache");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/refresh-no-cache"),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/refresh-no-cache",
+        record_by("Smith", 2024, "10.1000/refresh-no-cache"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let stale = Identifier::Doi(doi("10.1000/refresh-stale"));
+    let _ = index.put_extracted(&hash, &stale);
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let effective = effective_with(|layer| {
+        layer.network = Some(NetworkLayer {
+            cache: Some(false),
+            ..NetworkLayer::default()
+        });
+    });
+
+    let events = events_for(
+        &Command::resolve(vec![path.clone()]).refreshing(),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    no_refresh_at(&events, &path);
+    match resolved_at(&events, &path) {
+        Event::Resolved {
+            identifier,
+            sections,
+            ..
+        } => {
+            assert_eq!(identifier, "doi:10.1000/refresh-no-cache");
+            assert_eq!(sections.content_index.read, IndexReadStep::Bypassed);
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+    assert_eq!(
+        index.entry(&hash).extracted,
+        Fact::Held(Identifier::Doi(doi("10.1000/refresh-no-cache"))),
+        "its extracted evidence is written, as --no-cache always writes it"
+    );
+}
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate 6.1: the interactive refresh question (design
+// D3, D9, D10, D13)
+// ---------------------------------------------------------------------
+
+/// An [`Asker`] that edits a file on the first question it is put,
+/// before answering: the operator saving the item in another window.
+struct EditingAsker {
+    inner: ScriptedAsker,
+    file: PathBuf,
+    text: String,
+    edited: bool,
+}
+
+impl Asker for EditingAsker {
+    fn choose(&mut self, question: &Question) -> Answer {
+        if !self.edited {
+            fs::write(&self.file, &self.text).unwrap();
+            self.edited = true;
+        }
+        self.inner.choose(question)
+    }
+
+    fn text(&mut self, prompt: &TextPrompt) -> Option<String> {
+        self.inner.text(prompt)
+    }
+}
+
+fn differs_acceptance(step: &RefreshStep) -> &RefreshAcceptance {
+    match step {
+        RefreshStep::Differs { acceptance, .. } => acceptance,
+        other => panic!("expected a refresh that differs, got {other:?}"),
+    }
+}
+
+/// `after` is `before` with the title line replaced, and nothing else.
+fn assert_only_the_title_changed(before: &[String], after: &[String]) {
+    assert_eq!(after.len(), before.len(), "got {after:?}");
+    let changed: Vec<usize> = (0..before.len())
+        .filter(|&line| before[line] != after[line])
+        .collect();
+    assert_eq!(changed.len(), 1, "changed lines {changed:?} in {after:?}");
+    assert!(before[changed[0]].starts_with("title = "), "got {before:?}");
+    assert_eq!(after[changed[0]], format!("title = \"{FRESH_TITLE}\""));
+}
+
+fn description_has(question: &Question, label: &str, text: &str) -> bool {
+    question
+        .description
+        .iter()
+        .any(|line| line.starts_with(label) && line.contains(text))
+}
+
+impl Klykov {
+    /// Register the document at `path`, hashing to `hash`.
+    fn with_document(&mut self, path: &Path, hash: ContentHash, pdf: FakePdf) {
+        self.documents =
+            std::mem::replace(&mut self.documents, FakeDocuments::new()).with_file(path, hash, pdf);
+    }
+
+    /// An untracked, byte-identical copy of the tracked file at
+    /// `relative`.
+    fn with_untracked_copy(&mut self, relative: &str) -> PathBuf {
+        let bytes = fs::read(&self.path).unwrap();
+        let path = write_real_file(&self.root, relative, &bytes);
+        let hash = self.hash.clone();
+        self.with_document(&path, hash, pdf_with_no_identifier());
+        path
+    }
+
+    /// The tracked file is gone from disk, though its record names it,
+    /// so the library holds no live file of the work: nothing makes a
+    /// file answered by a reference a duplicate of it.
+    fn forget_the_tracked_file(&self) {
+        fs::remove_file(&self.path).unwrap();
+    }
+}
+
+#[test]
+fn interactive_refresh_puts_the_refresh_question_first_offering_keep_replace_quit() {
+    let klykov = klykov_named("question-first", "original.pdf", true);
+    let mut asker = ScriptedAsker::new(vec![Answer::KeepRecord, Answer::Skip]);
+
+    klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert_eq!(
+        questions[0].choices,
+        vec![Answer::KeepRecord, Answer::Replace, Answer::Quit]
+    );
+    assert_eq!(
+        questions[1].choices.first(),
+        Some(&Answer::Rename),
+        "the file's own question follows: got {:?}",
+        questions[1]
+    );
+}
+
+#[test]
+fn interactive_refresh_question_defaults_to_keeping_the_librarys_record() {
+    let klykov = klykov("question-default");
+    let mut asker = ScriptedAsker::new(vec![Answer::KeepRecord]);
+
+    klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_eq!(questions[0].choices.first(), Some(&Answer::KeepRecord));
+}
+
+#[test]
+fn interactive_refresh_question_names_the_file_as_its_target() {
+    let klykov = klykov("question-target");
+    let mut asker = ScriptedAsker::new(vec![Answer::KeepRecord]);
+
+    klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions[0].path, klykov.path);
+    assert_eq!(
+        questions[0].target, klykov.path,
+        "no move is in play, so the file is its own target"
+    );
+}
+
+#[test]
+fn interactive_refresh_keep_leaves_the_item_byte_identical_and_reports_declined() {
+    let klykov = klykov_named("keep", "Klykov2015.pdf", false);
+    let before = snapshot(&klykov.root);
+    let mut asker = ScriptedAsker::new(vec![Answer::KeepRecord]);
+
+    let events = klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &klykov.path)),
+        &RefreshAcceptance::Declined
+    );
+    assert_eq!(flow(&events), vec!["resolved", "already-named"]);
+    assert!(replacements(&events).is_empty());
+    assert_eq!(snapshot(&klykov.root), before);
+    assert_eq!(
+        library::identity(&klykov.root),
+        library::Identity::Absent,
+        "a run that keeps every record and changes none mints nothing"
+    );
+}
+
+#[test]
+fn interactive_refresh_replace_writes_the_item_and_reports_accepted() {
+    let klykov = klykov("replace-writes");
+    let before = klykov.item_lines();
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace]);
+
+    let events = klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    assert_only_the_title_changed(&before, &klykov.item_lines());
+    match replacements(&events).as_slice() {
+        [
+            Event::LibraryReplacement {
+                path,
+                item,
+                file,
+                fields,
+                write,
+            },
+        ] => {
+            assert_eq!(path, &klykov.path);
+            assert_eq!(item, &klykov.item.id.to_string());
+            assert_eq!(file, &klykov.item_file);
+            assert_eq!(fields, &vec!["title".to_string()]);
+            assert_eq!(write, &WriteStep::Written);
+        }
+        other => panic!("expected one replacement, got {other:?}"),
+    }
+    assert_eq!(
+        title_difference_acceptance_after(refresh_at(&events, &klykov.path)),
+        &RefreshAcceptance::Accepted
+    );
+}
+
+/// [`title_difference_acceptance`] for a verdict whose record is the
+/// replaced one: the refresh still reports the difference it was
+/// asked about.
+fn title_difference_acceptance_after(step: &RefreshStep) -> &RefreshAcceptance {
+    match step {
+        RefreshStep::Differs {
+            differences,
+            acceptance,
+            ..
+        } => {
+            assert_eq!(differences.len(), 1, "got {differences:?}");
+            assert_eq!(differences[0].field, "title");
+            acceptance
+        }
+        other => panic!("expected a refresh that differs, got {other:?}"),
+    }
+}
+
+#[test]
+fn interactive_refresh_replace_emits_library_replacement_before_the_files_resolved_event() {
+    let klykov = klykov("replace-order");
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace]);
+
+    let events = klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    assert_eq!(
+        flow(&events),
+        vec!["library-replacement", "resolved", "already-named"],
+        "got {events:?}"
+    );
+}
+
+#[test]
+fn interactive_refresh_replace_resolves_the_file_to_the_replaced_record() {
+    let klykov = klykov("replace-resolves");
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace]);
+
+    let events = klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    match resolved_at(&events, &klykov.path) {
+        Event::Resolved { record, .. } => assert_eq!(**record, klykov_record(FRESH_TITLE)),
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn interactive_refresh_replace_then_the_move_question_proposes_the_replaced_records_name() {
+    let klykov = klykov_named(
+        "replace-then-move",
+        "review-correction-determination-of-things.pdf",
+        true,
+    );
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace, Answer::Rename]);
+
+    let events = klykov.asked_with(
+        &[&klykov.crossref],
+        &ContentIndex::new(MemoryCache::new()),
+        effective_skipping_named("[title:slug]", true),
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert_eq!(
+        questions[0].choices.first(),
+        Some(&Answer::KeepRecord),
+        "the file is already named, and the refresh question is put all the same"
+    );
+    let target = klykov.root.join("determination-of-things.pdf");
+    assert_eq!(questions[1].target, target);
+    assert_eq!(questions[1].choices.first(), Some(&Answer::Rename));
+    assert!(
+        description_has(
+            &questions[1],
+            "decision",
+            "the library's record was replaced"
+        ),
+        "got {:?}",
+        questions[1].description
+    );
+    assert!(
+        description_has(&questions[1], "new name", "determination-of-things.pdf"),
+        "got {:?}",
+        questions[1].description
+    );
+    assert_eq!(
+        flow(&events),
+        vec!["library-replacement", "resolved", "renamed"]
+    );
+    assert!(target.exists());
+    let counts = finished_counts(&events);
+    assert_eq!((counts.resolved, counts.renamed, counts.skipped), (1, 1, 0));
+}
+
+#[test]
+fn interactive_refresh_replace_then_quit_keeps_the_replacement_and_counts_the_file_unreached() {
+    let klykov = klykov_named(
+        "replace-then-quit",
+        "review-correction-determination-of-things.pdf",
+        true,
+    );
+    let before = klykov.item_lines();
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace, Answer::Quit]);
+
+    let events = klykov.asked_with(
+        &[&klykov.crossref],
+        &ContentIndex::new(MemoryCache::new()),
+        effective_skipping_named("[title:slug]", true),
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    assert_only_the_title_changed(&before, &klykov.item_lines());
+    assert_eq!(flow(&events), vec!["library-replacement"], "got {events:?}");
+    assert_eq!(finished_counts(&events).unreached, 1);
+    assert!(klykov.path.exists(), "the file keeps its name");
+}
+
+#[test]
+fn interactive_refresh_quit_at_the_refresh_question_writes_nothing() {
+    let klykov = klykov("quit-at-refresh");
+    let before = snapshot(&klykov.root);
+    let mut asker = ScriptedAsker::new(vec![Answer::Quit]);
+
+    let events = klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    assert!(flow(&events).is_empty(), "got {events:?}");
+    assert_eq!(finished_counts(&events).unreached, 1);
+    assert_eq!(snapshot(&klykov.root), before);
+}
+
+#[test]
+fn interactive_refresh_replace_of_an_item_edited_meanwhile_is_unwritten() {
+    let klykov = klykov("edited-meanwhile");
+    let edited = Item {
+        id: klykov.item.id.clone(),
+        record: Record {
+            volume: Some("8".to_string()),
+            ..klykov.item.record.clone()
+        },
+    }
+    .to_toml();
+    let mut asker = EditingAsker {
+        inner: ScriptedAsker::new(vec![Answer::Replace]),
+        file: klykov.item_file.clone(),
+        text: edited.clone(),
+        edited: false,
+    };
+
+    let events = klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    let message = format!(
+        "{} changed after this run read it",
+        klykov.item_file.display()
+    );
+    assert_eq!(klykov.item_text(), edited, "the operator's edit stands");
+    match replacements(&events).as_slice() {
+        [Event::LibraryReplacement { write, .. }] => assert_eq!(
+            write,
+            &WriteStep::Failed {
+                message: message.clone()
+            }
+        ),
+        other => panic!("expected one replacement, got {other:?}"),
+    }
+    assert_eq!(
+        title_difference_acceptance_after(refresh_at(&events, &klykov.path)),
+        &RefreshAcceptance::Unwritten { message }
+    );
+    match resolved_at(&events, &klykov.path) {
+        Event::Resolved { record, .. } => {
+            assert_eq!(record.title.as_deref(), Some(CORRECTED_TITLE))
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn interactive_refresh_failed_write_is_unwritten_with_its_message() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let klykov = klykov("failed-write");
+    let before = klykov.item_text();
+    let items = klykov.root.join(ITEM_STORE);
+    fs::set_permissions(&items, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = items.join("probe.tmp");
+    if fs::write(&probe, b"x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&items, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping interactive_refresh_failed_write_is_unwritten_with_its_message: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace]);
+
+    let events = klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    fs::set_permissions(&items, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(klykov.item_text(), before);
+    let message = match replacements(&events).as_slice() {
+        [
+            Event::LibraryReplacement {
+                write: WriteStep::Failed { message },
+                ..
+            },
+        ] => message.clone(),
+        other => panic!("expected one failed replacement, got {other:?}"),
+    };
+    assert!(!message.is_empty());
+    assert_eq!(
+        title_difference_acceptance_after(refresh_at(&events, &klykov.path)),
+        &RefreshAcceptance::Unwritten { message }
+    );
+    match resolved_at(&events, &klykov.path) {
+        Event::Resolved { record, .. } => {
+            assert_eq!(record.title.as_deref(), Some(CORRECTED_TITLE))
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn interactive_refresh_replace_mints_the_identity_of_a_library_with_none() {
+    let klykov = klykov_named("replace-mints", "Klykov2015.pdf", false);
+    assert_eq!(library::identity(&klykov.root), library::Identity::Absent);
+    let before = klykov.item_lines();
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace]);
+
+    klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    assert!(matches!(
+        library::identity(&klykov.root),
+        library::Identity::Present(_)
+    ));
+    assert_only_the_title_changed(&before, &klykov.item_lines());
+}
+
+#[test]
+fn interactive_refresh_asks_about_an_already_named_file_skip_named_would_pass_over() {
+    let klykov = klykov("skip-named-asked");
+    let mut plain = ScriptedAsker::new(vec![]);
+    let (_, plain_text) = klykov.told(
+        &[&klykov.crossref],
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![klykov.path.clone()], false),
+        &mut plain,
+    );
+    assert!(
+        !plain_text.contains("Klykov2015.pdf"),
+        "without --refresh the file is passed over: {plain_text}"
+    );
+
+    let mut asker = ScriptedAsker::new(vec![Answer::KeepRecord]);
+    let (outcome, text) = klykov.told(
+        &[&klykov.crossref],
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    assert_eq!(asker.questions_asked().len(), 1);
+    assert!(text.contains("Klykov2015.pdf: resolved"), "got {text}");
+    assert!(text.contains("Klykov2015.pdf: already named"), "got {text}");
+    assert_eq!(outcome, Outcome::Success, "got {text}");
+}
+
+#[test]
+fn interactive_refresh_asks_no_already_named_question_after_the_refresh_question() {
+    let klykov = klykov("no-second-question");
+    let mut asker = ScriptedAsker::new(vec![Answer::KeepRecord]);
+
+    klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        1,
+        "the already-named question skip-named suppresses is not put: got {questions:?}"
+    );
+}
+
+#[test]
+fn interactive_refresh_shows_an_already_named_file_whose_refresh_found_nothing() {
+    let klykov = klykov("shown-nothing-found");
+    let outage = crossref_outage();
+    let mut asker = ScriptedAsker::new(vec![]);
+
+    let (_, text) = klykov.told(
+        &[&outage],
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    assert!(
+        text.contains("Klykov2015.pdf: resolved") && text.contains("; no fresh record: "),
+        "got {text}"
+    );
+    assert!(text.contains("1 already named"), "got {text}");
+    assert!(
+        !text.contains("not shown"),
+        "the file was shown, so it is not among those not shown: {text}"
+    );
+}
+
+#[test]
+fn interactive_refresh_passes_over_an_already_named_file_whose_item_is_current() {
+    let klykov = klykov("passed-over-current");
+    let agreeing = KeyedSource::new(SourceName::Crossref)
+        .answering(&klykov_identifier(), klykov.item.record.clone());
+    let mut asker = ScriptedAsker::new(vec![]);
+
+    let (_, text) = klykov.told(
+        &[&agreeing],
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    assert!(!text.contains("Klykov2015.pdf"), "got {text}");
+    assert!(text.contains("1 already named (not shown)"), "got {text}");
+}
+
+#[test]
+fn interactive_refresh_asks_once_per_item_and_a_second_file_after_replace_is_current() {
+    let mut klykov = klykov("once-per-item-replace");
+    let second = klykov.also_tracking("once-per-item-second", "si/Klykov2015.pdf");
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace]);
+
+    let events = klykov.asked(vec![klykov.path.clone(), second.clone()], &mut asker);
+
+    assert_eq!(asker.questions_asked().len(), 1, "one question per item");
+    assert_eq!(replacements(&events).len(), 1);
+    match refresh_at(&events, &second) {
+        RefreshStep::Current { .. } => {}
+        other => panic!("expected current for the second file, got {other:?}"),
+    }
+    match resolved_at(&events, &second) {
+        Event::Resolved { record, .. } => assert_eq!(**record, klykov_record(FRESH_TITLE)),
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn interactive_refresh_after_keep_reports_already_asked_for_the_second_file() {
+    let mut klykov = klykov("once-per-item-keep");
+    let second = klykov.also_tracking("once-per-item-keep-second", "si/Klykov2015.pdf");
+    let mut asker = ScriptedAsker::new(vec![Answer::KeepRecord]);
+
+    let events = klykov.asked(vec![klykov.path.clone(), second.clone()], &mut asker);
+
+    assert_eq!(asker.questions_asked().len(), 1, "one question per item");
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &second)),
+        &not_attempted("already-asked")
+    );
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &klykov.path)),
+        &RefreshAcceptance::Declined
+    );
+}
+
+#[test]
+fn interactive_refresh_replacement_is_learned_by_the_work_check() {
+    let new_doi = "10.1039/c5ay99999z";
+    let mut klykov = klykov("learned-by-work-check");
+    let later = write_real_file(&klykov.root, "later.pdf", b"refresh later bytes");
+    klykov.with_document(
+        &later,
+        hash_bytes(b"refresh later bytes"),
+        pdf_with_embedded_doi(new_doi),
+    );
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            &klykov_identifier(),
+            Record {
+                doi: Some(doi(new_doi)),
+                ..klykov_record(FRESH_TITLE)
+            },
+        )
+        .answering(&format!("doi:{new_doi}"), record_by("Later", 2020, new_doi));
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace, Answer::Skip]);
+
+    klykov.asked_with(
+        &[&crossref],
+        &ContentIndex::new(MemoryCache::new()),
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![klykov.path.clone(), later.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    assert_eq!(
+        Item::from_toml(&klykov.item_text())
+            .unwrap()
+            .item
+            .record
+            .doi,
+        Some(doi(new_doi)),
+        "the replacement wrote the new DOI"
+    );
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 2, "got {questions:?}");
+    assert_eq!(questions[1].path, later);
+    assert!(
+        questions[1].choices.contains(&Answer::File),
+        "the later file is a duplicate of the work the item now holds: got {:?}",
+        questions[1]
+    );
+}
+
+#[test]
+fn interactive_refresh_with_no_record_asks_nothing_and_reports_not_recording() {
+    let klykov = klykov_named("no-record", "Klykov2015.pdf", false);
+    let before = snapshot(&klykov.root);
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.record = Some(false);
+        layer.rename = Some(RenameLayer {
+            collision: None,
+            batch: None,
+            skip_named: Some(true),
+        });
+    });
+    let mut asker = ScriptedAsker::new(vec![]);
+
+    let (_, text) = klykov.told(
+        &[&klykov.crossref],
+        effective,
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    assert!(
+        text.contains(
+            "; a fresh record from crossref differs in title; this run records nothing, so \
+             the library's record is unchanged"
+        ),
+        "got {text}"
+    );
+    assert!(text.contains("1 already named"), "got {text}");
+    assert!(!text.contains("not shown"), "the file was shown: {text}");
+    assert_eq!(
+        snapshot(&klykov.root),
+        before,
+        "no admission, no write, no mint"
+    );
+}
+
+#[test]
+fn interactive_refresh_of_a_reference_answer_asks_nothing_and_reports_another_library() {
+    let copy = copy_of_a_referenced_item("interactive-reference", "copy.pdf", true);
+    let referenced_before = snapshot(&copy.other_root);
+    let sources: Vec<&dyn Source> = vec![&copy.crossref];
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+
+    let events = run_in(
+        &copy.run_root,
+        &copy.index(),
+        &copy.documents,
+        &sources,
+        effective_skipping_named("[auth][year]", true),
+        &Command::rename(vec![copy.path.clone()], false).refreshing(),
+        &mut Session::interactive(&mut asker),
+    );
+
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        1,
+        "only the move is asked: got {questions:?}"
+    );
+    assert_eq!(questions[0].choices.first(), Some(&Answer::Rename));
+    assert!(!questions[0].choices.contains(&Answer::KeepRecord));
+    for label in ["refresh", "differs", "decision"] {
+        assert!(
+            questions[0]
+                .description
+                .iter()
+                .any(|line| line.starts_with(label)),
+            "no {label} line in {:?}",
+            questions[0].description
+        );
+    }
+    assert!(
+        description_has(
+            &questions[0],
+            "decision",
+            &format!(
+                "only a rename in the library at {} can take it",
+                copy.other_root.display()
+            )
+        ),
+        "got {:?}",
+        questions[0].description
+    );
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &copy.path)),
+        &not_attempted("another-library")
+    );
+    assert_eq!(snapshot(&copy.other_root), referenced_before);
+    // An admission into this library mints its item from the item the
+    // verdict carries, not from the candidate.
+    let minted: Vec<Item> = fs::read_dir(copy.run_root.join(ITEM_STORE))
+        .unwrap()
+        .map(|entry| {
+            Item::from_toml(&fs::read_to_string(entry.unwrap().path()).unwrap())
+                .unwrap()
+                .item
+        })
+        .collect();
+    assert_eq!(minted.len(), 1, "got {minted:?}");
+    assert_eq!(minted[0].record.title.as_deref(), Some(CORRECTED_TITLE));
+}
+
+#[test]
+fn interactive_refresh_offers_no_retry_after_a_refresh_outage() {
+    let klykov = klykov_named("no-retry", "original.pdf", true);
+    let outage = crossref_outage();
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    let events = klykov.asked_with(
+        &[&outage],
+        &ContentIndex::new(MemoryCache::new()),
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert!(!questions[0].choices.contains(&Answer::Retry));
+    assert!(questions[0].choices.contains(&Answer::Rename));
+    assert!(matches!(
+        refresh_at(&events, &klykov.path),
+        RefreshStep::Unresolved { .. }
+    ));
+}
+
+#[test]
+fn interactive_refresh_replace_then_supply_keeps_the_refresh_on_the_supplied_verdict() {
+    let klykov = klykov_named("replace-then-supply", "original.pdf", true);
+    let before = klykov.item_lines();
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(&klykov_identifier(), klykov_record(FRESH_TITLE))
+        .answering(
+            "doi:10.1000/supplied-after-replace",
+            record_by("Doe", 2020, "10.1000/supplied-after-replace"),
+        );
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace, Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/supplied-after-replace".to_string())]);
+
+    let events = klykov.asked_with(
+        &[&crossref],
+        &ContentIndex::new(MemoryCache::new()),
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    assert_only_the_title_changed(&before, &klykov.item_lines());
+    match resolved_at(&events, &klykov.path) {
+        Event::Resolved { record, .. } => {
+            assert_eq!(record.authors[0].family, "Doe", "the supplied record")
+        }
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+    assert_eq!(
+        title_difference_acceptance_after(refresh_at(&events, &klykov.path)),
+        &RefreshAcceptance::Accepted,
+        "the replacement already made stands on the verdict"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Renamed { target, .. } if target == &klykov.root.join("Doe2020.pdf")
+    )));
+}
+
+#[test]
+fn interactive_refresh_of_a_self_reference_answer_puts_the_refresh_question() {
+    let mut klykov = klykov("self-reference");
+    let copy = klykov.with_untracked_copy("inbox/Klykov2015.pdf");
+    klykov.forget_the_tracked_file();
+    let before = klykov.item_lines();
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&klykov.hash, &klykov.reference());
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace]);
+
+    let events = klykov.asked_with(
+        &[&klykov.crossref],
+        &index,
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![copy.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    let questions = asker.questions_asked();
+    assert_eq!(questions.len(), 1, "got {questions:?}");
+    assert_eq!(questions[0].choices.first(), Some(&Answer::KeepRecord));
+    assert_only_the_title_changed(&before, &klykov.item_lines());
+    match replacements(&events).as_slice() {
+        [Event::LibraryReplacement { path, file, .. }] => {
+            assert_eq!(path, &copy);
+            assert_eq!(file, &klykov.item_file, "the run's own item file");
+        }
+        other => panic!("expected one replacement, got {other:?}"),
+    }
+    match resolved_at(&events, &copy) {
+        Event::Resolved { sections, .. } => assert!(
+            matches!(
+                sections.record_retrieval,
+                Some(RetrievedFrom::LibraryReference { .. })
+            ),
+            "answered through the reference: got {:?}",
+            sections.record_retrieval
+        ),
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn interactive_refresh_second_file_through_a_self_reference_after_replace_sees_the_replaced_record()
+{
+    let mut klykov = klykov("self-reference-second");
+    let copy = klykov.with_untracked_copy("inbox/Klykov2015.pdf");
+    klykov.forget_the_tracked_file();
+    // A file reached first whose reference reads the library's root,
+    // so the run holds the root as it stood before the replacement.
+    let other_item = Item {
+        id: ItemId::from_uuid(uuid::Uuid::now_v7()),
+        record: record_by("Smith", 2020, "10.1000/self-reference-other"),
+    };
+    write_lib_item(&klykov.root, "smith2020", &other_item);
+    let other = write_real_file(&klykov.root, "inbox/Smith2020.pdf", b"refresh other bytes");
+    let other_hash = hash_bytes(b"refresh other bytes");
+    klykov.with_document(&other, other_hash.clone(), pdf_with_no_identifier());
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(
+        &other_hash,
+        &LibraryReference {
+            item: other_item.id.clone(),
+            ..klykov.reference()
+        },
+    );
+    let _ = index.put_reference(&klykov.hash, &klykov.reference());
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(&klykov_identifier(), klykov_record(FRESH_TITLE))
+        .answering(
+            "doi:10.1000/self-reference-other",
+            other_item.record.clone(),
+        );
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace]);
+    // The tracked artifact is the file the replacement is made at, so it
+    // is reached before its copy.
+    let tracked = klykov.path.clone();
+
+    let events = klykov.asked_with(
+        &[&crossref],
+        &index,
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![other.clone(), tracked.clone(), copy.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        1,
+        "only the tracked file is asked: {questions:?}"
+    );
+    assert_eq!(questions[0].path, tracked);
+    assert!(matches!(
+        refresh_at(&events, &other),
+        RefreshStep::Current { .. }
+    ));
+    match refresh_at(&events, &copy) {
+        RefreshStep::Current { .. } => {}
+        other => panic!("expected current for the copy, got {other:?}"),
+    }
+    match resolved_at(&events, &copy) {
+        Event::Resolved { record, .. } => assert_eq!(**record, klykov_record(FRESH_TITLE)),
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+}
+
+#[test]
+fn interactive_refresh_of_a_reference_to_a_copy_of_the_library_asks_nothing_and_reports_another_library()
+ {
+    let mut klykov = klykov("copy-of-the-library");
+    let copy = klykov.with_untracked_copy("inbox/copy.pdf");
+    klykov.forget_the_tracked_file();
+    let copy_root = klykov._library.path().join("library-copy");
+    fs::create_dir_all(copy_root.join(STATE_DIR)).unwrap();
+    fs::copy(
+        library::identity_file(&klykov.root),
+        library::identity_file(&copy_root),
+    )
+    .unwrap();
+    write_lib_item(&copy_root, "klykov2015", &klykov.item);
+    let copy_snapshot = snapshot(&copy_root);
+    let before = klykov.item_lines();
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(
+        &klykov.hash,
+        &LibraryReference {
+            root: copy_root.clone(),
+            ..klykov.reference()
+        },
+    );
+    let mut asker = ScriptedAsker::new(vec![Answer::Skip]);
+
+    let events = klykov.asked_with(
+        &[&klykov.crossref],
+        &index,
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![copy.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    let questions = asker.questions_asked();
+    assert_eq!(
+        questions.len(),
+        1,
+        "only the move is asked: got {questions:?}"
+    );
+    assert!(!questions[0].choices.contains(&Answer::KeepRecord));
+    assert!(
+        description_has(
+            &questions[0],
+            "decision",
+            &format!(
+                "only a rename in the library at {} can take it",
+                copy_root.display()
+            )
+        ),
+        "got {:?}",
+        questions[0].description
+    );
+    assert_eq!(
+        title_difference_acceptance(refresh_at(&events, &copy)),
+        &not_attempted("another-library")
+    );
+    assert_eq!(
+        klykov.item_lines(),
+        before,
+        "the run's own item is not written"
+    );
+    assert_eq!(snapshot(&copy_root), copy_snapshot, "nor is the copy's");
+}
+
+#[test]
+fn interactive_refresh_replace_refused_for_annotations_is_unwritten_and_names_the_fields() {
+    let klykov = klykov("annotated");
+    let annotated = format!(
+        "id = \"{}\"\n\n[record]\ntype = \"article-journal\"\ntitle = \"{CORRECTED_TITLE}\"\n\
+         DOI = \"{KLYKOV_DOI}\"\n\n[[record.author]]\nfamily = \"Klykov\"\n\
+         orcid = \"0000-0002-1825-0097\"\n\n[record.issued]\ndate-parts = [[2015]]\n\n\
+         [record.borax.provenance]\nDOI = \"crossref\"\ntitle = \"crossref\"\n",
+        klykov.item.id
+    );
+    fs::write(&klykov.item_file, &annotated).unwrap();
+    assert_eq!(
+        Item::from_toml(&annotated).unwrap().item.record,
+        klykov.item.record,
+        "the hand-written item reads as the fixture's record"
+    );
+    let candidate = Record {
+        authors: vec![Name {
+            family: "Klykov".to_string(),
+            given: Some("S.".to_string()),
+        }],
+        ..klykov.item.record.clone()
+    };
+    let crossref =
+        KeyedSource::new(SourceName::Crossref).answering(&klykov_identifier(), candidate);
+    let mut asker = ScriptedAsker::new(vec![Answer::Replace]);
+
+    let events = klykov.asked_with(
+        &[&crossref],
+        &ContentIndex::new(MemoryCache::new()),
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    let message = format!(
+        "{} holds notes in author that replacing them would discard",
+        klykov.item_file.display()
+    );
+    assert_eq!(klykov.item_text(), annotated, "nothing is written");
+    match replacements(&events).as_slice() {
+        [Event::LibraryReplacement { fields, write, .. }] => {
+            assert_eq!(fields, &vec!["author".to_string()]);
+            assert_eq!(
+                write,
+                &WriteStep::Failed {
+                    message: message.clone()
+                }
+            );
+        }
+        other => panic!("expected one replacement, got {other:?}"),
+    }
+    assert_eq!(
+        differs_acceptance(refresh_at(&events, &klykov.path)),
+        &RefreshAcceptance::Unwritten { message }
+    );
+}
+
+#[test]
+fn interactive_refresh_that_keeps_every_record_and_records_a_moved_file_mints_the_identity() {
+    let klykov = klykov_named("keep-and-move", "original.pdf", false);
+    let before = klykov.item_text();
+    assert_eq!(library::identity(&klykov.root), library::Identity::Absent);
+    let mut asker = ScriptedAsker::new(vec![Answer::KeepRecord, Answer::Rename]);
+
+    let events = klykov.asked(vec![klykov.path.clone()], &mut asker);
+
+    assert!(
+        klykov.root.join("Klykov2015.pdf").exists(),
+        "got {events:?}"
+    );
+    assert_eq!(klykov.item_text(), before, "the item is kept");
+    assert!(
+        matches!(
+            library::identity(&klykov.root),
+            library::Identity::Present(_)
+        ),
+        "recording the moved file is a store write, which mints"
+    );
+}
+
+#[test]
+fn interactive_refresh_filed_work_duplicate_carries_no_refresh() {
+    let klykov = klykov("filed-duplicate");
+    let other_dir = tempdir().unwrap();
+    let other = referenced_library(
+        &other_dir.path().join("papers"),
+        klykov_record(CORRECTED_TITLE),
+    );
+    let filed = write_real_file(&klykov.root, "inbox/new.pdf", b"refresh filed bytes");
+    let filed_hash = hash_bytes(b"refresh filed bytes");
+    let mut klykov = klykov;
+    klykov.with_document(&filed, filed_hash.clone(), pdf_with_no_identifier());
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&filed_hash, &other.reference);
+    let mut asker = ScriptedAsker::new(vec![Answer::File, Answer::Rename]);
+
+    let events = klykov.asked_with(
+        &[&klykov.crossref],
+        &index,
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![filed.clone()], false).refreshing(),
+        &mut asker,
+    );
+
+    let questions = asker.questions_asked();
+    assert!(
+        questions[0].choices.contains(&Answer::File),
+        "the work is one the library holds: got {:?}",
+        questions[0]
+    );
+    assert!(
+        questions
+            .iter()
+            .all(|question| !question.choices.contains(&Answer::KeepRecord)),
+        "no refresh question is put: got {questions:?}"
+    );
+    no_refresh_at(&events, &filed);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Renamed { path, .. } if path == &filed
+        )),
+        "got {events:?}"
+    );
 }

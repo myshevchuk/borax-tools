@@ -178,6 +178,7 @@ fn resolved(path: &str, record: Record) -> (PathBuf, FileRecord) {
             evidence: Evidence::not_attempted(Unattempted::ContentDuplicate),
             overridden: false,
             accepted: false,
+            refresh: None,
         },
     )
 }

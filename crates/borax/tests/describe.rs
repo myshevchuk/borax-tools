@@ -15,12 +15,12 @@ use std::path::PathBuf;
 
 use borax::describe::{DEFAULT_WIDTH, Position, Proposal, describe};
 use borax::event::{
-    Acceptance, AcceptedItemCause, Claim, ClaimOrigin, ContentIndexSection, Displaced, Event,
-    EvidenceStep, ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep,
-    IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
-    MatchCheckStep, ReferenceStatusStep, ReferenceStep, RetrievedFrom, Sections, ServiceAnswer,
-    ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome, SyntaxStep,
-    TitlesStep, UnavailableCause, WriteStep,
+    Acceptance, AcceptedItemCause, Claim, ClaimOrigin, ContentIndexSection, DifferenceStep,
+    Displaced, Event, EvidenceStep, ExtractionResultStep, ExtractionSection, FetchedFrom,
+    IdentifierInputStep, IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep, LookupRound,
+    LookupStep, MatchCheckStep, ReferenceStatusStep, ReferenceStep, RefreshAcceptance, RefreshStep,
+    RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Submission,
+    SubmissionAcceptance, SubmissionOutcome, SyntaxStep, TitlesStep, UnavailableCause, WriteStep,
 };
 use borax_core::identifier::{ArxivId, Doi};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
@@ -237,6 +237,7 @@ impl Fixture {
             identifier: self.found.clone(),
             record: Box::new(self.record_with_provenance()),
             sections: Box::new(self.sections()),
+            refresh: None,
         }
     }
 }
@@ -1476,6 +1477,7 @@ fn an_overridden_conflict_shows_the_same_line_on_the_record_it_accepted() {
         identifier,
         record,
         mut sections,
+        ..
     } = fixture.event()
     else {
         unreachable!("the fixture builds a resolved event")
@@ -1492,6 +1494,7 @@ fn an_overridden_conflict_shows_the_same_line_on_the_record_it_accepted() {
         identifier,
         record,
         sections,
+        refresh: None,
     };
 
     let lines = describe(
@@ -1614,6 +1617,7 @@ fn a_pending_candidate_with_a_conflict_shows_the_conflict_line() {
         identifier,
         record,
         mut sections,
+        ..
     } = pending_event()
     else {
         unreachable!("pending_event builds a resolved event")
@@ -1629,6 +1633,7 @@ fn a_pending_candidate_with_a_conflict_shows_the_conflict_line() {
         identifier,
         record,
         sections,
+        refresh: None,
     };
 
     let lines = describe(
@@ -1702,6 +1707,7 @@ fn rejected_submissions_give_rejected_lines_in_order() {
         identifier,
         record,
         mut sections,
+        ..
     } = fixture.event()
     else {
         unreachable!("the fixture builds a resolved event")
@@ -1719,6 +1725,7 @@ fn rejected_submissions_give_rejected_lines_in_order() {
         identifier,
         record,
         sections,
+        refresh: None,
     };
 
     let lines = describe(
@@ -1853,6 +1860,7 @@ fn rejected_line_escapes_a_control_character() {
         identifier,
         record,
         mut sections,
+        ..
     } = fixture.event()
     else {
         unreachable!("the fixture builds a resolved event")
@@ -1867,6 +1875,7 @@ fn rejected_line_escapes_a_control_character() {
         identifier,
         record,
         sections,
+        refresh: None,
     };
 
     let lines = describe(
@@ -2013,6 +2022,7 @@ fn library_resolved_event(fixture: &Fixture, answer: LibraryAnswer) -> Event {
             },
             acceptance: Acceptance::Automatic,
         }),
+        refresh: None,
     }
 }
 
@@ -2134,6 +2144,7 @@ fn a_library_problem_on_a_resolved_event_adds_a_library_line_after_record() {
         identifier,
         record,
         mut sections,
+        ..
     } = fixture.event()
     else {
         unreachable!()
@@ -2149,6 +2160,7 @@ fn a_library_problem_on_a_resolved_event_adds_a_library_line_after_record() {
         identifier,
         record,
         sections,
+        refresh: None,
     };
 
     let lines = describe(
@@ -2514,6 +2526,7 @@ fn reference_resolved_event(fixture: &Fixture) -> Event {
             },
             acceptance: Acceptance::Automatic,
         }),
+        refresh: None,
     }
 }
 
@@ -2626,6 +2639,7 @@ fn a_description_carries_a_reference_line_for_each_reference_that_could_not_answ
         identifier,
         record,
         mut sections,
+        ..
     } = fixture.event()
     else {
         unreachable!()
@@ -2662,6 +2676,7 @@ fn a_description_carries_a_reference_line_for_each_reference_that_could_not_answ
         identifier,
         record,
         sections,
+        refresh: None,
     };
 
     let lines = described(&event, "paper.pdf");
@@ -2706,6 +2721,7 @@ fn a_description_carries_a_references_line_for_a_disagreement() {
         identifier,
         record,
         mut sections,
+        ..
     } = fixture.event()
     else {
         unreachable!()
@@ -2741,6 +2757,7 @@ fn a_description_carries_a_references_line_for_a_disagreement() {
         identifier,
         record,
         sections,
+        refresh: None,
     };
 
     let lines = described(&event, "paper.pdf");
@@ -2853,4 +2870,416 @@ fn a_skips_description_carries_its_reference_lines_after_its_library_line() {
         ],
         "got {lines:#?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate 6.1: the refresh, differs and decision lines
+// (design D11)
+// ---------------------------------------------------------------------
+
+const REFRESH_IDENTIFIER: &str = "doi:10.1039/c5ay00042d";
+const CORRECTED: &str = "REVIEW CORRECTION: Determination of things";
+
+/// The library's corrected item, as design D11's worked description
+/// shows it.
+fn corrected_item() -> Fixture {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some(CORRECTED.to_string());
+    record.authors = vec![name("S.", "Klykov")];
+    record.issued = Some(DateParts {
+        year: 2015,
+        month: None,
+        day: None,
+    });
+    record.doi = Some(Doi::parse("10.1039/c5ay00042d").unwrap());
+    let mut fixture = Fixture::new(record, REFRESH_IDENTIFIER);
+    fixture.path = PathBuf::from("Klykov2015.pdf");
+    fixture
+}
+
+/// The library's answer carrying `step` as its `refresh`.
+fn refreshed(step: RefreshStep) -> Event {
+    match library_resolved_event(&corrected_item(), tracked_answer()) {
+        Event::Resolved {
+            path,
+            identifier,
+            record,
+            sections,
+            ..
+        } => Event::Resolved {
+            path,
+            identifier,
+            record,
+            sections,
+            refresh: Some(Box::new(step)),
+        },
+        other => other,
+    }
+}
+
+fn crossref_found() -> ServiceAnswer {
+    ServiceAnswer {
+        service: "crossref".to_string(),
+        outcome: ServiceOutcome::Found {
+            retrieval: FetchedFrom::Network,
+            stored: Some(WriteStep::Written),
+        },
+    }
+}
+
+fn difference(
+    field: &str,
+    item: Option<serde_json::Value>,
+    candidate: Option<serde_json::Value>,
+) -> DifferenceStep {
+    DifferenceStep {
+        field: field.to_string(),
+        item,
+        candidate,
+    }
+}
+
+fn title_differs() -> DifferenceStep {
+    difference(
+        "title",
+        Some(CORRECTED.into()),
+        Some("Determination of things".into()),
+    )
+}
+
+fn differing(differences: Vec<DifferenceStep>, acceptance: RefreshAcceptance) -> RefreshStep {
+    RefreshStep::Differs {
+        identifier: REFRESH_IDENTIFIER.to_string(),
+        attempts: vec![crossref_found()],
+        differences,
+        candidate: Box::new(Record::new(EntryType::Article)),
+        acceptance,
+    }
+}
+
+fn describing(event: &Event, proposal: Option<&Proposal>, width: usize) -> Vec<String> {
+    describe(
+        event,
+        "Klykov2015.pdf",
+        proposal,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        width,
+    )
+}
+
+/// The lines of the description up to and including `file says`, which
+/// a refresh's lines follow.
+fn lines_before_the_refresh() -> Vec<String> {
+    vec![
+        rule(1, 1, DEFAULT_WIDTH),
+        label_line("file", "Klykov2015.pdf"),
+        label_line("identifier", REFRESH_IDENTIFIER),
+        label_line("record", "Crossref, from the library"),
+        label_line("type", "journal article"),
+        label_line("title", CORRECTED),
+        label_line("authors", "S. Klykov"),
+        label_line("issued", "2015"),
+        label_line("file says", "not read; the library answered"),
+    ]
+}
+
+#[test]
+fn description_of_a_current_refresh_matches_design_d11() {
+    let event = refreshed(RefreshStep::Current {
+        identifier: REFRESH_IDENTIFIER.to_string(),
+        attempts: vec![crossref_found()],
+    });
+
+    let lines = describing(&event, None, DEFAULT_WIDTH);
+
+    let mut expected = lines_before_the_refresh();
+    expected.extend([
+        label_line("refresh", REFRESH_IDENTIFIER),
+        continuation("Crossref does not differ from the library's record"),
+    ]);
+    assert_eq!(lines, expected, "got {lines:#?}");
+}
+
+#[test]
+fn description_of_a_pending_differing_refresh_matches_design_d11() {
+    let event = refreshed(differing(vec![title_differs()], RefreshAcceptance::Pending));
+
+    let lines = describing(&event, None, DEFAULT_WIDTH);
+
+    let mut expected = lines_before_the_refresh();
+    expected.extend([
+        label_line("refresh", REFRESH_IDENTIFIER),
+        continuation("Crossref differs from the library's record"),
+        label_line(
+            "differs",
+            "title: \"REVIEW CORRECTION: Determination of things\" in the",
+        ),
+        continuation("library, \"Determination of things\" from Crossref"),
+        label_line(
+            "decision",
+            "pending; keeping it leaves the library's record as it is",
+        ),
+    ]);
+    assert_eq!(lines, expected, "got {lines:#?}");
+}
+
+#[test]
+fn description_of_a_differing_author_list_writes_every_author() {
+    let everyone = [
+        ("S.", "Klykov"),
+        ("A.", "Petrov"),
+        ("B.", "Sidorov"),
+        ("C.", "Ivanov"),
+        ("D.", "Smith"),
+    ];
+    let authors = |count: usize| -> serde_json::Value {
+        serde_json::Value::Array(
+            everyone[..count]
+                .iter()
+                .map(|(given, family)| serde_json::json!({"family": family, "given": given}))
+                .collect(),
+        )
+    };
+    let event = refreshed(differing(
+        vec![difference("author", Some(authors(4)), Some(authors(5)))],
+        RefreshAcceptance::Pending,
+    ));
+
+    let lines = describing(&event, None, 400);
+
+    assert!(
+        lines.contains(&label_line(
+            "differs",
+            "author: S. Klykov, A. Petrov, B. Sidorov, C. Ivanov in the library, \
+             S. Klykov, A. Petrov, B. Sidorov, C. Ivanov, D. Smith from Crossref"
+        )),
+        "a difference past the third author must be visible: got {lines:#?}"
+    );
+}
+
+#[test]
+fn description_of_an_absent_value_writes_nothing() {
+    let described = |difference| {
+        describing(
+            &refreshed(differing(vec![difference], RefreshAcceptance::Pending)),
+            None,
+            400,
+        )
+    };
+
+    let candidate_only = described(difference("volume", None, Some("7".into())));
+    let item_only = described(difference("page", Some("45-67".into()), None));
+
+    assert!(
+        candidate_only.contains(&label_line(
+            "differs",
+            "volume: nothing in the library, \"7\" from Crossref"
+        )),
+        "got {candidate_only:#?}"
+    );
+    assert!(
+        item_only.contains(&label_line(
+            "differs",
+            "page: \"45-67\" in the library, nothing from Crossref"
+        )),
+        "got {item_only:#?}"
+    );
+}
+
+#[test]
+fn description_of_an_unresolved_refresh_writes_each_service_on_a_line() {
+    let event = refreshed(RefreshStep::Unresolved {
+        identifier: REFRESH_IDENTIFIER.to_string(),
+        attempts: vec![
+            ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: ServiceOutcome::Unavailable {
+                    message: "timed out".to_string(),
+                },
+            },
+            ServiceAnswer {
+                service: "openalex".to_string(),
+                outcome: ServiceOutcome::NotFound,
+            },
+        ],
+    });
+
+    let lines = describing(&event, None, DEFAULT_WIDTH);
+
+    let mut expected = lines_before_the_refresh();
+    expected.extend([
+        label_line("refresh", REFRESH_IDENTIFIER),
+        continuation("crossref: unavailable: timed out"),
+        continuation("openalex: not found"),
+    ]);
+    assert_eq!(lines, expected, "got {lines:#?}");
+}
+
+#[test]
+fn description_of_no_identifier_writes_one_refresh_line() {
+    let event = refreshed(RefreshStep::NotAttempted {
+        reason: "no-identifier".to_string(),
+    });
+
+    let lines = describing(&event, None, DEFAULT_WIDTH);
+
+    let mut expected = lines_before_the_refresh();
+    expected.push(label_line(
+        "refresh",
+        "the library's record carries no identifier to ask about",
+    ));
+    assert_eq!(lines, expected, "got {lines:#?}");
+}
+
+#[test]
+fn description_of_no_eligible_service_names_the_identifier_and_says_none_can_be_asked() {
+    let event = refreshed(RefreshStep::NoEligibleService {
+        identifier: REFRESH_IDENTIFIER.to_string(),
+    });
+
+    let lines = describing(&event, None, DEFAULT_WIDTH);
+
+    let mut expected = lines_before_the_refresh();
+    expected.extend([
+        label_line("refresh", REFRESH_IDENTIFIER),
+        continuation("no configured service can be asked about it"),
+    ]);
+    assert_eq!(lines, expected, "got {lines:#?}");
+}
+
+#[test]
+fn description_of_each_decision_matches_design_d11() {
+    let reference = |reason: &str| RefreshAcceptance::NotAttempted {
+        reason: reason.to_string(),
+    };
+    let cases = [
+        (
+            RefreshAcceptance::Pending,
+            "pending; keeping it leaves the library's record as it is",
+        ),
+        (
+            RefreshAcceptance::Accepted,
+            "the library's record was replaced",
+        ),
+        (
+            RefreshAcceptance::Unwritten {
+                message: "changed after this run read it".to_string(),
+            },
+            "the library's record could not be replaced (changed after this run read it)",
+        ),
+        (RefreshAcceptance::Declined, "the library's record was kept"),
+        (
+            reference("another-library"),
+            "only a rename in the library at /home/u/papers can take it",
+        ),
+        (
+            reference("not-recording"),
+            "this run records nothing, so the library's record stays as it is",
+        ),
+        (
+            reference("already-asked"),
+            "answered at an earlier file of the same item",
+        ),
+    ];
+
+    for (acceptance, text) in cases {
+        let mut event = refreshed(differing(vec![title_differs()], acceptance.clone()));
+        if let Event::Resolved { sections, .. } = &mut event
+            && matches!(&acceptance, RefreshAcceptance::NotAttempted { reason } if reason == "another-library")
+        {
+            sections.record_retrieval = Some(RetrievedFrom::LibraryReference {
+                library: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e71".to_string(),
+                root: "/home/u/papers".into(),
+                artifact: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e6f".to_string(),
+                item: "0192a1b2-c3d4-75e6-8f70-1a2b3c4d5e70".to_string(),
+            });
+        }
+
+        let lines = describing(&event, None, 400);
+
+        assert_eq!(
+            lines.last(),
+            Some(&label_line("decision", text)),
+            "for {acceptance:?}: got {lines:#?}"
+        );
+    }
+}
+
+#[test]
+fn description_refresh_lines_follow_file_says_and_precede_new_name() {
+    let event = refreshed(differing(
+        vec![title_differs()],
+        RefreshAcceptance::Declined,
+    ));
+
+    let lines = describing(
+        &event,
+        Some(&Proposal {
+            target: "Klykov2015.pdf".to_string(),
+            rendered: None,
+        }),
+        DEFAULT_WIDTH,
+    );
+
+    let position = |label: &str| {
+        lines
+            .iter()
+            .position(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no {label} line in {lines:#?}"))
+    };
+    assert!(position("file says") < position("refresh"));
+    assert!(position("refresh") < position("differs"));
+    assert!(position("differs") < position("decision"));
+    assert!(position("decision") < position("new name"));
+    assert_eq!(position("new name"), lines.len() - 1);
+}
+
+#[test]
+fn description_refresh_writes_the_identifier_whole() {
+    let long = format!("doi:10.1039/{}", "x".repeat(120));
+    let event = refreshed(RefreshStep::Current {
+        identifier: long.clone(),
+        attempts: vec![crossref_found()],
+    });
+
+    let lines = describing(&event, None, DEFAULT_WIDTH);
+
+    assert!(
+        lines.contains(&label_line("refresh", &long)),
+        "the identifier must not be folded: got {lines:#?}"
+    );
+}
+
+#[test]
+fn description_refresh_escapes_record_values() {
+    let event = refreshed(RefreshStep::Differs {
+        identifier: REFRESH_IDENTIFIER.to_string(),
+        attempts: vec![crossref_found()],
+        differences: vec![difference(
+            "title",
+            Some("bad\u{7}item".into()),
+            Some("bad\u{1b}candidate".into()),
+        )],
+        candidate: Box::new(Record::new(EntryType::Article)),
+        acceptance: RefreshAcceptance::Unwritten {
+            message: "disk\u{7} full".to_string(),
+        },
+    });
+
+    let lines = describing(&event, None, 400);
+
+    for line in &lines {
+        assert!(
+            !line.chars().any(|character| character.is_control()),
+            "got {line:?}"
+        );
+    }
+    assert!(
+        lines.iter().any(|line| line.starts_with("differs")),
+        "the differs line must still be written: got {lines:#?}"
+    );
+    assert!(lines.iter().any(|line| line.starts_with("decision")));
 }

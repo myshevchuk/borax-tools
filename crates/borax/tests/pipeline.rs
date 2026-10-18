@@ -29,6 +29,7 @@ use borax::pipeline::{
     standing_in, title_check, titles_of, unheld_evidence, verdict_event,
 };
 use borax::references::{Libraries, ReferenceRead, ReferenceStatus, Unavailable};
+use borax::refresh::{Decision, Difference, Field, Fresh, Whose};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, IdentifierKind, Isbn, Pmid, SuppliedError};
 use borax_core::index::{Fact, LibraryReference};
@@ -1012,6 +1013,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_and_sec
         hash: Some(hash_for("paper")),
         overridden: false,
         accepted: false,
+        refresh: None,
     };
 
     let event = resolved_event(&path, &file);
@@ -1022,6 +1024,7 @@ fn a_resolved_file_produces_a_resolved_event_with_path_identifier_record_and_sec
             identifier,
             record: event_record,
             sections,
+            ..
         } => {
             assert_eq!(event_path, path);
             assert_eq!(identifier, "doi:10.1000/xyz");
@@ -1054,6 +1057,7 @@ fn a_content_index_answer_reports_the_lookups_service_as_its_record_retrieval() 
         hash: Some(hash_for("paper")),
         overridden: false,
         accepted: false,
+        refresh: None,
     };
 
     let event = resolved_event(&path, &file);
@@ -3109,6 +3113,7 @@ fn a_resolved_event_carries_the_whole_record() {
         hash: None,
         overridden: false,
         accepted: false,
+        refresh: None,
     };
 
     let Event::Resolved {
@@ -3139,6 +3144,7 @@ fn a_resolved_event_round_trips_its_record_through_json() {
             hash: None,
             overridden: false,
             accepted: false,
+            refresh: None,
         },
     );
 
@@ -6752,6 +6758,7 @@ fn supplied_file_record(
         ),
         overridden: false,
         accepted: true,
+        refresh: None,
     }
 }
 
@@ -6788,6 +6795,7 @@ fn overridden_file_record(
         ),
         overridden: true,
         accepted: true,
+        refresh: None,
     }
 }
 
@@ -6818,6 +6826,7 @@ fn extracted_file_record(
         ),
         overridden: false,
         accepted: true,
+        refresh: None,
     }
 }
 
@@ -6935,6 +6944,7 @@ fn remember_of_an_index_held_lookup_writes_nothing_and_is_not_attempted_for_cont
         ),
         overridden: false,
         accepted: true,
+        refresh: None,
     };
 
     assert_eq!(
@@ -6982,6 +6992,7 @@ fn identification_of_an_index_origin_lookup_carries_the_answering_facts_origin()
             ),
             overridden: false,
             accepted: true,
+            refresh: None,
         };
 
         assert_eq!(
@@ -9795,4 +9806,617 @@ fn sections_project_a_reference_hit_and_its_references() {
         with_read(IndexRead::Miss),
         IndexReadStep::Miss { references: steps }
     );
+}
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate 4.1: resolution reports a refresh (design D2, D3,
+// D4, D8)
+// ---------------------------------------------------------------------
+
+/// A [`Source`] answering `response` for every identifier and recording
+/// each identifier it was asked for, in order.
+struct RecordingSource {
+    name: SourceName,
+    response: Result<Record, SourceError>,
+    asked: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RecordingSource {
+    fn answering(record: Record) -> (RecordingSource, Arc<std::sync::Mutex<Vec<String>>>) {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            RecordingSource {
+                name: SourceName::Crossref,
+                response: Ok(record),
+                asked: asked.clone(),
+            },
+            asked,
+        )
+    }
+}
+
+impl Source for RecordingSource {
+    fn name(&self) -> SourceName {
+        self.name
+    }
+
+    fn supports(&self, _identifier: &Identifier) -> bool {
+        true
+    }
+
+    fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
+        self.asked.lock().unwrap().push(identifier.to_string());
+        self.response.clone().map(Fetched::network)
+    }
+}
+
+fn refreshing() -> ResolveConfig {
+    ResolveConfig {
+        refresh: true,
+        ..config(true)
+    }
+}
+
+const CORRECTED: &str = "REVIEW CORRECTION: On the Structure of Borax";
+
+/// The record a service holds for the item the fixtures below correct:
+/// it differs from the item in its title alone.
+fn fresh_record(doi_value: &str) -> Record {
+    record_with_doi_and_title(doi_value, "On the Structure of Borax")
+}
+
+/// A library with one tracked file whose item was corrected by hand.
+struct Corrected {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    path: PathBuf,
+    hash: ContentHash,
+    item: Item,
+    stores: Stores,
+    documents: FakeDocuments,
+}
+
+fn corrected_library(seed: &str, doi_value: &str) -> Corrected {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let path = root.join("paper.pdf");
+    let hash = hash_for(seed);
+    let item = library_item(&root, record_with_doi_and_title(doi_value, CORRECTED));
+    let stores = tracked_library(&root, "paper.pdf", hash.clone(), &item);
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_text_layer());
+    Corrected {
+        _dir: dir,
+        root,
+        path,
+        hash,
+        item,
+        stores,
+        documents,
+    }
+}
+
+impl Corrected {
+    fn resolve<S: IndexStore>(
+        &self,
+        sources: &[&dyn Source],
+        index: &ContentIndex<S>,
+        config: &ResolveConfig,
+    ) -> FileRecord {
+        resolved_outcome(
+            standing(
+                &self.path,
+                &self.documents,
+                sources,
+                index,
+                config,
+                None,
+                Some(&self.stores),
+            )
+            .verdict,
+        )
+    }
+}
+
+fn title_value(title: &str) -> Option<serde_json::Value> {
+    Some(serde_json::Value::from(title))
+}
+
+#[test]
+fn a_tracked_file_resolved_without_refresh_carries_no_refresh() {
+    let library = corrected_library("no-refresh", "10.1000/no-refresh");
+    let (crossref, asked) = RecordingSource::answering(fresh_record("10.1000/no-refresh"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let file = library.resolve(&sources, &index, &config(true));
+
+    assert_eq!(file.refresh, None);
+    assert!(asked.lock().unwrap().is_empty(), "nothing may be asked");
+}
+
+#[test]
+fn a_tracked_file_resolved_with_refresh_still_resolves_to_its_items_record() {
+    let library = corrected_library("still-the-item", "10.1000/still-the-item");
+    let (crossref, _asked) = RecordingSource::answering(fresh_record("10.1000/still-the-item"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let file = library.resolve(&sources, &index, &refreshing());
+
+    assert_eq!(file.record, library.item.record);
+    assert_eq!(file.record.title.as_deref(), Some(CORRECTED));
+    assert_eq!(
+        file.evidence.retrieval(),
+        Some(RecordRetrieval::Library {
+            artifact: file_artifact_id(&library.stores, &library.path, &library.hash),
+            item: library.item.id.to_string(),
+        })
+    );
+    assert_eq!(
+        file.evidence.lookup,
+        LookupEvidence::NotAttempted(Unattempted::LibraryAnswered),
+        "the verdict's own lookup stays the library's"
+    );
+}
+
+#[test]
+fn a_tracked_file_with_refresh_looks_up_its_items_preferred_identifier() {
+    let mut record = record_with_doi_and_title("10.1000/preferred", CORRECTED);
+    record.borax.arxiv = Some(ArxivId::parse("2401.01234").unwrap());
+    let library = corrected_library("preferred", "10.1000/preferred");
+    let item = Item {
+        id: library.item.id.clone(),
+        record,
+    };
+    fs::write(
+        library.root.join("items").join(format!("{}.toml", item.id)),
+        item.to_toml(),
+    )
+    .unwrap();
+    let stores = Stores::read(&library.root);
+    let (crossref, asked) = RecordingSource::answering(fresh_record("10.1000/preferred"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let file = resolved_outcome(
+        standing(
+            &library.path,
+            &library.documents,
+            &sources,
+            &index,
+            &refreshing(),
+            None,
+            Some(&stores),
+        )
+        .verdict,
+    );
+
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![doi_identifier("10.1000/preferred").to_string()],
+        "asked once, for the DOI"
+    );
+    match file.refresh.map(|refresh| refresh.fresh) {
+        Some(Fresh::Differs { identifier, .. }) => {
+            assert_eq!(identifier, doi_identifier("10.1000/preferred"))
+        }
+        other => panic!("expected a differing refresh, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_tracked_file_with_refresh_opens_nothing_and_reads_no_index() {
+    let library = corrected_library("opens-nothing", "10.1000/opens-nothing");
+    let (crossref, _asked) = RecordingSource::answering(fresh_record("10.1000/opens-nothing"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let counting = CountingCache::new();
+    let index = ContentIndex::new(counting.clone());
+
+    let file = library.resolve(&sources, &index, &refreshing());
+
+    assert!(file.refresh.is_some(), "the refresh must have been made");
+    assert_eq!(counting.gets(), 0, "the content index must not be read");
+    assert_eq!(
+        library.documents.open_calls(),
+        0,
+        "the file must not be opened"
+    );
+}
+
+#[test]
+fn a_tracked_file_with_refresh_writes_nothing_to_the_content_index() {
+    let library = corrected_library("writes-nothing", "10.1000/writes-nothing");
+    let (crossref, _asked) = RecordingSource::answering(fresh_record("10.1000/writes-nothing"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let counting = CountingCache::new();
+    let index = ContentIndex::new(counting.clone());
+
+    let file = library.resolve(&sources, &index, &refreshing());
+
+    assert!(file.refresh.is_some(), "the refresh must have been made");
+    assert_eq!(counting.puts(), 0, "the content index must not be written");
+    assert_eq!(
+        file.evidence.content_index.write,
+        IndexWrite::NotAttempted(Unattempted::LibraryAnswered)
+    );
+}
+
+#[test]
+fn a_tracked_file_with_refresh_reports_decision_not_asked() {
+    let library = corrected_library("not-asked", "10.1000/not-asked");
+    let (crossref, _asked) = RecordingSource::answering(fresh_record("10.1000/not-asked"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let refresh = library
+        .resolve(&sources, &index, &refreshing())
+        .refresh
+        .expect("a tracked file's refresh");
+
+    assert_eq!(refresh.item, library.item.id);
+    assert_eq!(refresh.whose, Whose::Own);
+    assert_eq!(
+        refresh.decision,
+        Decision::NotAttempted(Unattempted::NotAsked)
+    );
+    match refresh.fresh {
+        Fresh::Differs {
+            candidate,
+            differences,
+            ..
+        } => {
+            assert_eq!(candidate, fresh_record("10.1000/not-asked"));
+            assert_eq!(
+                differences,
+                vec![Difference {
+                    field: Field::Title,
+                    item: title_value(CORRECTED),
+                    candidate: title_value("On the Structure of Borax"),
+                }]
+            );
+        }
+        other => panic!("expected Differs, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_tracked_file_answered_under_an_earlier_item_refreshes_that_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("paper.pdf");
+    let (hash_a, hash_b) = (hash_for("bytes a"), hash_for("bytes b"));
+    let earlier = library_item(
+        root,
+        record_with_doi_and_title("10.1000/earlier", CORRECTED),
+    );
+    let linked = library_item(root, record_with_doi("10.1000/linked"));
+    let entry = |hash: ContentHash, item: &Item| HashEntry {
+        hash,
+        run: LibraryRunId::new("earlier-run"),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        tool_version: "0.6.0-test".to_string(),
+        item: Some(item.id.clone()),
+        evidence: None,
+    };
+    let artifact = ArtifactRecord {
+        id: ArtifactId::from_uuid(fresh_uuid()),
+        item: Some(linked.id.clone()),
+        path: "paper.pdf".to_string(),
+        size: 100,
+        modified_millis: 0,
+        history: vec![entry(hash_a.clone(), &earlier), entry(hash_b, &linked)],
+    };
+    let records = root.join(".borax").join("artifacts");
+    fs::create_dir_all(&records).unwrap();
+    fs::write(
+        records.join(format!("{}.toml", artifact.id)),
+        artifact.to_toml(),
+    )
+    .unwrap();
+    let stores = Stores::read(root);
+    let documents = FakeDocuments::new().with_file(&path, hash_a, pdf_with_no_text_layer());
+    let (crossref, asked) = RecordingSource::answering(fresh_record("10.1000/earlier"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let file = resolved_outcome(
+        standing(
+            &path,
+            &documents,
+            &sources,
+            &index,
+            &refreshing(),
+            None,
+            Some(&stores),
+        )
+        .verdict,
+    );
+
+    assert_eq!(
+        file.record, earlier.record,
+        "the file resolves to that item"
+    );
+    let refresh = file.refresh.expect("the refresh of the earlier item");
+    assert_eq!(refresh.item, earlier.id);
+    assert_eq!(refresh.whose, Whose::Own);
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![doi_identifier("10.1000/earlier").to_string()]
+    );
+}
+
+#[test]
+fn a_reference_answer_with_refresh_refreshes_the_referenced_item_with_another_library() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("reference-refresh");
+    let documents = unopenable(path, &hash);
+    let library = tempdir().unwrap();
+    let referenced = referenced_library_at(library.path(), "10.1000/reference-refresh");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let (crossref, asked) = RecordingSource::answering(record_with_doi_and_title(
+        "10.1000/reference-refresh",
+        "A title the service holds now",
+    ));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &refreshing(),
+    ));
+
+    assert_eq!(file.record, referenced.item.record);
+    let refresh = file.refresh.expect("the referenced item's refresh");
+    assert_eq!(refresh.item, referenced.item.id);
+    assert_eq!(refresh.whose, Whose::Referenced);
+    assert_eq!(
+        refresh.decision,
+        Decision::NotAttempted(Unattempted::AnotherLibrary)
+    );
+    assert!(matches!(refresh.fresh, Fresh::Differs { .. }));
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![doi_identifier("10.1000/reference-refresh").to_string()]
+    );
+}
+
+/// A library at a fresh root holding the tracked file `original.pdf`
+/// and the identity `id`, and the reference `(id, reference_root,
+/// artifact, item)`; `copy` is an untracked byte-identical copy of the
+/// file inside the library.
+struct SelfReferenced {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    copy: PathBuf,
+    hash: ContentHash,
+    item: Item,
+    reference: LibraryReference,
+}
+
+fn self_referenced(seed: &str, doi_value: &str) -> SelfReferenced {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    fs::create_dir_all(root.join(".borax")).unwrap();
+    let id = LibraryId::from_uuid(fresh_uuid());
+    fs::write(
+        identity_file(&root),
+        LibraryIdentity { id: id.clone() }.to_toml(),
+    )
+    .unwrap();
+    let hash = hash_for(seed);
+    let item = library_item(&root, record_with_doi_and_title(doi_value, CORRECTED));
+    record_at(&root, "original.pdf", hash.clone(), Some(item.id.clone()));
+    let artifact = ArtifactId::from_uuid(fresh_uuid());
+    SelfReferenced {
+        copy: root.join("inbox").join("copy.pdf"),
+        reference: LibraryReference {
+            library: id,
+            root: root.clone(),
+            artifact,
+            item: item.id.clone(),
+        },
+        _dir: dir,
+        root,
+        hash,
+        item,
+    }
+}
+
+impl SelfReferenced {
+    /// The refresh of the copy, as a run in the library answers it
+    /// when the content index holds `reference` for the copy's bytes.
+    fn refresh_of_the_copy(&self, reference: &LibraryReference) -> borax::refresh::Refresh {
+        let stores = Stores::read(&self.root);
+        let documents = unopenable(&self.copy, &self.hash);
+        let index = ContentIndex::new(MemoryCache::new());
+        let _ = index.put_reference(&self.hash, reference);
+        let (crossref, _asked) = RecordingSource::answering(fresh_record_for(&self.item));
+        let sources: Vec<&dyn Source> = vec![&crossref];
+
+        let result = standing(
+            &self.copy,
+            &documents,
+            &sources,
+            &index,
+            &refreshing(),
+            None,
+            Some(&stores),
+        );
+
+        assert_eq!(result.library().cloned(), Some(LibraryAnswer::Untracked));
+        let file = resolved_outcome(result.verdict);
+        assert_eq!(file.record, self.item.record);
+        file.refresh.expect("the reference answer's refresh")
+    }
+}
+
+fn fresh_record_for(item: &Item) -> Record {
+    Record {
+        title: Some("On the Structure of Borax".to_string()),
+        ..item.record.clone()
+    }
+}
+
+#[test]
+fn a_self_reference_answer_with_refresh_is_own_and_reports_not_asked() {
+    let rig = self_referenced("self-reference", "10.1000/self-reference");
+
+    let refresh = rig.refresh_of_the_copy(&rig.reference);
+
+    assert_eq!(refresh.whose, Whose::Own);
+    assert_eq!(refresh.item, rig.item.id);
+    assert_eq!(
+        refresh.decision,
+        Decision::NotAttempted(Unattempted::NotAsked)
+    );
+    assert!(matches!(refresh.fresh, Fresh::Differs { .. }));
+}
+
+#[test]
+fn a_reference_to_a_copy_of_the_runs_library_with_refresh_reports_another_library() {
+    let rig = self_referenced("copy-of-the-library", "10.1000/copy-of-the-library");
+    let copy_root = rig._dir.path().join("library-copy");
+    fs::create_dir_all(copy_root.join(".borax")).unwrap();
+    fs::copy(identity_file(&rig.root), identity_file(&copy_root)).unwrap();
+    fs::create_dir_all(copy_root.join("items")).unwrap();
+    fs::write(
+        copy_root
+            .join("items")
+            .join(format!("{}.toml", rig.item.id)),
+        rig.item.to_toml(),
+    )
+    .unwrap();
+    let reference = LibraryReference {
+        root: copy_root,
+        ..rig.reference.clone()
+    };
+
+    let refresh = rig.refresh_of_the_copy(&reference);
+
+    assert_eq!(refresh.whose, Whose::Referenced);
+    assert_eq!(
+        refresh.decision,
+        Decision::NotAttempted(Unattempted::AnotherLibrary)
+    );
+}
+
+#[test]
+fn an_evidence_answer_with_refresh_carries_no_refresh() {
+    let path = Path::new("paper.pdf");
+    let hash = hash_for("evidence-refresh");
+    let documents = unopenable(path, &hash);
+    let identifier = doi_identifier("10.1000/evidence-refresh");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let (crossref, asked) = RecordingSource::answering(fresh_record("10.1000/evidence-refresh"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &refreshing(),
+    ));
+
+    assert_eq!(file.refresh, None);
+    assert_eq!(file.record, fresh_record("10.1000/evidence-refresh"));
+    assert_eq!(*asked.lock().unwrap(), vec![identifier.to_string()]);
+}
+
+#[test]
+fn an_extracted_file_with_refresh_carries_no_refresh() {
+    let path = Path::new("paper.pdf");
+    let documents = FakeDocuments::new().with_file(
+        path,
+        hash_for("extracted-refresh"),
+        pdf_with_embedded_doi("10.1000/extracted-refresh"),
+    );
+    let (crossref, asked) = RecordingSource::answering(fresh_record("10.1000/extracted-refresh"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let file = resolved_outcome(resolve_file(
+        path,
+        &documents,
+        &sources,
+        &index,
+        &refreshing(),
+    ));
+
+    assert_eq!(file.refresh, None);
+    assert_eq!(file.record, fresh_record("10.1000/extracted-refresh"));
+    assert_eq!(asked.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_work_duplicate_verdict_with_refresh_carries_no_refresh() {
+    let parent = tempdir().unwrap();
+    let account_root = parent.path().join("account");
+    fs::create_dir_all(&account_root).unwrap();
+    let path = account_root.join("incoming.pdf");
+    let hash = hash_for("refresh-work-check-incoming");
+    let documents = unopenable(&path, &hash);
+    let held = item_with(&account_root, "10.1000/refresh-work");
+    record_at(
+        &account_root,
+        "archived/Work2024.pdf",
+        hash_for("refresh-work-check-original"),
+        Some(held),
+    );
+    let referenced = referenced_library_at(&parent.path().join("other"), "10.1000/refresh-work");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let stores = Stores::read(&account_root);
+    let exists = |_: &Path| true;
+
+    let result = standing(
+        &path,
+        &documents,
+        &sources,
+        &index,
+        &refreshing(),
+        Some(&stores.account(&exists)),
+        None,
+    );
+
+    assert_eq!(
+        result.verdict,
+        FileOutcome::Skipped(SkipReason::Duplicate {
+            reason: DuplicateReason::Work,
+            existing_path: account_root.join("archived").join("Work2024.pdf"),
+        }),
+        "no service may be asked for a file that is skipped"
+    );
+    let line = serde_json::to_string(&verdict_event(&path, &result)).unwrap();
+    assert!(!line.contains("refresh"), "got {line}");
+}
+
+#[test]
+fn resolved_event_carries_the_files_refresh_as_its_step() {
+    let library = corrected_library("event-step", "10.1000/event-step");
+    let (crossref, _asked) = RecordingSource::answering(fresh_record("10.1000/event-step"));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let refreshed = library.resolve(&sources, &index, &refreshing());
+    let plain = library.resolve(&sources, &index, &config(true));
+
+    match resolved_event(&library.path, &refreshed) {
+        Event::Resolved { refresh, .. } => assert_eq!(
+            refresh.map(|step| *step),
+            Some(refreshed.refresh.as_ref().unwrap().step())
+        ),
+        other => panic!("expected Resolved, got {other:?}"),
+    }
+    match resolved_event(&library.path, &plain) {
+        Event::Resolved { refresh, .. } => assert_eq!(refresh, None),
+        other => panic!("expected Resolved, got {other:?}"),
+    }
 }

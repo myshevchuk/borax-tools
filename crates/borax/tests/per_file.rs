@@ -311,6 +311,7 @@ fn resolved_event(path: &Path, identifier: &str, record: &Record) -> Event {
             },
             acceptance: Acceptance::Automatic,
         }),
+        refresh: None,
     }
 }
 
