@@ -7170,6 +7170,16 @@ impl IndexStore for WriteFailingCache {
             message: "write-failing cache".to_string(),
         }
     }
+
+    fn list_facts(&self, _prefix: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn remove_fact(&self, _key: &str) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
 }
 
 /// Counted into the same `gets`/`puts` a record read or write counts,
@@ -7184,6 +7194,16 @@ impl IndexStore for CountingCache {
     fn write_fact(&self, key: &str, text: &str) -> CacheWrite {
         self.puts.fetch_add(1, Ordering::Relaxed);
         self.inner.write_fact(key, text)
+    }
+
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        self.gets.fetch_add(1, Ordering::Relaxed);
+        self.inner.list_facts(prefix)
+    }
+
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        self.puts.fetch_add(1, Ordering::Relaxed);
+        self.inner.remove_fact(key)
     }
 }
 

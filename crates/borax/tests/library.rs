@@ -17,13 +17,13 @@ use borax::evidence::{
 };
 use borax::library::{
     ARTIFACT_STORE, Account, Admitted, Admitting, Adopted, Adoptions, ArtifactStore, Consulted,
-    ITEM_STORE, Identity, ItemStore, Reconciliation, Reconciling, RecordFaults, STATE_DIR,
-    StoreFault, StoreWriter, Stores, Unadopted, Unrecorded, WorkDuplicate, accepted_by,
+    ITEM_STORE, Identity, ItemStore, OwedReference, Reconciliation, Reconciling, RecordFaults,
+    STATE_DIR, StoreFault, StoreWriter, Stores, Unadopted, Unrecorded, WorkDuplicate, accepted_by,
     admission_event, admit, adopt, artifacts, carries, contains, ensure_identity, excludes,
     extracted_identifier, extraction_event, identity, identity_fault_warning, identity_file,
     item_file_name, library_relative, missing, operator_decisions, orphan_events, orphans,
-    reconcile, reconciliation_events, recorded_at, relative_to, status_event, store_create,
-    store_write, strands, survey, validate, validation_events,
+    reconcile, reconciliation_events, recorded_at, references_owed, relative_to, status_event,
+    store_create, store_write, strands, survey, validate, validation_events,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
@@ -5849,6 +5849,7 @@ fn learn_takes_in_no_entry_for_bytes_already_held() {
     let admitted = Admitted {
         artifact: held.id.clone(),
         item: item.id.clone(),
+        answers_with: item.id.clone(),
         relinked_from: None,
     };
     stores.learn(&admitting, &admitted);
@@ -6890,6 +6891,7 @@ fn admission_event_is_none_for_an_ordinary_admission() {
     let admitted = Admitted {
         artifact: artifact_id(UUID_A),
         item: item_id(UUID_B),
+        answers_with: item_id(UUID_B),
         relinked_from: None,
     };
 
@@ -6907,6 +6909,7 @@ fn admission_event_reports_a_relink() {
     let admitted = Admitted {
         artifact: artifact_id(UUID_A),
         item: item_id(UUID_C),
+        answers_with: item_id(UUID_C),
         relinked_from: Some(item_id(UUID_B)),
     };
 
@@ -10892,4 +10895,462 @@ fn validate_mints_no_identity() {
     validate(root);
 
     assert_eq!(snapshot(root), before);
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries 2.1: Admitted::answers_with
+// ---------------------------------------------------------------------
+
+#[test]
+fn admit_of_a_minted_record_answers_with_its_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"minted bytes");
+    let record = record_with_doi("10.1000/answers-minted");
+    let hash = hash("minted bytes");
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: None,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.answers_with, admitted.item);
+    let saved = ArtifactStore::read(root);
+    assert_eq!(
+        saved.by_id(&admitted.artifact).unwrap().item_for(&hash),
+        Some(&admitted.answers_with)
+    );
+}
+
+/// An ordinary re-run over bytes the record held earlier appends
+/// nothing: the bytes keep answering with the item they were accepted
+/// under, while the record's link is another.
+#[test]
+fn admit_of_restored_bytes_answers_with_the_item_they_were_accepted_under() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x = item_id(UUID_B);
+    let y = item_id(UUID_C);
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.clone()),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &held);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &minimal_record(EntryType::Article),
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: None,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.item, y, "the record's link");
+    assert_eq!(admitted.answers_with, x, "the entry's item");
+}
+
+#[test]
+fn admit_of_a_reidentification_answers_with_the_new_link() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let z_record = record_with_doi("10.1000/answers-reidentified");
+    let z = Item {
+        id: item_id(UUID_D),
+        record: z_record.clone(),
+    };
+    write_item(root, &format!("z.{UUID_D}.toml"), &z);
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(item_id(UUID_B));
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(item_id(UUID_C));
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_C)),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &held);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &z_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: None,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.item, z.id);
+    assert_eq!(admitted.answers_with, z.id);
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries 2.1: references_owed (design D2, D3)
+// ---------------------------------------------------------------------
+
+fn owed(path: &Path, seed: &str, artifact: &str, item: &str) -> OwedReference {
+    OwedReference {
+        path: path.to_path_buf(),
+        hash: hash(seed),
+        artifact: artifact_id(artifact),
+        item: item_id(item),
+    }
+}
+
+fn entry_under(seed: &str, run: &str, item: Option<&str>) -> HashEntry {
+    let mut entry = hash_entry(seed, run);
+    entry.item = item.map(item_id);
+    entry
+}
+
+#[test]
+fn references_owed_names_every_hash_of_every_history() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "a.pdf",
+            vec![
+                entry_under("a old", "run-0", Some(UUID_C)),
+                entry_under("a new", "run-1", Some(UUID_C)),
+            ],
+        ),
+    );
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            Some(item_id(UUID_D)),
+            "b.pdf",
+            vec![entry_under("b only", "run-0", Some(UUID_D))],
+        ),
+    );
+
+    assert_eq!(
+        references_owed(root),
+        vec![
+            owed(&root.join("a.pdf"), "a old", UUID_A, UUID_C),
+            owed(&root.join("a.pdf"), "a new", UUID_A, UUID_C),
+            owed(&root.join("b.pdf"), "b only", UUID_B, UUID_D),
+        ]
+    );
+}
+
+#[test]
+fn references_owed_lists_each_hash_of_a_record_once() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "a.pdf",
+            vec![
+                entry_under("bytes one", "run-0", Some(UUID_B)),
+                entry_under("bytes one", "run-1", Some(UUID_C)),
+                entry_under("bytes two", "run-2", Some(UUID_C)),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        references_owed(root),
+        vec![
+            owed(&root.join("a.pdf"), "bytes one", UUID_A, UUID_C),
+            owed(&root.join("a.pdf"), "bytes two", UUID_A, UUID_C),
+        ]
+    );
+}
+
+#[test]
+fn references_owed_gives_restored_bytes_the_item_they_were_accepted_under() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "a.pdf",
+            vec![
+                entry_under("bytes x", "run-0", Some(UUID_B)),
+                entry_under("bytes y", "run-1", Some(UUID_C)),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        references_owed(root),
+        vec![
+            owed(&root.join("a.pdf"), "bytes x", UUID_A, UUID_B),
+            owed(&root.join("a.pdf"), "bytes y", UUID_A, UUID_C),
+        ]
+    );
+}
+
+#[test]
+fn references_owed_leaves_out_bytes_a_record_linking_no_item_answers_for_with_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "a.pdf",
+            vec![
+                entry_under("bytes x", "run-0", None),
+                entry_under("bytes y", "run-1", None),
+            ],
+        ),
+    );
+
+    assert_eq!(references_owed(root), Vec::new());
+}
+
+/// D2: older bytes whose own entry names an item are owed that item's
+/// reference even though the record now links none; the newest bytes
+/// are left out.
+#[test]
+fn references_owed_gives_an_unlinked_records_earlier_bytes_their_entrys_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "a.pdf",
+            vec![
+                entry_under("bytes x", "run-0", Some(UUID_B)),
+                entry_under("bytes y", "run-1", None),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        references_owed(root),
+        vec![owed(&root.join("a.pdf"), "bytes x", UUID_A, UUID_B)]
+    );
+}
+
+#[test]
+fn references_owed_names_the_full_path_the_record_names() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "sub/dir/paper.pdf",
+            vec![entry_under("nested bytes", "run-0", Some(UUID_C))],
+        ),
+    );
+
+    let found = references_owed(root);
+
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(
+        found[0].path,
+        root.join("sub").join("dir").join("paper.pdf")
+    );
+}
+
+#[test]
+fn references_owed_skips_a_record_file_that_does_not_parse() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "a.pdf",
+            vec![entry_under("good bytes", "run-0", Some(UUID_C))],
+        ),
+    );
+    fs::write(
+        root.join(STATE_DIR)
+            .join(ARTIFACT_STORE)
+            .join("broken.toml"),
+        "not valid toml {{{",
+    )
+    .unwrap();
+
+    assert_eq!(
+        references_owed(root),
+        vec![owed(&root.join("a.pdf"), "good bytes", UUID_A, UUID_C)]
+    );
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries 2.1: ItemStore::answer (design D4, D9)
+// ---------------------------------------------------------------------
+
+#[test]
+fn item_store_answer_is_the_one_item_carrying_the_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    write_item(
+        root,
+        &item_file_name(None, &item_id(UUID_C)),
+        &item_at(item_id(UUID_C)),
+    );
+
+    let items = ItemStore::read(root);
+
+    assert_eq!(items.answer(root, &item.id), Ok(&item));
+}
+
+#[test]
+fn item_store_answer_finds_an_item_whose_file_was_renamed_by_hand() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = item_at(item_id(UUID_B));
+    write_item(root, "renamed-by-hand.toml", &item);
+
+    let items = ItemStore::read(root);
+
+    assert_eq!(items.answer(root, &item.id), Ok(&item));
+}
+
+#[test]
+fn item_store_answer_is_dangling_when_no_file_carries_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_item(
+        root,
+        &item_file_name(None, &item_id(UUID_C)),
+        &item_at(item_id(UUID_C)),
+    );
+
+    let items = ItemStore::read(root);
+
+    assert_eq!(
+        items.answer(root, &item_id(UUID_B)),
+        Err(AcceptedItemCause::Dangling)
+    );
+}
+
+#[test]
+fn item_store_answer_is_unreadable_when_a_file_claiming_it_cannot_be_read() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let bad = root.join(ITEM_STORE).join(format!("badkey.{UUID_B}.toml"));
+    fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    fs::write(&bad, "not valid toml {{{").unwrap();
+
+    let items = ItemStore::read(root);
+
+    match items.answer(root, &item_id(UUID_B)) {
+        Err(AcceptedItemCause::Unreadable { path, .. }) => assert_eq!(path, bad),
+        other => panic!(
+            "expected unreadable naming {}, got {other:?}",
+            bad.display()
+        ),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn item_store_answer_is_unreadable_when_the_store_cannot_be_listed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    let items_dir = root.join(ITEM_STORE);
+    fs::set_permissions(&items_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let items = ItemStore::read(root);
+
+    // Restored before the temp directory's own cleanup.
+    fs::set_permissions(&items_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    if items.faults.is_empty() {
+        eprintln!(
+            "skipping item_store_answer_is_unreadable_when_the_store_cannot_be_listed: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+    match items.answer(root, &item.id) {
+        Err(AcceptedItemCause::Unreadable { path, .. }) => assert_eq!(path, items_dir),
+        other => panic!("expected unreadable naming the store, got {other:?}"),
+    }
+}
+
+#[test]
+fn item_store_answer_is_ambiguous_naming_every_file_carrying_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = item_at(item_id(UUID_B));
+    write_item(root, "one.toml", &item);
+    write_item(root, "two.toml", &item);
+
+    let items = ItemStore::read(root);
+
+    match items.answer(root, &item.id) {
+        Err(AcceptedItemCause::Ambiguous { files }) => {
+            let mut expected = vec![
+                root.join(ITEM_STORE).join("one.toml"),
+                root.join(ITEM_STORE).join("two.toml"),
+            ];
+            let mut files = files;
+            expected.sort();
+            files.sort();
+            assert_eq!(files, expected);
+        }
+        other => panic!("expected ambiguous, got {other:?}"),
+    }
 }

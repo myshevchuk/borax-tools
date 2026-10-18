@@ -5720,6 +5720,14 @@ impl IndexStore for RecordOrderStore<'_> {
         }
         self.inner.write_fact(key, text)
     }
+
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        self.inner.list_facts(prefix)
+    }
+
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        self.inner.remove_fact(key)
+    }
 }
 
 /// design D4: inside a library, the admission's item and record are
@@ -6580,6 +6588,16 @@ impl borax_sources::store::IndexStore for WriteFailingCache {
     }
 
     fn write_fact(&self, _key: &str, _text: &str) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+
+    fn list_facts(&self, _prefix: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn remove_fact(&self, _key: &str) -> CacheWrite {
         CacheWrite::Failed {
             message: "write-failing cache".to_string(),
         }

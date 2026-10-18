@@ -10,14 +10,14 @@ use std::sync::{Arc, Barrier};
 
 use borax_core::content::hash_bytes;
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
-use borax_core::index::Fact;
-use borax_core::library::{EvidenceOrigin, IdentificationEvidence};
+use borax_core::index::{Fact, LibraryReference, reference_to_json};
+use borax_core::library::{ArtifactId, EvidenceOrigin, IdentificationEvidence, ItemId, LibraryId};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
 use borax_sources::cache::{Cache, CacheWrite, MemoryCache};
 use borax_sources::store::{
     ContentIndex, FORMAT_VERSION, FileCache, INDEX_FORMAT_VERSION, IndexStore, cache_root,
     content_key, create_atomically, create_atomically_with, data_root, entry_path, extracted_key,
-    hash_file, operator_key, write_atomically,
+    hash_file, operator_key, reference_key, references_prefix, write_atomically,
 };
 
 /// A [`Cache`] whose `put` always reports [`CacheWrite::Failed`]
@@ -43,6 +43,16 @@ impl IndexStore for WriteFailingCache {
     }
 
     fn write_fact(&self, _key: &str, _text: &str) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+
+    fn list_facts(&self, _prefix: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn remove_fact(&self, _key: &str) -> CacheWrite {
         CacheWrite::Failed {
             message: "write-failing cache".to_string(),
         }
@@ -1586,4 +1596,411 @@ fn concurrent_creates_of_one_path_leave_exactly_one_winner() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(entries, ["library.toml"]);
+}
+
+// --- references: one file each under `content/<hash>/refs/` (design D1,
+// D9) ---
+
+/// A canonical UUID whose last group is `n`.
+fn uuid_text(n: u32) -> String {
+    format!("018f2b36-7f21-7abc-8def-{n:012x}")
+}
+
+/// A reference to library `library` at `root`, artifact `artifact`,
+/// item `item`; the numbers sort as they are written.
+fn reference_of(root: &str, library: u32, artifact: u32, item: u32) -> LibraryReference {
+    LibraryReference {
+        library: LibraryId::parse(&uuid_text(library)).unwrap(),
+        root: PathBuf::from(root),
+        artifact: ArtifactId::parse(&uuid_text(artifact)).unwrap(),
+        item: ItemId::parse(&uuid_text(item)).unwrap(),
+    }
+}
+
+fn refs_dir(root: &Path, hash: &borax_core::content::ContentHash) -> PathBuf {
+    root.join("content").join(hash.to_string()).join("refs")
+}
+
+/// The file names in `directory`, sorted.
+fn file_names(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn reference_file(
+    root: &Path,
+    hash: &borax_core::content::ContentHash,
+    r: &LibraryReference,
+) -> PathBuf {
+    refs_dir(root, hash).join(format!("{}.json", r.name().unwrap()))
+}
+
+#[test]
+fn reference_key_names_a_file_in_the_hashs_refs_directory() {
+    let hash = hash_bytes(b"reference keys");
+    let root = Path::new("/data/root");
+
+    assert_eq!(references_prefix(&hash), format!("content/{hash}/refs"));
+    assert_eq!(
+        reference_key(&hash, "sha256-abc"),
+        format!("content/{hash}/refs/sha256-abc")
+    );
+    assert_eq!(
+        entry_path(root, &reference_key(&hash, "sha256-abc")),
+        Some(
+            root.join("content")
+                .join(hash.to_string())
+                .join("refs")
+                .join("sha256-abc.json")
+        )
+    );
+}
+
+#[test]
+fn put_reference_writes_one_file_named_for_its_key() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"put reference one file");
+    let reference = reference_of("/lib", 1, 2, 3);
+
+    let result = index.put_reference(&hash, &reference);
+
+    assert!(matches!(result, CacheWrite::Written), "got {result:?}");
+    assert_eq!(
+        file_names(&refs_dir(dir.path(), &hash)),
+        vec![format!("{}.json", reference.name().unwrap())]
+    );
+    assert_eq!(
+        std::fs::read_to_string(reference_file(dir.path(), &hash, &reference)).unwrap(),
+        reference_to_json(&reference).unwrap()
+    );
+    assert_eq!(
+        file_names(&dir.path().join("content").join(hash.to_string())),
+        vec!["refs"]
+    );
+}
+
+#[test]
+fn put_reference_replaces_the_file_of_the_same_key_whole() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"put reference replaces");
+    let first = reference_of("/lib", 1, 2, 3);
+    let second = reference_of("/lib", 1, 2, 4);
+    let _ = index.put_reference(&hash, &first);
+
+    let result = index.put_reference(&hash, &second);
+
+    assert!(matches!(result, CacheWrite::Written), "got {result:?}");
+    assert_eq!(file_names(&refs_dir(dir.path(), &hash)).len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(reference_file(dir.path(), &hash, &first)).unwrap(),
+        reference_to_json(&second).unwrap()
+    );
+    assert_eq!(index.references(&hash), vec![second]);
+}
+
+#[test]
+fn put_reference_for_another_root_writes_a_second_file() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"put reference second root");
+
+    let _ = index.put_reference(&hash, &reference_of("/one", 1, 2, 3));
+    let _ = index.put_reference(&hash, &reference_of("/two", 1, 2, 3));
+
+    assert_eq!(file_names(&refs_dir(dir.path(), &hash)).len(), 2);
+}
+
+#[test]
+fn put_reference_leaves_extracted_and_operator_json_byte_identical() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"reference leaves evidence");
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/ext"));
+    let _ = index.put_operator(
+        &hash,
+        &IdentificationEvidence {
+            identifier: doi_identifier("10.1000/op"),
+            origin: EvidenceOrigin::Supplied,
+        },
+    );
+    let hash_dir = dir.path().join("content").join(hash.to_string());
+    let extracted = std::fs::read(hash_dir.join("extracted.json")).unwrap();
+    let operator = std::fs::read(hash_dir.join("operator.json")).unwrap();
+
+    let result = index.put_reference(&hash, &reference_of("/lib", 1, 2, 3));
+
+    assert!(matches!(result, CacheWrite::Written), "got {result:?}");
+    assert_eq!(
+        std::fs::read(hash_dir.join("extracted.json")).unwrap(),
+        extracted
+    );
+    assert_eq!(
+        std::fs::read(hash_dir.join("operator.json")).unwrap(),
+        operator
+    );
+}
+
+#[test]
+fn put_extracted_and_put_operator_leave_every_reference_byte_identical() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"evidence leaves references");
+    let references = [reference_of("/one", 1, 2, 3), reference_of("/two", 1, 2, 3)];
+    for reference in &references {
+        let _ = index.put_reference(&hash, reference);
+    }
+    let before: Vec<Vec<u8>> = references
+        .iter()
+        .map(|r| std::fs::read(reference_file(dir.path(), &hash, r)).unwrap())
+        .collect();
+
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/ext"));
+    let _ = index.put_operator(
+        &hash,
+        &IdentificationEvidence {
+            identifier: doi_identifier("10.1000/op"),
+            origin: EvidenceOrigin::Overridden,
+        },
+    );
+
+    let after: Vec<Vec<u8>> = references
+        .iter()
+        .map(|r| std::fs::read(reference_file(dir.path(), &hash, r)).unwrap())
+        .collect();
+    assert_eq!(after, before);
+    assert_eq!(file_names(&refs_dir(dir.path(), &hash)).len(), 2);
+}
+
+#[test]
+fn references_of_an_entry_with_no_refs_directory_are_none() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"no refs directory");
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/ext"));
+
+    assert_eq!(index.references(&hash), Vec::new());
+    assert_eq!(
+        index.references(&hash_bytes(b"no entry at all")),
+        Vec::new()
+    );
+}
+
+#[test]
+fn references_are_in_root_then_library_then_artifact_order() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"reference order");
+    let in_order = vec![
+        reference_of("/a", 1, 1, 9),
+        reference_of("/a", 1, 2, 9),
+        reference_of("/a", 2, 1, 9),
+        reference_of("/b", 1, 1, 9),
+    ];
+    for position in [3, 1, 0, 2] {
+        let _ = index.put_reference(&hash, &in_order[position]);
+    }
+
+    assert_eq!(index.references(&hash), in_order);
+}
+
+#[test]
+fn references_skip_a_file_that_does_not_parse() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"references skip unparsable");
+    let good = reference_of("/good", 1, 2, 3);
+    let _ = index.put_reference(&hash, &good);
+    let broken = reference_of("/broken", 1, 2, 3);
+    std::fs::write(reference_file(dir.path(), &hash, &broken), b"not json").unwrap();
+
+    assert_eq!(index.references(&hash), vec![good]);
+}
+
+#[test]
+fn references_ignore_a_temporary_and_a_file_not_ending_json() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"references ignore strays");
+    let kept = reference_of("/kept", 1, 2, 3);
+    let _ = index.put_reference(&hash, &kept);
+    let stray = reference_to_json(&reference_of("/stray", 1, 2, 3)).unwrap();
+    let directory = refs_dir(dir.path(), &hash);
+    std::fs::write(directory.join(".tmp-12345-0"), &stray).unwrap();
+    std::fs::write(directory.join("sha256-0123.txt"), &stray).unwrap();
+    std::fs::write(directory.join("sha256-4567"), &stray).unwrap();
+
+    assert_eq!(index.references(&hash), vec![kept]);
+}
+
+#[test]
+fn reference_reads_the_file_of_its_key_as_absent_held_or_unreadable() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"reference three states");
+    let reference = reference_of("/lib", 1, 2, 3);
+
+    assert_eq!(index.reference(&hash, &reference), Fact::Absent);
+
+    let _ = index.put_reference(&hash, &reference);
+    assert_eq!(
+        index.reference(&hash, &reference),
+        Fact::Held(reference.clone())
+    );
+
+    std::fs::write(reference_file(dir.path(), &hash, &reference), b"not json").unwrap();
+    assert!(
+        matches!(index.reference(&hash, &reference), Fact::Unreadable(_)),
+        "got {:?}",
+        index.reference(&hash, &reference)
+    );
+}
+
+#[test]
+fn entry_is_unchanged_by_references() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"entry unchanged by references");
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/ext"));
+    let without = index.entry(&hash);
+
+    let _ = index.put_reference(&hash, &reference_of("/lib", 1, 2, 3));
+
+    assert_eq!(index.entry(&hash), without);
+}
+
+#[test]
+fn remove_reference_removes_only_its_own_file() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"remove reference own file");
+    let gone = reference_of("/gone", 1, 2, 3);
+    let stays = reference_of("/stays", 1, 2, 3);
+    let _ = index.put_extracted(&hash, &doi_identifier("10.1000/ext"));
+    let _ = index.put_reference(&hash, &gone);
+    let _ = index.put_reference(&hash, &stays);
+
+    let result = index.remove_reference(&hash, &gone);
+
+    assert!(matches!(result, CacheWrite::Written), "got {result:?}");
+    assert!(!reference_file(dir.path(), &hash, &gone).exists());
+    assert_eq!(index.references(&hash), vec![stays]);
+    assert_eq!(
+        index.entry(&hash).extracted,
+        Fact::Held(doi_identifier("10.1000/ext"))
+    );
+}
+
+#[test]
+fn remove_reference_of_an_absent_file_is_written() {
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"remove absent reference");
+
+    let result = index.remove_reference(&hash, &reference_of("/never", 1, 2, 3));
+
+    assert!(matches!(result, CacheWrite::Written), "got {result:?}");
+}
+
+#[test]
+fn memory_cache_lists_only_the_facts_directly_under_a_prefix() {
+    let cache = MemoryCache::new();
+    for key in [
+        "content/h/refs/b",
+        "content/h/refs/a",
+        "content/h/refs/nested/c",
+        "content/h/refs2/d",
+        "content/h/extracted",
+        "content/other/refs/e",
+    ] {
+        let _ = cache.write_fact(key, "{}");
+    }
+
+    assert_eq!(
+        cache.list_facts("content/h/refs"),
+        Ok(vec![
+            "content/h/refs/a".to_string(),
+            "content/h/refs/b".to_string()
+        ])
+    );
+    assert_eq!(cache.list_facts("content/none/refs"), Ok(Vec::new()));
+}
+
+#[test]
+fn memory_cache_removes_a_fact() {
+    let cache = MemoryCache::new();
+    let _ = cache.write_fact("content/h/refs/a", "{}");
+    let _ = cache.write_fact("content/h/refs/b", "{}");
+
+    let removed = cache.remove_fact("content/h/refs/a");
+    let again = cache.remove_fact("content/h/refs/a");
+
+    assert!(matches!(removed, CacheWrite::Written), "got {removed:?}");
+    assert!(matches!(again, CacheWrite::Written), "got {again:?}");
+    assert_eq!(cache.read_fact("content/h/refs/a"), None);
+    assert_eq!(
+        cache.read_fact("content/h/refs/b"),
+        Some(Ok("{}".to_string()))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn file_cache_list_facts_of_an_unreadable_directory_is_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let store = FileCache::new(dir.path());
+    let hash = hash_bytes(b"unreadable refs directory");
+    let _ = ContentIndex::new(FileCache::new(dir.path()))
+        .put_reference(&hash, &reference_of("/lib", 1, 2, 3));
+    let directory = refs_dir(dir.path(), &hash);
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let listed = store.list_facts(&references_prefix(&hash));
+
+    // Restored before the temp directory's own cleanup.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    if listed.is_ok() {
+        eprintln!(
+            "skipping file_cache_list_facts_of_an_unreadable_directory_is_an_error: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+    assert!(listed.is_err(), "got {listed:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn put_reference_with_a_root_that_is_not_utf8_fails_without_writing() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(dir.path()));
+    let hash = hash_bytes(b"non utf8 reference root");
+    let reference = LibraryReference {
+        root: PathBuf::from(OsString::from(std::ffi::OsStr::from_bytes(
+            b"/home/\xff/papers",
+        ))),
+        ..reference_of("/r", 1, 2, 3)
+    };
+
+    let result = index.put_reference(&hash, &reference);
+
+    assert!(
+        matches!(result, CacheWrite::Failed { .. }),
+        "got {result:?}"
+    );
+    assert!(
+        !dir.path().join("content").join(hash.to_string()).exists(),
+        "a refused write must leave nothing behind"
+    );
+    assert_eq!(index.references(&hash), Vec::new());
 }
