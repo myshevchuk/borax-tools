@@ -548,7 +548,7 @@ Green point: `Adopted`, `Unadopted::Unanswered` and
 
 ## 8. Documents and state
 
-- [ ] 8.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
+- [x] 8.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
       (Org, for CLI users). This is not the implementer's. Keep every
       existing example name. Sources:
       - this change's design.md (D1–D8, D10, and the illustrative lines);
@@ -574,7 +574,7 @@ Green point: `Adopted`, `Unadopted::Unanswered` and
       - `* Run logs`: `references` on `hit` and `miss`, the statuses and
         causes, `library-reference`, the `reference` entry kind with
         `repaired_from`, and the meanings D7 lists as changed.
-- [ ] 8.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
+- [x] 8.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
       (Markdown, Keep a Changelog). Extend the Unreleased entry from
       proposal.md and design.md. It covers:
       - references to libraries in the content index, and the order
@@ -584,7 +584,7 @@ Green point: `Adopted`, `Unadopted::Unanswered` and
       - reconcile's restoration and repair;
       - adoption through another library;
       - the schema-5 additions and changed meanings, under Changed.
-- [ ] 8.3 Orchestrator: read both diffs against the sources, for
+- [x] 8.3 Orchestrator: read both diffs against the sources, for
       anything invented and for anything dropped from the old text.
       Check the `#+AI_PASS` line the doc writer adds. Answer or remove
       every `TODO(docs)`.
