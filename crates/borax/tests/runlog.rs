@@ -816,6 +816,16 @@ impl borax_sources::store::IndexStore for WriteFailingCache {
             message: "write-failing cache".to_string(),
         }
     }
+
+    fn list_facts(&self, _prefix: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn remove_fact(&self, _key: &str) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
 }
 
 #[test]

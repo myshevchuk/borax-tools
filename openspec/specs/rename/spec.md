@@ -360,7 +360,7 @@ A collision suffix candidate equal to the name the file already carries SHALL be
   alike
 
 ### Requirement: An interactive question shows what the answer rests on
-Before an interactive run puts a question about a resolved file, it SHALL show the operator a description of that file comprising, as far as the run knows them: the file's name and its position among the run's files; the identifier used and where it was found; the services that supplied the record; the record's type, title, authors, date of issue, container title, volume, issue and pages; every title the file claims for itself, with where each was read; and the proposed name.
+Before an interactive run puts a question about a resolved file, it SHALL show the operator a description of that file comprising, as far as the run knows them: the file's name and its position among the run's files; the identifier used and, where it was looked up, where it was found; the services that supplied the record; the record's type, title, authors, date of issue, container title, volume, issue and pages; every title the file claims for itself, with where each was read; and the proposed name.
 
 A field the record does not hold, or holds as text that is empty or
 only spaces, SHALL be left out rather than shown empty. A field the
@@ -375,7 +375,23 @@ earlier run, supplied in an earlier run, or accepted over a title
 conflict in an earlier run, as the origin the content index kept it
 under says, and SHALL NOT name a pass of this run. Where the library
 answered and nothing was looked up, the description SHALL name the
-record's own identifier without claiming where it came from. No title SHALL be truncated, and no identifier SHALL be broken
+record's own identifier without claiming where it came from. The same
+holds where a library reference in the content index answered: nothing
+was looked up, and the identifier is the record's own.
+
+Where a library reference answered, the description's `record` line
+SHALL name the services the item's provenance records followed by `from
+the library at <root>`, with the reference's root, or `the library at
+<root>` alone where the provenance names no service. Where the file's
+entry held references that could not answer, the description SHALL
+carry one line labelled `reference` for each, after any `library` line,
+stating what the file's human output line states after `a library
+reference could not answer: `. Where references disagreed, it SHALL
+carry one line labelled `references`, stating `disagree: ` followed by
+what that line states after `library references disagree: `. The
+description of a file that was skipped carries the same lines, after
+its reason and any `library` line. Like every other line, these render
+what the file's resolution event carries. No title SHALL be truncated, and no identifier SHALL be broken
 across lines: one that cannot be read back in one piece is no longer
 evidence.
 
@@ -396,10 +412,13 @@ answer — is the question's to show and is not held to that. A pending
 record is a fact about the question being put: the verdict reported
 after the answer says what the answer made of it.
 
-The identifier the description names SHALL be the one the run looked
-up, with the pass that found it. A record may carry identifiers that
-were not looked up, and naming one of those as found would be evidence
-the run does not have.
+Where the run looked an identifier up, the identifier the description
+names SHALL be the one the run looked up, with the pass that found it.
+Where nothing was looked up, because the library or a library reference
+answered, it SHALL be the record's own identifier, named without where
+it was found, as above. A record may carry identifiers that were not
+looked up, and naming one of those as found would be evidence the run
+does not have.
 
 The description SHALL be written where the question is written, so that
 a run whose standard output is redirected still asks its questions with
@@ -432,8 +451,8 @@ change which questions are put or what their answers do.
 
 #### Scenario: A record from an earlier run
 - **WHEN** the content index answers for the file with the DOI an
-  earlier run extracted from it, and Crossref's response cache holds
-  that DOI's record
+  earlier run extracted from it, no library reference for its bytes
+  answering, and Crossref's response cache holds that DOI's record
 - **THEN** the description names the DOI as found by an earlier run,
   names Crossref as the service that supplied the record, and says no
   title was read from the file
@@ -465,15 +484,32 @@ change which questions are put or what their answers do.
 - **THEN** the description reports the volume and the pages
 
 #### Scenario: A cached answer names no origin
-- **WHEN** the content index answers for a file
+- **WHEN** the content index answers for a file with its evidence, no
+  library reference for its bytes answering
 - **THEN** the description names the identifier it looked up without
   naming an extraction pass of this run as where it was found, and
   says it comes from an earlier run
 
 #### Scenario: An operator's answer from an earlier run
 - **WHEN** the content index answers for a file with a DOI an operator
-  supplied in an earlier run
+  supplied in an earlier run, no library reference for its bytes
+  answering
 - **THEN** the description names the DOI as supplied in an earlier run
+
+#### Scenario: A reference answer described
+- **WHEN** an interactive run asks about a file outside any library
+  that a reference to the library at `/home/u/papers` answered for,
+  whose item's provenance names Crossref
+- **THEN** the description names the item's DOI without saying where it
+  was found, and its `record` line reads `Crossref, from the library at
+  /home/u/papers`
+
+#### Scenario: A reference that could not answer described
+- **WHEN** an interactive run asks about a file whose entry held a
+  reference to `/media/old`, which no longer exists, and whose evidence
+  answered
+- **THEN** the description carries a `reference` line saying
+  `/media/old is missing`
 
 #### Scenario: A candidate is described as pending
 - **WHEN** an interactive run describes the record a supplied DOI

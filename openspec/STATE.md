@@ -6,8 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-17, at 0.9.0 with `library-identity` merged and
-`reduce-content-index` implemented on its branch.
+Last reviewed: 2026-10-18, at 0.9.0 with `reduce-content-index` merged
+and `index-references-libraries` implemented on its branch.
 
 ## What is built
 
@@ -520,7 +520,12 @@ findings. `library-status` and `library-validated` gain `id` after
 `root`, omitted when there is no readable identity, and each human
 report line then ends `; library <uuid>`. Change 13 must read the
 identity when it stores a reference rather than assume one: a
-successful admission does not imply a `Present` identity. Its review
+successful admission does not imply a `Present` identity. Since
+`index-references-libraries` it does: the rename driver reads
+`library::identity` immediately before each reference write, `adopt`
+and `reconcile` once after their own store writes, and only `Present`
+writes; `Absent` and `Faulty` write and report nothing, and nothing
+mints for a reference. Its review
 turned up a restoration: `reconcile` over a directory with no library
 root rewrote stale records there, against the `library` requirement
 that such a run writes no library state, and would have minted an
@@ -566,9 +571,56 @@ response answers is the new `unanswered`, and `recorded` gains
 loses `content-index`. A hand check over a copy of the real corpus
 traced resolve, clear, an interactive supply, deletion of the data
 directory then reconcile, and adoption into a second library.
-Library references — reading, agreement, writing, restoration, root
-repair, and adoption through one — are `index-references-libraries`,
-change 13b, which follows.
+
+`index-references-libraries` is implemented on top, as change 13b and
+the fourth of Phase 4, and adds to schema 5 without a bump. An entry
+now also holds references to libraries, each its own file
+`content/<hash>/refs/<name>.json` holding `library`, `root`,
+`artifact` and `item`, its name `sha256-` of library, root and artifact
+joined by NUL, so a changed item keeps its file; each is replaced
+whole, writing one touches no evidence fact, and an unreadable one is
+skipped. `IndexStore` gains `list_facts` and `remove_fact`. Writers are
+an applying rename after each admission that returned a record
+(`Admitted::answers_with` is the item), `adopt` for each orphan it
+records (`Adoptions::owed`), and `reconcile` for every hash of every
+history (`library::references_owed`), after its operator restorations;
+`references::keep` writes nothing for a key holding the same item,
+rewrites one holding another or unreadable, and otherwise writes the
+reference and then removes the references of the same library and
+artifact at roots that are missing or hold no library or another one,
+reported as `repaired_from`. Nothing prunes a reference otherwise, so
+a deleted copy's stays `missing`. For a file its run's library does
+not answer for, references are read before the evidence
+(`pipeline::standing_in`, one `references::Libraries` per run reading
+each root once, by identity and item store, never the marker or the
+artifact record): one reachable reference answers, several only when
+their items carry one preferred identifier, and a reference answer is
+`hit` with `references` and no `evidence`, `record_retrieval`
+`library-reference`, no lookup, no extraction and no evidence on an
+admission. Disagreeing references fall to the evidence, and every
+reference read is reported with its status and cause, on the human
+line and in the interactive description as `reference` and
+`references` lines. `adopt`'s lookup settles references before the
+evidence; a record reached through one is `recorded` with retrieval
+`library-reference` and no evidence on its history entry, and
+`unanswered` may carry no `identifier` and gains `references`. The
+reference writes are `content-index-write` entries of kind
+`reference`, which render nothing unless they fail. A hand check over
+copies of a library built from the real corpus traced reconcile
+restoring `refs/`, an outside resolve answered from the library, an
+`rsync` copy reconciled in both places agreeing, the copy moved and
+reported `missing`, a reconcile at the moved root naming
+`repaired_from`, and after `cache --clear` an adoption into a third
+library recorded through the reference.
+
+Its review found that a stale-root repair could remove a reference
+another run had rewritten, or whose root held the library again,
+between the listing and the removal. `keep` now re-reads each stale
+reference and its root from disk just before removing it, and leaves
+one that changed. The window between that check and the removal
+remains, since no filesystem offers a portable compare-and-delete; a
+reference lost in it is restored by the next `reconcile` in the
+library it names.
 
 ## Not built yet
 

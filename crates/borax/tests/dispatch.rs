@@ -20,7 +20,7 @@ use borax::event::{
     IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
     MatchCheckStep, Repair, RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome,
     SkipReason, Submission, SubmissionAcceptance, SyntaxStep, TitlesStep, WriteStep, WrittenEntry,
-    human_line,
+    human_line, json_line,
 };
 use borax::library::{self, ARTIFACT_STORE, ITEM_STORE, STATE_DIR};
 use borax::pipeline::Documents;
@@ -31,10 +31,10 @@ use borax::session::{Answer, Asker, Outcome, Question, Session, TextPrompt};
 use borax_core::bib_output::{DuplicatePolicy, MergeOutcome, merge};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Doi, Identifier, Isbn};
-use borax_core::index::Fact;
+use borax_core::index::{Fact, LibraryReference};
 use borax_core::library::{
     ArtifactId, ArtifactRecord, DuplicateReason, EvidenceOrigin, HashEntry, IdentificationEvidence,
-    Item, ItemId, RunId as LibraryRunId,
+    Item, ItemId, LibraryId, LibraryIdentity, RunId as LibraryRunId,
 };
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source as FieldSource};
 use borax_core::tables::{LookupTables, Lookups, NoTables, Table, TableSpec, ValueKind};
@@ -504,7 +504,9 @@ fn sections_for(identifier: &str, source: &str, tier: Option<&str>, cached: bool
                     reason: "no-library".to_string(),
                 },
                 content_index: ContentIndexSection {
-                    read: IndexReadStep::Miss,
+                    read: IndexReadStep::Miss {
+                        references: Vec::new(),
+                    },
                     write: WriteStep::Written,
                 },
                 extraction: ExtractionSection {
@@ -571,7 +573,9 @@ fn text_without_identifier_skip(path: PathBuf) -> Event {
                 reason: "no-library".to_string(),
             },
             content_index: ContentIndexSection {
-                read: IndexReadStep::Miss,
+                read: IndexReadStep::Miss {
+                    references: Vec::new(),
+                },
                 write: WriteStep::NotAttempted { reason: reason() },
             },
             extraction: ExtractionSection {
@@ -5720,6 +5724,14 @@ impl IndexStore for RecordOrderStore<'_> {
         }
         self.inner.write_fact(key, text)
     }
+
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        self.inner.list_facts(prefix)
+    }
+
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        self.inner.remove_fact(key)
+    }
 }
 
 /// design D4: inside a library, the admission's item and record are
@@ -6580,6 +6592,16 @@ impl borax_sources::store::IndexStore for WriteFailingCache {
     }
 
     fn write_fact(&self, _key: &str, _text: &str) -> CacheWrite {
+        CacheWrite::Failed {
+            message: "write-failing cache".to_string(),
+        }
+    }
+
+    fn list_facts(&self, _prefix: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn remove_fact(&self, _key: &str) -> CacheWrite {
         CacheWrite::Failed {
             message: "write-failing cache".to_string(),
         }
@@ -10185,13 +10207,18 @@ fn reconcile_rehash_flag_reaches_the_library() {
         "without --rehash the fast path must hide the change, got {plain:?}"
     );
 
-    let rehashed = events_for(
-        &Command::reconcile(Some(root.clone()), true),
-        &Configs::uniform(effective.clone()),
-        &adapters,
-        &mut Session::batch(),
-    )
-    .unwrap();
+    // The accepted change mints the identity, and the record links an
+    // item, so the run also writes a reference for each of the record's
+    // hashes. This test is about the repair and the totals.
+    let rehashed = without_reference_writes(
+        events_for(
+            &Command::reconcile(Some(root.clone()), true),
+            &Configs::uniform(effective.clone()),
+            &adapters,
+            &mut Session::batch(),
+        )
+        .unwrap(),
+    );
 
     let new_hash = hash_bytes(&edited);
     assert_eq!(rehashed.len(), 2, "got {rehashed:?}");
@@ -15909,11 +15936,11 @@ fn adopt_records_the_identifier_with_origin_adopted() {
     );
 }
 
-/// design D7: adoption writes nothing to the content index — the
+/// design D7: adoption writes no evidence to the content index — the
 /// identifier is already there, and adoption's own origin belongs to
-/// the library.
+/// the library. (It writes references; `entry` reads none.)
 #[test]
-fn adopt_writes_nothing_to_the_content_index() {
+fn adopt_writes_no_evidence_to_the_content_index() {
     let library = real_library();
     let root = library.path().to_path_buf();
     write_real_file(&root, "orphan.pdf", b"task-g4 writes-nothing bytes");
@@ -15932,7 +15959,7 @@ fn adopt_writes_nothing_to_the_content_index() {
     assert_eq!(
         index.entry(&hash),
         before,
-        "adoption must write nothing to the content index"
+        "adoption must write no evidence to the content index"
     );
 }
 
@@ -15958,7 +15985,8 @@ fn adopt_with_evidence_the_response_cache_does_not_hold_is_unanswered_naming_the
         vec![(
             "orphan.pdf".to_string(),
             Adoption::Unanswered {
-                identifier: identifier.to_string(),
+                identifier: Some(identifier.to_string()),
+                references: Vec::new(),
             }
         )],
         "got {:?}",
@@ -17340,7 +17368,10 @@ fn index_held_retry_runs_no_title_check_writes_nothing_and_keeps_its_origin(
                  titles would say"
             );
             match &sections.content_index.read {
-                IndexReadStep::Hit { evidence } => {
+                IndexReadStep::Hit {
+                    evidence: Some(evidence),
+                    ..
+                } => {
                     assert_eq!(evidence.origin, origin_str, "got {evidence:?}");
                 }
                 other => panic!("expected a content-index hit, got {other:?}"),
@@ -24679,4 +24710,2774 @@ fn deleting_derived_state_leaves_the_identity_as_it_was() {
     fs::remove_file(root.join("Derived2024.bib")).unwrap();
 
     assert_eq!(status(&root), before);
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries: fixtures
+// ---------------------------------------------------------------------
+
+/// Writes the identity file of the library at `root`, creating `.borax/`,
+/// and hands back the identity.
+fn seed_library_identity(root: &Path) -> LibraryId {
+    let id = LibraryId::from_uuid(uuid::Uuid::now_v7());
+    fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+    fs::write(
+        library::identity_file(root),
+        LibraryIdentity { id: id.clone() }.to_toml(),
+    )
+    .unwrap();
+    id
+}
+
+/// A library another library's index entry can refer to: an identity, and
+/// one item carrying `record`, with a reference to that item from an
+/// artifact the library need not hold (reaching a reference reads the
+/// identity and the item store alone).
+struct ReferencedLibrary {
+    item: Item,
+    reference: LibraryReference,
+}
+
+fn referenced_library(root: &Path, record: Record) -> ReferencedLibrary {
+    fs::create_dir_all(root).unwrap();
+    let library = seed_library_identity(root);
+    let item = Item {
+        id: ItemId::from_uuid(uuid::Uuid::now_v7()),
+        record,
+    };
+    write_lib_item(root, "referenced", &item);
+    let reference = LibraryReference {
+        library,
+        root: root.to_path_buf(),
+        artifact: ArtifactId::from_uuid(uuid::Uuid::now_v7()),
+        item: item.id.clone(),
+    };
+    ReferencedLibrary { item, reference }
+}
+
+/// The entry a reference write reports, as JSON.
+fn reference_entry_json(
+    reference: &LibraryReference,
+    repaired_from: &[&Path],
+) -> serde_json::Value {
+    let mut entry = serde_json::json!({
+        "kind": "reference",
+        "library": reference.library.to_string(),
+        "root": reference.root.display().to_string(),
+        "artifact": reference.artifact.to_string(),
+        "item": reference.item.to_string(),
+    });
+    if !repaired_from.is_empty() {
+        entry["repaired_from"] = serde_json::json!(
+            repaired_from
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+    entry
+}
+
+/// The `content-index-write` event of a reference written for `hash` at
+/// `path`, as JSON.
+fn reference_write_json(
+    path: &Path,
+    hash: &ContentHash,
+    reference: &LibraryReference,
+    repaired_from: &[&Path],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": SCHEMA,
+        "event": "content-index-write",
+        "path": path.display().to_string(),
+        "hash": hash.to_string(),
+        "entry": reference_entry_json(reference, repaired_from),
+        "write": {"status": "written"},
+    })
+}
+
+/// Every `content-index-write` of `events` that writes a reference, as
+/// JSON, in stream order.
+fn reference_writes(events: &[Event]) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ContentIndexWrite {
+                    entry: WrittenEntry::Reference { .. },
+                    ..
+                }
+            )
+        })
+        .map(|event| serde_json::from_str(&json_line(event)).unwrap())
+        .collect()
+}
+
+/// `events` without the `content-index-write` events that write a
+/// reference.
+fn without_reference_writes(events: Vec<Event>) -> Vec<Event> {
+    events
+        .into_iter()
+        .filter(|event| {
+            !matches!(
+                event,
+                Event::ContentIndexWrite {
+                    entry: WrittenEntry::Reference { .. },
+                    ..
+                }
+            )
+        })
+        .collect()
+}
+
+/// The reference the library at `root` owes for `hash`: its identity,
+/// the root, and the one record holding `hash` with the item it answers
+/// with for them.
+fn expected_reference(root: &Path, hash: &ContentHash) -> LibraryReference {
+    let library::Identity::Present(library) = library::identity(root) else {
+        panic!("the library at {root:?} must hold an identity")
+    };
+    let records = library::ArtifactStore::read(root);
+    let holding = records.by_hash(hash);
+    let [record] = holding.as_slice() else {
+        panic!("exactly one record must hold the bytes: got {holding:?}")
+    };
+    LibraryReference {
+        library,
+        root: root.to_path_buf(),
+        artifact: record.id.clone(),
+        item: record
+            .item_for(hash)
+            .expect("the record must answer with an item for the bytes")
+            .clone(),
+    }
+}
+
+/// An [`Effective`] with the default `[auth][year]` template and no file
+/// passed over for being already named.
+fn named_effective() -> Effective {
+    effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.rename = Some(RenameLayer {
+            collision: None,
+            batch: None,
+            skip_named: Some(false),
+        });
+    })
+}
+
+/// Runs `command` in the library at `root` over the real filesystem, and
+/// hands back its events.
+fn run_in<S: IndexStore>(
+    root: &Path,
+    index: &ContentIndex<S>,
+    documents: &FakeDocuments,
+    sources: &[&dyn Source],
+    effective: Effective,
+    command: &Command,
+    session: &mut Session<'_>,
+) -> Vec<Event> {
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents,
+        sources,
+        index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.to_path_buf()),
+        state_root: None,
+    };
+    events_for(command, &Configs::uniform(effective), &adapters, session).unwrap()
+}
+
+/// Runs `command` in the library at `root` through `dispatch`, and hands
+/// back its outcome, standard output and standard error.
+fn dispatch_in<S: IndexStore>(
+    root: &Path,
+    index: &ContentIndex<S>,
+    documents: &FakeDocuments,
+    sources: &[&dyn Source],
+    effective: Effective,
+    command: Command,
+    json: bool,
+) -> (Outcome, String, String) {
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents,
+        sources,
+        index,
+        filesystem: &RealFilesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: Some(root.to_path_buf()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let outcome = dispatch(
+        &cli(command, json),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+        &mut Streams {
+            out: &mut out,
+            err: &mut err,
+        },
+    );
+    (
+        outcome,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+/// Runs `borax reconcile` in the library at `root`, answering from
+/// `index`.
+fn reconcile_in<S: IndexStore>(root: &Path, index: &ContentIndex<S>) -> Vec<Event> {
+    run_in(
+        root,
+        index,
+        &FakeDocuments::new(),
+        &[],
+        resolve(Vec::new()).unwrap(),
+        &Command::reconcile(Some(root.to_path_buf()), false),
+        &mut Session::batch(),
+    )
+}
+
+/// One file in a library, named `original.pdf`, that a Crossref fake
+/// resolves to a record by `family`, and that is renamed to
+/// `<family>2024.pdf`. `documents` knows the file at both names.
+struct Filed {
+    _library: tempfile::TempDir,
+    root: PathBuf,
+    path: PathBuf,
+    target: PathBuf,
+    hash: ContentHash,
+    documents: FakeDocuments,
+    crossref: KeyedSource,
+}
+
+fn filed(seed: &str, family: &str) -> Filed {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = format!("g13 {seed} bytes");
+    let path = write_real_file(&root, "original.pdf", bytes.as_bytes());
+    let target = root.join(format!("{family}2024.pdf"));
+    let hash = hash_bytes(bytes.as_bytes());
+    let doi_value = format!("10.1000/g13-{seed}");
+    let documents = FakeDocuments::new()
+        .with_file(&path, hash.clone(), pdf_with_embedded_doi(&doi_value))
+        .with_file(&target, hash.clone(), pdf_with_embedded_doi(&doi_value));
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        &format!("doi:{doi_value}"),
+        record_by(family, 2024, &doi_value),
+    );
+    Filed {
+        _library: library,
+        root,
+        path,
+        target,
+        hash,
+        documents,
+        crossref,
+    }
+}
+
+impl Filed {
+    /// An applying batch rename of `path`.
+    fn apply<S: IndexStore>(&self, index: &ContentIndex<S>) -> Vec<Event> {
+        self.rename(index, &self.path, true)
+    }
+
+    /// An applying batch rename of the file at its new name.
+    fn apply_target<S: IndexStore>(&self, index: &ContentIndex<S>) -> Vec<Event> {
+        self.rename(index, &self.target, true)
+    }
+
+    fn rename<S: IndexStore>(
+        &self,
+        index: &ContentIndex<S>,
+        path: &Path,
+        apply: bool,
+    ) -> Vec<Event> {
+        let sources: Vec<&dyn Source> = vec![&self.crossref];
+        run_in(
+            &self.root,
+            index,
+            &self.documents,
+            &sources,
+            named_effective(),
+            &Command::rename(vec![path.to_path_buf()], apply),
+            &mut Session::batch(),
+        )
+    }
+}
+
+/// Every file under `root`, with its bytes, keyed by its path below `root`.
+fn files_below(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    snapshot(root)
+        .into_iter()
+        .map(|(path, bytes)| (path.strip_prefix(root).unwrap().to_path_buf(), bytes))
+        .collect()
+}
+
+/// A content-index store that fails every write of a reference and
+/// forwards everything else.
+struct ReferenceWriteFailing<S: IndexStore> {
+    inner: S,
+}
+
+impl<S: IndexStore> IndexStore for ReferenceWriteFailing<S> {
+    fn read_fact(&self, key: &str) -> Option<Result<String, String>> {
+        self.inner.read_fact(key)
+    }
+
+    fn write_fact(&self, key: &str, text: &str) -> CacheWrite {
+        match key.contains("/refs/") {
+            true => CacheWrite::Failed {
+                message: "reference store full".to_string(),
+            },
+            false => self.inner.write_fact(key, text),
+        }
+    }
+
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        self.inner.list_facts(prefix)
+    }
+
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        self.inner.remove_fact(key)
+    }
+}
+
+/// A store that records, each time a reference is written, whether the
+/// library at `root` already held an artifact record.
+struct ReferenceOrderStore {
+    root: PathBuf,
+    inner: MemoryCache,
+    record_existed: Arc<Mutex<Vec<bool>>>,
+}
+
+impl IndexStore for ReferenceOrderStore {
+    fn read_fact(&self, key: &str) -> Option<Result<String, String>> {
+        self.inner.read_fact(key)
+    }
+
+    fn write_fact(&self, key: &str, text: &str) -> CacheWrite {
+        if key.contains("/refs/") {
+            self.record_existed
+                .lock()
+                .unwrap()
+                .push(!library::ArtifactStore::read(&self.root).is_empty());
+        }
+        self.inner.write_fact(key, text)
+    }
+
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        self.inner.list_facts(prefix)
+    }
+
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        self.inner.remove_fact(key)
+    }
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 4.1: resolution through references
+// ---------------------------------------------------------------------
+
+/// design D4, D5: outside any library, a reference to a library that
+/// can be reached answers for the file, and no request is made.
+#[test]
+fn resolve_outside_a_library_is_answered_by_a_reachable_reference_with_no_request() {
+    let parent = tempdir().unwrap();
+    let referenced = referenced_library(
+        &parent.path().join("papers"),
+        record_by("Referenced", 2015, "10.1000/g13-resolve-reference"),
+    );
+    let path = parent.path().join("Downloads").join("paper.pdf");
+    let hash = hash_for("g13 resolve through a reference");
+    let documents = FakeDocuments::new().with_open_error(
+        &path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+
+    let events = events_for(
+        &Command::resolve(vec![path.clone()]),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let resolved: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Resolved { .. }))
+        .collect();
+    let [
+        Event::Resolved {
+            record, sections, ..
+        },
+    ] = resolved.as_slice()
+    else {
+        panic!("expected one resolved event: got {events:?}")
+    };
+    assert_eq!(**record, referenced.item.record);
+    assert_eq!(
+        serde_json::to_value(&sections.content_index.read).unwrap(),
+        serde_json::json!({
+            "status": "hit",
+            "references": [{
+                "library": referenced.reference.library.to_string(),
+                "root": referenced.reference.root.display().to_string(),
+                "artifact": referenced.reference.artifact.to_string(),
+                "item": referenced.reference.item.to_string(),
+                "status": "answered",
+            }]
+        })
+    );
+    assert!(
+        matches!(
+            sections.record_retrieval,
+            Some(RetrievedFrom::LibraryReference { .. })
+        ),
+        "got {:?}",
+        sections.record_retrieval
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "a resolution writes no reference: got {events:?}"
+    );
+}
+
+/// An edit made to an item file while the run is under way, made when
+/// the file at `watched` is hashed.
+struct EditingDocuments {
+    inner: FakeDocuments,
+    watched: PathBuf,
+    edit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl Documents for EditingDocuments {
+    fn hash(&self, path: &Path) -> Result<ContentHash, ExtractionError> {
+        if path == self.watched {
+            if let Some(edit) = self.edit.lock().unwrap().take() {
+                edit();
+            }
+        }
+        self.inner.hash(path)
+    }
+
+    fn open(&self, path: &Path) -> Result<Box<dyn PdfSource>, ExtractionError> {
+        self.inner.open(path)
+    }
+}
+
+/// design D4: `resolve_batch` shares one `Libraries`, so a library
+/// referenced by two files is read once. At concurrency 1 the second
+/// file is hashed after the first is settled, and an edit made then to
+/// the library's second item is not seen.
+#[test]
+fn resolve_batch_reads_a_referenced_library_once_for_two_files() {
+    let parent = tempdir().unwrap();
+    let root = parent.path().join("papers");
+    let first = referenced_library(&root, record_by("First", 2015, "10.1000/g13-first"));
+    let second_item = Item {
+        id: ItemId::from_uuid(uuid::Uuid::now_v7()),
+        record: record_by("Second", 2016, "10.1000/g13-second"),
+    };
+    write_lib_item(&root, "second", &second_item);
+    let second_reference = LibraryReference {
+        artifact: ArtifactId::from_uuid(uuid::Uuid::now_v7()),
+        item: second_item.id.clone(),
+        ..first.reference.clone()
+    };
+    let (one, two) = (parent.path().join("one.pdf"), parent.path().join("two.pdf"));
+    let (hash_one, hash_two) = (hash_for("g13 batch one"), hash_for("g13 batch two"));
+    let unopenable = |error: &str| ExtractionError::Unreadable {
+        message: error.to_string(),
+    };
+    let inner = FakeDocuments::new()
+        .with_open_error(&one, hash_one.clone(), unopenable("never opened"))
+        .with_open_error(&two, hash_two.clone(), unopenable("never opened"));
+    let item_file = root
+        .join(ITEM_STORE)
+        .join(format!("second.{}.toml", second_item.id));
+    let edited = Item {
+        id: second_item.id.clone(),
+        record: record_by("Edited", 2017, "10.1000/g13-edited"),
+    };
+    let edit_path = item_file.clone();
+    let edited_text = edited.to_toml();
+    let documents = EditingDocuments {
+        inner,
+        watched: two.clone(),
+        edit: Mutex::new(Some(Box::new(move || {
+            fs::write(&edit_path, edited_text).unwrap();
+        }))),
+    };
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash_one, &first.reference);
+    let _ = index.put_reference(&hash_two, &second_reference);
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let effective = effective_with(|layer| {
+        layer.network = Some(NetworkLayer {
+            concurrency: Some(1),
+            ..NetworkLayer::default()
+        });
+    });
+
+    let events = events_for(
+        &Command::resolve(vec![one.clone(), two.clone()]),
+        &Configs::uniform(effective),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+
+    let records: Vec<Record> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Resolved { record, .. } => Some((**record).clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        records,
+        vec![first.item.record.clone(), second_item.record.clone()],
+        "the second file is answered from the first read of the library, not the edit \
+         made between the two: got {events:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&item_file).unwrap(),
+        edited.to_toml(),
+        "setup: the edit was made"
+    );
+}
+
+/// design D8: the question an interactive run puts over a reference
+/// answer rests on a description whose `record` line names the library
+/// at its root.
+#[test]
+fn an_interactive_question_over_a_reference_answer_names_the_library_at_its_root() {
+    let parent = tempdir().unwrap();
+    let root = parent.path().join("papers");
+    let referenced = referenced_library(&root, record_by("Smith", 2015, "10.1000/g13-question"));
+    let path = parent.path().join("Downloads").join("paper.pdf");
+    let hash = hash_for("g13 question through a reference");
+    let documents = FakeDocuments::new().with_open_error(
+        &path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let state = tempdir().unwrap();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: Some(state.path().to_path_buf()),
+    };
+    let mut asker = ScriptedAsker::new(vec![Answer::Rename]);
+
+    let _ = events_for(
+        &Command::rename(vec![path.clone()], false),
+        &Configs::uniform(effective_with_default_template("[auth][year]")),
+        &adapters,
+        &mut Session::interactive(&mut asker),
+    )
+    .unwrap();
+
+    let asked = asker.questions_asked();
+    assert_eq!(asked.len(), 1, "got {asked:?}");
+    let described = asked[0].description.join("\n");
+    assert!(
+        asked[0].description.iter().any(|line| {
+            line.starts_with("record")
+                && line.ends_with(&format!("the library at {}", root.display()))
+        }),
+        "got {described}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 5.1: the rename driver writes a
+// reference for each admission it records (design D2, D3, D10)
+// ---------------------------------------------------------------------
+
+/// An already-named, tracked file in a library with an identity: the
+/// file, its item and its record agree, so admitting it writes nothing
+/// to the library.
+struct Tracked {
+    _library: tempfile::TempDir,
+    root: PathBuf,
+    path: PathBuf,
+    hash: ContentHash,
+    id: LibraryId,
+    item: Item,
+    record: ArtifactRecord,
+    documents: FakeDocuments,
+}
+
+fn tracked_and_named(seed: &str, with_identity: bool) -> Tracked {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let id = match with_identity {
+        true => seed_library_identity(&root),
+        false => LibraryId::from_uuid(uuid::Uuid::now_v7()),
+    };
+    let bytes = format!("g13 {seed} bytes");
+    let path = write_real_file(&root, "Smith2024.pdf", bytes.as_bytes());
+    let hash = hash_bytes(bytes.as_bytes());
+    let (size, modified_millis) = real_stat(&path);
+    let item = Item {
+        id: ItemId::from_uuid(uuid::Uuid::now_v7()),
+        record: record_by("Smith", 2024, &format!("10.1000/g13-{seed}")),
+    };
+    write_lib_item(&root, "smith", &item);
+    let record = ArtifactRecord {
+        id: ArtifactId::from_uuid(uuid::Uuid::now_v7()),
+        item: Some(item.id.clone()),
+        path: "Smith2024.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![hash_entry_for(hash.clone(), "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+    let documents = FakeDocuments::new().with_file(&path, hash.clone(), pdf_with_no_identifier());
+    Tracked {
+        _library: library,
+        root,
+        path,
+        hash,
+        id,
+        item,
+        record,
+        documents,
+    }
+}
+
+impl Tracked {
+    fn reference(&self) -> LibraryReference {
+        LibraryReference {
+            library: self.id.clone(),
+            root: self.root.clone(),
+            artifact: self.record.id.clone(),
+            item: self.item.id.clone(),
+        }
+    }
+
+    fn apply<S: IndexStore>(&self, index: &ContentIndex<S>) -> Vec<Event> {
+        let panics = PanicSource {
+            name: SourceName::Crossref,
+        };
+        let sources: Vec<&dyn Source> = vec![&panics];
+        run_in(
+            &self.root,
+            index,
+            &self.documents,
+            &sources,
+            named_effective(),
+            &Command::rename(vec![self.path.clone()], true),
+            &mut Session::batch(),
+        )
+    }
+}
+
+#[test]
+fn an_applying_rename_writes_a_reference_for_the_admitted_bytes() {
+    let filed = filed("reference-written", "Written");
+    let library = seed_library_identity(&filed.root);
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = filed.apply(&index);
+
+    assert!(filed.target.exists(), "the file must move: got {events:?}");
+    let reference = expected_reference(&filed.root, &filed.hash);
+    assert_eq!(reference.library, library);
+    assert_eq!(index.references(&filed.hash), vec![reference.clone()]);
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &filed.target,
+            &filed.hash,
+            &reference,
+            &[]
+        )]
+    );
+}
+
+#[test]
+fn an_applying_rename_writes_the_reference_after_the_artifact_record() {
+    let filed = filed("reference-after-record", "AfterRecord");
+    let store = ReferenceOrderStore {
+        root: filed.root.clone(),
+        inner: MemoryCache::new(),
+        record_existed: Arc::new(Mutex::new(Vec::new())),
+    };
+    let observed = Arc::clone(&store.record_existed);
+    let index = ContentIndex::new(store);
+
+    let events = filed.apply(&index);
+
+    assert_eq!(reference_writes(&events).len(), 1, "got {events:?}");
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![true],
+        "the library's record must be on disk when the reference is written"
+    );
+}
+
+#[test]
+fn an_already_named_tracked_file_admitted_by_an_applying_run_writes_its_missing_reference() {
+    let tracked = tracked_and_named("already-named", true);
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = tracked.apply(&index);
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::AlreadyNamed { path } if path == &tracked.path)),
+        "got {events:?}"
+    );
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &tracked.path,
+            &tracked.hash,
+            &tracked.reference(),
+            &[]
+        )]
+    );
+    assert_eq!(index.references(&tracked.hash), vec![tracked.reference()]);
+}
+
+#[test]
+fn an_applying_rerun_over_a_held_reference_writes_and_reports_nothing() {
+    let filed = filed("reference-held", "Held");
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    filed.apply(&index);
+    let before = snapshot(index_dir.path());
+    assert!(
+        before
+            .keys()
+            .any(|path| path.to_string_lossy().contains("refs")),
+        "setup: the first run must have written a reference: got {before:?}"
+    );
+
+    let events = filed.apply_target(&index);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "got {events:?}"
+    );
+    assert_eq!(snapshot(index_dir.path()), before);
+}
+
+/// A file admitted under the wrong record by an applying run, and then
+/// re-identified by an operator who supplies the right identifier: the
+/// second run re-links the record, which is an admission it reports.
+struct Reidentified {
+    _library: tempfile::TempDir,
+    root: PathBuf,
+    hash: ContentHash,
+    index: ContentIndex<MemoryCache>,
+    first_references: Vec<LibraryReference>,
+    second_events: Vec<Event>,
+    right_target: PathBuf,
+}
+
+fn reidentified_in_a_library(seed: &str) -> Reidentified {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let bytes = format!("g13 {seed} bytes");
+    let original = write_real_file(&root, "original.pdf", bytes.as_bytes());
+    let hash = hash_bytes(bytes.as_bytes());
+    let wrong_target = root.join("Wrong2020.pdf");
+    let right_target = root.join("Right2021.pdf");
+    let (wrong, right) = (
+        format!("10.1000/g13-{seed}-wrong"),
+        format!("10.1000/g13-{seed}-right"),
+    );
+    let documents = FakeDocuments::new()
+        .with_file(&original, hash.clone(), pdf_with_embedded_doi(&wrong))
+        .with_file(&wrong_target, hash.clone(), pdf_with_embedded_doi(&wrong));
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(&format!("doi:{wrong}"), record_by("Wrong", 2020, &wrong))
+        .answering(&format!("doi:{right}"), record_by("Right", 2021, &right));
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    run_in(
+        &root,
+        &index,
+        &documents,
+        &sources,
+        named_effective(),
+        &Command::rename(vec![original.clone()], true),
+        &mut Session::batch(),
+    );
+    let first_references = index.references(&hash);
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some(right.clone())]);
+    let second_events = run_in(
+        &root,
+        &index,
+        &documents,
+        &sources,
+        named_effective(),
+        &Command::rename(vec![wrong_target], false),
+        &mut Session::interactive(&mut asker),
+    );
+    Reidentified {
+        _library: library,
+        root,
+        hash,
+        index,
+        first_references,
+        second_events,
+        right_target,
+    }
+}
+
+#[test]
+fn a_reidentification_rewrites_the_reference_with_the_new_item() {
+    let run = reidentified_in_a_library("reidentify-rewrites");
+    let before = &run.first_references;
+    assert_eq!(before.len(), 1, "setup: got {before:?}");
+
+    let after = expected_reference(&run.root, &run.hash);
+
+    assert_ne!(after.item, before[0].item, "the record must be re-linked");
+    assert_eq!(after.artifact, before[0].artifact);
+    assert_eq!(
+        run.index.references(&run.hash),
+        vec![after.clone()],
+        "the key's file is replaced, not joined by a second"
+    );
+    assert_eq!(
+        reference_writes(&run.second_events),
+        vec![reference_write_json(
+            &run.right_target,
+            &run.hash,
+            &after,
+            &[]
+        )]
+    );
+}
+
+#[test]
+fn an_applying_rename_reports_the_reference_after_the_admission_and_before_the_evidence() {
+    let run = reidentified_in_a_library("reference-order");
+    let events = &run.second_events;
+
+    let at = |wanted: &dyn Fn(&Event) -> bool| {
+        events
+            .iter()
+            .position(wanted)
+            .unwrap_or_else(|| panic!("no such event in {events:?}"))
+    };
+    let renamed = at(&|event| matches!(event, Event::Renamed { .. }));
+    let admission = at(&|event| {
+        matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Relinked { .. },
+                ..
+            }
+        )
+    });
+    let reference = at(&|event| {
+        matches!(
+            event,
+            Event::ContentIndexWrite {
+                entry: WrittenEntry::Reference { .. },
+                ..
+            }
+        )
+    });
+    let evidence = at(&|event| {
+        matches!(
+            event,
+            Event::ContentIndexWrite {
+                entry: WrittenEntry::Evidence { .. },
+                ..
+            }
+        )
+    });
+    assert!(
+        renamed < admission && admission < reference && reference < evidence,
+        "renamed {renamed}, admission {admission}, reference {reference}, evidence {evidence}: \
+         got {events:?}"
+    );
+}
+
+#[test]
+fn a_separated_file_is_referenced_as_its_new_artifact_and_the_old_reference_is_kept() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let identity = seed_library_identity(&root);
+    let path = write_real_file(&root, "original.pdf", b"g13 other work bytes");
+    let new_hash = hash_bytes(b"g13 other work bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: record_by("Original", 2020, "10.1000/g13-sep-original"),
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("g13 earlier bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+    let old_hash = hash_for("g13 earlier bytes");
+    let old_reference = LibraryReference {
+        library: identity.clone(),
+        root: root.clone(),
+        artifact: held.id.clone(),
+        item: item.id.clone(),
+    };
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&old_hash, &old_reference);
+    let documents =
+        FakeDocuments::new().with_file(&path, new_hash.clone(), pdf_with_no_identifier());
+    let crossref = KeyedSource::new(SourceName::Crossref).answering(
+        "doi:10.1000/g13-sep-other",
+        record_by("Other", 2022, "10.1000/g13-sep-other"),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("doi:10.1000/g13-sep-other".to_string())]);
+
+    let events = run_in(
+        &root,
+        &index,
+        &documents,
+        &sources,
+        named_effective(),
+        &Command::rename(vec![path.clone()], false),
+        &mut Session::interactive(&mut asker),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Separated { .. },
+                ..
+            }
+        )),
+        "got {events:?}"
+    );
+    let new_reference = expected_reference(&root, &new_hash);
+    assert_ne!(new_reference.artifact, held.id);
+    assert_eq!(index.references(&new_hash), vec![new_reference.clone()]);
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &root.join("Other2022.pdf"),
+            &new_hash,
+            &new_reference,
+            &[]
+        )]
+    );
+    assert_eq!(index.references(&old_hash), vec![old_reference]);
+}
+
+#[test]
+fn restored_bytes_admitted_again_are_referenced_with_the_item_they_were_accepted_under() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    let identity = seed_library_identity(&root);
+    let path = write_real_file(&root, "original.pdf", b"g13 bytes x");
+    let hash_x = hash_bytes(b"g13 bytes x");
+    let item_x = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: record_by("Xrec", 2020, "10.1000/g13-restored-x"),
+    };
+    let item_y = Item {
+        id: lib_item_id(G7_UUID_C),
+        record: record_by("Yrec", 2021, "10.1000/g13-restored-y"),
+    };
+    write_lib_item(&root, "x", &item_x);
+    write_lib_item(&root, "y", &item_y);
+    let mut entry_x = lib_hash_entry("g13 bytes x", "run-0");
+    entry_x.item = Some(item_x.id.clone());
+    let mut entry_y = lib_hash_entry("g13 bytes y", "run-1");
+    entry_y.item = Some(item_y.id.clone());
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item_y.id.clone()),
+        path: "original.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![entry_x, entry_y],
+    };
+    write_lib_artifact_record(&root, &held);
+    let documents = FakeDocuments::new().with_file(&path, hash_x.clone(), pdf_with_no_identifier());
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = run_in(
+        &root,
+        &index,
+        &documents,
+        &sources,
+        named_effective(),
+        &Command::rename(vec![path.clone()], true),
+        &mut Session::batch(),
+    );
+
+    let expected = LibraryReference {
+        library: identity,
+        root: root.clone(),
+        artifact: held.id.clone(),
+        item: item_x.id.clone(),
+    };
+    assert_eq!(index.references(&hash_x), vec![expected.clone()]);
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &root.join("Xrec2020.pdf"),
+            &hash_x,
+            &expected,
+            &[]
+        )]
+    );
+}
+
+#[test]
+fn a_pending_change_writes_no_reference() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    seed_library_identity(&root);
+    let path = write_real_file(&root, "Guide2021.pdf", b"g13 pending bytes");
+    let item = Item {
+        id: lib_item_id(G7_UUID_B),
+        record: record_by("Klykov", 2021, "10.1000/g13-pending-klykov"),
+    };
+    write_lib_item(&root, "item", &item);
+    let held = ArtifactRecord {
+        id: lib_artifact_id(G7_UUID_A),
+        item: Some(item.id.clone()),
+        path: "Guide2021.pdf".to_string(),
+        size: 999_999,
+        modified_millis: 0,
+        history: vec![lib_hash_entry("g13 klykov bytes", "earlier-run")],
+    };
+    write_lib_artifact_record(&root, &held);
+    let hash = hash_bytes(b"g13 pending bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/g13-pending-guide"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Guide", 2021, "10.1000/g13-pending-guide")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = run_in(
+        &root,
+        &index,
+        &documents,
+        &sources,
+        named_effective(),
+        &Command::rename(vec![path.clone()], true),
+        &mut Session::batch(),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Pending { .. },
+                ..
+            }
+        )),
+        "setup: got {events:?}"
+    );
+    assert!(reference_writes(&events).is_empty(), "got {events:?}");
+    assert!(index.references(&hash).is_empty());
+}
+
+#[test]
+fn a_file_renamed_outside_the_library_writes_no_reference() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    seed_library_identity(&root);
+    let elsewhere = tempdir().unwrap();
+    let path = write_real_file(elsewhere.path(), "original.pdf", b"g13 outside bytes");
+    let hash = hash_bytes(b"g13 outside bytes");
+    let documents = FakeDocuments::new().with_file(
+        &path,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/g13-outside"),
+    );
+    let crossref = fake_source(
+        SourceName::Crossref,
+        Ok(record_by("Outside", 2022, "10.1000/g13-outside")),
+    );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = run_in(
+        &root,
+        &index,
+        &documents,
+        &sources,
+        named_effective(),
+        &Command::rename(vec![path.clone()], true),
+        &mut Session::batch(),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Outside,
+                ..
+            }
+        )),
+        "setup: got {events:?}"
+    );
+    assert!(reference_writes(&events).is_empty(), "got {events:?}");
+    assert!(index.references(&hash).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unwritten_admission_writes_no_reference() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let filed = filed("unwritten-no-reference", "Unwritten");
+    seed_library_identity(&filed.root);
+    let records_dir = filed.root.join(STATE_DIR).join(ARTIFACT_STORE);
+    fs::create_dir_all(&records_dir).unwrap();
+    fs::set_permissions(&records_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = records_dir.join("probe.tmp");
+    if fs::write(&probe, b"x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&records_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping an_unwritten_admission_writes_no_reference: directory permissions \
+             were not enforced (running as root?)"
+        );
+        return;
+    }
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = filed.apply(&index);
+
+    fs::set_permissions(&records_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LibraryAdmission {
+                admission: Admission::Unwritten { .. },
+                ..
+            }
+        )),
+        "setup: got {events:?}"
+    );
+    assert!(reference_writes(&events).is_empty(), "got {events:?}");
+    assert!(index.references(&filed.hash).is_empty());
+}
+
+#[test]
+fn a_preview_writes_no_reference() {
+    let filed = filed("preview-no-reference", "Preview");
+    seed_library_identity(&filed.root);
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let preview = filed.rename(&index, &filed.path, false);
+
+    assert!(reference_writes(&preview).is_empty(), "got {preview:?}");
+    assert!(index.references(&filed.hash).is_empty());
+    let applied = filed.apply(&index);
+    assert_eq!(
+        reference_writes(&applied).len(),
+        1,
+        "the same file, applied, is referenced: got {applied:?}"
+    );
+}
+
+#[test]
+fn no_record_writes_no_reference() {
+    let filed = filed("no-record-no-reference", "NoRecord");
+    seed_library_identity(&filed.root);
+    let index = ContentIndex::new(MemoryCache::new());
+    let effective = effective_with(|layer| {
+        layer.templates = Some(BTreeMap::from([(
+            "default".to_string(),
+            "[auth][year]".to_string(),
+        )]));
+        layer.record = Some(false);
+    });
+    let sources: Vec<&dyn Source> = vec![&filed.crossref];
+
+    let events = run_in(
+        &filed.root,
+        &index,
+        &filed.documents,
+        &sources,
+        effective,
+        &Command::rename(vec![filed.path.clone()], true),
+        &mut Session::batch(),
+    );
+
+    assert!(
+        filed.target.exists(),
+        "the move still happens: got {events:?}"
+    );
+    assert!(reference_writes(&events).is_empty(), "got {events:?}");
+    assert!(index.references(&filed.hash).is_empty());
+}
+
+#[test]
+fn an_applying_rename_into_a_library_with_no_identity_names_the_identity_it_minted() {
+    let filed = filed("names-minted-identity", "Minted");
+    assert_eq!(library::identity(&filed.root), library::Identity::Absent);
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = filed.apply(&index);
+
+    let library::Identity::Present(minted) = library::identity(&filed.root) else {
+        panic!("the admission must have minted an identity: got {events:?}")
+    };
+    let references = index.references(&filed.hash);
+    assert_eq!(references.len(), 1, "got {events:?}");
+    assert_eq!(references[0].library, minted);
+    let writes = reference_writes(&events);
+    assert_eq!(writes.len(), 1, "got {events:?}");
+    assert_eq!(writes[0]["entry"]["library"], minted.to_string());
+}
+
+#[test]
+fn an_unchanged_admission_into_a_library_with_no_identity_writes_no_reference_and_reports_nothing()
+{
+    let tracked = tracked_and_named("unchanged-no-identity", false);
+    let index = ContentIndex::new(MemoryCache::new());
+    let panics = PanicSource {
+        name: SourceName::Crossref,
+    };
+    let sources: Vec<&dyn Source> = vec![&panics];
+
+    let (_, stdout, stderr) = dispatch_in(
+        &tracked.root,
+        &index,
+        &tracked.documents,
+        &sources,
+        named_effective(),
+        Command::rename(vec![tracked.path.clone()], true),
+        true,
+    );
+
+    assert!(
+        !stdout.contains("content-index-write"),
+        "no event reports a reference: got {stdout}"
+    );
+    assert_eq!(stderr, "", "nothing is reported");
+    assert_eq!(
+        library::identity(&tracked.root),
+        library::Identity::Absent,
+        "nothing mints an identity for a reference"
+    );
+    assert!(index.references(&tracked.hash).is_empty());
+}
+
+#[test]
+fn an_admission_into_a_library_with_a_faulty_identity_writes_no_reference_and_warns_once() {
+    let filed = filed("faulty-identity-no-reference", "Faulty");
+    fs::create_dir_all(filed.root.join(STATE_DIR)).unwrap();
+    fs::write(library::identity_file(&filed.root), b"not-toml-at-all {{").unwrap();
+    let index = ContentIndex::new(MemoryCache::new());
+    let sources: Vec<&dyn Source> = vec![&filed.crossref];
+
+    let (_, stdout, stderr) = dispatch_in(
+        &filed.root,
+        &index,
+        &filed.documents,
+        &sources,
+        named_effective(),
+        Command::rename(vec![filed.path.clone()], true),
+        true,
+    );
+
+    assert_eq!(
+        library::ArtifactStore::read(&filed.root).len(),
+        1,
+        "the file is recorded"
+    );
+    assert!(
+        !stdout.contains(r#""kind":"reference""#),
+        "no reference is written or reported: got {stdout}"
+    );
+    assert!(index.references(&filed.hash).is_empty());
+    assert_eq!(
+        stderr
+            .matches("could not be read as the library's identity")
+            .count(),
+        1,
+        "change 12's warning, once and nothing beyond it: got {stderr:?}"
+    );
+}
+
+#[test]
+fn an_applying_admission_repairs_the_reference_of_a_moved_library() {
+    let tracked = tracked_and_named("admission-repairs", true);
+    let parent = tempdir().unwrap();
+    let gone = parent.path().join("moved-away");
+    let stale = LibraryReference {
+        root: gone.clone(),
+        ..tracked.reference()
+    };
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&tracked.hash, &stale);
+
+    let events = tracked.apply(&index);
+
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &tracked.path,
+            &tracked.hash,
+            &tracked.reference(),
+            &[gone.as_path()]
+        )]
+    );
+    assert_eq!(index.references(&tracked.hash), vec![tracked.reference()]);
+}
+
+#[test]
+fn a_failed_reference_write_is_reported_and_leaves_the_rename_standing() {
+    let filed = filed("failed-reference-write", "Failing");
+    seed_library_identity(&filed.root);
+    let index = ContentIndex::new(ReferenceWriteFailing {
+        inner: MemoryCache::new(),
+    });
+    let sources: Vec<&dyn Source> = vec![&filed.crossref];
+
+    let (outcome, stdout, stderr) = dispatch_in(
+        &filed.root,
+        &index,
+        &filed.documents,
+        &sources,
+        named_effective(),
+        Command::rename(vec![filed.path.clone()], true),
+        true,
+    );
+
+    assert!(filed.target.exists(), "the rename stands");
+    assert_eq!(
+        library::ArtifactStore::read(&filed.root).len(),
+        1,
+        "the record stands"
+    );
+    assert_eq!(outcome, Outcome::Success, "stderr {stderr:?}");
+    let failed: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|line| {
+            line["event"] == "content-index-write" && line["entry"]["kind"] == "reference"
+        })
+        .collect();
+    assert_eq!(failed.len(), 1, "got {stdout}");
+    assert_eq!(failed[0]["write"]["status"], "failed");
+    assert!(
+        failed[0]["write"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reference store full"),
+        "got {}",
+        failed[0]
+    );
+    assert!(index.references(&filed.hash).is_empty());
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 5.1: reconcile restores and repairs
+// references for every hash of every history (design D2, D3, D10)
+// ---------------------------------------------------------------------
+
+/// A library at some root holding `paper.pdf`, which one record links to
+/// one item, with an identity. Everything agrees, so a reconcile finds
+/// nothing to repair.
+struct Linked {
+    library: LibraryId,
+    item: Item,
+    record: ArtifactRecord,
+    hash: ContentHash,
+}
+
+fn linked_library(root: &Path, seed: &str) -> Linked {
+    fs::create_dir_all(root).unwrap();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let library = seed_library_identity(root);
+    let bytes = format!("g13 {seed} bytes");
+    let path = write_real_file(root, "paper.pdf", bytes.as_bytes());
+    let hash = hash_bytes(bytes.as_bytes());
+    let (size, modified_millis) = real_stat(&path);
+    let item = Item {
+        id: ItemId::from_uuid(uuid::Uuid::now_v7()),
+        record: record_by("Linked", 2024, &format!("10.1000/g13-{seed}")),
+    };
+    write_lib_item(root, "linked", &item);
+    let record = ArtifactRecord {
+        id: ArtifactId::from_uuid(uuid::Uuid::now_v7()),
+        item: Some(item.id.clone()),
+        path: "paper.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![hash_entry_for(hash.clone(), "run-0")],
+    };
+    write_lib_artifact_record(root, &record);
+    Linked {
+        library,
+        item,
+        record,
+        hash,
+    }
+}
+
+impl Linked {
+    /// The reference this library owes for its bytes when it is at `root`.
+    fn reference_at(&self, root: &Path) -> LibraryReference {
+        LibraryReference {
+            library: self.library.clone(),
+            root: root.to_path_buf(),
+            artifact: self.record.id.clone(),
+            item: self.item.id.clone(),
+        }
+    }
+}
+
+/// An item with a record by `family`, written into the store of `root`.
+fn extra_item(root: &Path, key: &str, family: &str, doi_value: &str) -> Item {
+    let item = Item {
+        id: ItemId::from_uuid(uuid::Uuid::now_v7()),
+        record: record_by(family, 2020, doi_value),
+    };
+    write_lib_item(root, key, &item);
+    item
+}
+
+#[test]
+fn reconcile_restores_the_reference_an_interrupted_admission_left_unwritten() {
+    let filed = filed("interrupted-reference", "Interrupted");
+    let interrupted_dir = tempdir().unwrap();
+    let interrupted = ContentIndex::new(ReferenceWriteFailing {
+        inner: FileCache::new(interrupted_dir.path()),
+    });
+    let first = filed.apply(&interrupted);
+    assert!(
+        interrupted.references(&filed.hash).is_empty(),
+        "setup: the run was cut short before its reference: got {first:?}"
+    );
+
+    let restored_dir = tempdir().unwrap();
+    let restored = ContentIndex::new(FileCache::new(restored_dir.path()));
+    let events = reconcile_in(&filed.root, &restored);
+
+    let expected = expected_reference(&filed.root, &filed.hash);
+    assert_eq!(restored.references(&filed.hash), vec![expected.clone()]);
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &filed.target,
+            &filed.hash,
+            &expected,
+            &[]
+        )]
+    );
+    let uninterrupted_dir = tempdir().unwrap();
+    let uninterrupted = ContentIndex::new(FileCache::new(uninterrupted_dir.path()));
+    filed.apply_target(&uninterrupted);
+    assert_eq!(
+        files_below(restored_dir.path()),
+        files_below(uninterrupted_dir.path()),
+        "the reconciled index must equal what an uninterrupted run leaves"
+    );
+}
+
+#[test]
+fn reconcile_writes_a_reference_for_every_hash_of_every_history() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let linked = linked_library(&root, "every-hash");
+    let older = hash_for("g13 every-hash older bytes");
+    let mut record = linked.record.clone();
+    record
+        .history
+        .insert(0, hash_entry_for(older.clone(), "run-0"));
+    write_lib_artifact_record(&root, &record);
+    let index = ContentIndex::new(MemoryCache::new());
+    let reference = linked.reference_at(&root);
+    let path = root.join("paper.pdf");
+
+    let events = reconcile_in(&root, &index);
+
+    assert_eq!(
+        reference_writes(&events),
+        vec![
+            reference_write_json(&path, &older, &reference, &[]),
+            reference_write_json(&path, &linked.hash, &reference, &[]),
+        ]
+    );
+    assert_eq!(index.references(&older), vec![reference.clone()]);
+    assert_eq!(index.references(&linked.hash), vec![reference]);
+}
+
+#[test]
+fn reconcile_gives_restored_bytes_the_item_they_were_accepted_under() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let identity = seed_library_identity(&root);
+    let path = write_real_file(&root, "paper.pdf", b"g13 restored y");
+    let (size, modified_millis) = real_stat(&path);
+    let item_x = extra_item(&root, "x", "Xrec", "10.1000/g13-reconcile-x");
+    let item_y = extra_item(&root, "y", "Yrec", "10.1000/g13-reconcile-y");
+    let hash_x = hash_for("g13 restored x");
+    let hash_y = hash_bytes(b"g13 restored y");
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: Some(item_y.id.clone()),
+        path: "paper.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![
+            HashEntry {
+                item: Some(item_x.id.clone()),
+                ..hash_entry_for(hash_x.clone(), "run-0")
+            },
+            HashEntry {
+                item: Some(item_y.id.clone()),
+                ..hash_entry_for(hash_y.clone(), "run-1")
+            },
+        ],
+    };
+    write_lib_artifact_record(&root, &record);
+    let index = ContentIndex::new(MemoryCache::new());
+    let reference = |item: &Item| LibraryReference {
+        library: identity.clone(),
+        root: root.clone(),
+        artifact: record.id.clone(),
+        item: item.id.clone(),
+    };
+
+    let events = reconcile_in(&root, &index);
+
+    assert_eq!(index.references(&hash_x), vec![reference(&item_x)]);
+    assert_eq!(index.references(&hash_y), vec![reference(&item_y)]);
+    assert_eq!(
+        reference_writes(&events),
+        vec![
+            reference_write_json(&path, &hash_x, &reference(&item_x), &[]),
+            reference_write_json(&path, &hash_y, &reference(&item_y), &[]),
+        ]
+    );
+}
+
+#[test]
+fn reconcile_writes_no_reference_for_bytes_whose_record_links_no_item_and_reports_nothing() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let linked = linked_library(&root, "links-no-item");
+    let mut record = linked.record.clone();
+    record.item = None;
+    write_lib_artifact_record(&root, &record);
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = reconcile_in(&root, &index);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "got {events:?}"
+    );
+    assert!(index.references(&linked.hash).is_empty());
+}
+
+#[test]
+fn reconcile_leaves_a_reference_whose_record_no_longer_links_an_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let linked = linked_library(&root, "link-removed");
+    let index = ContentIndex::new(MemoryCache::new());
+    let held = linked.reference_at(&root);
+    let _ = index.put_reference(&linked.hash, &held);
+    let mut record = linked.record.clone();
+    record.item = None;
+    write_lib_artifact_record(&root, &record);
+
+    let events = reconcile_in(&root, &index);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "got {events:?}"
+    );
+    assert_eq!(index.references(&linked.hash), vec![held]);
+}
+
+#[test]
+fn reconcile_rewrites_a_reference_whose_records_link_was_corrected_by_hand() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let linked = linked_library(&root, "link-corrected");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&linked.hash, &linked.reference_at(&root));
+    let corrected = extra_item(&root, "corrected", "Corrected", "10.1000/g13-corrected");
+    let mut record = linked.record.clone();
+    record.item = Some(corrected.id.clone());
+    write_lib_artifact_record(&root, &record);
+
+    let events = reconcile_in(&root, &index);
+
+    let expected = LibraryReference {
+        item: corrected.id.clone(),
+        ..linked.reference_at(&root)
+    };
+    assert_eq!(index.references(&linked.hash), vec![expected.clone()]);
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &root.join("paper.pdf"),
+            &linked.hash,
+            &expected,
+            &[]
+        )]
+    );
+}
+
+#[test]
+fn reconcile_repairs_every_reference_of_a_moved_library_historical_hashes_included() {
+    let parent = tempdir().unwrap();
+    let old_root = parent.path().join("r1");
+    let new_root = parent.path().join("r2");
+    let linked = linked_library(&old_root, "moved-library");
+    let older_item = extra_item(&old_root, "older", "Older", "10.1000/g13-moved-older");
+    let older = hash_for("g13 moved-library older bytes");
+    let mut record = linked.record.clone();
+    record.history.insert(
+        0,
+        HashEntry {
+            item: Some(older_item.id.clone()),
+            ..hash_entry_for(older.clone(), "run-0")
+        },
+    );
+    write_lib_artifact_record(&old_root, &record);
+    let index = ContentIndex::new(MemoryCache::new());
+    let older_reference = LibraryReference {
+        item: older_item.id.clone(),
+        ..linked.reference_at(&old_root)
+    };
+    let _ = index.put_reference(&older, &older_reference);
+    let _ = index.put_reference(&linked.hash, &linked.reference_at(&old_root));
+    fs::rename(&old_root, &new_root).unwrap();
+    let path = new_root.join("paper.pdf");
+    let moved_older = LibraryReference {
+        root: new_root.clone(),
+        ..older_reference
+    };
+    let moved_newest = linked.reference_at(&new_root);
+
+    let events = reconcile_in(&new_root, &index);
+
+    assert_eq!(
+        reference_writes(&events),
+        vec![
+            reference_write_json(&path, &older, &moved_older, &[old_root.as_path()]),
+            reference_write_json(&path, &linked.hash, &moved_newest, &[old_root.as_path()]),
+        ]
+    );
+    assert_eq!(index.references(&older), vec![moved_older]);
+    assert_eq!(index.references(&linked.hash), vec![moved_newest]);
+}
+
+#[test]
+fn reconcile_in_a_copy_beside_the_original_adds_a_second_reference() {
+    let parent = tempdir().unwrap();
+    let (first, second) = (parent.path().join("r1"), parent.path().join("r2"));
+    let linked = linked_library(&first, "copy-beside");
+    let index = ContentIndex::new(MemoryCache::new());
+    let original = linked.reference_at(&first);
+    let _ = index.put_reference(&linked.hash, &original);
+    copy_dir_recursive(&first, &second);
+
+    let events = reconcile_in(&second, &index);
+
+    let copied = linked.reference_at(&second);
+    assert_eq!(
+        index.references(&linked.hash),
+        vec![original, copied.clone()],
+        "the original is at a root holding the library, so it is not stale"
+    );
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &second.join("paper.pdf"),
+            &linked.hash,
+            &copied,
+            &[]
+        )]
+    );
+}
+
+#[test]
+fn reconcile_in_a_copy_after_the_original_is_deleted_repairs_rather_than_adds() {
+    let parent = tempdir().unwrap();
+    let (first, second) = (parent.path().join("r1"), parent.path().join("r2"));
+    let linked = linked_library(&first, "copy-after-delete");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&linked.hash, &linked.reference_at(&first));
+    copy_dir_recursive(&first, &second);
+    fs::remove_dir_all(&first).unwrap();
+
+    let events = reconcile_in(&second, &index);
+
+    let copied = linked.reference_at(&second);
+    assert_eq!(index.references(&linked.hash), vec![copied.clone()]);
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &second.join("paper.pdf"),
+            &linked.hash,
+            &copied,
+            &[first.as_path()]
+        )]
+    );
+}
+
+#[test]
+fn reconcile_keeps_the_reference_of_a_deleted_copy() {
+    let parent = tempdir().unwrap();
+    let (first, second) = (parent.path().join("r1"), parent.path().join("r2"));
+    let linked = linked_library(&first, "deleted-copy");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&linked.hash, &linked.reference_at(&first));
+    copy_dir_recursive(&first, &second);
+    reconcile_in(&second, &index);
+    assert_eq!(
+        index.references(&linked.hash).len(),
+        2,
+        "setup: the copy is referenced"
+    );
+    fs::remove_dir_all(&second).unwrap();
+
+    let events = reconcile_in(&first, &index);
+
+    assert!(reference_writes(&events).is_empty(), "got {events:?}");
+    assert_eq!(
+        index.references(&linked.hash),
+        vec![linked.reference_at(&first), linked.reference_at(&second)],
+        "nothing is pruned"
+    );
+}
+
+#[test]
+fn reconcile_keeps_a_reference_whose_item_is_gone() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let linked = linked_library(&root, "item-gone");
+    let index = ContentIndex::new(MemoryCache::new());
+    let held = linked.reference_at(&root);
+    let _ = index.put_reference(&linked.hash, &held);
+    fs::remove_file(
+        root.join(ITEM_STORE)
+            .join(format!("linked.{}.toml", linked.item.id)),
+    )
+    .unwrap();
+
+    let events = reconcile_in(&root, &index);
+
+    assert!(reference_writes(&events).is_empty(), "got {events:?}");
+    assert_eq!(index.references(&linked.hash), vec![held]);
+}
+
+#[test]
+fn reconcile_over_a_library_with_no_identity_writes_no_reference_and_mints_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let linked = linked_library(&root, "no-identity");
+    fs::remove_file(library::identity_file(&root)).unwrap();
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = reconcile_in(&root, &index);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "got {events:?}"
+    );
+    assert!(index.references(&linked.hash).is_empty());
+    assert_eq!(library::identity(&root), library::Identity::Absent);
+}
+
+#[test]
+fn reconcile_whose_repair_minted_the_identity_writes_references_under_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join(".borax.toml"), b"").unwrap();
+    let path = write_real_file(&root, "new/paper.pdf", b"g13 repair mints bytes");
+    let hash = hash_bytes(b"g13 repair mints bytes");
+    let (size, modified_millis) = real_stat(&path);
+    let item = extra_item(&root, "minted", "Minted", "10.1000/g13-repair-mints");
+    let record = ArtifactRecord {
+        id: lib_artifact_id(LIB_UUID_A),
+        item: Some(item.id.clone()),
+        path: "old/paper.pdf".to_string(),
+        size,
+        modified_millis,
+        history: vec![hash_entry_for(hash.clone(), "run-0")],
+    };
+    write_lib_artifact_record(&root, &record);
+    assert_eq!(library::identity(&root), library::Identity::Absent);
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = reconcile_in(&root, &index);
+
+    let library::Identity::Present(minted) = library::identity(&root) else {
+        panic!("the repair must have minted an identity: got {events:?}")
+    };
+    let expected = LibraryReference {
+        library: minted,
+        root: root.clone(),
+        artifact: record.id.clone(),
+        item: item.id.clone(),
+    };
+    assert_eq!(index.references(&hash), vec![expected.clone()]);
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(&path, &hash, &expected, &[])]
+    );
+}
+
+#[test]
+fn reconcile_twice_writes_no_reference_the_second_time() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    let linked = linked_library(&root, "twice");
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let first = reconcile_in(&root, &index);
+    assert_eq!(reference_writes(&first).len(), 1, "setup: got {first:?}");
+    let before = snapshot(index_dir.path());
+
+    let second = reconcile_in(&root, &index);
+
+    assert!(reference_writes(&second).is_empty(), "got {second:?}");
+    assert_eq!(snapshot(index_dir.path()), before);
+    assert_eq!(
+        index.references(&linked.hash),
+        vec![linked.reference_at(&root)]
+    );
+}
+
+#[test]
+fn reconcile_reports_reference_writes_after_operator_restorations_and_before_its_totals() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let linked = linked_library(&root, "event-order");
+    let mut record = linked.record.clone();
+    record.history[0].evidence = Some(IdentificationEvidence {
+        identifier: Identifier::Doi(doi("10.1000/g13-event-order")),
+        origin: EvidenceOrigin::Supplied,
+    });
+    write_lib_artifact_record(&root, &record);
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = reconcile_in(&root, &index);
+
+    let position = |wanted: &dyn Fn(&Event) -> bool| {
+        events
+            .iter()
+            .position(wanted)
+            .unwrap_or_else(|| panic!("no such event in {events:?}"))
+    };
+    let restored = position(&|event| {
+        matches!(
+            event,
+            Event::ContentIndexWrite {
+                entry: WrittenEntry::Evidence { .. },
+                ..
+            }
+        )
+    });
+    let referenced = position(&|event| {
+        matches!(
+            event,
+            Event::ContentIndexWrite {
+                entry: WrittenEntry::Reference { .. },
+                ..
+            }
+        )
+    });
+    let totals = position(&|event| matches!(event, Event::LibraryReconciled { .. }));
+    assert!(
+        restored < referenced && referenced < totals,
+        "restored {restored}, referenced {referenced}, totals {totals}: got {events:?}"
+    );
+}
+
+#[test]
+fn reconcile_reference_writes_leave_every_store_file_byte_identical() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    let linked = linked_library(&root, "store-untouched");
+    let before = snapshot(&root);
+    let index = ContentIndex::new(MemoryCache::new());
+
+    let events = reconcile_in(&root, &index);
+
+    assert_eq!(reference_writes(&events).len(), 1, "setup: got {events:?}");
+    assert_eq!(index.references(&linked.hash).len(), 1);
+    assert_eq!(snapshot(&root), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn reconcile_whose_reference_write_fails_still_succeeds_and_reports_failed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("library");
+    let linked = linked_library(&root, "write-fails");
+    let index_parent = tempdir().unwrap();
+    let locked = index_parent.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = locked.join("probe");
+    if fs::write(&probe, b"x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipping reconcile_whose_reference_write_fails_still_succeeds_and_reports_failed: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+    let index = ContentIndex::new(FileCache::new(&locked));
+
+    let (outcome, stdout, stderr) = dispatch_in(
+        &root,
+        &index,
+        &FakeDocuments::new(),
+        &[],
+        resolve(Vec::new()).unwrap(),
+        Command::reconcile(Some(root.clone()), false),
+        true,
+    );
+
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(outcome, Outcome::Success, "stderr {stderr:?}");
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let failed: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|line| {
+            line["event"] == "content-index-write" && line["entry"]["kind"] == "reference"
+        })
+        .collect();
+    assert_eq!(failed.len(), 1, "got {stdout}");
+    assert_eq!(failed[0]["write"]["status"], "failed");
+    assert_eq!(
+        failed[0]["entry"]["item"],
+        linked.item.id.to_string(),
+        "got {}",
+        failed[0]
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["event"] == "library-reconciled"),
+        "the totals still close the run: got {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 5.1: sequences across runs (design
+// D10 (c), (d))
+// ---------------------------------------------------------------------
+
+/// `borax resolve` over the file at `path` outside every library,
+/// answering from `index`; the file hashes to `hash` and must never be
+/// opened.
+fn resolve_outside<S: IndexStore>(
+    index: &ContentIndex<S>,
+    sources: &[&dyn Source],
+    path: &Path,
+    hash: &ContentHash,
+) -> Event {
+    let documents = FakeDocuments::new().with_open_error(
+        path,
+        hash.clone(),
+        ExtractionError::Unreadable {
+            message: "must never be opened".to_string(),
+        },
+    );
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources,
+        index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: None,
+        now: fixed_now,
+        collection_root: None,
+        state_root: None,
+    };
+    let events = events_for(
+        &Command::resolve(vec![path.to_path_buf()]),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+    )
+    .unwrap();
+    events
+        .into_iter()
+        .find(|event| matches!(event, Event::Resolved { .. }))
+        .expect("the outside file must resolve")
+}
+
+/// The `content_index.read` of a resolved event, as JSON.
+fn read_of_resolved(event: &Event) -> serde_json::Value {
+    match event {
+        Event::Resolved { sections, .. } => {
+            serde_json::to_value(&sections.content_index.read).unwrap()
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+}
+
+fn reference_step_json(reference: &LibraryReference, tail: serde_json::Value) -> serde_json::Value {
+    let mut step = serde_json::json!({
+        "library": reference.library.to_string(),
+        "root": reference.root.display().to_string(),
+        "artifact": reference.artifact.to_string(),
+        "item": reference.item.to_string(),
+    });
+    for (key, value) in tail.as_object().unwrap() {
+        step[key] = value.clone();
+    }
+    step
+}
+
+/// design D10 (c): two copies of one library are referenced and agree.
+/// An interactive rename in the second supplies another identifier, which
+/// re-links its record and rewrites its reference. Outside, the two
+/// references name different identifiers and disagree, so the entry's
+/// own evidence answers, and the line names both.
+#[test]
+fn two_copies_referenced_then_one_relinked_disagree_and_the_evidence_answers() {
+    let parent = tempdir().unwrap();
+    let (first, second) = (parent.path().join("r1"), parent.path().join("r2"));
+    fs::create_dir_all(&first).unwrap();
+    fs::write(first.join(".borax.toml"), b"").unwrap();
+    let original = write_real_file(&first, "original.pdf", b"g13 disagreement bytes");
+    let hash = hash_bytes(b"g13 disagreement bytes");
+    let crossref = KeyedSource::new(SourceName::Crossref)
+        .answering(
+            "doi:10.1000/g13-x",
+            record_by("Smith", 2024, "10.1000/g13-x"),
+        )
+        .answering(
+            "doi:10.1000/g13-y",
+            record_by("Jones", 2025, "10.1000/g13-y"),
+        );
+    let sources: Vec<&dyn Source> = vec![&crossref];
+    let index = ContentIndex::new(MemoryCache::new());
+    let documents_one = FakeDocuments::new().with_file(
+        &original,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/g13-x"),
+    );
+    run_in(
+        &first,
+        &index,
+        &documents_one,
+        &sources,
+        named_effective(),
+        &Command::rename(vec![original.clone()], true),
+        &mut Session::batch(),
+    );
+    copy_dir_recursive(&first, &second);
+    reconcile_in(&second, &index);
+    assert_eq!(
+        index.references(&hash).len(),
+        2,
+        "setup: both copies are referenced"
+    );
+    let named_in_second = second.join("Smith2024.pdf");
+    let documents_two = FakeDocuments::new().with_file(
+        &named_in_second,
+        hash.clone(),
+        pdf_with_embedded_doi("10.1000/g13-x"),
+    );
+    let mut asker = ScriptedAsker::new(vec![Answer::Supply, Answer::Rename])
+        .with_texts(vec![Some("10.1000/g13-y".to_string())]);
+    run_in(
+        &second,
+        &index,
+        &documents_two,
+        &sources,
+        named_effective(),
+        &Command::rename(vec![named_in_second.clone()], false),
+        &mut Session::interactive(&mut asker),
+    );
+
+    let copy = parent.path().join("Downloads").join("paper.pdf");
+    let event = resolve_outside(&index, &sources, &copy, &hash);
+
+    let references = index.references(&hash);
+    assert_eq!(references.len(), 2, "got {references:?}");
+    assert_ne!(references[0].item, references[1].item);
+    assert_eq!(
+        read_of_resolved(&event),
+        serde_json::json!({
+            "status": "hit",
+            "evidence": {"identifier": "doi:10.1000/g13-y", "origin": "supplied"},
+            "references": [
+                reference_step_json(&references[0], serde_json::json!({
+                    "status": "disagreeing", "identifier": "doi:10.1000/g13-x"
+                })),
+                reference_step_json(&references[1], serde_json::json!({
+                    "status": "disagreeing", "identifier": "doi:10.1000/g13-y"
+                })),
+            ],
+        })
+    );
+    match &event {
+        Event::Resolved { record, .. } => {
+            assert_eq!(**record, record_by("Jones", 2025, "10.1000/g13-y"));
+        }
+        other => panic!("expected Event::Resolved, got {other:?}"),
+    }
+    assert!(
+        human_line(&event).unwrap().ends_with(&format!(
+            "; library references disagree: the library at {} names doi:10.1000/g13-x, the \
+             library at {} names doi:10.1000/g13-y",
+            first.display(),
+            second.display()
+        )),
+        "got {:?}",
+        human_line(&event)
+    );
+}
+
+/// design D10 (d): a library whose root moved is `missing` outside, and
+/// the evidence answers; a reconcile in the moved library repairs the
+/// reference, naming the old root; then the library answers again.
+#[test]
+fn a_reference_whose_root_was_moved_is_missing_until_reconcile_repairs_it() {
+    let filed = filed("moved-root", "Moved");
+    let old_root = filed.root.clone();
+    let index = ContentIndex::new(MemoryCache::new());
+    filed.apply(&index);
+    let sources: Vec<&dyn Source> = vec![&filed.crossref];
+    let parent = tempdir().unwrap();
+    let copy = parent.path().join("Downloads").join("paper.pdf");
+
+    let before = resolve_outside(&index, &sources, &copy, &filed.hash);
+    assert_eq!(
+        read_of_resolved(&before)["references"][0]["status"],
+        "answered",
+        "setup: got {before:?}"
+    );
+
+    let moved = parent.path().join("moved");
+    fs::rename(&old_root, &moved).unwrap();
+    let missing = resolve_outside(&index, &sources, &copy, &filed.hash);
+
+    let read = read_of_resolved(&missing);
+    assert_eq!(read["status"], "hit");
+    assert!(
+        read.get("evidence").is_some(),
+        "the evidence answers: {read}"
+    );
+    assert_eq!(read["references"][0]["status"], "unavailable");
+    assert_eq!(read["references"][0]["cause"], "missing");
+    assert!(
+        human_line(&missing).unwrap().ends_with(&format!(
+            "; a library reference could not answer: {} is missing",
+            old_root.display()
+        )),
+        "got {:?}",
+        human_line(&missing)
+    );
+
+    let events = reconcile_in(&moved, &index);
+
+    let repaired = expected_reference(&moved, &filed.hash);
+    assert_eq!(index.references(&filed.hash), vec![repaired.clone()]);
+    assert_eq!(
+        reference_writes(&events),
+        vec![reference_write_json(
+            &moved.join("Moved2024.pdf"),
+            &filed.hash,
+            &repaired,
+            &[old_root.as_path()]
+        )]
+    );
+    let after = resolve_outside(&index, &sources, &copy, &filed.hash);
+    assert_eq!(
+        read_of_resolved(&after)["references"][0]["root"],
+        moved.display().to_string()
+    );
+    assert_eq!(
+        read_of_resolved(&after)["references"][0]["status"],
+        "answered"
+    );
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 6.1: adoption through references
+// (design D6, D7, D8)
+// ---------------------------------------------------------------------
+
+/// A reference step as JSON, for a reference that could not answer
+/// because its root is missing.
+fn missing_step_json(reference: &LibraryReference) -> serde_json::Value {
+    reference_step_json(
+        reference,
+        serde_json::json!({"status": "unavailable", "cause": "missing"}),
+    )
+}
+
+/// A reference to a library that is not at its root.
+fn reference_to_nowhere(parent: &Path) -> LibraryReference {
+    LibraryReference {
+        library: LibraryId::from_uuid(uuid::Uuid::now_v7()),
+        root: parent.join("never-created"),
+        artifact: ArtifactId::from_uuid(uuid::Uuid::now_v7()),
+        item: ItemId::from_uuid(uuid::Uuid::now_v7()),
+    }
+}
+
+/// The adoption event of `relative`, as JSON.
+fn adoption_json(events: &[Event], relative: &str) -> serde_json::Value {
+    let (_, adoption) = adoptions(events)
+        .into_iter()
+        .find(|(path, _)| path == relative)
+        .unwrap_or_else(|| panic!("no adoption for {relative}: got {events:?}"));
+    serde_json::to_value(adoption).unwrap()
+}
+
+#[test]
+fn adopt_records_an_orphan_from_a_reachable_reference_before_the_response_cache() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"g13 adopt reference first");
+    let hash = hash_bytes(b"g13 adopt reference first");
+    let parent = tempdir().unwrap();
+    let referenced = referenced_library(
+        &parent.path().join("papers"),
+        record_by("Referenced", 2015, "10.1000/g13-adopt-reference"),
+    );
+    let cached = record_by("Cached", 2020, "10.1000/g13-adopt-cached");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &doi_of(&cached));
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let responses = tempdir().unwrap();
+    seed_response_cache(responses.path(), &doi_of(&cached), &cached);
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+    let items = library::ItemStore::read(&root);
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items.iter().next().unwrap().record,
+        referenced.item.record,
+        "the item holds the reference's record, not the response cache's"
+    );
+}
+
+#[test]
+fn adopt_through_a_reference_reports_retrieval_library_reference() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"g13 adopt retrieval");
+    let hash = hash_bytes(b"g13 adopt retrieval");
+    let parent = tempdir().unwrap();
+    let referenced = referenced_library(
+        &parent.path().join("papers"),
+        record_by("Referenced", 2015, "10.1000/g13-adopt-retrieval"),
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let responses = tempdir().unwrap();
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    let records = library::ArtifactStore::read(&root);
+    let record = records
+        .by_path("orphan.pdf")
+        .expect("the orphan is recorded");
+    let reference = &referenced.reference;
+    assert_eq!(
+        adoption_json(&events, "orphan.pdf"),
+        serde_json::json!({
+            "kind": "recorded",
+            "id": record.id.to_string(),
+            "item": record.item.as_ref().unwrap().to_string(),
+            "retrieval": {
+                "kind": "library-reference",
+                "library": reference.library.to_string(),
+                "root": reference.root.display().to_string(),
+                "artifact": reference.artifact.to_string(),
+                "item": reference.item.to_string(),
+            },
+        })
+    );
+}
+
+#[test]
+fn adopt_through_a_reference_records_no_evidence_on_the_history_entry() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"g13 adopt no evidence");
+    let hash = hash_bytes(b"g13 adopt no evidence");
+    let parent = tempdir().unwrap();
+    let referenced = referenced_library(
+        &parent.path().join("papers"),
+        record_by("Referenced", 2015, "10.1000/g13-adopt-no-evidence"),
+    );
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let responses = tempdir().unwrap();
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+    let records = library::ArtifactStore::read(&root);
+    let record = records.by_path("orphan.pdf").unwrap();
+    assert_eq!(record.history.len(), 1, "got {:?}", record.history);
+    assert_eq!(
+        record.history[0].evidence, None,
+        "the record was reached by the bytes' reference, not by an identifier"
+    );
+}
+
+#[test]
+fn adopt_through_a_reference_after_the_cache_is_cleared_records_the_orphan() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"g13 adopt after clear");
+    let hash = hash_bytes(b"g13 adopt after clear");
+    let parent = tempdir().unwrap();
+    let referenced = referenced_library(
+        &parent.path().join("papers"),
+        record_by("Referenced", 2015, "10.1000/g13-adopt-after-clear"),
+    );
+    let index_dir = tempdir().unwrap();
+    let index = ContentIndex::new(FileCache::new(index_dir.path()));
+    let _ = index.put_reference(&hash, &referenced.reference);
+    let cache_dir = tempdir().unwrap();
+    assert_eq!(
+        snapshot(index_dir.path()).len(),
+        1,
+        "setup: the index holds the reference alone"
+    );
+    assert!(
+        fs::read_dir(cache_dir.path()).unwrap().next().is_none(),
+        "setup: nothing is cached"
+    );
+
+    let events = adopt_over(&root, &index, cache_dir.path());
+
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+    assert!(
+        library::ArtifactStore::read(&root)
+            .by_path("orphan.pdf")
+            .is_some(),
+        "got {events:?}"
+    );
+}
+
+#[test]
+fn adopt_with_disagreeing_references_uses_the_entrys_evidence() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"g13 adopt disagreement");
+    let hash = hash_bytes(b"g13 adopt disagreement");
+    let parent = tempdir().unwrap();
+    let first = referenced_library(
+        &parent.path().join("a"),
+        record_by("First", 2015, "10.1000/g13-adopt-first"),
+    );
+    let second = referenced_library(
+        &parent.path().join("b"),
+        record_by("Second", 2016, "10.1000/g13-adopt-second"),
+    );
+    let cached = record_by("Cached", 2020, "10.1000/g13-adopt-evidence");
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &first.reference);
+    let _ = index.put_reference(&hash, &second.reference);
+    let _ = index.put_extracted(&hash, &doi_of(&cached));
+    let responses = tempdir().unwrap();
+    seed_response_cache(responses.path(), &doi_of(&cached), &cached);
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (1, 0), "got {events:?}");
+    let adoption = adoption_json(&events, "orphan.pdf");
+    assert_eq!(adoption["kind"], "recorded");
+    assert_eq!(
+        adoption["retrieval"],
+        serde_json::json!({"kind": "service-cache", "service": "crossref"})
+    );
+    let records = library::ArtifactStore::read(&root);
+    let record = records.by_path("orphan.pdf").unwrap();
+    assert_eq!(
+        record.history[0].evidence,
+        Some(IdentificationEvidence {
+            identifier: doi_of(&cached),
+            origin: EvidenceOrigin::Adopted,
+        })
+    );
+}
+
+#[test]
+fn adopt_with_references_none_answered_and_no_evidence_is_unanswered_naming_them_and_no_identifier()
+{
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"g13 adopt unanswered no evidence");
+    let hash = hash_bytes(b"g13 adopt unanswered no evidence");
+    let parent = tempdir().unwrap();
+    let missing = reference_to_nowhere(parent.path());
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &missing);
+    let responses = tempdir().unwrap();
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (0, 1), "got {events:?}");
+    assert_eq!(
+        adoption_json(&events, "orphan.pdf"),
+        serde_json::json!({
+            "kind": "unanswered",
+            "references": [missing_step_json(&missing)],
+        })
+    );
+    assert!(library::ArtifactStore::read(&root).is_empty());
+}
+
+#[test]
+fn adopt_with_evidence_no_cache_holds_and_an_unavailable_reference_is_unanswered_naming_both() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"g13 adopt unanswered with evidence");
+    let hash = hash_bytes(b"g13 adopt unanswered with evidence");
+    let parent = tempdir().unwrap();
+    let missing = reference_to_nowhere(parent.path());
+    let identifier = Identifier::Doi(doi("10.1000/g13-adopt-unanswered"));
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_extracted(&hash, &identifier);
+    let _ = index.put_reference(&hash, &missing);
+    let responses = tempdir().unwrap();
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (0, 1), "got {events:?}");
+    assert_eq!(
+        adoption_json(&events, "orphan.pdf"),
+        serde_json::json!({
+            "kind": "unanswered",
+            "identifier": identifier.to_string(),
+            "references": [missing_step_json(&missing)],
+        })
+    );
+}
+
+/// Two orphans an index answers for from the response cache, adopted
+/// into a library that has no identity yet.
+struct TwoAdopted {
+    _library: tempfile::TempDir,
+    root: PathBuf,
+    index: ContentIndex<MemoryCache>,
+    events: Vec<Event>,
+    hashes: Vec<(String, ContentHash)>,
+}
+
+fn two_adopted_orphans() -> TwoAdopted {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "one.pdf", b"g13 adopt writes one");
+    write_real_file(&root, "two.pdf", b"g13 adopt writes two");
+    let one = record_by("One", 2020, "10.1000/g13-adopt-writes-one");
+    let two = record_by("Two", 2021, "10.1000/g13-adopt-writes-two");
+    let index = ContentIndex::new(MemoryCache::new());
+    let responses = tempdir().unwrap();
+    let hashes = vec![
+        ("one.pdf".to_string(), hash_bytes(b"g13 adopt writes one")),
+        ("two.pdf".to_string(), hash_bytes(b"g13 adopt writes two")),
+    ];
+    for ((_, hash), record) in hashes.iter().zip([&one, &two]) {
+        let _ = index.put_extracted(hash, &doi_of(record));
+        seed_response_cache(responses.path(), &doi_of(record), record);
+    }
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    TwoAdopted {
+        _library: library,
+        root,
+        index,
+        events,
+        hashes,
+    }
+}
+
+#[test]
+fn adopt_writes_a_reference_for_each_orphan_it_records() {
+    let adopted = two_adopted_orphans();
+    let (root, index, events, hashes) = (
+        &adopted.root,
+        &adopted.index,
+        &adopted.events,
+        &adopted.hashes,
+    );
+
+    assert_eq!(adopted_totals(events), (2, 0), "got {events:?}");
+    let expected: Vec<serde_json::Value> = hashes
+        .iter()
+        .map(|(relative, hash)| {
+            reference_write_json(
+                &root.join(relative),
+                hash,
+                &expected_reference(root, hash),
+                &[],
+            )
+        })
+        .collect();
+    assert_eq!(reference_writes(events), expected);
+    for (_, hash) in hashes {
+        assert_eq!(index.references(hash), vec![expected_reference(root, hash)]);
+    }
+}
+
+#[test]
+fn adopt_writes_no_reference_for_an_orphan_it_leaves() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"g13 adopt leaves");
+    let hash = hash_bytes(b"g13 adopt leaves");
+    let index = ContentIndex::new(MemoryCache::new());
+    let responses = tempdir().unwrap();
+
+    let events = adopt_over(&root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (0, 1), "got {events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "got {events:?}"
+    );
+    assert!(index.references(&hash).is_empty());
+}
+
+/// design D10 (a): a file an interrupted admission recorded is not an
+/// orphan, so `adopt` never visits it and cannot write its reference;
+/// `reconcile` does.
+#[test]
+fn adopt_writes_no_reference_for_a_file_already_recorded() {
+    let tracked = tracked_and_named("adopt-already-recorded", true);
+    let index = ContentIndex::new(MemoryCache::new());
+    let responses = tempdir().unwrap();
+
+    let events = adopt_over(&tracked.root, &index, responses.path());
+
+    assert_eq!(adopted_totals(&events), (0, 0), "got {events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ContentIndexWrite { .. })),
+        "got {events:?}"
+    );
+    assert!(index.references(&tracked.hash).is_empty());
+}
+
+#[test]
+fn adopt_reports_reference_writes_after_the_adoptions_and_before_its_totals() {
+    let adopted = two_adopted_orphans();
+    let events = &adopted.events;
+
+    let last_adoption = events
+        .iter()
+        .rposition(|event| matches!(event, Event::LibraryAdoption { .. }))
+        .expect("the orphans are adopted");
+    let first_reference = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ContentIndexWrite {
+                    entry: WrittenEntry::Reference { .. },
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("no reference write in {events:?}"));
+    let last_reference = events
+        .iter()
+        .rposition(|event| {
+            matches!(
+                event,
+                Event::ContentIndexWrite {
+                    entry: WrittenEntry::Reference { .. },
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert!(last_adoption < first_reference, "got {events:?}");
+    assert_eq!(
+        last_reference + 1,
+        events.len() - 1,
+        "the totals follow the last reference write and close the run: got {events:?}"
+    );
+    assert!(matches!(events.last(), Some(Event::LibraryAdopted { .. })));
+}
+
+#[test]
+fn adopt_human_mode_names_an_unavailable_reference_on_an_unanswered_orphan() {
+    let library = real_library();
+    let root = library.path().to_path_buf();
+    write_real_file(&root, "orphan.pdf", b"g13 adopt human unavailable");
+    let hash = hash_bytes(b"g13 adopt human unavailable");
+    let parent = tempdir().unwrap();
+    let missing = reference_to_nowhere(parent.path());
+    let documents = CountingDocuments::new();
+    let sources: Vec<&dyn Source> = Vec::new();
+    let index = ContentIndex::new(MemoryCache::new());
+    let _ = index.put_reference(&hash, &missing);
+    let responses = tempdir().unwrap();
+    let filesystem = FakeFilesystem::new();
+    let bib_files = FakeBibFiles::new();
+    let adapters = Adapters {
+        documents: &documents,
+        sources: &sources,
+        index: &index,
+        filesystem: &filesystem,
+        bib_files: &bib_files,
+        cache_root: Some(responses.path().to_path_buf()),
+        now: fixed_now,
+        collection_root: Some(root.clone()),
+        state_root: None,
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+
+    let outcome = dispatch(
+        &cli(Command::adopt(Some(root.clone())), false),
+        &Configs::uniform(resolve(Vec::new()).unwrap()),
+        &adapters,
+        &mut Session::batch(),
+        &mut streams,
+    );
+
+    assert_eq!(outcome, Outcome::Success, "got {outcome:?}");
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            format!(
+                "orphan.pdf: no library reference the content index holds for its bytes \
+                 answered, and it holds no identifier for them, so it is still an orphan; \
+                 a library reference could not answer: {} is missing",
+                missing.root.display()
+            ),
+            format!("{}: 0 adopted, 1 orphans", root.display()),
+        ],
+        "got {lines:?}"
+    );
 }

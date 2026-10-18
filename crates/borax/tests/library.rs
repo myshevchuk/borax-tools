@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borax::event::{
     AcceptedBy, AcceptedItemCause, Admission, Adoption, Condition, Event, Extraction, Finding,
-    Level, LibraryAnswer, Repair,
+    Level, LibraryAnswer, Repair, RetrievedFrom,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
@@ -17,13 +17,13 @@ use borax::evidence::{
 };
 use borax::library::{
     ARTIFACT_STORE, Account, Admitted, Admitting, Adopted, Adoptions, ArtifactStore, Consulted,
-    ITEM_STORE, Identity, ItemStore, Reconciliation, Reconciling, RecordFaults, STATE_DIR,
-    StoreFault, StoreWriter, Stores, Unadopted, Unrecorded, WorkDuplicate, accepted_by,
+    ITEM_STORE, Identity, ItemStore, OwedReference, Reconciliation, Reconciling, RecordFaults,
+    STATE_DIR, StoreFault, StoreWriter, Stores, Unadopted, Unrecorded, WorkDuplicate, accepted_by,
     admission_event, admit, adopt, artifacts, carries, contains, ensure_identity, excludes,
     extracted_identifier, extraction_event, identity, identity_fault_warning, identity_file,
     item_file_name, library_relative, missing, operator_decisions, orphan_events, orphans,
-    reconcile, reconciliation_events, recorded_at, relative_to, status_event, store_create,
-    store_write, strands, survey, validate, validation_events,
+    reconcile, reconciliation_events, recorded_at, references_owed, relative_to, status_event,
+    store_create, store_write, strands, survey, validate, validation_events,
 };
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{ArxivId, Doi, Identifier, Isbn, Pmid};
@@ -32,7 +32,6 @@ use borax_core::library::{
     LibraryId, LibraryIdentity, RunId,
 };
 use borax_core::record::{EntryType, Record};
-use borax_sources::source::SourceName;
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------
@@ -5849,6 +5848,7 @@ fn learn_takes_in_no_entry_for_bytes_already_held() {
     let admitted = Admitted {
         artifact: held.id.clone(),
         item: item.id.clone(),
+        answers_with: item.id.clone(),
         relinked_from: None,
     };
     stores.learn(&admitting, &admitted);
@@ -6890,6 +6890,7 @@ fn admission_event_is_none_for_an_ordinary_admission() {
     let admitted = Admitted {
         artifact: artifact_id(UUID_A),
         item: item_id(UUID_B),
+        answers_with: item_id(UUID_B),
         relinked_from: None,
     };
 
@@ -6907,6 +6908,7 @@ fn admission_event_reports_a_relink() {
     let admitted = Admitted {
         artifact: artifact_id(UUID_A),
         item: item_id(UUID_C),
+        answers_with: item_id(UUID_C),
         relinked_from: Some(item_id(UUID_B)),
     };
 
@@ -8474,6 +8476,7 @@ fn evidence_retrieval_names_the_item_answered_with_for_restored_bytes() {
         }),
         content_index: IndexEvidence {
             read: IndexRead::NotAttempted(Unattempted::LibraryAnswered),
+            references: Vec::new(),
             write: IndexWrite::NotAttempted(Unattempted::LibraryAnswered),
         },
         extraction: ExtractionEvidence {
@@ -10331,8 +10334,10 @@ fn adopt_that_records_an_orphan_mints_the_identity() {
         if *candidate == orphan_hash {
             Ok(Adopted {
                 record: record_with_doi("10.1000/adopt-mints-identity"),
-                identifier: identifier.clone(),
-                service: SourceName::Crossref,
+                identifier: Some(identifier.clone()),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             })
         } else {
             Err(Unadopted::Unindexed)
@@ -10388,8 +10393,10 @@ fn adopt_into_a_library_with_a_faulty_identity_file_records_and_reports_the_faul
         if *candidate == orphan_hash {
             Ok(Adopted {
                 record: record_with_doi("10.1000/adopt-faulty-identity"),
-                identifier: identifier.clone(),
-                service: SourceName::Crossref,
+                identifier: Some(identifier.clone()),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             })
         } else {
             Err(Unadopted::Unindexed)
@@ -10444,8 +10451,10 @@ fn adopt_whose_mint_fails_records_nothing_and_reports_unwritten_naming_the_ident
         if *candidate == orphan_hash {
             Ok(Adopted {
                 record: record_with_doi("10.1000/adopt-mint-fails"),
-                identifier: identifier.clone(),
-                service: SourceName::Crossref,
+                identifier: Some(identifier.clone()),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             })
         } else {
             Err(Unadopted::Unindexed)
@@ -10495,8 +10504,10 @@ fn adopt_writes_the_lookups_identifier_as_adopted_on_the_adopted_entry() {
         if *candidate == orphan_hash {
             Ok(Adopted {
                 record: record_with_doi("10.1000/adopt-evidence"),
-                identifier: identifier.clone(),
-                service: SourceName::Crossref,
+                identifier: Some(identifier.clone()),
+                retrieval: RetrievedFrom::ServiceCache {
+                    service: "crossref".to_string(),
+                },
             })
         } else {
             Err(Unadopted::Unindexed)
@@ -10546,7 +10557,8 @@ fn adopt_reports_unanswered_as_the_lookup_says() {
     let identifier = Identifier::Doi(Doi::parse("10.1000/adopt-unanswered").unwrap());
     let lookup = |_hash: &ContentHash| -> Result<Adopted, Unadopted> {
         Err(Unadopted::Unanswered {
-            identifier: identifier.clone(),
+            identifier: Some(identifier.clone()),
+            references: Vec::new(),
         })
     };
     let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
@@ -10565,7 +10577,8 @@ fn adopt_reports_unanswered_as_the_lookup_says() {
     assert_eq!(
         result.adoptions[0].1,
         Adoption::Unanswered {
-            identifier: identifier.to_string(),
+            identifier: Some(identifier.to_string()),
+            references: Vec::new(),
         },
         "got {:?}",
         result.adoptions
@@ -10892,4 +10905,575 @@ fn validate_mints_no_identity() {
     validate(root);
 
     assert_eq!(snapshot(root), before);
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries 2.1: Admitted::answers_with
+// ---------------------------------------------------------------------
+
+#[test]
+fn admit_of_a_minted_record_answers_with_its_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"minted bytes");
+    let record = record_with_doi("10.1000/answers-minted");
+    let hash = hash("minted bytes");
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &record,
+            hash: &hash,
+            held: None,
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-1"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: None,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.answers_with, admitted.item);
+    let saved = ArtifactStore::read(root);
+    assert_eq!(
+        saved.by_id(&admitted.artifact).unwrap().item_for(&hash),
+        Some(&admitted.answers_with)
+    );
+}
+
+/// An ordinary re-run over bytes the record held earlier appends
+/// nothing: the bytes keep answering with the item they were accepted
+/// under, while the record's link is another.
+#[test]
+fn admit_of_restored_bytes_answers_with_the_item_they_were_accepted_under() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let x = item_id(UUID_B);
+    let y = item_id(UUID_C);
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(x.clone());
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(y.clone());
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(y.clone()),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &held);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &minimal_record(EntryType::Article),
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: false,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: None,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.item, y, "the record's link");
+    assert_eq!(admitted.answers_with, x, "the entry's item");
+}
+
+#[test]
+fn admit_of_a_reidentification_answers_with_the_new_link() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = write_file(root, "paper.pdf", b"bytes a");
+    let hash_a = hash("bytes a");
+    let z_record = record_with_doi("10.1000/answers-reidentified");
+    let z = Item {
+        id: item_id(UUID_D),
+        record: z_record.clone(),
+    };
+    write_item(root, &format!("z.{UUID_D}.toml"), &z);
+    let mut entry_a = hash_entry("bytes a", "run-0");
+    entry_a.item = Some(item_id(UUID_B));
+    let mut entry_b = hash_entry("bytes b", "run-1");
+    entry_b.item = Some(item_id(UUID_C));
+    let held = artifact_record(
+        artifact_id(UUID_A),
+        Some(item_id(UUID_C)),
+        "paper.pdf",
+        vec![entry_a, entry_b],
+    );
+    write_artifact_record(root, &held);
+
+    let admitted = admit(
+        root,
+        &Admitting {
+            path: &path,
+            record: &z_record,
+            hash: &hash_a,
+            held: Some(&held),
+            reidentified: true,
+            key: None,
+            run: RunId::new("run-2"),
+            timestamp: TIMESTAMP,
+            tool_version: TOOL_VERSION,
+            evidence: None,
+        },
+        &store_write,
+    )
+    .unwrap();
+
+    assert_eq!(admitted.item, z.id);
+    assert_eq!(admitted.answers_with, z.id);
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries 2.1: references_owed (design D2, D3)
+// ---------------------------------------------------------------------
+
+fn owed(path: &Path, seed: &str, artifact: &str, item: &str) -> OwedReference {
+    OwedReference {
+        path: path.to_path_buf(),
+        hash: hash(seed),
+        artifact: artifact_id(artifact),
+        item: item_id(item),
+    }
+}
+
+fn entry_under(seed: &str, run: &str, item: Option<&str>) -> HashEntry {
+    let mut entry = hash_entry(seed, run);
+    entry.item = item.map(item_id);
+    entry
+}
+
+#[test]
+fn references_owed_names_every_hash_of_every_history() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "a.pdf",
+            vec![
+                entry_under("a old", "run-0", Some(UUID_C)),
+                entry_under("a new", "run-1", Some(UUID_C)),
+            ],
+        ),
+    );
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_B),
+            Some(item_id(UUID_D)),
+            "b.pdf",
+            vec![entry_under("b only", "run-0", Some(UUID_D))],
+        ),
+    );
+
+    assert_eq!(
+        references_owed(root),
+        vec![
+            owed(&root.join("a.pdf"), "a old", UUID_A, UUID_C),
+            owed(&root.join("a.pdf"), "a new", UUID_A, UUID_C),
+            owed(&root.join("b.pdf"), "b only", UUID_B, UUID_D),
+        ]
+    );
+}
+
+#[test]
+fn references_owed_lists_each_hash_of_a_record_once() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "a.pdf",
+            vec![
+                entry_under("bytes one", "run-0", Some(UUID_B)),
+                entry_under("bytes one", "run-1", Some(UUID_C)),
+                entry_under("bytes two", "run-2", Some(UUID_C)),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        references_owed(root),
+        vec![
+            owed(&root.join("a.pdf"), "bytes one", UUID_A, UUID_C),
+            owed(&root.join("a.pdf"), "bytes two", UUID_A, UUID_C),
+        ]
+    );
+}
+
+#[test]
+fn references_owed_gives_restored_bytes_the_item_they_were_accepted_under() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "a.pdf",
+            vec![
+                entry_under("bytes x", "run-0", Some(UUID_B)),
+                entry_under("bytes y", "run-1", Some(UUID_C)),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        references_owed(root),
+        vec![
+            owed(&root.join("a.pdf"), "bytes x", UUID_A, UUID_B),
+            owed(&root.join("a.pdf"), "bytes y", UUID_A, UUID_C),
+        ]
+    );
+}
+
+#[test]
+fn references_owed_leaves_out_bytes_a_record_linking_no_item_answers_for_with_none() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "a.pdf",
+            vec![
+                entry_under("bytes x", "run-0", None),
+                entry_under("bytes y", "run-1", None),
+            ],
+        ),
+    );
+
+    assert_eq!(references_owed(root), Vec::new());
+}
+
+/// D2: older bytes whose own entry names an item are owed that item's
+/// reference even though the record now links none; the newest bytes
+/// are left out.
+#[test]
+fn references_owed_gives_an_unlinked_records_earlier_bytes_their_entrys_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            None,
+            "a.pdf",
+            vec![
+                entry_under("bytes x", "run-0", Some(UUID_B)),
+                entry_under("bytes y", "run-1", None),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        references_owed(root),
+        vec![owed(&root.join("a.pdf"), "bytes x", UUID_A, UUID_B)]
+    );
+}
+
+#[test]
+fn references_owed_names_the_full_path_the_record_names() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "sub/dir/paper.pdf",
+            vec![entry_under("nested bytes", "run-0", Some(UUID_C))],
+        ),
+    );
+
+    let found = references_owed(root);
+
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(
+        found[0].path,
+        root.join("sub").join("dir").join("paper.pdf")
+    );
+}
+
+#[test]
+fn references_owed_skips_a_record_file_that_does_not_parse() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_artifact_record(
+        root,
+        &artifact_record(
+            artifact_id(UUID_A),
+            Some(item_id(UUID_C)),
+            "a.pdf",
+            vec![entry_under("good bytes", "run-0", Some(UUID_C))],
+        ),
+    );
+    fs::write(
+        root.join(STATE_DIR)
+            .join(ARTIFACT_STORE)
+            .join("broken.toml"),
+        "not valid toml {{{",
+    )
+    .unwrap();
+
+    assert_eq!(
+        references_owed(root),
+        vec![owed(&root.join("a.pdf"), "good bytes", UUID_A, UUID_C)]
+    );
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries 2.1: ItemStore::answer (design D4, D9)
+// ---------------------------------------------------------------------
+
+#[test]
+fn item_store_answer_is_the_one_item_carrying_the_identity() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    write_item(
+        root,
+        &item_file_name(None, &item_id(UUID_C)),
+        &item_at(item_id(UUID_C)),
+    );
+
+    let items = ItemStore::read(root);
+
+    assert_eq!(items.answer(root, &item.id), Ok(&item));
+}
+
+#[test]
+fn item_store_answer_finds_an_item_whose_file_was_renamed_by_hand() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = item_at(item_id(UUID_B));
+    write_item(root, "renamed-by-hand.toml", &item);
+
+    let items = ItemStore::read(root);
+
+    assert_eq!(items.answer(root, &item.id), Ok(&item));
+}
+
+#[test]
+fn item_store_answer_is_dangling_when_no_file_carries_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write_item(
+        root,
+        &item_file_name(None, &item_id(UUID_C)),
+        &item_at(item_id(UUID_C)),
+    );
+
+    let items = ItemStore::read(root);
+
+    assert_eq!(
+        items.answer(root, &item_id(UUID_B)),
+        Err(AcceptedItemCause::Dangling)
+    );
+}
+
+#[test]
+fn item_store_answer_is_unreadable_when_a_file_claiming_it_cannot_be_read() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let bad = root.join(ITEM_STORE).join(format!("badkey.{UUID_B}.toml"));
+    fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    fs::write(&bad, "not valid toml {{{").unwrap();
+
+    let items = ItemStore::read(root);
+
+    match items.answer(root, &item_id(UUID_B)) {
+        Err(AcceptedItemCause::Unreadable { path, .. }) => assert_eq!(path, bad),
+        other => panic!(
+            "expected unreadable naming {}, got {other:?}",
+            bad.display()
+        ),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn item_store_answer_is_unreadable_when_the_store_cannot_be_listed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = item_at(item_id(UUID_B));
+    write_item(root, &item_file_name(None, &item.id), &item);
+    let items_dir = root.join(ITEM_STORE);
+    fs::set_permissions(&items_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let items = ItemStore::read(root);
+
+    // Restored before the temp directory's own cleanup.
+    fs::set_permissions(&items_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    if items.faults.is_empty() {
+        eprintln!(
+            "skipping item_store_answer_is_unreadable_when_the_store_cannot_be_listed: \
+             directory permissions were not enforced (running as root?)"
+        );
+        return;
+    }
+    match items.answer(root, &item.id) {
+        Err(AcceptedItemCause::Unreadable { path, .. }) => assert_eq!(path, items_dir),
+        other => panic!("expected unreadable naming the store, got {other:?}"),
+    }
+}
+
+#[test]
+fn item_store_answer_is_ambiguous_naming_every_file_carrying_it() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let item = item_at(item_id(UUID_B));
+    write_item(root, "one.toml", &item);
+    write_item(root, "two.toml", &item);
+
+    let items = ItemStore::read(root);
+
+    match items.answer(root, &item.id) {
+        Err(AcceptedItemCause::Ambiguous { files }) => {
+            let mut expected = vec![
+                root.join(ITEM_STORE).join("one.toml"),
+                root.join(ITEM_STORE).join("two.toml"),
+            ];
+            let mut files = files;
+            expected.sort();
+            files.sort();
+            assert_eq!(files, expected);
+        }
+        other => panic!("expected ambiguous, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 6.1: adoption lists the references it
+// owes the content index, and writes no evidence for a lookup with no
+// identifier (design D2, D6)
+// ---------------------------------------------------------------------
+
+/// design D2: `adopt` lists, for each orphan it recorded, the reference
+/// the content index is owed: its full path, hash, the new artifact and
+/// the item it answers with. An orphan it left lists none.
+#[test]
+fn adopt_lists_the_reference_owed_for_each_orphan_it_records() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("one.pdf"), b"owed one").unwrap();
+    fs::write(root.join("two.pdf"), b"owed two").unwrap();
+    fs::write(root.join("three.pdf"), b"owed three, left").unwrap();
+    let lookup = |candidate: &ContentHash| -> Result<Adopted, Unadopted> {
+        let doi_value = match candidate {
+            found if *found == hash("owed one") => "10.1000/owed-one",
+            found if *found == hash("owed two") => "10.1000/owed-two",
+            _ => return Err(Unadopted::Unindexed),
+        };
+        Ok(Adopted {
+            record: record_with_doi(doi_value),
+            identifier: Some(Identifier::Doi(Doi::parse(doi_value).unwrap())),
+            retrieval: RetrievedFrom::ServiceCache {
+                service: "crossref".to_string(),
+            },
+        })
+    };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    assert_eq!(result.adopted(), 2, "got {result:?}");
+    let records = ArtifactStore::read(root);
+    let owed_for = |relative: &str, seed: &str| {
+        let record = records.by_path(relative).unwrap();
+        OwedReference {
+            path: root.join(relative),
+            hash: hash(seed),
+            artifact: record.id.clone(),
+            item: record.item.clone().unwrap(),
+        }
+    };
+    assert_eq!(
+        result.owed,
+        vec![
+            owed_for("one.pdf", "owed one"),
+            owed_for("two.pdf", "owed two")
+        ],
+        "in the order the orphans were recorded"
+    );
+}
+
+/// design D6: a lookup that reached its record through a library
+/// reference found no identifier, so the entry it writes carries no
+/// evidence.
+#[test]
+fn adopt_with_no_identifier_from_its_lookup_writes_no_evidence() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("orphan.pdf"), b"no identifier from the lookup").unwrap();
+    let orphan_hash = hash("no identifier from the lookup");
+    let lookup = |candidate: &ContentHash| -> Result<Adopted, Unadopted> {
+        match *candidate == orphan_hash {
+            true => Ok(Adopted {
+                record: record_with_doi("10.1000/no-identifier-from-lookup"),
+                identifier: None,
+                retrieval: RetrievedFrom::LibraryReference {
+                    library: UUID_A.into(),
+                    root: "/home/u/papers".into(),
+                    artifact: UUID_B.into(),
+                    item: UUID_C.into(),
+                },
+            }),
+            false => Err(Unadopted::Unindexed),
+        }
+    };
+    let mut key = |_record: &Record, _hash: &ContentHash| -> Option<String> { None };
+
+    let result = adopt(
+        root,
+        &lookup,
+        &mut key,
+        RunId::new("run-1"),
+        TIMESTAMP,
+        TOOL_VERSION,
+    );
+
+    assert_eq!(result.adopted(), 1, "got {result:?}");
+    let records = ArtifactStore::read(root);
+    let record = records
+        .by_hash(&orphan_hash)
+        .first()
+        .cloned()
+        .cloned()
+        .expect("the orphan must be recorded");
+    assert_eq!(record.history.len(), 1, "got {:?}", record.history);
+    assert_eq!(
+        record.history[0].evidence, None,
+        "no identifier was established, so none is recorded: got {:?}",
+        record.history[0]
+    );
 }

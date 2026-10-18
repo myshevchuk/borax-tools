@@ -13,6 +13,7 @@
 //! stream's own types in [`crate::event`].
 
 use borax_core::identifier::{Identifier, SuppliedError};
+use borax_core::index::LibraryReference;
 use borax_core::library::{EvidenceOrigin, IdentificationEvidence};
 use borax_core::record::Record;
 use borax_pdf::tiered::Tier;
@@ -28,6 +29,7 @@ use crate::event::{
     Submission as SubmissionStep, SubmissionAcceptance, SubmissionOutcome as SubmissionOutcomeStep,
     SyntaxStep, TitlesStep, WriteStep,
 };
+use crate::references::{ReferenceRead, answered};
 
 /// Everything a resolution retained about one file, one section per
 /// step, in the order the steps run.
@@ -35,8 +37,8 @@ use crate::event::{
 pub struct Evidence {
     /// What the run's library said about the file.
     pub library: Consultation,
-    /// What the content index did: the read, and the write of the
-    /// identifier the record was reached by.
+    /// What the content index did: the read, the entry's references,
+    /// and the write of the identifier the record was reached by.
     pub content_index: IndexEvidence,
     /// What extraction found, and the titles the file claims.
     pub extraction: ExtractionEvidence,
@@ -60,6 +62,7 @@ impl Evidence {
             library: Consultation::NotConsulted(reason),
             content_index: IndexEvidence {
                 read: IndexRead::NotAttempted(reason),
+                references: Vec::new(),
                 write: IndexWrite::NotAttempted(reason),
             },
             extraction: ExtractionEvidence {
@@ -100,9 +103,16 @@ impl Evidence {
             content_index: ContentIndexSection {
                 read: match &self.content_index.read {
                     IndexRead::Hit(evidence) => IndexReadStep::Hit {
-                        evidence: EvidenceStep::of(evidence),
+                        evidence: Some(EvidenceStep::of(evidence)),
+                        references: self.content_index.reference_steps(),
                     },
-                    IndexRead::Miss => IndexReadStep::Miss,
+                    IndexRead::Referenced => IndexReadStep::Hit {
+                        evidence: None,
+                        references: self.content_index.reference_steps(),
+                    },
+                    IndexRead::Miss => IndexReadStep::Miss {
+                        references: self.content_index.reference_steps(),
+                    },
                     IndexRead::Bypassed => IndexReadStep::Bypassed,
                     IndexRead::Unavailable { message } => IndexReadStep::Unavailable {
                         message: message.clone(),
@@ -166,10 +176,14 @@ impl Evidence {
     ///    whose record was returned — the item the file's bytes were
     ///    accepted under when the answer names one, and the record's
     ///    link otherwise.
+    /// 3. The lookup was not attempted because the content index
+    ///    answered, through a reference to a library
+    ///    ([`IndexRead::Referenced`]): the reference that answered.
     ///
-    /// `None` when neither holds, which is evidence of no record. A
-    /// content-index answer is an identifier, so the record it led to
-    /// was retrieved by its lookup, as any other lookup's is.
+    /// `None` when none holds, which is evidence of no record. A
+    /// content-index answer from its evidence is an identifier, so the
+    /// record it led to was retrieved by its lookup, as any other
+    /// lookup's is.
     ///
     /// The lookup is asked first because an operator's lookup can sit
     /// on evidence that also records a library answer, and the record
@@ -191,6 +205,16 @@ impl Evidence {
             return Some(RecordRetrieval::Library {
                 artifact: artifact.clone(),
                 item: accepted_under.as_ref().unwrap_or(item).clone(),
+            });
+        }
+
+        if let (LookupEvidence::NotAttempted(Unattempted::ContentIndexHit), IndexRead::Referenced) =
+            (&self.lookup, &self.content_index.read)
+        {
+            return answered(&self.content_index.references).map(|read| {
+                RecordRetrieval::LibraryReference {
+                    reference: read.reference.clone(),
+                }
             });
         }
 
@@ -222,19 +246,36 @@ impl Consultation {
 pub struct IndexEvidence {
     /// Whether the index answered for the file's hash.
     pub read: IndexRead,
+    /// Every readable reference of the file's entry to a library, in
+    /// entry order, with what became of it: empty when the entry was
+    /// not read or holds none.
+    pub references: Vec<ReferenceRead>,
     /// What became of writing the identifier the record was reached by
     /// as the file's extracted evidence.
     pub write: IndexWrite,
 }
 
+impl IndexEvidence {
+    /// The references as a resolution event carries them.
+    fn reference_steps(&self) -> Vec<crate::event::ReferenceStep> {
+        self.references.iter().map(ReferenceRead::step).collect()
+    }
+}
+
 /// What reading the content index came to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexRead {
-    /// The index answered for the file's hash with this evidence, whose
-    /// identifier is then looked up.
+    /// The index answered for the file's hash through a reference to a
+    /// library: the one
+    /// [`ReferenceStatus::Answered`](crate::references::ReferenceStatus::Answered) among
+    /// [`IndexEvidence::references`]. Its item's record is the file's,
+    /// and nothing is looked up.
+    Referenced,
+    /// No reference answered, and the index answered for the file's
+    /// hash with this evidence, whose identifier is then looked up.
     Hit(IdentificationEvidence),
     /// The index answered with nothing for the file's hash: it holds no
-    /// entry, or one that answers with no evidence.
+    /// entry, or one in which no reference and no evidence answers.
     Miss,
     /// The run turned the cache off, so the index was not read.
     Bypassed,
@@ -667,6 +708,9 @@ pub enum RecordRetrieval {
     ServiceCache { service: SourceName },
     /// `service`, over the network.
     Network { service: SourceName },
+    /// The item of another library that `reference`, held by the
+    /// content index for the file's bytes, names.
+    LibraryReference { reference: LibraryReference },
 }
 
 impl RecordRetrieval {
@@ -694,6 +738,12 @@ impl RecordRetrieval {
             },
             RecordRetrieval::Network { service } => RetrievedFrom::Network {
                 service: service.as_str().to_string(),
+            },
+            RecordRetrieval::LibraryReference { reference } => RetrievedFrom::LibraryReference {
+                library: reference.library.to_string(),
+                root: reference.root,
+                artifact: reference.artifact.to_string(),
+                item: reference.item.to_string(),
             },
         }
     }
@@ -753,7 +803,8 @@ pub enum Unattempted {
     ContentDuplicate,
     /// The library answered with the file's item.
     LibraryAnswered,
-    /// The content index answered for the file.
+    /// The content index answered for the file: through a reference to
+    /// a library, or with its evidence.
     ContentIndexHit,
     /// Extraction found no identifier.
     ExtractionFailed,

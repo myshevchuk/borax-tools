@@ -185,10 +185,11 @@ fn sections_via_content_index() -> Sections {
         },
         content_index: ContentIndexSection {
             read: IndexReadStep::Hit {
-                evidence: EvidenceStep {
+                evidence: Some(EvidenceStep {
                     identifier: "doi:10.1000/cached-record".to_string(),
                     origin: "extracted".to_string(),
-                },
+                }),
+                references: Vec::new(),
             },
             write: WriteStep::NotAttempted {
                 reason: not_attempted(),

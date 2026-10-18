@@ -18,7 +18,8 @@ use borax_core::record::{DateParts, EntryType, Name, Record};
 use crate::event::{
     Acceptance, Claim, ClaimOrigin, Event, ExtractionResultStep, IdentifierOrigin, IndexReadStep,
     LibraryAnswer, LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, SkipReason,
-    TitlesStep, rejected_identifiers, services_of, why_unanswered,
+    TitlesStep, disagreement, references_read, rejected_identifiers, services_of, why_unanswered,
+    why_unreachable,
 };
 
 /// The move a description is about: where the file would go, and the
@@ -83,8 +84,11 @@ const NAMED_AUTHORS: usize = 3;
 /// pass, `supplied`, or the earlier run the content index has it from),
 /// or the record's own identifier where nothing was looked up; the
 /// services that supplied the record, and whether it came from the
-/// library; why the library could not
-/// answer for the file, where it could not; the record's type, title,
+/// library or from another library a content-index reference names;
+/// why the library could not answer for the file, where it could not;
+/// a `reference` line for each content-index reference to a library
+/// that could not answer, and a `references` line naming what each
+/// disagreeing one names; the record's type, title,
 /// authors, date of issue and container; what the file's own titles
 /// say — each title with where it was read, or that it claims none,
 /// could not be opened, or was not read and why; the conflict an
@@ -99,8 +103,8 @@ const NAMED_AUTHORS: usize = 3;
 /// (the extraction failure, the lookup and what each service answered,
 /// or the two titles of a conflict), what the file's own titles say
 /// wherever the verdict is not a conflict, why the library could not
-/// answer, where it could not, and then a `rejected` line for each
-/// candidate the operator rejected.
+/// answer, where it could not, the `reference` and `references` lines,
+/// and then a `rejected` line for each candidate the operator rejected.
 ///
 /// The rule fills `width`; values wrap within it, under a hanging
 /// indent as wide as the label column. The identifier is the exception
@@ -140,6 +144,7 @@ pub fn describe(
                     .and_then(|sections| sections.library.answer()),
             );
             if let Some(sections) = sections {
+                unreferenced(&mut description, sections);
                 rejected(&mut description, sections);
             }
             return description.lines;
@@ -161,6 +166,7 @@ pub fn describe(
         description.field("record", &from);
     }
     unanswered(&mut description, sections.library.answer());
+    unreferenced(&mut description, sections);
     description.field("type", type_name(record.entry_type));
     if let Some(title) = held(record.title.as_deref()) {
         description.field("title", title);
@@ -341,7 +347,10 @@ fn looked_up(sections: &Sections) -> Option<String> {
         }
         (IdentifierOrigin::Extracted, _) => None,
         (IdentifierOrigin::ContentIndex, _) => match &sections.content_index.read {
-            IndexReadStep::Hit { evidence } => match evidence.origin.as_str() {
+            IndexReadStep::Hit {
+                evidence: Some(evidence),
+                ..
+            } => match evidence.origin.as_str() {
                 "extracted" => Some("found by an earlier run"),
                 "supplied" => Some("supplied in an earlier run"),
                 "overridden" => Some("accepted over a title conflict in an earlier run"),
@@ -591,21 +600,29 @@ fn alike(field: &str, similarity: f64) -> String {
 }
 
 /// The `record` line: the services that supplied `record`
-/// ([`services_of`]), and whether it was held by the library, as
-/// `retrieval` says. `None` when there is nothing to name.
+/// ([`services_of`]), and whether it was held by the library or by the
+/// library at a root a content-index reference names, as `retrieval`
+/// says. `None` when there is nothing to name.
 ///
 /// A library answer whose record names no service is named by where it
-/// was kept: `the library`.
+/// was kept: `the library`, or `the library at <root>`.
 fn record_from(record: &Record, retrieval: Option<&RetrievedFrom>) -> Option<String> {
     let named = services_of(record, retrieval)
         .into_iter()
         .map(service_name)
         .collect::<Vec<_>>()
         .join(", ");
-    let from = match (retrieval, named.is_empty()) {
-        (Some(RetrievedFrom::Library { .. }), true) => "the library".to_string(),
-        (Some(RetrievedFrom::Library { .. }), false) => format!("{named}, from the library"),
-        _ => named,
+    let kept = match retrieval {
+        Some(RetrievedFrom::Library { .. }) => Some("the library".to_string()),
+        Some(RetrievedFrom::LibraryReference { root, .. }) => {
+            Some(format!("the library at {}", root.display()))
+        }
+        _ => None,
+    };
+    let from = match (kept, named.is_empty()) {
+        (Some(kept), true) => kept,
+        (Some(kept), false) => format!("{named}, from {kept}"),
+        (None, _) => named,
     };
     (!from.is_empty()).then_some(from)
 }
@@ -615,6 +632,21 @@ fn record_from(record: &Record, retrieval: Option<&RetrievedFrom>) -> Option<Str
 fn unanswered(description: &mut Description, library: Option<&LibraryAnswer>) {
     if let Some(what) = library.and_then(why_unanswered) {
         description.field("library", &what);
+    }
+}
+
+/// The lines about the content index's references to libraries, in
+/// entry order: a `reference` line for each that could not answer,
+/// saying why ([`why_unreachable`]), then one `references` line naming
+/// what each disagreeing reference names, when any disagreed. Nothing
+/// for references that answered or agreed.
+fn unreferenced(description: &mut Description, sections: &Sections) {
+    let references = references_read(sections);
+    for why in references.iter().filter_map(why_unreachable) {
+        description.field("reference", &why);
+    }
+    if let Some(list) = disagreement(references) {
+        description.field("references", &format!("disagree: {list}"));
     }
 }
 

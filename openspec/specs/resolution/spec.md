@@ -25,7 +25,9 @@ sources fail is the file diverted to the skip queue.
 Successful source responses SHALL be cached on disk keyed by normalized
 identifier, and resolved records SHALL additionally be indexed by the
 source file's content hash, through the identification evidence "The
-content index keeps identification evidence, one fact per file" states. A cache hit SHALL be used without any network request. A bypass
+content index keeps identification evidence, one fact per file" states,
+and through the library references "The content index keeps references
+to libraries, one file each" states. A cache hit SHALL be used without any network request. A bypass
 flag (`--no-cache`) SHALL force live queries for every file the run's
 library does not answer for, and SHALL skip reading the content index,
 and a cache subcommand SHALL be able to clear the cache.
@@ -49,13 +51,16 @@ change no answer the library gives.
 - **THEN** its record is served through the content-hash index without
   re-extraction, and from the response cache without network access —
   or, where the run's library tracks the file under its new name, from
-  its library item instead
+  its library item instead, and where a library reference for its bytes
+  answers, from the item that reference names
 
 #### Scenario: Clearing the cache spares the index
 - **WHEN** `borax cache --clear` runs after a file was resolved, and the
   file is resolved again
-- **THEN** it is not extracted, its identifier is looked up again over
-  the network, and the content index answered for it
+- **THEN** it is not extracted, and the content index answered for it:
+  where no library reference for its bytes answers, its identifier is
+  looked up again over the network; where one answers, nothing is
+  looked up and the record is the item's that reference names
 
 ### Requirement: Network use is polite and bounded
 Every request SHALL carry a User-Agent identifying borax and its version
@@ -183,7 +188,10 @@ summary fits its command".
 A `resolved` event SHALL carry every title the file claims for itself, each with where it was read — the XMP packet or the document information dictionary — in the order they were read, including claims the conflict check did not count as evidence, as the `claims` of its `extraction` section's `titles`. A file that was not opened, because the content index or the file's library item answered, SHALL carry its titles as not attempted, with that reason, and not as a file that claims none.
 
 A `resolved` event SHALL carry the identifier the run looked up, in its
-`lookup` section, alongside the identifiers the record itself holds. The
+`lookup` section, alongside the identifiers the record itself holds,
+wherever the run looked one up. A record the library or a library
+reference answered with was reached by no lookup, and its `lookup`
+section says so. The
 two are not always the same — a record resolved from an arXiv identifier
 may carry a DOI, which is what the event reports as the record's
 `identifier` — and only the former is evidence about the file.
@@ -192,7 +200,8 @@ Which services supplied the record's fields is the record's own per-field
 provenance, which the event carries in `record`, and it is a separate
 fact from where the record was retrieved. Where a rendering names the
 services that supplied the record, they SHALL be the service that
-answered the lookup, or, when the library answered, the sources the record's per-field provenance names other than
+answered the lookup, or, when the library answered or a library
+reference answered for the file's bytes, the sources the record's per-field provenance names other than
 extraction itself, in a fixed order that does not depend on the
 identifier type: Crossref, OpenAlex, arXiv, DataCite, PubMed, then a
 sidecar. A record whose provenance names no such source SHALL be
@@ -207,8 +216,9 @@ reported separately, and so SHALL whether the library did.
   both titles, marked XMP and document information respectively
 
 #### Scenario: A content-index answer names its service
-- **WHEN** a file is resolved from the content index, by looking up the
-  DOI it holds, which Crossref's response cache answers
+- **WHEN** a file is resolved from the content index, with no library
+  reference for its bytes answering, by looking up the DOI it holds,
+  which Crossref's response cache answers
 - **THEN** its human line names Crossref as the service, its
   `resolved` event's `record_retrieval` is `service-cache` naming
   Crossref, and its titles are not attempted because the content index
@@ -221,6 +231,13 @@ reported separately, and so SHALL whether the library did.
   event's `record_retrieval` is `library`, its `content_index.read` is
   not attempted because the library answered, and its titles are not
   attempted for the same reason
+
+#### Scenario: A reference answer names its item's services
+- **WHEN** a file outside any library is answered by a library
+  reference whose item's provenance attributes its fields to Crossref
+- **THEN** its human line names Crossref as the service, its
+  `record_retrieval` is `library-reference`, and its titles are not
+  attempted because the content index answered
 
 #### Scenario: The looked-up identifier is carried
 - **WHEN** a file resolves from an arXiv identifier to a record that
@@ -306,20 +323,28 @@ decision, and a later run SHALL resolve the file from that item: the
 library tracks the file, and its item answers before the content index
 is asked. The content index entry is written all the same, after the
 artifact record: the identifier with its origin, in the entry's
-operator evidence. It is what answers for the file where the library
-does not, a copy of the same bytes elsewhere among them, by looking the
-identifier up. An interruption between the two leaves the decision in
-the library alone, and the next `borax reconcile` writes it to the
-content index, as the `library` capability states.
+operator evidence. A reference to the library is written between the
+artifact record and that evidence, as the `library` capability's
+requirement "A library's references are
+written after its records, and reconcile restores and repairs them"
+states. Where the library does not answer for the file, a copy of the
+same bytes elsewhere among them, that reference answers with the item
+first, as "A library reference answers for a file before the entry's
+evidence" states. The operator's identifier is looked up where no
+reference answers. An interruption between the writes leaves the
+decision in the library alone, and the next `borax reconcile` writes
+both to the content index, as the `library` capability states.
 
 Outside a library the content index is the one place the answer is
 kept, and it keeps it durably: the content index is not a cache,
 `borax cache --clear` leaves it, and an identifier extraction finds
 never takes the place of an operator's, as "The content index keeps
 identification evidence, one fact per file" states. A later run
-looks the operator's identifier up, so the record itself comes from
-the response cache, or from the services when the response cache does
-not hold it.
+looks the operator's identifier up wherever no library reference for
+the bytes answers, so the record itself comes from the response cache,
+or from the services when the response cache does not hold it. Where a
+reference answers, nothing is looked up and the record is the item's
+that reference names.
 
 No record SHALL be written for a file the operator did not rename: a
 record resolved from a supplied identifier and then skipped, abandoned
@@ -342,8 +367,9 @@ followed.
 - **THEN** the batch run resolves it without extraction and without a
   question — by looking up the identifier the content index holds, with
   no network request while the response cache holds it, or from its
-  library item where its library tracks it — and reports it already
-  named
+  library item where its library tracks it, or, with no lookup, from the
+  item a library reference names where one answers for its bytes — and
+  reports it already named
 
 #### Scenario: A wrong identifier abandoned
 - **WHEN** the operator supplies an identifier, sees a record for a
@@ -369,7 +395,8 @@ followed.
 #### Scenario: Clearing the cache forgets no answer
 - **WHEN** a file outside any library was renamed from a supplied
   identifier, `borax cache --clear` runs, and a batch run reaches the
-  file with the services reachable
+  file with the services reachable, no library reference for its bytes
+  answering
 - **THEN** the file is not asked about and not extracted, and the
   supplied identifier is looked up over the network
 
@@ -426,6 +453,11 @@ another path — a copy, or a recorded artifact moved out of band before
 `borax reconcile` repaired its record — SHALL be untracked, as `borax
 status` counts it an orphan, and SHALL resolve through the content
 index, extraction and the services as it did before this requirement.
+The content index can answer for such a file through a reference to
+this same library, naming the item its bytes' record answers with, as
+"A library reference answers for a file before the entry's evidence"
+states. The file is still untracked: that answer is the reference's,
+not the library's, and is reported as such.
 
 The run's library SHALL be the one the run already discovers: the
 directory holding the nearest `.borax.toml` above the run's start
@@ -481,16 +513,22 @@ capability states.
 #### Scenario: An untracked file resolves as before
 - **WHEN** a PDF inside a library that no artifact record names is
   resolved and the content index holds its hash
-- **THEN** it resolves from the content index exactly as before, and its
+- **THEN** it resolves from the content index exactly as before — by
+  the item a library reference names where one answers, with no lookup,
+  and otherwise by looking up the identifier the entry holds — and its
   `resolved` event reports the library's answer as untracked
 
 #### Scenario: A copy is not the artifact
 - **WHEN** a byte-identical copy of a tracked artifact sits at another
   path in the library with no record naming that path, and `borax
   resolve` runs on the copy
-- **THEN** the copy does not resolve from the artifact's item, is
-  reported untracked, and resolves through the content index,
-  extraction and the services as before
+- **THEN** the copy is not tracked by the artifact's record: it is
+  reported untracked, it does not resolve from the library's answer,
+  and it resolves through the content index, extraction and the
+  services as before. Where the content index holds a reference to this
+  library for its bytes, that reference answers with the artifact's
+  item, and the copy's `record_retrieval` is `library-reference`, not
+  `library`
 
 #### Scenario: Outside any library nothing changes
 - **WHEN** `borax resolve` runs on a file with no `.borax.toml` above it
@@ -990,7 +1028,7 @@ and priority" fixes both.
   DOI's origin, and the lookup that met the outage is retained before it
 
 ### Requirement: A resolution says where its record came from
-Every record a resolution reaches SHALL be retained with where it was retrieved from: the file's library item, naming the artifact and the item; a service's response cache, naming the service; or the network, naming the service.
+Every record a resolution reaches SHALL be retained with where it was retrieved from: the file's library item, naming the artifact and the item; the item a library reference names, naming the library, its root, the artifact and the item; a service's response cache, naming the service; or the network, naming the service.
 
 A service's answer served from the response cache SHALL be
 distinguishable from one the service sent over the network. This
@@ -1000,6 +1038,12 @@ record reached by looking up the identifier the
 content index holds was retrieved from the service that answered that
 lookup, from its response cache or the network. The content index holds
 no record, and so is never where one was retrieved from.
+
+A record a library reference answered with was retrieved from the item
+in the library that reference names, and involves no service attempt.
+It is distinguishable from a record the run's own library answered
+with, which names no root, even where the reference names the run's own
+library.
 
 Where a record was retrieved from is a separate fact from which
 services its fields came from, which is the record's per-field
@@ -1019,8 +1063,9 @@ the provenance it was stored with.
   found it are retained as served by Crossref's response cache
 
 #### Scenario: A content-index answer
-- **WHEN** a file is resolved from the content index, by looking up the
-  identifier it holds, and Crossref's response cache answers
+- **WHEN** a file is resolved from the content index, with no library
+  reference for its bytes answering, by looking up the identifier it
+  holds, and Crossref's response cache answers
 - **THEN** its record is retained as served by Crossref's response
   cache, not as retrieved from the content index, and so is the attempt
   that found it
@@ -1030,6 +1075,13 @@ the provenance it was stored with.
 - **THEN** its record is retained as retrieved from the library, naming
   the artifact record and the item, with no service attempt
 
+#### Scenario: A reference answer
+- **WHEN** a file outside any library is answered by a library
+  reference
+- **THEN** its record is retained as retrieved from the item that
+  reference names, naming the library, its root, the artifact and the
+  item, with no service attempt
+
 #### Scenario: A record an operator reached comes from the service
 - **WHEN** the content index answered for a file, or its library
   tracks it, and an operator supplies an identifier that Crossref holds
@@ -1038,11 +1090,20 @@ the provenance it was stored with.
   the content index and the library said is retained as they said it
 
 ### Requirement: A resolution says what the content index did
-Every resolution of a file SHALL retain what the content index did for it: it answered, with the identification evidence it answered with; it held nothing for the file; it was bypassed because the run turned the cache off; it could not be asked because the file could not be hashed, with the reason hashing gave; or it was not asked because the resolution was already decided, with the reason.
+Every resolution of a file SHALL retain what the content index did for it: it answered, through a library reference or with the identification evidence it answered with; it held nothing for the file that answered; it was bypassed because the run turned the cache off; it could not be asked because the file could not be hashed, with the reason hashing gave; or it was not asked because the resolution was already decided, with the reason.
 
-The content index answers by the identifier it holds, which the
-resolution then looks up, as "A content-index entry answers with its
-identifier" states. It answers with no record of its own.
+The content index answers through a library reference first, with the
+item it names, as "A library reference answers for a file before the
+entry's evidence" states. Where no reference answers, it answers by the
+identifier it holds, which the resolution then looks up, as "A
+content-index entry answers with its identifier" states. It answers
+with no record of its own.
+
+Wherever the content index was read and its entry held references, the
+resolution SHALL retain every reference read, with what became of it:
+answered, agreed, disagreeing, unavailable with the cause, or
+item-unavailable with the cause. It retains them whether the entry then
+answered through a reference, through its evidence, or not at all.
 
 A file that could not be hashed SHALL be retained as such even when the
 run bypassed the cache. The missing hash also decides that nothing can
@@ -1064,19 +1125,26 @@ reason is the earliest one in the order the resolution runs:
 - the file has no content hash.
 
 #### Scenario: A hit and a miss
-- **WHEN** one file is resolved from the content index, and another,
-  whose hash the index does not hold, is extracted and resolved from a
-  service
+- **WHEN** one file is resolved from the content index's evidence, no
+  library reference for its bytes answering, and another, whose hash
+  the index does not hold, is extracted and resolved from a service
 - **THEN** the first retains the content index as having answered, with
   the identifier it held, and the second retains it as having held
   nothing and retains the write of its record as made
+
+#### Scenario: References that did not answer are retained
+- **WHEN** a file's entry holds a reference to a library whose root is
+  missing, and an extracted DOI that the lookup resolves
+- **THEN** its resolution retains the content index as having answered
+  with that DOI, and retains the reference as unavailable because its
+  root is missing
 
 #### Scenario: An operator's identifier is not overwritten
 - **WHEN** the content index holds an identifier an operator supplied
   for a file, and a run with `--no-cache` extracts and resolves another
 - **THEN** its resolution retains the content index as bypassed and the
-  write of the extracted identifier as made, and the content index
-  still answers with the operator's identifier
+  write of the extracted identifier as made, and the content index's
+  evidence still answers with the operator's identifier
 
 #### Scenario: An unhashable file
 - **WHEN** a file cannot be hashed, with the cache on, and its DOI
@@ -1261,7 +1329,8 @@ The reasons are:
 - the file lies outside the run's library or in a subtree it excludes;
 - the file's bytes duplicate an artifact the library holds;
 - the library answered;
-- the content index answered, with the identifier it holds;
+- the content index answered, through a library reference or with the
+  identifier it holds;
 - extraction found no identifier;
 - no service held the identifier, or none could be asked;
 - no question was put to an operator about the file;
@@ -1286,11 +1355,19 @@ verdict retains the evidence of every step that ran before it.
   taken because the library answered
 
 #### Scenario: A content-index answer
-- **WHEN** a file is resolved from the content index
+- **WHEN** a file is resolved from the content index's evidence, no
+  library reference for its bytes answering
 - **THEN** the titles, extraction, the title check and the
   content-index write are each retained as not taken because the
   content index answered, and the lookup of the identifier it held is
   retained as made
+
+#### Scenario: A reference answer
+- **WHEN** a file is answered by a library reference
+- **THEN** the titles, extraction, the lookup, the title check and the
+  content-index write are each retained as not taken because the
+  content index answered, and the operator's identifier input as not
+  taken because no question was put
 
 #### Scenario: Extraction found no identifier
 - **WHEN** a file carrying a title yields no identifier
@@ -1372,7 +1449,9 @@ and it remained 4.
 Schema 4 was then released, in 0.9.0, and the content index stopped
 holding records, which changes what released values mean:
 `content_index.read` `hit` is an identifier the index answered with,
-which the resolution then looks up, rather than a record served;
+which the resolution then looks up, rather than a record served — where
+no library reference answers, as the paragraph on references below
+states;
 `content_index.write` writes identification evidence rather than a
 record; `record_retrieval` `content-index` is no longer emitted;
 `content-index-write` reports every evidence write made after a
@@ -1384,9 +1463,44 @@ wrongly, so the version SHALL be 5. No release has carried schema 5, so
 a later change SHALL be free to change it without a further bump until
 one does.
 
+Library references were then added to schema 5, before any release
+carried it. These are additions:
+
+- `references` on `content_index.read` `hit` and `miss`;
+- `record_retrieval` `library-reference`;
+- `content-index-write`'s entry kind `reference`, with `repaired_from`;
+- `references` on `library-adoption` `unanswered`.
+
+These meanings schema 5 had given changed with them:
+
+- a `hit` answered by a reference carries no `evidence`, and no lookup
+  follows it, so its `lookup` is not attempted with reason
+  `content-index-hit`;
+- `content-index-write` reports reference writes too, by an applying
+  run, batch runs included, by `borax adopt`, and by `borax reconcile`;
+- `library-adoption` `unanswered` carries no `identifier` where the
+  entry held no evidence;
+- `library-adoption` `unindexed` narrows: it means the entry holds
+  neither evidence that answers nor a reference that can be read, since
+  an entry holding only references is `recorded` through one that
+  answers, or `unanswered`;
+- `library-adoption` `recorded` may carry `retrieval`
+  `library-reference`, where it was always a service's response cache;
+- a `miss` means that neither a reference nor the evidence answered,
+  and may carry the `references` that did not;
+- `record_retrieval` after a `hit` may be `library-reference`, where it
+  was always the lookup's service;
+- `borax adopt` writes to the content index.
+
+A line about an entry that holds no reference is written exactly as
+before, since `references` is left out when there are none. The
+version SHALL stay 5, as the requirement "JSON Lines output is
+first-class" allows for a schema no release has carried.
+
 #### Scenario: A content-index answer in sections
-- **WHEN** a run with no library resolves a file from the content index,
-  whose identifier Crossref's response cache answers for
+- **WHEN** a run with no library resolves a file from the content
+  index's evidence, no library reference for its bytes answering, and
+  Crossref's response cache answers for its identifier
 - **THEN** its `resolved` event carries schema version 5; `library` not
   attempted with reason `no-library`; `content_index` with `read` `hit`
   carrying that identifier and its origin as `evidence`, and `write`
@@ -1396,6 +1510,16 @@ one does.
   reason `not-asked`; `lookup` attempted with `origin`
   `content-index`; `record_retrieval` of kind `service-cache` naming
   Crossref; and `acceptance` `automatic`
+
+#### Scenario: A reference answer in sections
+- **WHEN** a run with no library resolves a file through a library
+  reference
+- **THEN** its `resolved` event carries `content_index` with `read`
+  `hit` carrying `references` and no `evidence`, and `write` not
+  attempted with reason `content-index-hit`; `extraction`'s `result`
+  and `titles`, `lookup` and `match_check` each not attempted with
+  reason `content-index-hit`; `record_retrieval` of kind
+  `library-reference`; and `acceptance` `automatic`
 
 #### Scenario: The version is five
 - **WHEN** any run emits an event
@@ -1422,10 +1546,34 @@ one does.
 ### Requirement: A resolution reports what the content index did and every cache write
 The `content_index` section SHALL report the content index's `read` as `hit`, `miss`, `bypassed`, `unavailable` with the hashing error's `message`, or not attempted, and its `write` of the record reached as `written`, `failed` with the store's `message`, or not attempted with the earliest reason the requirement "A resolution says what the content index did" orders.
 
-A `hit` SHALL carry `evidence`: the `identifier` the entry answered
-with and its `origin`, `extracted`, `supplied` or `overridden`. An
-entry holding no evidence that can be read is reported `miss`, as "The
-content index keeps identification evidence, one fact per file" states.
+A `hit` answered by the entry's evidence SHALL carry `evidence`: the
+`identifier` the entry answered with and its `origin`, `extracted`,
+`supplied` or `overridden`. A `hit` answered by a library reference
+SHALL carry no `evidence`. An entry holding nothing that answers is
+reported `miss`, as "The content index keeps identification evidence,
+one fact per file" states.
+
+A `hit` or a `miss` whose entry held at least one reference that could
+be read SHALL carry `references`, an array in entry order. Each element
+has the reference's `library`, `root`, `artifact` and `item`, and a
+`status`:
+
+- `answered`;
+- `agreed`;
+- `disagreeing`, with the `identifier` its item carries, left out when
+  it carries none;
+- `unavailable`, with a `cause`:
+  - `missing`;
+  - `other-library`, with the identity `found`, left out when the root
+    holds none;
+  - `unreadable`, with `path` and `message`;
+- `item-unavailable`, with a `cause`:
+  - `dangling`;
+  - `unreadable`, with `path` and `message`;
+  - `ambiguous`, with the item `files`.
+
+`references` SHALL be left out where the entry held none, so such a
+line is written as it was before references existed.
 
 The `write` is of the extracted identifier the record was reached by,
 into the entry's extracted evidence. It is made whatever operator
@@ -1479,9 +1627,20 @@ status.
 
 #### Scenario: A hit names the evidence it answered with
 - **WHEN** a file's entry holds an extracted DOI and a DOI of origin
-  `supplied`
+  `supplied`, and no reference that answers
 - **THEN** `content_index.read` is `hit` with `evidence` naming the
   supplied DOI and `supplied`
+
+#### Scenario: A hit through a reference
+- **WHEN** a file's entry holds a reachable reference and an extracted
+  DOI
+- **THEN** `content_index.read` is `hit` with `references` naming that
+  reference `answered`, and carries no `evidence`
+
+#### Scenario: A miss beside a reference that could not answer
+- **WHEN** a file's entry holds only a reference whose root is missing
+- **THEN** `content_index.read` is `miss` with `references` naming it
+  `unavailable` with cause `missing`, and the file is extracted
 
 ### Requirement: Each service asked is reported with its outcome
 The `lookup` section SHALL report the identifier the resolution looked up, its `origin` as `extracted`, `operator` or `content-index`, and every service asked about it, in the order asked, each as an object with the `service` and an `outcome` tagged `found`, `not-found`, `unavailable` with its `message`, `rate-limited`, or `malformed` with its `message`.
@@ -1580,7 +1739,7 @@ the current round only.
   `content_index.read.evidence.origin` is `supplied`
 
 ### Requirement: A resolution reports where its record was retrieved
-The `record_retrieval` section SHALL name where the record a resolution reached was retrieved from: `library` with the `artifact` and `item` identities, `service-cache` with the `service`, or `network` with the `service`.
+The `record_retrieval` section SHALL name where the record a resolution reached was retrieved from: `library` with the `artifact` and `item` identities, `library-reference` with the `library`, `root`, `artifact` and `item` the reference names, `service-cache` with the `service`, or `network` with the `service`.
 
 The `library` retrieval's `item` SHALL name the item whose record was
 returned, which is what this section has always attributed the record
@@ -1595,6 +1754,11 @@ reported as a retrieval. A record reached
 by looking up the identifier the content index holds SHALL be reported
 as retrieved from the service that answered, from its response cache
 or the network.
+
+A record a library reference answered with SHALL be reported as
+`library-reference`, never as `library`, which names the run's own
+library's answer for a file it tracks. That holds when the reference
+names the run's own library.
 
 On a conflict skip it SHALL name where the refused candidate was
 retrieved from. A record an operator reached by a lookup SHALL be
@@ -1621,8 +1785,15 @@ though it were a service.
 
 #### Scenario: A content-index answer
 - **WHEN** a file outside any library is resolved by looking up the DOI
-  the content index holds for it, and Crossref answers over the network
+  the content index holds for it, no library reference for its bytes
+  answering, and Crossref answers over the network
 - **THEN** `record_retrieval` is `network` naming Crossref
+
+#### Scenario: A reference answer
+- **WHEN** a file outside any library is answered by a reference to a
+  library at `/home/u/papers`
+- **THEN** `record_retrieval` is `library-reference` naming that
+  library's identity, `/home/u/papers`, the artifact and the item
 
 #### Scenario: An operator's lookup over a tracked file
 - **WHEN** an operator supplies an identifier for a tracked file and
@@ -1802,9 +1973,10 @@ content index already held writes nothing at the move. A restoration is written 
 `library` capability's requirement "A library's operator decisions are
 restored to the content index" states.
 
-The event SHALL follow the file's `renamed` event, and its
-`library-admission` event where there is one, and SHALL precede anything
-else reported about the file. In `borax reconcile`, which reports
+The event SHALL follow the file's `renamed` event, its
+`library-admission` event where there is one, and the event reporting
+its library reference's write where there is one, and SHALL precede
+anything else reported about the file. In `borax reconcile`, which reports
 after its pass, the events SHALL follow every per-object event of the
 run and precede its totals. The `path` is the file after the move, or
 the full path the reconciled record names, whether or not a file is
@@ -1817,15 +1989,17 @@ attempted with reason `awaiting-acceptance`. Where no write is made — a
 batch run, whose resolution wrote its record's evidence as it resolved;
 a move declined, skipped or never reached; a reconcile that finds the
 content index already holding the library's operator identifier — no
-`content-index-write` event SHALL be emitted for it.
+`content-index-write` event of kind `evidence` SHALL be emitted for it.
+A reference written for the same file is reported in an event of its
+own, as "What became of a library reference write is reported" states.
 
 The event SHALL NOT be counted in `run-finished`, and a `failed` write
 SHALL NOT change the exit status or be reported as a failure of the
 rename or the reconcile.
 
 #### Scenario: A supplied identifier remembered
-- **WHEN** an operator supplies a DOI for a file and renames it from the
-  record it reaches
+- **WHEN** an operator supplies a DOI for a file outside any library
+  and renames it from the record it reaches
 - **THEN** the stream carries the file's `resolved` event with
   `content_index.write` not attempted for `awaiting-acceptance`, its
   `renamed` event, and then a `content-index-write` event naming the
@@ -1843,8 +2017,11 @@ rename or the reconcile.
 #### Scenario: A batch run writes as it resolves
 - **WHEN** `borax rename --apply` renames a file it resolved from a
   service
-- **THEN** no `content-index-write` event is emitted, and the file's
-  `resolved` event reports `content_index.write` `written`
+- **THEN** no `content-index-write` event of kind `evidence` is emitted,
+  and the file's `resolved` event reports `content_index.write`
+  `written`; inside a library with an identity, the reference the move
+  recorded is reported in a `content-index-write` event of kind
+  `reference`
 
 #### Scenario: A retried lookup remembered
 - **WHEN** a file's own DOI meets an outage, the operator asks the
@@ -1871,10 +2048,36 @@ holds, joined by `, `, and SHALL be left out when it holds neither. The
 services SHALL be those the requirement "A resolution reports the
 evidence it was checked against" names; ` via ` and the services SHALL
 be left out when there are none. Where the record was retrieved SHALL be
-written `the library`, `the response cache` or `the network`. No record
+written `the library`, `the library at <root>` for a library
+reference's item, `the response cache` or `the network`. No record
 is retrieved from the content index, so `the content index` is never
 written there: a record reached through the identifier it holds names
-the service's response cache or the network.
+the service's response cache or the network, and one reached through a
+reference names the library at the reference's root.
+
+Where the file's entry held references, a `resolved` line or a
+resolution skip line SHALL carry clauses about them, after any clause
+saying the library could not answer and before any rejected candidate,
+in entry order:
+
+- for each reference that is `unavailable` or `item-unavailable`, `; a
+  library reference could not answer: ` followed by:
+  - `<root> is missing`, for `missing`;
+  - `<root> holds no library`, for `other-library` with no identity
+    found;
+  - `<root> holds another library (<found>)`, for `other-library` with
+    one;
+  - `<path> could not be read (<message>)`, for `unreadable` under
+    either status;
+  - `the library at <root> holds no item <item>`, for `dangling`;
+  - `the library at <root> holds item <item> in several files`, for
+    `ambiguous`;
+- where references disagreed, one clause: `; library references
+  disagree: ` and, for each `disagreeing` reference, `the library at
+  <root> names <identifier>`, or `the library at <root> names no
+  identifier`, joined by `, `.
+
+A reference `answered` or `agreed` adds no clause.
 
 The human rendering of a resolution skip SHALL be `<path>: skipped, `
 followed by, for each kind:
@@ -1913,7 +2116,9 @@ path SHALL be printed as every other human line prints it; escaping file
 names is outside this requirement.
 A `content-index-write` event SHALL render no line when its write was
 made, and a line saying the content index could not keep the answer,
-with the store's message, when it failed.
+with the store's message, when it failed. For an `entry` of kind
+`reference`, that line says the content index could not keep its
+reference to the library at the reference's root.
 
 #### Scenario: A network answer read by a person
 - **WHEN** `borax resolve` resolves `paper.pdf` from Crossref over the
@@ -1924,9 +2129,30 @@ with the store's message, when it failed.
   `paper.pdf: resolved doi:10.1039/c5ay00042d to "Determination of things" (Smith, 2015) via crossref, from the network`
 
 #### Scenario: A content-index answer read by a person
-- **WHEN** the same file is resolved from the content index, by looking
-  up the DOI it holds, which Crossref's response cache answers
+- **WHEN** the same file is resolved from the content index, with no
+  library reference for its bytes answering, by looking up the DOI it
+  holds, which Crossref's response cache answers
 - **THEN** the line ends `via crossref, from the response cache`
+
+#### Scenario: A reference answer read by a person
+- **WHEN** the same file is answered by a reference to the library at
+  `/home/u/papers`, whose item's provenance names Crossref
+- **THEN** the line ends `via crossref, from the library at
+  /home/u/papers`
+
+#### Scenario: A missing library read by a person
+- **WHEN** a file's entry holds a reference whose root `/media/old` no
+  longer exists, and its extracted DOI is answered by Crossref's
+  response cache
+- **THEN** the line ends `from the response cache; a library reference
+  could not answer: /media/old is missing`
+
+#### Scenario: A disagreement read by a person
+- **WHEN** references to libraries at `/home/u/a` and `/home/u/b`
+  disagree, naming `doi:10.1000/x` and `doi:10.1000/y`
+- **THEN** the line carries `; library references disagree: the library
+  at /home/u/a names doi:10.1000/x, the library at /home/u/b names
+  doi:10.1000/y`
 
 #### Scenario: A title carrying terminal escapes
 - **WHEN** a file is skipped as a conflict and its embedded title holds
@@ -2192,8 +2418,8 @@ at most:
 
 - `extracted.json`, holding the extracted identifier;
 - `operator.json`, holding the operator's identifier and its origin;
-- `refs/`, reserved for references to libraries, which nothing yet
-  writes or reads.
+- `refs/`, holding one file per reference to a library, as "The content
+  index keeps references to libraries, one file each" states.
 
 No other file in an entry SHALL be read as a fact, so the temporary an
 interrupted write leaves is none.
@@ -2214,33 +2440,41 @@ SHALL read, merge and rewrite a file another writer writes:
   is the one it holds.
 
 So an extraction and an operator's decision about the same bytes,
-written in either order or at once, both survive.
+written in either order or at once, both survive. The references in
+`refs/` have writers of their own, which never touch these two files,
+and these two writers never touch a reference.
 
 The evidence an entry answers with SHALL be the operator's when
 `operator.json` holds evidence, and the extracted evidence otherwise.
-An entry whose directory is absent, or holds no fact that can be read,
-is no entry. An `operator.json` that cannot be read or does not parse
-SHALL stop the entry from answering at all, so the file is resolved as
-one the index holds nothing for: the extracted identifier beside it is
-the one an operator may have corrected. An `extracted.json` that cannot
-be read or does not parse is ignored. Either is reported as the index
-holding nothing for the file, as an unreadable entry is reported today,
-and the next write of that fact replaces it. A reader SHALL ignore a key
-it does not know.
+An entry whose directory is absent, or holds no evidence that can be
+read, answers with no evidence. An `operator.json` that cannot be read
+or does not parse SHALL stop the entry's evidence from answering at all,
+so the file is resolved as one the index holds no evidence for: the
+extracted identifier beside it is the one an operator may have
+corrected. An `extracted.json` that cannot be read or does not parse is
+ignored. Either is reported as the index holding nothing for the file,
+as an unreadable entry is reported today, unless a reference answers.
+The next write of that fact replaces it. A reader SHALL ignore a key it
+does not know. The entry's references answer before its evidence, as
+"A library reference answers for a file before the entry's evidence"
+states.
 
 The content index is not a cache. `borax cache --clear` SHALL NOT touch
 it, and it SHALL survive every operation on the response cache. It is
 not library state either: deleting it changes no answer a library gives
 for its own files and no count borax reports. It costs the answers the
 index gave for files outside any library, including the identifiers
-operators supplied for them, and, until the next `borax reconcile`
-restores them, the operator identifiers of a library's files.
+operators supplied for them. Until the next `borax reconcile` restores
+them, it also costs the operator identifiers of a library's files and
+the references to the library.
 
 Where a requirement speaks of a record written to, held by, served from
 or remembered in the content index, it means the identification
 evidence the content index keeps for that record under the file's hash,
 and the record a lookup of that evidence reaches, as "A content-index
-entry answers with its identifier" states.
+entry answers with its identifier" states. Where the record reached is
+a library item's, through a reference, it means that reference and the
+item it names.
 
 #### Scenario: Clearing the cache keeps the index
 - **WHEN** a file was resolved and `borax cache --clear` runs
@@ -2262,7 +2496,8 @@ entry answers with its identifier" states.
 #### Scenario: An operator's identifier outlasts a bypass
 - **WHEN** an operator supplied `doi:10.1000/x` for a file in an earlier
   run, `borax resolve --no-cache` extracts `doi:10.1000/y` from it and
-  resolves that, and a later run without `--no-cache` reaches the file
+  resolves that, and a later run without `--no-cache` reaches the file,
+  no library reference for its bytes answering
 - **THEN** the bypassing run writes `extracted.json` with
   `doi:10.1000/y`, `operator.json` still holds `doi:10.1000/x` with
   origin `supplied`, and the later run looks up `doi:10.1000/x`
@@ -2288,12 +2523,20 @@ entry answers with its identifier" states.
   hold, and the `v1` entry is left where it is
 
 ### Requirement: A content-index entry answers with its identifier
-A file whose content hash the content index holds evidence for SHALL be resolved by looking up that evidence's identifier, and SHALL NOT be opened for extraction or have its titles checked, wherever the run's library does not answer for it first.
+A file whose content hash the content index holds evidence for SHALL be resolved by looking up that evidence's identifier, and SHALL NOT be opened for extraction or have its titles checked, wherever neither the run's library nor a library reference in the entry answers for it first.
 
 This applies after the run's library has been asked and has not
 answered, and only where the run reads the content index: the cache is
 on and the file has a hash. A file the run's library tracks is answered
 by the library and never reaches its entry.
+
+It applies after the entry's references have been read, too, and only
+where none of them answered: none was reachable, or the reachable ones
+disagreed, as "A library reference answers for a file before the
+entry's evidence" states. The order is reference, then evidence, then
+extraction. What this requirement once called an evidence-first answer
+was the whole of an entry that held nothing else. The references read
+are reported beside the evidence, whatever they came to.
 
 The identifier SHALL be the evidence the entry answers with, the
 operator's before the extracted one, as "The content index keeps
@@ -2329,35 +2572,315 @@ for it, which already holds that evidence.
 
 #### Scenario: An evidence answer
 - **WHEN** a file outside any library, whose entry holds the DOI an
-  earlier run extracted, is resolved, and Crossref's response cache
-  holds that DOI
+  earlier run extracted and no reference that answers, is resolved, and
+  Crossref's response cache holds that DOI
 - **THEN** it resolves from Crossref's response cache with no request
   sent, its `lookup.origin` is `content-index`, and the file is not
   opened
 
 #### Scenario: The operator's identifier answers
 - **WHEN** the entry holds an extracted DOI and a DOI an operator
-  supplied
+  supplied, and no reference that answers
 - **THEN** the supplied DOI is the one looked up
 
 #### Scenario: An accepted conflict is looked up and not judged
-- **WHEN** the entry holds evidence of origin `overridden`, and the
-  file's titles conflict with the record its identifier reaches
+- **WHEN** the entry holds evidence of origin `overridden` and no
+  reference that answers, and the file's titles conflict with the
+  record its identifier reaches
 - **THEN** the file is not opened, its `match_check` is not attempted
   with reason `content-index-hit`, and it resolves with that record
 
 #### Scenario: Asking again about an operator's identifier
-- **WHEN** the entry holds evidence of origin `overridden`, its lookup
-  meets an outage, and the operator asks the services again, Crossref
+- **WHEN** the entry holds evidence of origin `overridden` and no
+  reference that answers, its lookup meets an outage, and the operator asks the services again, Crossref
   answers, and the operator renames the file
 - **THEN** the lookup's origin is still `content-index` with the outage
   kept as an earlier round, the titles are not read, the title check is
-  not made, no `content-index-write` event is emitted, and the entry is
-  unchanged
+  not made, no `content-index-write` event of kind `evidence` is
+  emitted, and the entry's evidence is unchanged
 
 #### Scenario: Offline with no response cache
-- **WHEN** the entry holds evidence, the response cache does not hold
-  its identifier, and no service can be reached
+- **WHEN** the entry holds evidence and no reference that answers, the
+  response cache does not hold its identifier, and no service can be
+  reached
 - **THEN** the file is skipped as `unresolvable` with each service
   reported unavailable, it is not extracted, and the entry is unchanged
+
+### Requirement: The content index keeps references to libraries, one file each
+The content index SHALL keep, under a file's content hash, a reference to each library location that recorded those bytes, each reference in a file of its own that its writer replaces whole and never merges with another.
+
+A reference names four things: the library's identity, the root the
+library was last known at, the identity of the artifact record that
+holds the bytes, and the identity of the item that record answers with
+for them. It holds no record and no identification evidence.
+
+A reference SHALL be the file `refs/<name>.json` in the hash's entry
+directory, holding `library`, `root`, `artifact` and `item`. `<name>`
+SHALL be `sha256-` and the lowercase hexadecimal SHA-256 of the
+library's identity, the root and the artifact's identity, joined by a
+NUL character. So one library, root and artifact name exactly one
+file, and a reference whose item changes keeps its file. The root SHALL
+be the library root as text, made absolute and normalised lexically as
+the library's own stores are read. Identities SHALL be canonical UUID
+text. A reader SHALL ignore a key it does not know. A file that cannot
+be read, does not parse, or lacks one of the four is not a reference.
+Neither is a file in `refs/` whose name does not end `.json`, such as
+the temporary an interrupted write leaves. Neither is reported.
+
+Each reference file SHALL be created or replaced by atomic replacement,
+by a writer that reads no other fact to decide what to write. Writing a
+reference SHALL NOT touch the entry's evidence. Writing evidence SHALL
+NOT touch a reference. A reference is removed only by the repair the
+`library` capability's requirement "A library's references are written
+after its records, and reconcile restores and repairs them" states,
+which writes the reference that replaces it first. Two writers of
+different references write different files. Two writers of one
+reference differ at most in its item, and the one written last stands.
+
+Who writes a reference, when, and what it names is that `library`
+requirement's. A library whose root is not UTF-8 text cannot be named by
+a reference, and an attempt to write one is reported as a failed write.
+
+References SHALL be preserved: a reference whose library cannot be
+reached SHALL NOT be removed because of that, and nothing removes one
+automatically. A later operation that prunes references SHALL be an
+explicit one of its own.
+
+Like the entry's evidence, the references survive `borax cache --clear`
+and every operation on the response cache, and are not library state.
+Deleting them changes no answer a library gives for its own files. It
+costs the answers they gave for copies of those files elsewhere, until
+`borax reconcile` in each library writes them again.
+
+#### Scenario: One reference per library location and artifact
+- **WHEN** an applying rename records a file in a library, and
+  `borax reconcile` runs over that library afterwards
+- **THEN** the file's entry holds one file under `refs/`, naming the
+  library's identity, its root, the artifact and the item, and the
+  reconcile writes no second one
+
+#### Scenario: A changed item keeps its file
+- **WHEN** a reference's artifact record is re-linked to another item,
+  and the reference is written again
+- **THEN** the same file under `refs/` names the new item, and no other
+  file was added
+
+#### Scenario: Evidence and references do not touch each other
+- **WHEN** a file's entry holds `extracted.json`, `operator.json` and a
+  reference, and a resolution writes its extracted identifier while a
+  reconcile replaces the reference with one naming another item
+- **THEN** `extracted.json` holds the resolution's identifier, the
+  reference names the reconcile's item, and `operator.json` is
+  byte-identical
+
+#### Scenario: Clearing the cache keeps the references
+- **WHEN** a library's reconcile has written references, and `borax
+  cache --clear` runs
+- **THEN** every reference file is byte-identical afterwards
+
+### Requirement: A library reference answers for a file before the entry's evidence
+For a file the run's library does not answer for, a reachable library reference SHALL answer with the record of the item it names, before the entry's evidence is looked up, as long as every reachable reference agrees; the file SHALL then not be opened, looked up, or have its titles checked.
+
+This applies where the content index is read at all: after the run's
+library has been asked and has not answered, with the cache on, and for
+a file that has a hash. A file the run's library tracks is answered by
+its library item and never reaches its entry, references included. Any
+other file inside a library reaches its entry as a file outside does:
+an untracked copy, or a file whose record cannot answer. That includes
+references to its own library, and its `library` section still reports
+what the library said.
+
+The order is reference, then evidence, then extraction. The requirement
+"A content-index entry answers with its identifier" describes an entry
+no reference of which answers. Earlier changes called an answer outside
+a library evidence-first only because the entry held nothing else.
+
+Each reference SHALL be reached through its root, the first of these
+deciding:
+
+- the root does not exist, a link to nothing included: the reference is
+  `unavailable` because the root is `missing`;
+- the root cannot be examined for another reason: `unavailable` because
+  it is `unreadable`, with the root and the reason;
+- the root is not a directory, or holds no library identity:
+  `unavailable` because it holds `other-library`, with no identity
+  found;
+- its identity file cannot be read or does not parse: `unavailable`
+  because it is `unreadable`, with that file and the reason;
+- it holds another library's identity: `unavailable` because it holds
+  `other-library`, with the identity found;
+- no item file of that library carries the reference's item, and the
+  item store could not be listed or a file whose name claims that item
+  could not be read: `item-unavailable` because it is `unreadable`, with
+  the directory or file and the reason;
+- no item file carries it otherwise: `item-unavailable` because it is
+  `dangling`;
+- several item files carry it: `item-unavailable` because it is
+  `ambiguous`, with those files;
+- otherwise the reference is reachable, and the item it names answers.
+
+The item SHALL be found by the identity inside an item file, never by
+its name. The item SHALL be the one the reference names. The artifact
+record the reference names is not read. The library's marker is not
+consulted: a library is named by its identity. Each root a run's
+references name SHALL be read at most once in the run, and reaching a
+reference SHALL write nothing anywhere.
+
+References are taken in entry order: by root, then library, then
+artifact, compared as text. Two locations of one library are two
+references. Among the reachable ones:
+
+- **One, or several that agree**, answer: the first in entry order is
+  `answered`, every other reachable one `agreed`. Reachable references
+  agree when every item they name carries the same preferred
+  identifier, or when none carries one and all name one item of one
+  library. The preferred identifier is the record's DOI, else its arXiv
+  identifier, else its PMID, else its ISBN, the identifier a `resolved`
+  event reports the record under. An item carrying one and an item
+  carrying none disagree.
+- **Several that disagree** are each `disagreeing`, with the preferred
+  identifier its item carries, and none answers. The entry's evidence
+  is then looked up, as "A content-index entry answers with its
+  identifier" states. With no evidence, the file is extracted as one
+  the content index holds nothing for.
+- **None reachable**: the entry's evidence is looked up, and failing
+  that the file is extracted.
+
+A reference that is unavailable keeps that status whatever the others
+come to, so that what answered is distinguishable from the library
+that could not.
+
+A record a reference answered with SHALL be the file's record, with the
+provenance it was stored with, retrieved from that library's item.
+Nothing is written to the content index for it. Extraction, the file's
+titles, the lookup, the title check and the content-index write are not
+taken, because the content index answered. The record goes through the
+work check, and an interactive run puts it the question it calls for.
+No identifier established it, so a library admitting the file records
+no identification evidence for it.
+
+#### Scenario: A library's correction reaches a copy
+- **WHEN** a library holds a file whose item was corrected by hand, and
+  `borax resolve` runs on a copy of that file outside every library
+- **THEN** the copy resolves with the corrected record, no service is
+  asked, the file is not opened, and its `record_retrieval` names the
+  library, its root, the artifact and the item
+
+#### Scenario: References answer before an operator's identifier
+- **WHEN** a file's entry holds a reachable reference and an
+  identifier an operator supplied
+- **THEN** the reference answers, and the identifier is not looked up
+
+#### Scenario: Two copies of one library agree
+- **WHEN** a library and a copy of it at another root are both
+  referenced for a file's bytes, and their items carry the same DOI
+- **THEN** the reference whose root sorts first answers, and the other
+  is reported `agreed`
+
+#### Scenario: Two libraries disagree
+- **WHEN** two reachable references name items carrying different DOIs
+- **THEN** neither answers, both are reported `disagreeing` with their
+  DOIs, and the entry's evidence is looked up
+
+#### Scenario: A missing library is reported, and the evidence answers
+- **WHEN** a file's only reference names a root that no longer exists,
+  and its entry holds an extracted DOI
+- **THEN** the reference is reported `unavailable` because the root is
+  `missing`, it is kept, and the DOI is looked up
+
+#### Scenario: Another library at the old root
+- **WHEN** a reference's root now holds a library with another identity
+- **THEN** the reference is reported `unavailable` because the root
+  holds `other-library`, naming the identity found
+
+#### Scenario: The item is gone
+- **WHEN** a reference's library is reachable and no item file carries
+  its item
+- **THEN** the reference is reported `item-unavailable` because it is
+  `dangling`, and the entry's evidence is looked up
+
+#### Scenario: A tracked file reads no reference
+- **WHEN** a file its library tracks has bytes whose entry holds a
+  reference to another library
+- **THEN** it resolves from its own library item, and the reference is
+  not read
+
+#### Scenario: A copy inside a library
+- **WHEN** an untracked copy of a tracked artifact sits at another path
+  in the library, and the copy's bytes are referenced by that library
+- **THEN** the copy resolves from the item the reference names, its
+  `library` section reports it untracked, and its `record_retrieval` is
+  the reference's, not `library`
+
+#### Scenario: The cache bypassed
+- **WHEN** a file whose entry holds a reachable reference is resolved
+  with `--no-cache`
+- **THEN** the content index is reported bypassed, no reference is
+  read, and the file is extracted
+
+### Requirement: What became of a library reference write is reported
+Every reference a run writes to the content index, and every one it fails to write, SHALL be reported in a `content-index-write` event whose `entry` is of kind `reference`, naming the `library`, the `root`, the `artifact` and the `item`.
+
+The event carries the file's `path`, the content `hash`, the `entry`
+and a `write` of `written`, or `failed` with the store's `message`. The
+`path` is:
+
+- in a rename, the file where the run left it: the path it moved to, or
+  the one it already carried;
+- in `borax adopt`, the full path of the orphan it recorded;
+- in `borax reconcile`, the full path the record names, whether or not a
+  file is there.
+
+A write that repaired a stale root SHALL carry `repaired_from`, the
+roots whose references it removed, and SHALL be `failed` when a removal
+failed, with a message naming the file left. `repaired_from` is left
+out when it would be empty.
+
+A reference held already, naming the same item, is not written, and no
+event SHALL be emitted for it. So neither a re-run nor a second
+reconcile over an unchanged library reports one.
+
+The events SHALL come in this order:
+
+- in a rename, after the file's `renamed` or `already-named` event and
+  its `library-admission` events, and before the event reporting the
+  operator's evidence;
+- in `borax adopt`, after every `library-adoption` event, in the order
+  of the orphans recorded, and before the run's totals;
+- in `borax reconcile`, after every per-record event, the `not-pending`
+  skips and the operator restorations, and before its totals.
+
+They are written to the stream and the run log alike, never before the
+move. A written one renders no human line. A failed one renders
+`<path>: the content index could not keep its reference to the library
+at <root> (<message>)`. The event SHALL NOT be counted in
+`run-finished`, and a failed write SHALL NOT change the exit status or
+be reported as a failure of the rename, adoption or reconcile.
+
+#### Scenario: A rename reports its reference
+- **WHEN** `borax rename --apply` moves and records a file in a library
+  that has an identity
+- **THEN** the stream carries its `renamed` event, then a
+  `content-index-write` event whose `entry` is of kind `reference`
+  naming the library, its root, the new artifact and its item, with
+  `write` `written`
+
+#### Scenario: A repair reported
+- **WHEN** `borax reconcile` runs over a library moved from `/media/old`
+  that a reference still names there
+- **THEN** a `content-index-write` event names the new root and carries
+  `repaired_from` with `/media/old`, before the reconcile's totals
+
+#### Scenario: Nothing to report the second time
+- **WHEN** `borax reconcile` runs twice over a library nothing has
+  touched
+- **THEN** the second run reports no `content-index-write` event
+
+#### Scenario: A failed reference write
+- **WHEN** the content index cannot be written during an applying rename
+  in a library
+- **THEN** the file is renamed and recorded, the reference's
+  `content-index-write` event is `failed` with the store's message, its
+  human line names the library's root, and the exit status is what it
+  would have been had the write succeeded
 

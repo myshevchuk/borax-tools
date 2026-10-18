@@ -789,3 +789,340 @@ fn a_run_with_no_data_directory_writes_no_fact_and_succeeds() {
          cache directory"
     );
 }
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 5.1: references on disk and through
+// the binary (design D1, D2, D4)
+// ---------------------------------------------------------------------
+
+/// What `seed_referenced_binary_fixture` wrote, as the texts a reference
+/// names.
+struct Seeded {
+    library: String,
+    artifact: String,
+    item: String,
+}
+
+/// Writes a library at `root`: an identity, the file `relative` holding
+/// `bytes`, an item whose record carries `doi_value` and `title`, and an
+/// artifact record linking the item and holding the file's hash with its
+/// real size and modification time, so a reconcile finds nothing to
+/// repair.
+fn seed_referenced_binary_fixture(
+    root: &Path,
+    relative: &str,
+    bytes: &[u8],
+    doi_value: &str,
+    title: &str,
+) -> Seeded {
+    use borax_core::content::hash_bytes;
+    use borax_core::identifier::Doi;
+    use borax_core::library::{
+        ArtifactId, ArtifactRecord, HashEntry, Item, ItemId, LibraryId, LibraryIdentity, RunId,
+    };
+    use borax_core::record::{EntryType, Record};
+    use uuid::Uuid;
+
+    fs::write(root.join(".borax.toml"), b"").expect("marker");
+    fs::write(root.join(relative), bytes).expect("the file");
+    let library = LibraryId::from_uuid(Uuid::now_v7());
+    fs::create_dir_all(root.join(".borax")).expect("state dir");
+    fs::write(
+        root.join(".borax").join("library.toml"),
+        LibraryIdentity {
+            id: library.clone(),
+        }
+        .to_toml(),
+    )
+    .expect("identity file");
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some(title.to_string());
+    record.doi = Some(Doi::parse(doi_value).expect("a valid doi"));
+    let item = Item {
+        id: ItemId::from_uuid(Uuid::now_v7()),
+        record,
+    };
+    let items = root.join("items");
+    fs::create_dir_all(&items).expect("items dir");
+    fs::write(items.join(format!("{}.toml", item.id)), item.to_toml()).expect("item file");
+    let modified_millis = fs::metadata(root.join(relative))
+        .expect("metadata")
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_millis() as i64;
+    let artifact = ArtifactRecord {
+        id: ArtifactId::from_uuid(Uuid::now_v7()),
+        item: Some(item.id.clone()),
+        path: relative.to_string(),
+        size: bytes.len() as u64,
+        modified_millis,
+        history: vec![HashEntry {
+            hash: hash_bytes(bytes),
+            run: RunId::new("fixture-run"),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            tool_version: "0.6.0-test".to_string(),
+            item: None,
+            evidence: None,
+        }],
+    };
+    let records = root.join(".borax").join("artifacts");
+    fs::create_dir_all(&records).expect("artifacts dir");
+    fs::write(
+        records.join(format!("{}.toml", artifact.id)),
+        artifact.to_toml(),
+    )
+    .expect("artifact record file");
+    Seeded {
+        library: library.to_string(),
+        artifact: artifact.id.to_string(),
+        item: item.id.to_string(),
+    }
+}
+
+/// `borax <args>` run from `cwd`, with every directory it could write
+/// to a temporary one.
+fn borax_in(
+    args: &[&str],
+    cwd: &Path,
+    config_home: &Path,
+    cache_home: &Path,
+    data_home: &Path,
+) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_borax"))
+        .args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("APPDATA", config_home)
+        .env("XDG_CACHE_HOME", cache_home)
+        .env("XDG_DATA_HOME", data_home)
+        .output()
+        .expect("the binary should run")
+}
+
+/// The `refs` directory of `bytes`' entry under `data_home`'s index.
+fn refs_directory(data_home: &Path, bytes: &[u8]) -> std::path::PathBuf {
+    data_home
+        .join("borax")
+        .join("v2")
+        .join("content")
+        .join(borax_core::content::hash_bytes(bytes).to_string())
+        .join("refs")
+}
+
+/// The one reference file in `directory`, parsed.
+fn only_reference_in(directory: &Path) -> (std::path::PathBuf, serde_json::Value) {
+    let files: Vec<std::path::PathBuf> = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("expected {directory:?} to exist: {error}"))
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    assert_eq!(files.len(), 1, "got {files:?}");
+    assert_eq!(
+        files[0]
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("json"),
+        "got {files:?}"
+    );
+    let text = fs::read_to_string(&files[0]).expect("the reference file");
+    let value = serde_json::from_str(&text).unwrap_or_else(|error| panic!("{error}: {text:?}"));
+    (files[0].clone(), value)
+}
+
+/// design D1: `borax reconcile` writes the library's reference under
+/// `$XDG_DATA_HOME/borax/v2/content/<hash>/refs/<name>.json`, holding the
+/// library, root, artifact and item.
+#[test]
+fn reconcile_writes_references_under_xdg_data_home_borax_v2_content_refs() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let root = library.path();
+    let bytes = b"g13 binary reconcile reference bytes";
+    let seeded = seed_referenced_binary_fixture(
+        root,
+        "paper.pdf",
+        bytes,
+        "10.1000/g13-binary-reconcile",
+        "Referenced Title",
+    );
+
+    let output = borax_in(
+        &["reconcile", "--json"],
+        root,
+        config_home.path(),
+        cache_home.path(),
+        data_home.path(),
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (file, reference) = only_reference_in(&refs_directory(data_home.path(), bytes));
+    assert!(
+        file.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("sha256-")),
+        "got {file:?}"
+    );
+    assert_eq!(reference["library"], seeded.library);
+    assert_eq!(reference["artifact"], seeded.artifact);
+    assert_eq!(reference["item"], seeded.item);
+    assert_eq!(
+        fs::canonicalize(reference["root"].as_str().expect("a root text")).expect("a real root"),
+        fs::canonicalize(root).expect("canonical root")
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#""kind":"reference""#),
+        "the write is reported: got {stdout}"
+    );
+}
+
+/// The `resolved` event `borax resolve --json copy.pdf` gives, run
+/// outside every library over a file holding `bytes`.
+fn resolve_a_copy(
+    bytes: &[u8],
+    config_home: &Path,
+    cache_home: &Path,
+    data_home: &Path,
+) -> serde_json::Value {
+    let outside = tempfile::tempdir().expect("a directory outside every library");
+    fs::write(outside.path().join("copy.pdf"), bytes).expect("the copy");
+    let output = borax_in(
+        &["resolve", "--json", "copy.pdf"],
+        outside.path(),
+        config_home,
+        cache_home,
+        data_home,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json"))
+        .find(|line: &serde_json::Value| line["event"] == "resolved")
+        .unwrap_or_else(|| {
+            panic!(
+                "no resolved event: stdout {stdout}, stderr {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+}
+
+/// design D4, D5: outside any library, the reference a reconcile wrote
+/// answers for a copy of the file. The copy is not a PDF and the binary
+/// has no transport, so only the reference can have answered.
+#[test]
+fn resolve_outside_a_library_reads_a_reference_from_xdg_data_home() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let root = library.path();
+    let bytes = b"g13 binary resolve reference bytes";
+    let seeded = seed_referenced_binary_fixture(
+        root,
+        "paper.pdf",
+        bytes,
+        "10.1000/g13-binary-resolve",
+        "The Referenced Title",
+    );
+    let reconciled = borax_in(
+        &["reconcile", "--json"],
+        root,
+        config_home.path(),
+        cache_home.path(),
+        data_home.path(),
+    );
+    assert_eq!(reconciled.status.code(), Some(0), "setup");
+
+    let resolved = resolve_a_copy(
+        bytes,
+        config_home.path(),
+        cache_home.path(),
+        data_home.path(),
+    );
+
+    assert_eq!(resolved["record"]["title"], "The Referenced Title");
+    assert_eq!(resolved["record_retrieval"]["kind"], "library-reference");
+    assert_eq!(resolved["record_retrieval"]["library"], seeded.library);
+    assert_eq!(resolved["record_retrieval"]["item"], seeded.item);
+    assert_eq!(
+        fs::canonicalize(
+            resolved["record_retrieval"]["root"]
+                .as_str()
+                .expect("a root text")
+        )
+        .expect("a real root"),
+        fs::canonicalize(root).expect("canonical root")
+    );
+    assert_eq!(resolved["content_index"]["read"]["status"], "hit");
+    assert_eq!(
+        resolved["content_index"]["read"]["references"][0]["status"],
+        "answered"
+    );
+}
+
+/// design D1: `borax cache --clear` removes service responses only, so
+/// the reference survives it byte-identical and a copy is still answered
+/// by it.
+#[test]
+fn cache_clear_leaves_the_content_index_so_a_reference_still_answers() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let root = library.path();
+    let bytes = b"g13 binary cache clear reference bytes";
+    seed_referenced_binary_fixture(
+        root,
+        "paper.pdf",
+        bytes,
+        "10.1000/g13-binary-clear",
+        "The Surviving Title",
+    );
+    let reconciled = borax_in(
+        &["reconcile", "--json"],
+        root,
+        config_home.path(),
+        cache_home.path(),
+        data_home.path(),
+    );
+    assert_eq!(reconciled.status.code(), Some(0), "setup");
+    let (file, before) = only_reference_in(&refs_directory(data_home.path(), bytes));
+    let before_bytes = fs::read(&file).expect("the reference file");
+    assert!(before["item"].as_str().is_some());
+
+    let cleared = borax_in(
+        &["cache", "--clear", "--json"],
+        root,
+        config_home.path(),
+        cache_home.path(),
+        data_home.path(),
+    );
+
+    assert_eq!(
+        cleared.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&cleared.stderr)
+    );
+    assert_eq!(
+        fs::read(&file).expect("`cache --clear` must leave the reference"),
+        before_bytes
+    );
+    let resolved = resolve_a_copy(
+        bytes,
+        config_home.path(),
+        cache_home.path(),
+        data_home.path(),
+    );
+    assert_eq!(resolved["record"]["title"], "The Surviving Title");
+    assert_eq!(resolved["record_retrieval"]["kind"], "library-reference");
+}

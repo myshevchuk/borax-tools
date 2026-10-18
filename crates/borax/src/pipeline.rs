@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
-use borax_core::library::{DuplicateReason, EvidenceOrigin, IdentificationEvidence};
+use borax_core::library::{DuplicateReason, EvidenceOrigin, IdentificationEvidence, Item};
 use borax_core::record::Record;
 use borax_pdf::pure::PurePdf;
 use borax_pdf::scan::xmp_title;
@@ -37,6 +37,7 @@ use crate::evidence::{
     Unattempted,
 };
 use crate::library::{Account, Consulted, Stores, WorkDuplicate};
+use crate::references::{Libraries, ReferenceRead};
 
 /// The documents a run works on, as something that can be read.
 ///
@@ -147,8 +148,8 @@ impl FileRecord {
     /// - the answering fact's own origin for a lookup of the content
     ///   index's identifier.
     ///
-    /// A record the library supplied was reached by no lookup, and has
-    /// none.
+    /// A record the library supplied, or a reference to another library
+    /// answered with, was reached by no lookup, and has none.
     pub fn identification(&self) -> Option<IdentificationEvidence> {
         let LookupEvidence::Attempted {
             identifier, origin, ..
@@ -202,9 +203,13 @@ pub struct ResolveConfig {
 ///   message, whatever [`ResolveConfig::cache`] says;
 /// - [`ResolveConfig::cache`] `false` — the `--no-cache` bypass — gives
 ///   [`IndexRead::Bypassed`], and the index is not read;
-/// - otherwise the hash's entry is read: [`IndexRead::Hit`] with the
-///   evidence it answers with ([`borax_core::index::IndexEntry::answer`]),
-///   or [`IndexRead::Miss`] when it answers with none.
+/// - otherwise the evidence of the hash's entry is read:
+///   [`IndexRead::Hit`] with the evidence it answers with
+///   ([`borax_core::index::IndexEntry::answer`]), or [`IndexRead::Miss`]
+///   when it answers with none.
+///
+/// The entry's references are not read here: [`standing`] reads them
+/// first, and asks this only when none answered.
 ///
 /// A hit means the file need not be opened at all: the evidence's
 /// identifier is looked up instead of one extracted from the file.
@@ -232,7 +237,8 @@ pub fn index_read<S: IndexStore>(
 
 /// The standing of a file the content index answered for with
 /// `evidence`, with `library` as what the library said before the index
-/// was read: `evidence`'s identifier looked up through `sources`, with
+/// was read and `references` as the entry's references, none of which
+/// answered: `evidence`'s identifier looked up through `sources`, with
 /// origin [`Origin::Indexed`].
 ///
 /// Nothing is read from the file and no title check is made, whatever
@@ -241,9 +247,11 @@ pub fn index_read<S: IndexStore>(
 /// through the library's work check as any other does. A lookup no
 /// service answered is [`SkipReason::Unresolvable`] with its attempts,
 /// and the file is not extracted instead.
+#[allow(clippy::too_many_arguments)]
 fn indexed_standing(
     path: &Path,
     evidence: IdentificationEvidence,
+    references: Vec<ReferenceRead>,
     hash: Option<ContentHash>,
     sources: &[&dyn Source],
     account: Option<&Account<'_>>,
@@ -257,6 +265,7 @@ fn indexed_standing(
         library,
         content_index: IndexEvidence {
             read: IndexRead::Hit(evidence),
+            references,
             write: IndexWrite::NotAttempted(reason),
         },
         identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
@@ -287,6 +296,45 @@ fn indexed_standing(
             },
         ),
     }
+}
+
+/// The standing of a file a reference to a library answered for:
+/// `item`'s record, with `library` as what the run's library said and
+/// `references` as the entry's references, the answering one among
+/// them.
+///
+/// Nothing was read from the file, looked up, checked or written: each
+/// of those steps is not attempted because the content index answered,
+/// and no operator was asked. The record goes through the library's
+/// work check as any other does. It is no lookup's, so it carries no
+/// identification evidence ([`FileRecord::identification`]).
+fn referenced_standing(
+    path: &Path,
+    item: Item,
+    references: Vec<ReferenceRead>,
+    hash: Option<ContentHash>,
+    account: Option<&Account<'_>>,
+    library: Consultation,
+) -> Standing {
+    let reason = Unattempted::ContentIndexHit;
+    let file = FileRecord {
+        record: item.record,
+        hash,
+        evidence: Evidence {
+            library,
+            content_index: IndexEvidence {
+                read: IndexRead::Referenced,
+                references,
+                write: IndexWrite::NotAttempted(reason),
+            },
+            identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
+            ..Evidence::not_attempted(reason)
+        },
+        // The item is the referenced library's decision, made there.
+        overridden: false,
+        accepted: false,
+    };
+    Standing::of(path, file, account)
 }
 
 /// The record the library supplies for a file it tracks: its item's,
@@ -434,14 +482,19 @@ pub fn title_check(titles: &Titles, record: &Record) -> MatchCheck {
 ///    A library that cannot answer for the file says why, and the
 ///    passes below run as for a file it does not track. This function
 ///    passes no library, so it starts at the content index.
-/// 2. **Content index**: the file's hash is looked up ([`index_read`]).
-///    On a hit, the identifier the index answers with is looked up over
-///    `sources` without opening the file or checking its titles, and
-///    what that lookup reaches is the result: the record, or
-///    [`SkipReason::Unresolvable`]. Skipped entirely when
-///    [`ResolveConfig::cache`] is `false`, and treated as a miss when
-///    the file cannot be hashed — a hash failure is not yet a reason to
-///    give up, since opening the file reports a better one.
+/// 2. **Content index**: the file's hash is looked up. First its
+///    references to libraries are reached and settled
+///    ([`crate::references::read`]): where one answers, the file's
+///    record is its item's, returned without opening the file, asking
+///    a service, or writing the content index. Otherwise the evidence
+///    the entry answers with is read ([`index_read`]): on a hit, its
+///    identifier is looked up over `sources` without opening the file
+///    or checking its titles, and what that lookup reaches is the
+///    result: the record, or [`SkipReason::Unresolvable`]. Every
+///    reference read is reported, whatever answered. Skipped entirely
+///    when [`ResolveConfig::cache`] is `false`, and treated as a miss
+///    when the file cannot be hashed — a hash failure is not yet a
+///    reason to give up, since opening the file reports a better one.
 /// 3. **Extraction**: [`borax_pdf::tiered::extract`] over the opened
 ///    file.
 /// 4. **Resolution**: [`borax_sources::dispatch::resolve`] over
@@ -647,6 +700,10 @@ fn duplicate(reason: DuplicateReason, existing: &Path) -> SkipReason {
 /// Every verdict carries the evidence of the steps that ran before it,
 /// and says of each step that did not run why it did not
 /// ([`Standing::evidence`]).
+///
+/// The libraries the content index's references name are read afresh,
+/// for this file alone; [`standing_in`] shares what was read across
+/// files.
 pub fn standing<S: IndexStore>(
     path: &Path,
     documents: &dyn Documents,
@@ -655,6 +712,33 @@ pub fn standing<S: IndexStore>(
     config: &ResolveConfig,
     account: Option<&Account<'_>>,
     library: Option<&Stores>,
+) -> Standing {
+    standing_in(
+        path,
+        documents,
+        sources,
+        index,
+        config,
+        account,
+        library,
+        &Libraries::new(),
+    )
+}
+
+/// [`standing`], reaching the libraries the content index's references
+/// name through `libraries`, so that each library root is read at most
+/// once across every file a run resolves through it: what a root holds
+/// is what the first read of it found.
+#[allow(clippy::too_many_arguments)]
+pub fn standing_in<S: IndexStore>(
+    path: &Path,
+    documents: &dyn Documents,
+    sources: &[&dyn Source],
+    index: &ContentIndex<S>,
+    config: &ResolveConfig,
+    account: Option<&Account<'_>>,
+    library: Option<&Stores>,
+    libraries: &Libraries,
 ) -> Standing {
     let hashed = documents.hash(path);
     let hash = hashed.as_ref().ok().cloned();
@@ -688,6 +772,7 @@ pub fn standing<S: IndexStore>(
             config,
             account,
             Consultation::Consulted(answer),
+            libraries,
         ),
         Err(reason) => beyond_library(
             path,
@@ -698,6 +783,7 @@ pub fn standing<S: IndexStore>(
             config,
             account,
             Consultation::NotConsulted(reason),
+            libraries,
         ),
     }
 }
@@ -707,6 +793,11 @@ pub fn standing<S: IndexStore>(
 /// which the library did not answer for: `library` is what it said
 /// instead, or why it was not asked, carried onto the evidence of
 /// every verdict reached here.
+///
+/// The entry's references are read first, through `libraries`, for a
+/// hashed file with the cache on; a reference that answers ends the
+/// passes. The references read are carried onto every verdict's
+/// evidence.
 #[allow(clippy::too_many_arguments)]
 fn beyond_library<S: IndexStore>(
     path: &Path,
@@ -717,15 +808,23 @@ fn beyond_library<S: IndexStore>(
     config: &ResolveConfig,
     account: Option<&Account<'_>>,
     library: Consultation,
+    libraries: &Libraries,
 ) -> Standing {
     let hash = hashed.as_ref().ok().map(|hash| (*hash).clone());
+    let (answer, references) = match (&hashed, config.cache) {
+        (Ok(hash), true) => crate::references::read(index, hash, libraries),
+        _ => (None, Vec::new()),
+    };
+    if let Some((_, item)) = answer {
+        return referenced_standing(path, item, references, hash, account, library);
+    }
     let read = index_read(
         hashed.as_ref().map(|hash| *hash).map_err(String::as_str),
         index,
         config,
     );
     if let IndexRead::Hit(evidence) = read {
-        return indexed_standing(path, evidence, hash, sources, account, library);
+        return indexed_standing(path, evidence, references, hash, sources, account, library);
     }
 
     let FileRead { extracted, titles } = from_file(path, documents, &config.extraction);
@@ -741,6 +840,7 @@ fn beyond_library<S: IndexStore>(
                 library,
                 content_index: IndexEvidence {
                     read,
+                    references,
                     write: IndexWrite::NotAttempted(reason),
                 },
                 extraction,
@@ -762,6 +862,7 @@ fn beyond_library<S: IndexStore>(
                 library,
                 content_index: IndexEvidence {
                     read,
+                    references,
                     write: IndexWrite::NotAttempted(reason),
                 },
                 extraction,
@@ -786,7 +887,11 @@ fn beyond_library<S: IndexStore>(
         hash: hash.clone(),
         evidence: Evidence {
             library,
-            content_index: IndexEvidence { read, write },
+            content_index: IndexEvidence {
+                read,
+                references,
+                write,
+            },
             extraction,
             identifier_input: IdentifierInput::NotAttempted(Unattempted::NotAsked),
             lookup: found_lookup(looked_up, origin, &resolved, Vec::new()),
@@ -915,6 +1020,7 @@ pub fn resolve_supplied(
             library: prior.library.clone(),
             content_index: IndexEvidence {
                 read: prior.content_index.read.clone(),
+                references: prior.content_index.references.clone(),
                 write: IndexWrite::NotAttempted(Unattempted::AwaitingAcceptance),
             },
             extraction: ExtractionEvidence {
@@ -974,6 +1080,7 @@ pub fn resolve_indexed_again(
         evidence: Evidence {
             content_index: IndexEvidence {
                 read: prior.content_index.read.clone(),
+                references: prior.content_index.references.clone(),
                 write: IndexWrite::NotAttempted(Unattempted::ContentIndexHit),
             },
             lookup: found_lookup(
@@ -1029,6 +1136,7 @@ pub fn unheld_evidence(
         library: prior.library.clone(),
         content_index: IndexEvidence {
             read: prior.content_index.read.clone(),
+            references: prior.content_index.references.clone(),
             write: IndexWrite::NotAttempted(reason),
         },
         extraction: prior.extraction.clone(),
@@ -1339,26 +1447,29 @@ pub fn resolved_event(path: &Path, file: &FileRecord) -> Event {
 }
 
 /// The identifier a record is reported under: its DOI, else its arXiv
-/// id, else its PMID, else its ISBN, and empty when the record carries
+/// id, else its PMID, else its ISBN, and `None` when the record carries
 /// none.
+///
+/// This is the `resolved` event's `identifier`, and the identifier
+/// several library references are compared by.
+pub fn preferred_identifier(record: &Record) -> Option<Identifier> {
+    record
+        .doi
+        .clone()
+        .map(Identifier::Doi)
+        .or_else(|| record.borax.arxiv.clone().map(Identifier::Arxiv))
+        .or_else(|| record.pmid.map(Identifier::Pmid))
+        .or_else(|| record.isbn.clone().map(Identifier::Isbn))
+}
+
+/// [`preferred_identifier`] as the `resolved` event's text, empty when
+/// the record carries none.
 ///
 /// Rendered through [`Identifier`]'s own `Display`, so the value
 /// carries its kind (`doi:10.1000/xyz`) rather than leaving a consumer
 /// to guess which of four kinds a bare string is.
 fn identifier_of(record: &Record) -> String {
-    record
-        .doi
-        .as_ref()
-        .map(|id| Identifier::Doi(id.clone()))
-        .or_else(|| {
-            record
-                .borax
-                .arxiv
-                .as_ref()
-                .map(|id| Identifier::Arxiv(id.clone()))
-        })
-        .or_else(|| record.pmid.as_ref().map(|id| Identifier::Pmid(*id)))
-        .or_else(|| record.isbn.as_ref().map(|id| Identifier::Isbn(id.clone())))
+    preferred_identifier(record)
         .map(|identifier| identifier.to_string())
         .unwrap_or_default()
 }
@@ -1386,7 +1497,9 @@ pub struct Run {
 ///
 /// `library` is the run's library, asked about every file as
 /// [`standing`] asks it and shared by every worker: nothing is learned
-/// into it, so no file's answer depends on another's.
+/// into it, so no file's answer depends on another's. The libraries the
+/// content index's references name are read once for the whole batch
+/// and shared the same way ([`standing_in`]).
 ///
 /// Up to `concurrency` files are resolved at once
 /// ([`borax_sources::pace::map_bounded`]). Ordering is unaffected: that
@@ -1405,8 +1518,9 @@ pub fn resolve_batch<S: IndexStore>(
     config: &(dyn Fn(&Path) -> ResolveConfig + Sync),
     concurrency: usize,
 ) -> Run {
+    let libraries = Libraries::new();
     let mut events = map_bounded(paths.to_vec(), concurrency, |path| {
-        let standing = standing(
+        let standing = standing_in(
             &path,
             documents,
             sources,
@@ -1414,6 +1528,7 @@ pub fn resolve_batch<S: IndexStore>(
             &config(&path),
             None,
             library,
+            &libraries,
         );
         verdict_event(&path, &standing)
     });

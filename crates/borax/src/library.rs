@@ -31,7 +31,6 @@ use borax_core::library::{
 };
 use borax_core::record::Record;
 use borax_core::template::slug;
-use borax_sources::source::SourceName;
 use borax_sources::store::{create_atomically, hash_file, write_atomically};
 use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, value};
 use uuid::Uuid;
@@ -42,6 +41,7 @@ use crate::event::{
     Finding, Level, LibraryAnswer, Repair, RetrievedFrom,
 };
 use crate::paths::{lexical, same_name};
+use crate::references::ReferenceRead;
 use crate::run::documents;
 
 pub use crate::config::library_root;
@@ -710,6 +710,54 @@ impl ItemStore {
         self.entries.iter().map(|(_, item)| item)
     }
 
+    /// The one item of identity `id`, or why there is none, for the
+    /// library rooted at `root`.
+    ///
+    /// The item is found by the identity inside its file, never by the
+    /// file's name. With none carrying it, the cause is
+    /// [`AcceptedItemCause::Unreadable`] naming the store fault that may
+    /// have cost it, as [`ItemStore::fault_for`] attributes one, and
+    /// [`AcceptedItemCause::Dangling`] when none can be. With several
+    /// carrying it, it is [`AcceptedItemCause::Ambiguous`] naming each
+    /// file.
+    pub fn answer(&self, root: &Path, id: &ItemId) -> Result<&Item, AcceptedItemCause> {
+        match self.carrying(id).as_slice() {
+            [(_, item)] => Ok(item),
+            [] => Err(match self.fault_for(root, id) {
+                Some(fault) => AcceptedItemCause::Unreadable {
+                    path: fault.path.clone(),
+                    message: fault.message.clone(),
+                },
+                None => AcceptedItemCause::Dangling,
+            }),
+            several => Err(AcceptedItemCause::Ambiguous {
+                files: several
+                    .iter()
+                    .filter_map(|(file, _)| file.clone())
+                    .collect(),
+            }),
+        }
+    }
+
+    /// The fault that may have cost the item `id` of the library rooted
+    /// at `root`: the store's directory itself, else the first file
+    /// whose name claims that identity. `None` when no fault can be
+    /// attributed to it.
+    fn fault_for(&self, root: &Path, id: &ItemId) -> Option<&StoreFault> {
+        let directory = root.join(ITEM_STORE);
+        self.faults
+            .iter()
+            .find(|fault| fault.path == directory)
+            .or_else(|| {
+                self.faults.iter().find(|fault| {
+                    fault
+                        .path
+                        .file_name()
+                        .is_some_and(|name| name_uuid(&name.to_string_lossy()) == Some(id.uuid()))
+                })
+            })
+    }
+
     /// Every item of identity `id`, each beside the file it came from
     /// (`None` for an item a preview learned it would mint), in the
     /// order they were read.
@@ -1178,31 +1226,24 @@ impl Stores {
         };
         let item = linked.to_string();
 
-        let files = |several: &[&(Option<PathBuf>, Item)]| -> Vec<PathBuf> {
-            several
-                .iter()
-                .filter_map(|(file, _)| file.clone())
-                .collect()
-        };
-
-        let held = match self.items.carrying(linked).as_slice() {
-            [] => {
-                return answer(match self.item_fault(linked) {
-                    Some(fault) => LibraryAnswer::UnreadableItem {
-                        artifact,
-                        item,
-                        path: fault.path.clone(),
-                        message: fault.message.clone(),
-                    },
-                    None => LibraryAnswer::DanglingItem { artifact, item },
+        let held = match self.items.answer(&self.root, linked) {
+            Ok(held) => held.clone(),
+            Err(AcceptedItemCause::Unreadable { path, message }) => {
+                return answer(LibraryAnswer::UnreadableItem {
+                    artifact,
+                    item,
+                    path,
+                    message,
                 });
             }
-            [(_, held)] => held.clone(),
-            several => {
+            Err(AcceptedItemCause::Dangling) => {
+                return answer(LibraryAnswer::DanglingItem { artifact, item });
+            }
+            Err(AcceptedItemCause::Ambiguous { files }) => {
                 return answer(LibraryAnswer::AmbiguousItem {
                     artifact,
                     item,
-                    files: files(several),
+                    files,
                 });
             }
         };
@@ -1220,8 +1261,8 @@ impl Stores {
             }
         };
         let accepted_under = accepted.to_string();
-        let cause = match self.items.carrying(accepted).as_slice() {
-            [(_, held)] => {
+        let cause = match self.items.answer(&self.root, accepted) {
+            Ok(held) => {
                 return Some(Consulted {
                     answer: LibraryAnswer::Tracked {
                         artifact,
@@ -1231,16 +1272,7 @@ impl Stores {
                     item: Some(held.clone()),
                 });
             }
-            [] => match self.item_fault(accepted) {
-                Some(fault) => AcceptedItemCause::Unreadable {
-                    path: fault.path.clone(),
-                    message: fault.message.clone(),
-                },
-                None => AcceptedItemCause::Dangling,
-            },
-            several => AcceptedItemCause::Ambiguous {
-                files: files(several),
-            },
+            Err(cause) => cause,
         };
         answer(LibraryAnswer::AcceptedItemUnavailable {
             artifact,
@@ -1255,25 +1287,6 @@ impl Stores {
     /// in no subtree the library excludes.
     pub fn covers(&self, path: &Path) -> bool {
         library_relative(&self.root, path).is_some() && !excludes(&self.root, path)
-    }
-
-    /// The item-store fault that may have cost the item `id`: the
-    /// store's directory itself, else the first file whose name claims
-    /// that identity. `None` when no fault can be attributed to it.
-    fn item_fault(&self, id: &ItemId) -> Option<&StoreFault> {
-        let directory = self.root.join(ITEM_STORE);
-        let faults = &self.items.faults;
-        faults
-            .iter()
-            .find(|fault| fault.path == directory)
-            .or_else(|| {
-                faults.iter().find(|fault| {
-                    fault
-                        .path
-                        .file_name()
-                        .is_some_and(|name| name_uuid(&name.to_string_lossy()) == Some(id.uuid()))
-                })
-            })
     }
 
     /// What the artifact store could not read, or `None` when it was
@@ -1353,7 +1366,7 @@ impl Stores {
                     .map(|item| item.id.clone())
             })
             .unwrap_or_else(|| ItemId::from_uuid(Uuid::now_v7()));
-        let admitted = Admitted {
+        let mut admitted = Admitted {
             artifact: admitting.held.map_or_else(
                 || ArtifactId::from_uuid(Uuid::now_v7()),
                 |held| held.id.clone(),
@@ -1362,24 +1375,28 @@ impl Stores {
                 .held
                 .and_then(|held| held.item.clone())
                 .filter(|before| before != &item),
+            answers_with: item.clone(),
             item,
         };
-        self.take_in(admitting, &admitted, None);
+        if let Some(answers_with) = self.take_in(admitting, &admitted, None) {
+            admitted.answers_with = answers_with;
+        }
         Some(admitted)
     }
 
     /// Learn the artifact record `admitted` describes and, when the
     /// stores do not hold its item yet, that item as held in
-    /// `item_file`.
+    /// `item_file`, and return the item the learned record answers with
+    /// for `admitting.hash`.
+    ///
+    /// `None`, learning nothing, for a path outside the library.
     fn take_in(
         &mut self,
         admitting: &Admitting<'_>,
         admitted: &Admitted,
         item_file: Option<PathBuf>,
-    ) {
-        let Some(relative) = library_relative(&self.root, admitting.path) else {
-            return;
-        };
+    ) -> Option<ItemId> {
+        let relative = library_relative(&self.root, admitting.path)?;
 
         if self.items.by_id(&admitted.item).is_none() {
             self.items.entries.push((
@@ -1404,6 +1421,7 @@ impl Stores {
         record.item = Some(admitted.item.clone());
         record.path = relative;
         settle_history(&mut record, admitting, link_as_read.as_ref());
+        let answers_with = record.item_for(admitting.hash).cloned();
 
         match self
             .records
@@ -1421,6 +1439,7 @@ impl Stores {
                 self.records.entries.push((file, record));
             }
         }
+        answers_with
     }
 }
 
@@ -2749,6 +2768,53 @@ pub fn operator_decisions(root: &Path) -> Vec<OperatorDecision> {
     decisions
 }
 
+/// A reference to its library the content index is owed for some
+/// bytes a library's records hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwedReference {
+    /// The artifact the record names, as a full path.
+    pub path: PathBuf,
+    /// The bytes the reference is for.
+    pub hash: ContentHash,
+    /// The record's identity.
+    pub artifact: ArtifactId,
+    /// The item the record answers with for the bytes
+    /// ([`ArtifactRecord::item_for`]).
+    pub item: ItemId,
+}
+
+/// Every reference the artifact records of the library rooted at
+/// `root` owe the content index: one per distinct hash of each record's
+/// history, with the item [`ArtifactRecord::item_for`] gives for it.
+///
+/// A hash `item_for` gives no item for is left out, which is every
+/// hash a record linking no item answers for with its link. Two records
+/// holding the same hash owe one reference each. References are listed
+/// records in path order and each history oldest first, a hash where it
+/// first appears. The store is read afresh; a record file that cannot
+/// be read costs its own references and no other. Nothing is written.
+pub fn references_owed(root: &Path) -> Vec<OwedReference> {
+    let mut owed = Vec::new();
+    for record in ArtifactStore::read(root).iter() {
+        let mut seen: BTreeSet<&ContentHash> = BTreeSet::new();
+        for entry in &record.history {
+            if !seen.insert(&entry.hash) {
+                continue;
+            }
+            let Some(item) = record.item_for(&entry.hash) else {
+                continue;
+            };
+            owed.push(OwedReference {
+                path: relative_to(root, &record.path),
+                hash: entry.hash.clone(),
+                artifact: record.id.clone(),
+                item: item.clone(),
+            });
+        }
+    }
+    owed
+}
+
 /// The artifact record naming `path` in the library rooted at `root`,
 /// or `None` when no record names it.
 ///
@@ -2876,6 +2942,11 @@ pub struct Admitted {
     pub artifact: ArtifactId,
     /// The item the artifact record names afterwards.
     pub item: ItemId,
+    /// The item the record answers with for the admitted bytes
+    /// afterwards, as [`ArtifactRecord::item_for`] gives it: `item`,
+    /// unless the bytes are earlier ones the history still holds under
+    /// the item they were accepted under.
+    pub answers_with: ItemId,
     /// The item it named before, when the admission moved the link,
     /// and `None` when the link is where it was or the record is new.
     pub relinked_from: Option<ItemId>,
@@ -3026,6 +3097,7 @@ pub fn admit(
             .map_err(|error| unrecorded(error.to_string()))?;
         return Ok(Admitted {
             artifact: record.id,
+            answers_with: item.clone(),
             item,
             relinked_from: None,
         });
@@ -3052,6 +3124,10 @@ pub fn admit(
     rewrite(&file, &record, write).map_err(|error| unrecorded(error.to_string()))?;
 
     Ok(Admitted {
+        answers_with: record
+            .item_for(admitting.hash)
+            .cloned()
+            .unwrap_or_else(|| item.clone()),
         artifact: record.id,
         relinked_from: held.item.clone().filter(|before| before != &item),
         item,
@@ -3148,6 +3224,7 @@ pub fn admission_event(path: &Path, admitted: &Result<Admitted, Unrecorded>) -> 
             artifact,
             item,
             relinked_from: Some(from),
+            ..
         }) => Admission::Relinked {
             id: artifact.to_string(),
             from: from.to_string(),
@@ -3174,6 +3251,11 @@ pub struct Adoptions {
     pub adoptions: Vec<(String, Adoption)>,
     /// How many orphans the library held before the run.
     pub orphans: usize,
+    /// The reference to the library the content index is owed for each
+    /// orphan the run recorded, in the order they were recorded: the
+    /// orphan as a full path, its hash, the artifact record written for
+    /// it, and the item that record answers with for its bytes.
+    pub owed: Vec<OwedReference>,
     /// The library's identity file as the run's first write found it
     /// unreadable, when it did: the fault
     /// [`identity_fault_warning`] reports. `None` for a run that
@@ -3197,50 +3279,62 @@ pub struct Adopted {
     /// The record found.
     pub record: Record,
     /// The identifier the record was found by: the one the content
-    /// index answers with for the bytes.
-    pub identifier: Identifier,
-    /// The service whose stored answer the record is.
-    pub service: SourceName,
+    /// index answers with for the bytes. `None` when no identifier
+    /// found it, as for a record a reference to another library
+    /// answered with.
+    pub identifier: Option<Identifier>,
+    /// Where the record was read: another library, or a service's
+    /// response cache.
+    pub retrieval: RetrievedFrom,
 }
 
 /// Why an adoption lookup found no record for an orphan's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unadopted {
-    /// The content index answers with no evidence for the bytes.
+    /// The content index answers with no evidence and holds no readable
+    /// reference for the bytes.
     Unindexed,
-    /// The content index answers with `identifier`, and no stored
-    /// answer holds a record for it.
-    Unanswered { identifier: Identifier },
+    /// The content index answered with nothing that led to a record:
+    /// none of its `references` answered, and either it answers with
+    /// `identifier` and no stored answer holds a record for it, or it
+    /// answers with no evidence and `identifier` is `None`.
+    Unanswered {
+        identifier: Option<Identifier>,
+        references: Vec<ReferenceRead>,
+    },
 }
 
 /// Adopt the orphans of the library rooted at `root`: record each one
 /// whose bytes `lookup` finds a record for.
 ///
 /// Each orphan ([`orphans`]) is hashed and its hash handed to
-/// `lookup`, which in a run reads the content index's evidence and the
-/// response cache. Where it finds a record, the orphan is admitted
-/// exactly as an applying run admits a file it found already named
-/// ([`admit`], with no held record and no re-identification), and its
-/// history entry carries the identifier the record was found by, with
-/// origin `adopted`: the item the library holds for one of the
+/// `lookup`, which in a run reads the content index's references and
+/// evidence and the response cache. Where it finds a record, the orphan
+/// is admitted exactly as an applying run admits a file it found
+/// already named ([`admit`], with no held record and no
+/// re-identification), and its history entry carries the identifier
+/// the record was found by, with origin `adopted`, or no evidence when
+/// no identifier found it: the item the library holds for one of the
 /// record's identifiers is linked, or one is minted from the record and
 /// written at the name `key` renders for it. The store is re-read on
 /// every admission, so a second orphan of the work a first one minted
-/// an item for links to that item. [`Adoption::Recorded`] names the
-/// service's response cache as the record's retrieval. Where `lookup`
-/// finds none, the orphan is left as it is and reported
-/// [`Adoption::Unindexed`] or [`Adoption::Unanswered`], as `lookup`
-/// says.
+/// an item for links to that item. [`Adoption::Recorded`] names where
+/// `lookup` says the record was read. Where `lookup` finds none, the
+/// orphan is left as it is and reported [`Adoption::Unindexed`] or
+/// [`Adoption::Unanswered`], as `lookup` says. Each orphan recorded is
+/// listed in [`Adoptions::owed`].
 ///
 /// An orphan whose hash is in the history of a record already in the
 /// store, or of one this run wrote for an earlier orphan, is left an
 /// orphan and reported [`Adoption::Held`], and `lookup` is not asked
 /// about it.
 ///
-/// Nothing but the two stores and the library's identity is written:
-/// the identity is minted before the first record when the library has
-/// none ([`StoreWriter`]), no file is opened beyond being hashed, and
-/// none is moved, renamed or deleted. A record that
+/// Nothing but the two stores and the library's identity is written,
+/// and nothing to the content index, whose references a caller writes
+/// from [`Adoptions::owed`]: the identity is minted before the first
+/// record when the library has none ([`StoreWriter`]), no file is
+/// opened beyond being hashed, and none is moved, renamed or deleted.
+/// A record that
 /// already names a path is not an orphan's, so it is left exactly as it
 /// is, and a second run over a library the first left alone finds
 /// nothing to write.
@@ -3264,6 +3358,7 @@ pub fn adopt(
     let orphans = orphans(root, &walk(root).0, &store);
     let mut written: BTreeMap<ContentHash, ArtifactId> = BTreeMap::new();
     let mut adoptions = Vec::new();
+    let mut owed = Vec::new();
     let writer = StoreWriter::new(root, &store_create, &store_write);
 
     for path in &orphans {
@@ -3294,17 +3389,23 @@ pub fn adopt(
                 adoptions.push((relative, Adoption::Unindexed));
                 continue;
             }
-            Err(Unadopted::Unanswered { identifier }) => {
-                let identifier = identifier.to_string();
-                adoptions.push((relative, Adoption::Unanswered { identifier }));
+            Err(Unadopted::Unanswered {
+                identifier,
+                references,
+            }) => {
+                let adoption = Adoption::Unanswered {
+                    identifier: identifier.as_ref().map(Identifier::to_string),
+                    references: references.iter().map(ReferenceRead::step).collect(),
+                };
+                adoptions.push((relative, adoption));
                 continue;
             }
         };
         let record = found.record;
-        let evidence = IdentificationEvidence {
-            identifier: found.identifier,
+        let evidence = found.identifier.map(|identifier| IdentificationEvidence {
+            identifier,
             origin: EvidenceOrigin::Adopted,
-        };
+        });
 
         let key = key(&record, &hash);
         let admitted = admit(
@@ -3315,7 +3416,7 @@ pub fn adopt(
                 hash: &hash,
                 held: None,
                 reidentified: false,
-                evidence: Some(&evidence),
+                evidence: evidence.as_ref(),
                 key: key.as_deref(),
                 run: run.clone(),
                 timestamp,
@@ -3325,13 +3426,17 @@ pub fn adopt(
         );
         let adoption = match admitted {
             Ok(admitted) => {
+                owed.push(OwedReference {
+                    path: path.clone(),
+                    hash: hash.clone(),
+                    artifact: admitted.artifact.clone(),
+                    item: admitted.answers_with.clone(),
+                });
                 written.insert(hash, admitted.artifact.clone());
                 Adoption::Recorded {
                     id: admitted.artifact.to_string(),
                     item: admitted.item.to_string(),
-                    retrieval: RetrievedFrom::ServiceCache {
-                        service: found.service.as_str().to_string(),
-                    },
+                    retrieval: found.retrieval,
                 }
             }
             Err(unrecorded) => Adoption::Unwritten {
@@ -3345,6 +3450,7 @@ pub fn adopt(
         root: root.to_path_buf(),
         adoptions,
         orphans: orphans.len(),
+        owed,
         identity_fault: writer.identity_fault(),
     }
 }

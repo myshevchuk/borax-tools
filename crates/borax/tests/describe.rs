@@ -15,11 +15,12 @@ use std::path::PathBuf;
 
 use borax::describe::{DEFAULT_WIDTH, Position, Proposal, describe};
 use borax::event::{
-    Acceptance, Claim, ClaimOrigin, ContentIndexSection, Displaced, Event, EvidenceStep,
-    ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep, IdentifierOrigin,
-    IndexReadStep, LibraryAnswer, LibraryStep, LookupRound, LookupStep, MatchCheckStep,
-    RetrievedFrom, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Submission,
-    SubmissionAcceptance, SubmissionOutcome, SyntaxStep, TitlesStep, WriteStep,
+    Acceptance, AcceptedItemCause, Claim, ClaimOrigin, ContentIndexSection, Displaced, Event,
+    EvidenceStep, ExtractionResultStep, ExtractionSection, FetchedFrom, IdentifierInputStep,
+    IdentifierOrigin, IndexReadStep, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
+    MatchCheckStep, ReferenceStatusStep, ReferenceStep, RetrievedFrom, Sections, ServiceAnswer,
+    ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome, SyntaxStep,
+    TitlesStep, UnavailableCause, WriteStep,
 };
 use borax_core::identifier::{ArxivId, Doi};
 use borax_core::record::{BoraxExt, DateParts, EntryType, Name, Record, Source};
@@ -87,10 +88,11 @@ impl Fixture {
                 },
                 content_index: ContentIndexSection {
                     read: IndexReadStep::Hit {
-                        evidence: EvidenceStep {
+                        evidence: Some(EvidenceStep {
                             identifier: self.found.clone(),
                             origin: self.evidence_origin.clone(),
-                        },
+                        }),
+                        references: Vec::new(),
                     },
                     write: WriteStep::NotAttempted {
                         reason: "content-index-hit".to_string(),
@@ -175,7 +177,9 @@ impl Fixture {
                         reason: "no-library".to_string(),
                     },
                     content_index: ContentIndexSection {
-                        read: IndexReadStep::Miss,
+                        read: IndexReadStep::Miss {
+                            references: Vec::new(),
+                        },
                         write: WriteStep::Written,
                     },
                     extraction: ExtractionSection {
@@ -300,7 +304,9 @@ fn unresolvable_skip(
                 reason: "no-library".to_string(),
             },
             content_index: ContentIndexSection {
-                read: IndexReadStep::Miss,
+                read: IndexReadStep::Miss {
+                    references: Vec::new(),
+                },
                 write: WriteStep::NotAttempted {
                     reason: not_attempted(),
                 },
@@ -344,7 +350,9 @@ fn extraction_failure_skip(path: &str, reason: SkipReason, result: ExtractionRes
                 reason: "no-library".to_string(),
             },
             content_index: ContentIndexSection {
-                read: IndexReadStep::Miss,
+                read: IndexReadStep::Miss {
+                    references: Vec::new(),
+                },
                 write: WriteStep::NotAttempted {
                     reason: not_attempted(),
                 },
@@ -1375,7 +1383,9 @@ fn a_conflict_asked_about_shows_how_close_the_two_titles_were() {
                 reason: "no-library".to_string(),
             },
             content_index: ContentIndexSection {
-                read: IndexReadStep::Miss,
+                read: IndexReadStep::Miss {
+                    references: Vec::new(),
+                },
                 write: WriteStep::NotAttempted {
                     reason: not_attempted(),
                 },
@@ -2242,7 +2252,9 @@ fn a_titled_blank_scan_shows_the_no_text_layer_line_and_the_retained_title() {
                 reason: "no-library".to_string(),
             },
             content_index: ContentIndexSection {
-                read: IndexReadStep::Miss,
+                read: IndexReadStep::Miss {
+                    references: Vec::new(),
+                },
                 write: WriteStep::NotAttempted {
                     reason: "extraction-failed".to_string(),
                 },
@@ -2308,7 +2320,9 @@ fn an_encrypted_file_shows_the_encrypted_line_and_could_not_be_opened() {
                 reason: "no-library".to_string(),
             },
             content_index: ContentIndexSection {
-                read: IndexReadStep::Miss,
+                read: IndexReadStep::Miss {
+                    references: Vec::new(),
+                },
                 write: WriteStep::NotAttempted {
                     reason: "extraction-failed".to_string(),
                 },
@@ -2371,7 +2385,9 @@ fn a_no_eligible_service_lookup_shows_no_source_was_asked() {
                 reason: "no-library".to_string(),
             },
             content_index: ContentIndexSection {
-                read: IndexReadStep::Miss,
+                read: IndexReadStep::Miss {
+                    references: Vec::new(),
+                },
                 write: WriteStep::NotAttempted {
                     reason: "no-record".to_string(),
                 },
@@ -2419,6 +2435,421 @@ fn a_no_eligible_service_lookup_shows_no_source_was_asked() {
             label_line("identifier", "arXiv:2401.12345, from the text layer"),
             label_line("no record", "no source was asked"),
             label_line("file says", "no title in its metadata"),
+        ],
+        "got {lines:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// index-references-libraries, task 4.1: the description names a library
+// reference answer, and the references that could not answer (design
+// D8)
+// ---------------------------------------------------------------------
+
+const REFERENCE_LIBRARY: &str = "0190c3a2-7f21-7abc-8def-0123456789aa";
+const REFERENCE_ARTIFACT: &str = "0190c3a2-7f21-7abc-8def-0123456789ab";
+const REFERENCE_ITEM: &str = "0190c3a2-7f21-7abc-8def-0123456789ac";
+
+/// One reference of an entry, at `root`, with `status`.
+fn reference_step(root: &str, status: ReferenceStatusStep) -> ReferenceStep {
+    ReferenceStep {
+        library: REFERENCE_LIBRARY.into(),
+        root: root.into(),
+        artifact: REFERENCE_ARTIFACT.into(),
+        item: REFERENCE_ITEM.into(),
+        status,
+    }
+}
+
+/// A resolved event for a record a library reference at `/home/u/papers`
+/// answered: nothing was looked up, extracted or checked, for
+/// `content-index-hit`, and the record came from the reference.
+fn reference_resolved_event(fixture: &Fixture) -> Event {
+    let not_attempted = || "content-index-hit".to_string();
+    Event::Resolved {
+        path: fixture.path.clone(),
+        identifier: fixture.found.clone(),
+        record: Box::new(record_with_source_provenance(
+            &fixture.record,
+            &fixture.source,
+        )),
+        sections: Box::new(Sections {
+            library: LibraryStep::NotAttempted {
+                reason: "no-library".to_string(),
+            },
+            content_index: ContentIndexSection {
+                read: IndexReadStep::Hit {
+                    evidence: None,
+                    references: vec![reference_step(
+                        "/home/u/papers",
+                        ReferenceStatusStep::Answered,
+                    )],
+                },
+                write: WriteStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+            },
+            extraction: ExtractionSection {
+                result: ExtractionResultStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+                titles: TitlesStep::NotAttempted {
+                    reason: not_attempted(),
+                },
+            },
+            identifier_input: IdentifierInputStep::NotAttempted {
+                reason: "not-asked".to_string(),
+            },
+            lookup: LookupStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            record_retrieval: Some(RetrievedFrom::LibraryReference {
+                library: REFERENCE_LIBRARY.into(),
+                root: "/home/u/papers".into(),
+                artifact: REFERENCE_ARTIFACT.into(),
+                item: REFERENCE_ITEM.into(),
+            }),
+            match_check: MatchCheckStep::NotAttempted {
+                reason: not_attempted(),
+            },
+            acceptance: Acceptance::Automatic,
+        }),
+    }
+}
+
+fn described(event: &Event, name: &str) -> Vec<String> {
+    describe(
+        event,
+        name,
+        None,
+        Position {
+            of_this: 1,
+            total: 1,
+        },
+        DEFAULT_WIDTH,
+    )
+}
+
+/// The text of the field labelled `label`, its continuation lines
+/// folded back into it with single spaces, so a wrapped value compares
+/// as the clause it is. Every field of that label, in order.
+fn field_texts(lines: &[String], label: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut inside = false;
+    for line in lines {
+        let (head, value) = match line.char_indices().nth(12) {
+            Some((at, _)) => line.split_at(at),
+            None => (line.as_str(), ""),
+        };
+        if head.trim_end() == label {
+            found.push(value.trim().to_string());
+            inside = true;
+        } else if head.trim().is_empty() && inside && !value.is_empty() {
+            let last = found.last_mut().unwrap();
+            last.push(' ');
+            last.push_str(value.trim());
+        } else {
+            inside = false;
+        }
+    }
+    found
+}
+
+/// design D8: a reference answer looked nothing up, so `identifier`
+/// names the record's own identifier with no origin clause.
+#[test]
+fn a_reference_answer_names_the_records_identifier_without_an_origin() {
+    let mut record = Record::new(EntryType::Article);
+    record.doi = Some(Doi::parse("10.1000/reference-answer").unwrap());
+    let fixture = Fixture::new(record, "doi:10.1000/reference-answer");
+
+    let lines = described(&reference_resolved_event(&fixture), "paper.pdf");
+
+    assert!(
+        lines.contains(&label_line("identifier", "doi:10.1000/reference-answer")),
+        "got {lines:#?}"
+    );
+    assert!(
+        lines.contains(&label_line(
+            "file says",
+            "not read; an earlier run answered"
+        )),
+        "got {lines:#?}"
+    );
+}
+
+/// design D8: `record` reads `<services>, from the library at <root>`.
+#[test]
+fn a_reference_answers_record_line_names_the_library_at_its_root() {
+    let record = Record::new(EntryType::Article);
+    let mut fixture = Fixture::new(record, "doi:10.1000/reference-record");
+    fixture.source = "crossref".to_string();
+
+    let lines = described(&reference_resolved_event(&fixture), "paper.pdf");
+
+    assert!(
+        lines.contains(&label_line(
+            "record",
+            "Crossref, from the library at /home/u/papers"
+        )),
+        "got {lines:#?}"
+    );
+}
+
+/// design D8: a record whose provenance names no service reads `the
+/// library at <root>` alone.
+#[test]
+fn a_reference_answer_with_no_provenance_names_the_library_at_its_root_alone() {
+    let record = Record::new(EntryType::Article);
+    let mut fixture = Fixture::new(record, "doi:10.1000/reference-bare");
+    fixture.source = "library".to_string();
+
+    let lines = described(&reference_resolved_event(&fixture), "paper.pdf");
+
+    assert!(
+        lines.contains(&label_line("record", "the library at /home/u/papers")),
+        "got {lines:#?}"
+    );
+}
+
+/// design D8: after the `library` line, one `reference` line for each
+/// reference that could not answer, in entry order, with the text after
+/// `could not answer: `; one that answered adds none.
+#[test]
+fn a_description_carries_a_reference_line_for_each_reference_that_could_not_answer() {
+    let record = Record::new(EntryType::Article);
+    let mut fixture = Fixture::new(record, "doi:10.1000/reference-lines");
+    fixture.tier = None;
+    fixture.cached = true;
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        mut sections,
+    } = fixture.event()
+    else {
+        unreachable!()
+    };
+    sections.library = LibraryStep::Consulted {
+        answer: LibraryAnswer::DanglingItem {
+            artifact: "a".to_string(),
+            item: "b".to_string(),
+        },
+    };
+    sections.content_index.read = IndexReadStep::Hit {
+        evidence: Some(EvidenceStep {
+            identifier: "doi:10.1000/reference-lines".to_string(),
+            origin: "extracted".to_string(),
+        }),
+        references: vec![
+            reference_step(
+                "/media/old",
+                ReferenceStatusStep::Unavailable {
+                    cause: UnavailableCause::Missing,
+                },
+            ),
+            reference_step("/home/u/ok", ReferenceStatusStep::Agreed),
+            reference_step(
+                "/home/u/papers",
+                ReferenceStatusStep::ItemUnavailable {
+                    cause: AcceptedItemCause::Dangling,
+                },
+            ),
+        ],
+    };
+    let event = Event::Resolved {
+        path,
+        identifier,
+        record,
+        sections,
+    };
+
+    let lines = described(&event, "paper.pdf");
+
+    let library_index = lines
+        .iter()
+        .position(|line| line.starts_with("library"))
+        .unwrap_or_else(|| panic!("no library line: {lines:#?}"));
+    assert_eq!(
+        lines[library_index + 1],
+        label_line("reference", "/media/old is missing"),
+        "got {lines:#?}"
+    );
+    assert!(
+        lines[library_index + 2].starts_with(&label_line("reference", "the library at")),
+        "got {lines:#?}"
+    );
+    assert_eq!(
+        field_texts(&lines, "reference"),
+        vec![
+            "/media/old is missing".to_string(),
+            format!("the library at /home/u/papers holds no item {REFERENCE_ITEM}"),
+        ],
+        "got {lines:#?}"
+    );
+    assert!(
+        field_texts(&lines, "references").is_empty(),
+        "got {lines:#?}"
+    );
+}
+
+/// design D8: one `references` line for a disagreement, `disagree:` and
+/// the clause's list, after the `reference` lines.
+#[test]
+fn a_description_carries_a_references_line_for_a_disagreement() {
+    let record = Record::new(EntryType::Article);
+    let mut fixture = Fixture::new(record, "doi:10.1000/y");
+    fixture.tier = Some("text-layer".to_string());
+    fixture.cached = false;
+    let Event::Resolved {
+        path,
+        identifier,
+        record,
+        mut sections,
+    } = fixture.event()
+    else {
+        unreachable!()
+    };
+    sections.library = LibraryStep::Consulted {
+        answer: LibraryAnswer::DanglingItem {
+            artifact: "a".to_string(),
+            item: "b".to_string(),
+        },
+    };
+    sections.content_index.read = IndexReadStep::Miss {
+        references: vec![
+            reference_step(
+                "/home/u/a",
+                ReferenceStatusStep::Disagreeing {
+                    identifier: Some("doi:10.1000/x".to_string()),
+                },
+            ),
+            reference_step(
+                "/media/old",
+                ReferenceStatusStep::Unavailable {
+                    cause: UnavailableCause::Missing,
+                },
+            ),
+            reference_step(
+                "/home/u/b",
+                ReferenceStatusStep::Disagreeing { identifier: None },
+            ),
+        ],
+    };
+    let event = Event::Resolved {
+        path,
+        identifier,
+        record,
+        sections,
+    };
+
+    let lines = described(&event, "paper.pdf");
+
+    assert_eq!(
+        field_texts(&lines, "references"),
+        vec![
+            "disagree: the library at /home/u/a names doi:10.1000/x, the library at \
+             /home/u/b names no identifier"
+                .to_string()
+        ],
+        "got {lines:#?}"
+    );
+    let reference_at = lines
+        .iter()
+        .position(|line| line.starts_with("reference "))
+        .unwrap_or_else(|| panic!("no reference line: {lines:#?}"));
+    let references_at = lines
+        .iter()
+        .position(|line| line.starts_with("references "))
+        .unwrap_or_else(|| panic!("no references line: {lines:#?}"));
+    assert!(reference_at < references_at, "got {lines:#?}");
+    assert_eq!(
+        field_texts(&lines, "reference"),
+        vec!["/media/old is missing".to_string()],
+        "a disagreeing reference was reachable, so it adds no reference line: {lines:#?}"
+    );
+}
+
+/// design D8: a skip's description carries the same two kinds of line,
+/// after its reason and its `library` line.
+#[test]
+fn a_skips_description_carries_its_reference_lines_after_its_library_line() {
+    let Event::Skipped {
+        path,
+        reason,
+        mut sections,
+        candidate,
+    } = extraction_failure_skip(
+        "scanned.pdf",
+        SkipReason::TextWithoutIdentifier,
+        ExtractionResultStep::TextWithoutIdentifier,
+    )
+    else {
+        unreachable!()
+    };
+    let sections_mut = sections.as_mut().unwrap();
+    sections_mut.library = LibraryStep::Consulted {
+        answer: LibraryAnswer::UnrecognisedContent {
+            artifacts: vec!["a".to_string()],
+        },
+    };
+    sections_mut.content_index.read = IndexReadStep::Miss {
+        references: vec![
+            reference_step(
+                "/media/old",
+                ReferenceStatusStep::Unavailable {
+                    cause: UnavailableCause::Missing,
+                },
+            ),
+            reference_step(
+                "/home/u/a",
+                ReferenceStatusStep::Disagreeing {
+                    identifier: Some("doi:10.1000/x".to_string()),
+                },
+            ),
+            reference_step(
+                "/home/u/b",
+                ReferenceStatusStep::Disagreeing {
+                    identifier: Some("doi:10.1000/y".to_string()),
+                },
+            ),
+        ],
+    };
+    let event = Event::Skipped {
+        path,
+        reason,
+        sections,
+        candidate,
+    };
+
+    let lines = described(&event, "scanned.pdf");
+
+    assert_eq!(
+        lines[..5].to_vec(),
+        vec![
+            rule(1, 1, DEFAULT_WIDTH),
+            label_line("file", "scanned.pdf"),
+            label_line("identifier", "none found in its metadata or the pages read"),
+            label_line("file says", "no title in its metadata"),
+            label_line(
+                "library",
+                "the library records artifact a at this path, but not these bytes"
+            ),
+        ],
+        "got {lines:#?}"
+    );
+    assert_eq!(
+        lines[5],
+        label_line("reference", "/media/old is missing"),
+        "got {lines:#?}"
+    );
+    assert!(lines[6].starts_with("references"), "got {lines:#?}");
+    assert_eq!(
+        field_texts(&lines[6..], "references"),
+        vec![
+            "disagree: the library at /home/u/a names doi:10.1000/x, the library at \
+             /home/u/b names doi:10.1000/y"
+                .to_string()
         ],
         "got {lines:#?}"
     );

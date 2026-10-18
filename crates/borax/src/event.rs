@@ -236,24 +236,37 @@ pub enum Event {
         path: PathBuf,
         admission: Admission,
     },
-    /// What became of an evidence write to the content index made after
-    /// a verdict: the move's, for a record an operator reached —
-    /// supplied, or accepted over a conflict — or a retried lookup of
-    /// the file's own identifier; or `reconcile`'s, restoring an
-    /// operator decision the library holds.
+    /// What became of a write to the content index made after a
+    /// verdict or a library's own writes: an evidence write, or a
+    /// reference to a library ([`WrittenEntry`]).
     ///
-    /// In a rename, follows the file's [`Event::Renamed`] and any
-    /// [`Event::LibraryAdmission`], and is emitted for no other file:
-    /// the resolution's own `content_index.write` reads
-    /// `awaiting-acceptance` for exactly these. In a reconcile, one
-    /// precedes the totals for each restoration written or failed.
-    /// `write` is [`WriteStep::Written`] or [`WriteStep::Failed`]; a
-    /// failure is evidence and never a failure of the run. Counts toward
-    /// no total.
+    /// An evidence write is the move's, for a record an operator
+    /// reached — supplied, or accepted over a conflict — or a retried
+    /// lookup of the file's own identifier; or `reconcile`'s, restoring
+    /// an operator decision the library holds. The resolution's own
+    /// `content_index.write` reads `awaiting-acceptance` for exactly the
+    /// move's.
+    ///
+    /// A reference write is an applying rename's, for each file it
+    /// recorded into a library with an identity; `adopt`'s, for each
+    /// orphan it recorded; or `reconcile`'s, for every hash of every
+    /// record's history. A reference the index already held with the
+    /// same item is not written and not reported.
+    ///
+    /// In a rename, follows the file's [`Event::Renamed`] or
+    /// [`Event::AlreadyNamed`] and its [`Event::LibraryAdmission`]
+    /// events: the reference write first, then the evidence write. In
+    /// `adopt`, the reference writes follow every
+    /// [`Event::LibraryAdoption`] and precede the misses and the
+    /// totals. In a reconcile, the restorations and then the reference
+    /// writes precede the totals. `write` is [`WriteStep::Written`] or
+    /// [`WriteStep::Failed`]; a failure is evidence and never a failure
+    /// of the run. Counts toward no total.
     ContentIndexWrite {
         /// The file: in a rename, at the path it holds after the move;
-        /// in a reconcile, the artifact the record holding the decision
-        /// names.
+        /// in `adopt`, the orphan; in a reconcile, the artifact the
+        /// record holding the decision or owing the reference names, as
+        /// a full path.
         path: PathBuf,
         /// The content hash whose entry was written, as `sha256-<hex>`.
         hash: String,
@@ -783,8 +796,10 @@ pub enum Admission {
 pub enum Adoption {
     /// The orphan now has an artifact record, `id`, linked to the item
     /// `item`: one the library already held for an identifier of the
-    /// cached record, or one minted from that record. `retrieval` is
-    /// where the record was read: a service's response cache.
+    /// record found, or one minted from that record. `retrieval` is
+    /// where the record was read: another library, through a reference
+    /// the content index holds for the bytes, or a service's response
+    /// cache.
     Recorded {
         id: String,
         item: String,
@@ -805,14 +820,26 @@ pub enum Adoption {
     /// the filesystem put it. The orphan is still one, and the next
     /// adoption tries it again.
     Unwritten { message: String },
-    /// The content index holds no evidence for the orphan's bytes, so
-    /// there was nothing to adopt it from and it is still an orphan.
+    /// The content index holds no evidence and no readable reference
+    /// for the orphan's bytes, so there was nothing to adopt it from
+    /// and it is still an orphan.
     Unindexed,
-    /// The content index knows the orphan's bytes as `identifier`, and
-    /// no response cache holds a record for it, so it is still an
-    /// orphan. A resolution that fetches the record lets a later
-    /// adoption record it.
-    Unanswered { identifier: String },
+    /// The content index answered for the orphan's bytes with nothing
+    /// that led to a record, so it is still an orphan: none of its
+    /// `references` answered, and either it knows the bytes as
+    /// `identifier` and no response cache holds a record for it, or it
+    /// holds no evidence for them and `identifier` is `None`. A
+    /// resolution that fetches the record lets a later adoption record
+    /// it.
+    ///
+    /// `identifier` is left out of the line when `None`, and
+    /// `references` when empty.
+    Unanswered {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identifier: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        references: Vec<ReferenceStep>,
+    },
 }
 
 /// Which library condition a [`Event::LibraryCondition`] names.
@@ -1078,12 +1105,30 @@ pub struct ContentIndexSection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "kebab-case")]
 pub enum IndexReadStep {
-    /// The index answered with `evidence`, whose identifier the lookup
-    /// then looked up.
-    Hit { evidence: EvidenceStep },
+    /// The index answered for the file's hash: through one of its
+    /// `references`, the one [`ReferenceStatusStep::Answered`], when
+    /// `evidence` is `None`, and nothing was looked up; or with
+    /// `evidence`, whose identifier the lookup then looked up, when no
+    /// reference answered.
+    ///
+    /// `references` are every readable reference of the entry, in entry
+    /// order, each with what became of it. Each key is left out of the
+    /// line when it is `None` or empty.
+    Hit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<EvidenceStep>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        references: Vec<ReferenceStep>,
+    },
     /// The index answered with nothing: it holds no entry for the
-    /// file's hash, or one that answers with no evidence.
-    Miss,
+    /// file's hash, or one in which no reference and no evidence
+    /// answers. `references` are the entry's readable references, none
+    /// of which answered, in entry order; left out of the line when
+    /// empty.
+    Miss {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        references: Vec<ReferenceStep>,
+    },
     /// The run turned the cache off, so the index was not read.
     Bypassed,
     /// The file could not be hashed, with `message` as the hashing
@@ -1115,6 +1160,74 @@ impl EvidenceStep {
     }
 }
 
+/// One reference of a content-index entry to a library, with what
+/// became of it when the entry was read.
+///
+/// Serialized as the reference's `library`, `root`, `artifact` and
+/// `item`, followed by its `status` and whatever the status adds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferenceStep {
+    /// The library's identity, as canonical UUID text.
+    pub library: String,
+    /// The root the library was last known at.
+    pub root: PathBuf,
+    /// The artifact record holding the bytes there, as canonical UUID
+    /// text.
+    pub artifact: String,
+    /// The item the reference answers with, as canonical UUID text.
+    pub item: String,
+    #[serde(flatten)]
+    pub status: ReferenceStatusStep,
+}
+
+/// What became of one reference. Serialized with a `status` tag,
+/// flattened into its [`ReferenceStep`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum ReferenceStatusStep {
+    /// It was reachable, and the file's record is its item's.
+    Answered,
+    /// It was reachable and agreed with the one that answered.
+    Agreed,
+    /// It was reachable, and the reachable references disagreed, so
+    /// none answered. `identifier` is its item's preferred identifier,
+    /// left out when the item carries none.
+    Disagreeing {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identifier: Option<String>,
+    },
+    /// Its root does not hold its library, for `cause`.
+    Unavailable {
+        #[serde(flatten)]
+        cause: UnavailableCause,
+    },
+    /// Its root holds its library, and no one item file there carries
+    /// its item, for `cause`.
+    ItemUnavailable {
+        #[serde(flatten)]
+        cause: AcceptedItemCause,
+    },
+}
+
+/// Why a reference's root does not hold its library. Serialized with a
+/// `cause` tag, flattened beside the reference's `status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "cause", rename_all = "kebab-case")]
+pub enum UnavailableCause {
+    /// Nothing is at the root.
+    Missing,
+    /// The root holds no library, or the library `found`, which is not
+    /// the reference's. `found` is canonical UUID text, left out when
+    /// the root holds no identity.
+    OtherLibrary {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        found: Option<String>,
+    },
+    /// `path` could not be read: the root itself, or its identity file.
+    /// `message` is the reader's.
+    Unreadable { path: PathBuf, message: String },
+}
+
 /// What a content-index write wrote to an entry. Serialized with a
 /// `kind` tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1123,6 +1236,19 @@ pub enum WrittenEntry {
     /// Identification evidence: `identifier`, with `origin`
     /// `extracted`, `supplied` or `overridden`.
     Evidence { identifier: String, origin: String },
+    /// A reference to the library `library` at `root`: its artifact
+    /// record `artifact` holds the bytes there, answering with `item`.
+    /// Identities are canonical UUID text. `repaired_from` are the
+    /// roots of the stale references of the same library and artifact
+    /// removed once it was written, left out of the line when empty.
+    Reference {
+        library: String,
+        root: PathBuf,
+        artifact: String,
+        item: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        repaired_from: Vec<PathBuf>,
+    },
 }
 
 impl WrittenEntry {
@@ -1321,6 +1447,16 @@ pub enum FetchedFrom {
 pub enum RetrievedFrom {
     /// The file's library item, through the artifact record `artifact`.
     Library { artifact: String, item: String },
+    /// The item `item` of another library, `library` at `root`, which a
+    /// reference the content index holds for the file's bytes names,
+    /// through that library's artifact record `artifact`. Identities
+    /// are canonical UUID text.
+    LibraryReference {
+        library: String,
+        root: PathBuf,
+        artifact: String,
+        item: String,
+    },
     /// `service`'s response cache.
     ServiceCache { service: String },
     /// `service`, over the network.
@@ -1551,9 +1687,10 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: {}",
             path.display(),
             escaped(&format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 resolved_as(identifier, record, sections),
                 unanswered(sections.library.answer()),
+                reference_clauses(references_read(sections)),
                 rejected_candidates(Some(sections))
             ))
         )),
@@ -1584,13 +1721,14 @@ pub fn human_line(event: &Event) -> Option<String> {
             "{}: skipped, {}",
             path.display(),
             escaped(&format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 skipped_because(reason, sections.as_deref()),
                 unanswered(
                     sections
                         .as_deref()
                         .and_then(|sections| sections.library.answer())
                 ),
+                reference_clauses(sections.as_deref().map(references_read).unwrap_or_default()),
                 rejected_candidates(sections.as_deref())
             ))
         )),
@@ -1697,13 +1835,22 @@ pub fn human_line(event: &Event) -> Option<String> {
         Event::LibraryAdoption { path, adoption } => {
             Some(format!("{}: {}", escaped(path), what_was_adopted(adoption)))
         }
-        Event::ContentIndexWrite { path, write, .. } => match write {
+        Event::ContentIndexWrite {
+            path, entry, write, ..
+        } => match write {
             WriteStep::Failed { message } => Some(format!(
                 "{}: {}",
                 path.display(),
-                escaped(&format!(
-                    "the content index could not keep this answer ({message})"
-                ))
+                escaped(&match entry {
+                    WrittenEntry::Evidence { .. } => {
+                        format!("the content index could not keep this answer ({message})")
+                    }
+                    WrittenEntry::Reference { root, .. } => format!(
+                        "the content index could not keep its reference to the library at {} \
+                         ({message})",
+                        root.display()
+                    ),
+                })
             )),
             WriteStep::Written | WriteStep::NotAttempted { .. } => None,
         },
@@ -1899,9 +2046,12 @@ fn resolved_as(identifier: &str, record: &Record, sections: &Sections) -> String
         clause.push_str(&format!(
             ", from {}",
             match retrieval {
-                RetrievedFrom::Library { .. } => "the library",
-                RetrievedFrom::ServiceCache { .. } => "the response cache",
-                RetrievedFrom::Network { .. } => "the network",
+                RetrievedFrom::Library { .. } => "the library".to_string(),
+                RetrievedFrom::LibraryReference { root, .. } => {
+                    format!("the library at {}", root.display())
+                }
+                RetrievedFrom::ServiceCache { .. } => "the response cache".to_string(),
+                RetrievedFrom::Network { .. } => "the network".to_string(),
             }
         ));
     }
@@ -1941,6 +2091,94 @@ fn unanswered(library: Option<&LibraryAnswer>) -> String {
         Some(what) => format!("; the library could not answer: {what}"),
         None => String::new(),
     }
+}
+
+/// The references a resolution's content-index read reports: those of a
+/// `hit` or a `miss`, and none for any other read.
+pub(crate) fn references_read(sections: &Sections) -> &[ReferenceStep] {
+    match &sections.content_index.read {
+        IndexReadStep::Hit { references, .. } | IndexReadStep::Miss { references } => references,
+        IndexReadStep::Bypassed
+        | IndexReadStep::Unavailable { .. }
+        | IndexReadStep::NotAttempted { .. } => &[],
+    }
+}
+
+/// The clauses a human line carries for `references`, unescaped, in
+/// entry order: `; a library reference could not answer: <why>` for
+/// each one unavailable or whose item is unavailable
+/// ([`why_unreachable`]), then `; library references disagree: <list>`
+/// once when any disagreed ([`disagreement`]). Nothing for references
+/// that answered or agreed.
+fn reference_clauses(references: &[ReferenceStep]) -> String {
+    let mut clauses: String = references
+        .iter()
+        .filter_map(why_unreachable)
+        .map(|why| format!("; a library reference could not answer: {why}"))
+        .collect();
+    if let Some(list) = disagreement(references) {
+        clauses.push_str(&format!("; library references disagree: {list}"));
+    }
+    clauses
+}
+
+/// Why `reference` could not answer, unescaped, or `None` when it was
+/// reachable:
+///
+/// - `<root> is missing`;
+/// - `<root> holds no library`, or `<root> holds another library
+///   (<found>)`;
+/// - `<path> could not be read (<message>)`, for a root or a file in it
+///   that could not be read;
+/// - `the library at <root> holds no item <item>`, or `the library at
+///   <root> holds item <item> in several files`.
+///
+/// Shared by the human line and the interactive description.
+pub(crate) fn why_unreachable(reference: &ReferenceStep) -> Option<String> {
+    let root = reference.root.display();
+    let item = &reference.item;
+    let unreadable =
+        |path: &PathBuf, message: &str| format!("{} could not be read ({message})", path.display());
+    Some(match &reference.status {
+        ReferenceStatusStep::Answered
+        | ReferenceStatusStep::Agreed
+        | ReferenceStatusStep::Disagreeing { .. } => return None,
+        ReferenceStatusStep::Unavailable { cause } => match cause {
+            UnavailableCause::Missing => format!("{root} is missing"),
+            UnavailableCause::OtherLibrary { found: None } => format!("{root} holds no library"),
+            UnavailableCause::OtherLibrary { found: Some(found) } => {
+                format!("{root} holds another library ({found})")
+            }
+            UnavailableCause::Unreadable { path, message } => unreadable(path, message),
+        },
+        ReferenceStatusStep::ItemUnavailable { cause } => match cause {
+            AcceptedItemCause::Dangling => format!("the library at {root} holds no item {item}"),
+            AcceptedItemCause::Unreadable { path, message } => unreadable(path, message),
+            AcceptedItemCause::Ambiguous { .. } => {
+                format!("the library at {root} holds item {item} in several files")
+            }
+        },
+    })
+}
+
+/// The disagreeing references among `references`, unescaped, as `the
+/// library at <root> names <identifier>`, or `names no identifier`,
+/// joined by `, ` in entry order; `None` when none disagreed.
+///
+/// Shared by the human line and the interactive description.
+pub(crate) fn disagreement(references: &[ReferenceStep]) -> Option<String> {
+    let named: Vec<String> = references
+        .iter()
+        .filter_map(|reference| match &reference.status {
+            ReferenceStatusStep::Disagreeing { identifier } => Some(format!(
+                "the library at {} names {}",
+                reference.root.display(),
+                identifier.as_deref().unwrap_or("no identifier")
+            )),
+            _ => None,
+        })
+        .collect();
+    (!named.is_empty()).then(|| named.join(", "))
 }
 
 /// The clause a resolution's human line ends with when an operator
@@ -2244,11 +2482,22 @@ fn what_was_adopted(adoption: &Adoption) -> String {
         Adoption::Unindexed => {
             "the content index holds no record of its bytes, so it is still an orphan".to_string()
         }
-        Adoption::Unanswered { identifier } => format!(
-            "the content index knows its bytes as {}, but no response cache holds that \
-             record, so it is still an orphan; borax resolve fetches it",
-            escaped(identifier)
-        ),
+        Adoption::Unanswered {
+            identifier: Some(identifier),
+            references,
+        } => escaped(&format!(
+            "the content index knows its bytes as {identifier}, but no response cache holds \
+             that record, so it is still an orphan; borax resolve fetches it{}",
+            reference_clauses(references)
+        )),
+        Adoption::Unanswered {
+            identifier: None,
+            references,
+        } => escaped(&format!(
+            "no library reference the content index holds for its bytes answered, and it \
+             holds no identifier for them, so it is still an orphan{}",
+            reference_clauses(references)
+        )),
     }
 }
 

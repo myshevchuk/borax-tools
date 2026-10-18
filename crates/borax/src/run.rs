@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Identifier, SuppliedError, supplied};
-use borax_core::index::Fact;
+use borax_core::index::{Fact, LibraryReference};
 use borax_core::library::ArtifactRecord;
 use borax_core::record::{EntryType, Record};
 use borax_core::tables::{LookupTables, Lookups, Table, TableSpec};
@@ -54,7 +54,7 @@ use crate::evidence::{
     IndexWrite, LookupEvidence, MatchCheck, Origin as LookupOrigin, Submission, SubmissionOutcome,
     Unattempted,
 };
-use crate::library::{Account, ItemStore};
+use crate::library::{Account, ItemStore, OwedReference};
 use crate::pipeline::{
     Documents, Duplicated, FileOutcome, FileRecord, RealDocuments, ResolveConfig, Standing,
     resolution_skip, resolve_batch, resolved_event,
@@ -1394,6 +1394,10 @@ fn rename_events<S: IndexStore>(
     // could not be recorded. Either way the files after it are left
     // untouched and counted.
     let mut stopped: Option<Stopped> = None;
+    // Each library a content-index reference names is read once for the
+    // run: by the resolutions that reach it, and by the reference writes
+    // asking whether a root is stale.
+    let libraries = crate::references::Libraries::new();
 
     for (index, group) in groups.iter().enumerate() {
         let effective = configs.for_directory(&group.directory);
@@ -1458,7 +1462,7 @@ fn rename_events<S: IndexStore>(
                 // the file's fate made of the verdict, which for a
                 // batch run is settled the moment the verdict is and
                 // for an interactive one is settled by its operator.
-                let standing = crate::pipeline::standing(
+                let standing = crate::pipeline::standing_in(
                     path,
                     adapters.documents,
                     adapters.sources,
@@ -1466,6 +1470,7 @@ fn rename_events<S: IndexStore>(
                     &resolving(effective.config()),
                     account.as_ref(),
                     snapshot,
+                    &libraries,
                 );
                 consulted |= standing.library().is_some();
                 let about = About {
@@ -1615,7 +1620,7 @@ fn rename_events<S: IndexStore>(
                                 .borrow_mut()
                                 .push(crate::paths::lexical(path).unwrap_or_else(|| path.clone()));
                         }
-                        let admissions = match recording {
+                        let (admissions, owed) = match recording {
                             true => recorded(
                                 library,
                                 writer.as_ref(),
@@ -1650,7 +1655,7 @@ fn rename_events<S: IndexStore>(
                                         .borrow_mut()
                                         .push(crate::paths::lexical(&learned).unwrap_or(learned));
                                 }
-                                Vec::new()
+                                (Vec::new(), None)
                             }
                         };
                         let shown = admissions.iter().any(|admission| {
@@ -1670,6 +1675,21 @@ fn rename_events<S: IndexStore>(
                             match shown {
                                 true => sink.release(),
                                 false => sink.withhold(),
+                            }
+                        }
+                        // After the hold is settled, so a reference that
+                        // could not be written is shown whatever became
+                        // of the file's own lines; one written renders
+                        // nothing. After the admission, whose record the
+                        // reference names, and before the evidence below.
+                        if let (Some(owed), Some(library)) = (owed, library) {
+                            for event in references_kept(
+                                adapters.index,
+                                library,
+                                std::slice::from_ref(&owed),
+                                &libraries,
+                            ) {
+                                sink.emit(event);
                             }
                         }
                         // On the move and never before: an operator who
@@ -3102,7 +3122,11 @@ fn refused(settled: Settled, record: bool, held: Option<&ArtifactRecord>) -> Set
 /// checked against it; one that was not teaches them nothing.
 ///
 /// The events are in the order they are to be reported, and none for
-/// an ordinary admission.
+/// an ordinary admission. Beside them is the reference to the library
+/// the content index is owed for an admission that returned a record,
+/// written or unchanged — the file at `current`, its hash, the record
+/// admitted, separated or not, and the item it answers with for the
+/// bytes — and `None` for every other outcome.
 #[allow(clippy::too_many_arguments)]
 fn recorded(
     library: Option<&Path>,
@@ -3114,14 +3138,14 @@ fn recorded(
     key: impl FnOnce() -> Option<String>,
     at: &str,
     stores: Option<&mut crate::library::Stores>,
-) -> Vec<Event> {
+) -> (Vec<Event>, Option<OwedReference>) {
     let current = match event {
         Event::Renamed { target, .. } => target,
         Event::AlreadyNamed { path } => path,
-        _ => return Vec::new(),
+        _ => return (Vec::new(), None),
     };
     let (Some(library), Some(writer), Some(hash)) = (library, writer, file.hash.as_ref()) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let reported = |admission: Admission| Event::LibraryAdmission {
         path: current.clone(),
@@ -3129,14 +3153,15 @@ fn recorded(
     };
 
     if !admissible(library, current) {
-        return vec![reported(Admission::Outside)];
+        return (vec![reported(Admission::Outside)], None);
     }
     let moved = matches!(event, Event::Renamed { .. });
     if let (Some(Change::Unaccepted), Some(held), false) = (change, held, moved) {
-        return vec![reported(Admission::Pending {
+        let pending = reported(Admission::Pending {
             id: held.id.to_string(),
             hash: hash.to_string(),
-        })];
+        });
+        return (vec![pending], None);
     }
 
     let key = key();
@@ -3160,6 +3185,12 @@ fn recorded(
     if let (Ok(admitted), Some(stores)) = (&admitted, stores) {
         stores.learn(&admitting, admitted);
     }
+    let owed = admitted.as_ref().ok().map(|admitted| OwedReference {
+        path: current.clone(),
+        hash: hash.clone(),
+        artifact: admitted.artifact.clone(),
+        item: admitted.answers_with.clone(),
+    });
     let mut events = Vec::new();
     if let Ok(admitted) = &admitted {
         match (change, held) {
@@ -3174,13 +3205,59 @@ fn recorded(
                     item: admitted.item.to_string(),
                     from: held.id.to_string(),
                 }));
-                return events;
+                return (events, owed);
             }
             _ => {}
         }
     }
     events.extend(crate::library::admission_event(current, &admitted));
-    events
+    (events, owed)
+}
+
+/// Keep in `index` each reference `owed` names to the library rooted at
+/// `root` ([`crate::references::keep`]), in order, and hand back the
+/// `content-index-write` event reporting each one written or failed.
+///
+/// The library's identity is read once, now, and only a present one is
+/// referenced: a library with no identity, or one whose identity file
+/// cannot be read, gets no reference and nothing is reported, and
+/// nothing is minted. The root is named made absolute and normalised
+/// lexically ([`crate::paths::lexical`]). A reference the index already
+/// holds with the same item is neither written nor reported. Staleness
+/// of another root is asked of `libraries`.
+fn references_kept<S: IndexStore>(
+    index: &ContentIndex<S>,
+    root: &Path,
+    owed: &[OwedReference],
+    libraries: &crate::references::Libraries,
+) -> Vec<Event> {
+    let crate::library::Identity::Present(library) = crate::library::identity(root) else {
+        return Vec::new();
+    };
+    let root = crate::paths::lexical(root).unwrap_or_else(|| root.to_path_buf());
+    owed.iter()
+        .filter_map(|owed| {
+            let reference = LibraryReference {
+                library: library.clone(),
+                root: root.clone(),
+                artifact: owed.artifact.clone(),
+                item: owed.item.clone(),
+            };
+            let kept = crate::references::keep(index, &owed.hash, &reference, libraries)?;
+            Some(Event::ContentIndexWrite {
+                path: owed.path.clone(),
+                hash: owed.hash.to_string(),
+                entry: crate::event::WrittenEntry::Reference {
+                    library: kept.reference.library.to_string(),
+                    root: kept.reference.root,
+                    artifact: kept.reference.artifact.to_string(),
+                    item: kept.reference.item.to_string(),
+                    repaired_from: kept.repaired_from,
+                },
+                write: crate::evidence::write_step(&kept.write),
+            })
+        })
+        .collect()
 }
 
 /// What an applying run's gate made of a file at its record's path
@@ -3324,7 +3401,9 @@ fn reidentified(file: &FileRecord) -> bool {
 ///
 /// Nothing here admits a file anywhere, so no duplicate check is made:
 /// the file is resolved as a run that keeps no account resolves it.
-/// `library` is the run's library, asked about the file first.
+/// `library` is the run's library, asked about the file first, and
+/// `libraries` the libraries the content index's references name, as
+/// the run has read them ([`crate::pipeline::standing_in`]).
 ///
 /// Each file is resolved and reported before the next is opened, so a
 /// reader watching a network-bound run sees it make progress.
@@ -3332,10 +3411,11 @@ fn resolved_record<S: IndexStore>(
     path: &Path,
     effective: &Effective,
     library: Option<&crate::library::Stores>,
+    libraries: &crate::references::Libraries,
     adapters: &Adapters<S>,
     sink: &mut dyn Sink,
 ) -> Option<FileRecord> {
-    let standing = crate::pipeline::standing(
+    let standing = crate::pipeline::standing_in(
         path,
         adapters.documents,
         adapters.sources,
@@ -3343,6 +3423,7 @@ fn resolved_record<S: IndexStore>(
         &resolving(effective.config()),
         None,
         library,
+        libraries,
     );
     sink.emit(crate::pipeline::verdict_event(path, &standing));
     match standing.verdict {
@@ -3382,6 +3463,9 @@ fn bib_events<S: IndexStore>(
     // Across groups, because a table is named once for the run however
     // many directories consult one under that name.
     let mut missed = Missed::default();
+    // Each library a content-index reference names is read once for the
+    // run, whichever file reaches it first.
+    let libraries = crate::references::Libraries::new();
 
     for group in groups {
         let effective = configs.for_directory(&group.directory);
@@ -3392,7 +3476,9 @@ fn bib_events<S: IndexStore>(
         let mut lookups = Lookups::new(&group.tables);
 
         for path in &group.paths {
-            if let Some(file) = resolved_record(path, effective, library, adapters, sink) {
+            if let Some(file) =
+                resolved_record(path, effective, library, &libraries, adapters, sink)
+            {
                 cited.add(
                     path.clone(),
                     file,
@@ -3915,8 +4001,16 @@ fn validation_events<S: IndexStore>(
 /// something to say about, then one `skipped` event with the reason
 /// `not-pending` per `--accept` path at which nothing was pending, then
 /// one `content-index-write` per operator decision restored to the
-/// content index ([`restore_operator_decisions`]), then the totals
+/// content index ([`restore_operator_decisions`]), then one per
+/// reference to the library written to it, then the totals
 /// ([`crate::library::reconciliation_events`]).
+///
+/// The references are those every hash of every record's history owes
+/// the index ([`crate::library::references_owed`]), read from the store
+/// as this run's own writes left it and kept under the identity the
+/// library holds after them ([`references_kept`]): each one the index
+/// lacks, holds with another item, or holds unreadably is written, and
+/// stale references of the same library and artifact are repaired.
 ///
 /// A changed file is read through [`crate::pipeline::extraction`] under
 /// the run's own extraction settings, as `status --identify` reads one,
@@ -3965,7 +4059,16 @@ fn reconcile_events<S: IndexStore>(
             candidate: None,
         });
     }
-    restore_operator_decisions(&reported_root(command, adapters), adapters.index, sink);
+    let root = reported_root(command, adapters);
+    restore_operator_decisions(&root, adapters.index, sink);
+    for event in references_kept(
+        adapters.index,
+        &root,
+        &crate::library::references_owed(&root),
+        &crate::references::Libraries::new(),
+    ) {
+        sink.emit(event);
+    }
     if let Some(totals) = totals {
         sink.emit(totals);
     }
@@ -4006,17 +4109,22 @@ fn restore_operator_decisions<S: IndexStore>(
     }
 }
 
-/// Write `adopt`'s events into `sink`: one per orphan, then every
-/// lookup the citation keys found no row for, then the totals
-/// ([`crate::library::adoption_events`]).
+/// Write `adopt`'s events into `sink`: one per orphan, then one
+/// `content-index-write` per reference to the library written for an
+/// orphan it recorded, then every lookup the citation keys found no row
+/// for, then the totals ([`crate::library::adoption_events`]).
 ///
 /// `library` is the group [`preflight`] prepared: the library root,
 /// with the citation-key table an item minted here is named by. An
 /// orphan is answered from what is already held ([`held_answer`]): the
-/// content index's evidence, and the response cache under
-/// [`Adapters::cache_root`]. No source is queried, no document opened,
-/// and nothing written to the content index. The run's timestamp
-/// stamps every hash entry it writes, as [`reconcile_events`]'s does.
+/// content index's references to other libraries, its evidence, and
+/// the response cache under [`Adapters::cache_root`]. No source is
+/// queried and no document opened. The only content-index writes are
+/// the references owed for the orphans recorded
+/// ([`crate::library::Adoptions::owed`]), kept under the identity the
+/// library holds after the run's own writes ([`references_kept`]); no
+/// evidence is written. The run's timestamp stamps every hash entry it
+/// writes, as [`reconcile_events`]'s does.
 ///
 /// Returns the warning a library whose identity file could not be read
 /// calls for, when the run recorded an orphan into it
@@ -4029,9 +4137,10 @@ fn adopt_events<S: IndexStore>(
     let at = (adapters.now)();
     let mut lookups = Lookups::new(&library.tables);
     let responses = adapters.cache_root.clone().map(FileCache::new);
+    let libraries = crate::references::Libraries::new();
     let adoptions = crate::library::adopt(
         &library.directory,
-        &|hash| held_answer(adapters.index, responses.as_ref(), hash),
+        &|hash| held_answer(adapters.index, responses.as_ref(), hash, &libraries),
         &mut |record, hash| {
             crate::bib::citation_key(record, Some(hash), &library.citation_keys, &mut lookups)
         },
@@ -4042,6 +4151,14 @@ fn adopt_events<S: IndexStore>(
 
     let (events, totals) = crate::library::adoption_events(&adoptions);
     for event in events {
+        sink.emit(event);
+    }
+    for event in references_kept(
+        adapters.index,
+        &library.directory,
+        &adoptions.owed,
+        &libraries,
+    ) {
         sink.emit(event);
     }
     let mut missed = Missed::default();
@@ -4055,29 +4172,56 @@ fn adopt_events<S: IndexStore>(
 }
 
 /// The record already held for the bytes hashing to `hash`, found
-/// without asking any service: the identifier the content index
-/// answers with ([`borax_core::index::IndexEntry::answer`]), read from
-/// `responses` under [`borax_sources::cache::key`] for each service of
-/// [`borax_sources::dispatch::priority`] in turn, whatever services a
-/// run is configured with. The first record found is the answer.
+/// without asking any service, from the first of these that answers:
+///
+/// 1. the content index's references to libraries, reached through
+///    `libraries` and settled ([`crate::references::read`]): the item a
+///    reference answers with, retrieved from that library, with no
+///    identifier;
+/// 2. the identifier the content index answers with
+///    ([`borax_core::index::IndexEntry::answer`]), read from
+///    `responses` under [`borax_sources::cache::key`] for each service
+///    of [`borax_sources::dispatch::priority`] in turn, whatever
+///    services a run is configured with: the first record found, from
+///    that service's response cache.
 ///
 /// [`Unadopted::Unindexed`](crate::library::Unadopted::Unindexed) when
-/// the index answers with no evidence, and
-/// [`Unadopted::Unanswered`](crate::library::Unadopted::Unanswered)
-/// when it does and `responses`, or its absence, holds no record for
-/// the identifier. Nothing is written anywhere.
+/// the index answers with no evidence and holds no readable reference,
+/// and [`Unadopted::Unanswered`](crate::library::Unadopted::Unanswered)
+/// with every reference read otherwise: with the identifier when
+/// `responses`, or its absence, holds no record for it, and with none
+/// when the index holds no evidence. Nothing is written anywhere.
 fn held_answer<S: IndexStore>(
     index: &ContentIndex<S>,
     responses: Option<&FileCache>,
     hash: &ContentHash,
+    libraries: &crate::references::Libraries,
 ) -> Result<crate::library::Adopted, crate::library::Unadopted> {
     use crate::library::{Adopted, Unadopted};
 
-    let identifier = index
-        .entry(hash)
-        .answer()
-        .ok_or(Unadopted::Unindexed)?
-        .identifier;
+    let (answer, references) = crate::references::read(index, hash, libraries);
+    if let Some((reference, item)) = answer {
+        return Ok(Adopted {
+            record: item.record,
+            identifier: None,
+            retrieval: crate::event::RetrievedFrom::LibraryReference {
+                library: reference.library.to_string(),
+                root: reference.root,
+                artifact: reference.artifact.to_string(),
+                item: reference.item.to_string(),
+            },
+        });
+    }
+    let Some(evidence) = index.entry(hash).answer() else {
+        return Err(match references.is_empty() {
+            true => Unadopted::Unindexed,
+            false => Unadopted::Unanswered {
+                identifier: None,
+                references,
+            },
+        });
+    };
+    let identifier = evidence.identifier;
     let found = responses.and_then(|responses| {
         borax_sources::dispatch::priority(&identifier)
             .into_iter()
@@ -4089,10 +4233,15 @@ fn held_answer<S: IndexStore>(
     match found {
         Some((record, service)) => Ok(Adopted {
             record,
-            identifier,
-            service,
+            identifier: Some(identifier),
+            retrieval: crate::event::RetrievedFrom::ServiceCache {
+                service: service.as_str().to_string(),
+            },
         }),
-        None => Err(Unadopted::Unanswered { identifier }),
+        None => Err(Unadopted::Unanswered {
+            identifier: Some(identifier),
+            references,
+        }),
     }
 }
 
@@ -4479,6 +4628,20 @@ impl IndexStore for IndexHome {
         match self {
             IndexHome::File(store) => store.write_fact(key, text),
             IndexHome::Memory(store) => store.write_fact(key, text),
+        }
+    }
+
+    fn list_facts(&self, prefix: &str) -> Result<Vec<String>, String> {
+        match self {
+            IndexHome::File(store) => store.list_facts(prefix),
+            IndexHome::Memory(store) => store.list_facts(prefix),
+        }
+    }
+
+    fn remove_fact(&self, key: &str) -> CacheWrite {
+        match self {
+            IndexHome::File(store) => store.remove_fact(key),
+            IndexHome::Memory(store) => store.remove_fact(key),
         }
     }
 }
