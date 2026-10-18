@@ -24,12 +24,12 @@ use borax::evidence::{
 use borax::library::{ArtifactStore, ItemStore, Stores};
 use borax::pipeline::{
     Documents, FileOutcome, FileRecord, RealDocuments, ResolveConfig, accept, attempts_of,
-    extraction, extraction_of, from_file, remember, resolution_skip, resolve_batch, resolve_file,
-    resolve_indexed_again, resolve_supplied, resolved_event, standing, title_check, titles_of,
-    unheld_evidence, verdict_event,
+    extraction, extraction_of, from_file, preferred_identifier, remember, resolution_skip,
+    resolve_batch, resolve_file, resolve_indexed_again, resolve_supplied, resolved_event, standing,
+    title_check, titles_of, unheld_evidence, verdict_event,
 };
 use borax_core::content::{ContentHash, hash_bytes};
-use borax_core::identifier::{ArxivId, Doi, Identifier, IdentifierKind, SuppliedError};
+use borax_core::identifier::{ArxivId, Doi, Identifier, IdentifierKind, Isbn, Pmid, SuppliedError};
 use borax_core::index::Fact;
 use borax_core::library::{
     ArtifactId, ArtifactRecord, DuplicateReason, EvidenceOrigin, HashEntry, IdentificationEvidence,
@@ -8672,4 +8672,43 @@ fn resolve_file_skips_an_encrypted_file_as_encrypted() {
     let outcome = resolve_file(path, &documents, &sources, &index, &config(true));
 
     assert_eq!(skipped_outcome(outcome), SkipReason::Encrypted);
+}
+
+/// A record's preferred identifier is its DOI, then its arXiv id, then
+/// its PMID, then its ISBN, and none when it carries none of them.
+#[test]
+fn preferred_identifier_takes_doi_then_arxiv_then_pmid_then_isbn() {
+    let doi_value = Doi::parse("10.1000/preferred").unwrap();
+    let arxiv = ArxivId::parse("2401.01234").unwrap();
+    let pmid = Pmid::parse("12345678").unwrap();
+    let isbn = Isbn::parse("9780306406157").unwrap();
+    let with = |doi: bool, has_arxiv: bool, has_pmid: bool, has_isbn: bool| {
+        let mut record = Record::new(EntryType::Article);
+        record.doi = doi.then(|| doi_value.clone());
+        record.borax.arxiv = has_arxiv.then(|| arxiv.clone());
+        record.pmid = has_pmid.then_some(pmid);
+        record.isbn = has_isbn.then(|| isbn.clone());
+        record
+    };
+
+    assert_eq!(
+        preferred_identifier(&with(true, true, true, true)),
+        Some(Identifier::Doi(doi_value.clone()))
+    );
+    assert_eq!(
+        preferred_identifier(&with(false, true, true, true)),
+        Some(Identifier::Arxiv(arxiv.clone()))
+    );
+    assert_eq!(
+        preferred_identifier(&with(false, false, true, true)),
+        Some(Identifier::Pmid(pmid))
+    );
+    assert_eq!(
+        preferred_identifier(&with(false, false, false, true)),
+        Some(Identifier::Isbn(isbn.clone()))
+    );
+    assert_eq!(
+        preferred_identifier(&with(false, false, false, false)),
+        None
+    );
 }
