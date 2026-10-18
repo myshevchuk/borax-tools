@@ -20,6 +20,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-14 Wed] -- reconcile outside a library
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-17 Sat] -- reduced content index
 #+AI_PASS: fact-check claude-opus-5-5 [2026-10-17 Sat] -- remaining JSONL examples moved to schema 5
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-18 Sun] -- library references
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -42,22 +43,30 @@ how to install it, and a handful of examples.
      record. borax does not open the file, extract anything, ask a
      service or either cache, compare titles, or update the content
      index for that file.
-  3. *Otherwise, find an identifier.* Unless you used ~--no-cache~,
-     borax first asks the content index whether an earlier run identified
-     these bytes. The index holds the identifier and whether it was
-     extracted, supplied by you, or accepted over a title conflict. On a
-     miss, the cheap extraction passes run and the first hit wins: the
-     PDF's embedded metadata — the XMP packet, then the Info dictionary
-     — and after that the page text layer, reading as many pages from the
-     front as ~extraction.page-limit~ allows. What it is looking for is a
-     DOI or an arXiv id.
-  4. *Resolve that identifier to a record.* The enabled services are
-     asked in turn — Crossref, OpenAlex, arXiv — through an on-disk
-     response cache, and no faster than the pacing allows. An index hit
-     also takes this step: the index does not hold the record. borax does
-     not extract from the file or compare titles again for that answer.
-     What comes back is normalized into one record model, a superset of
-     CSL-JSON.
+  3. *Otherwise, ask the content index.* Unless you used ~--no-cache~,
+     borax first checks the entry for these bytes for references to other
+     libraries. One reachable reference answers from its library item.
+     Several reachable references answer only when their items carry the
+     same preferred identifier: DOI, then arXiv, PMID, or ISBN. Two
+     locations of the same library count as two references. When the
+     reachable items disagree, no reference answers. borax then asks
+     whether an earlier run identified these bytes. The index holds the
+     identifier and whether it was extracted, supplied by you, or accepted
+     over a title conflict. On a miss, the cheap extraction passes run and
+     the first hit wins: the PDF's embedded metadata — the XMP packet,
+     then the Info dictionary — and after that the page text layer,
+     reading as many pages from the front as
+     ~extraction.page-limit~ allows. What it is looking for is a DOI or an
+     arXiv id. An untracked copy inside a library follows this same order
+     and remains reported as untracked.
+  4. *Resolve an identifier to a record when no reference answered.* The
+     enabled services are asked in turn — Crossref, OpenAlex, arXiv —
+     through an on-disk response cache, and no faster than the pacing
+     allows. An index evidence hit also takes this step: the index does
+     not hold the record. borax does not extract from the file or compare
+     titles again for that answer. A reference answer needs no lookup,
+     extraction, or title check. What comes back is normalized into one
+     record model, a superset of CSL-JSON.
   5. *Render a name, a citation key, or both.* The record's entry type
      chooses the template; the template renders a string; sanitization
      makes that string a legal file name on every supported platform.
@@ -72,6 +81,16 @@ how to install it, and a handful of examples.
   against that start-of-run snapshot. An applying rename may record
   earlier files, but those writes do not become answers for later files
   in the same run.
+
+  For each content hash, the index can keep one file per library
+  reference under ~content/<hash>/refs/~. A reference names the library's
+  identity and last-known root, plus an artifact and item in that library.
+  borax writes it only after the artifact record is on disk and only when
+  the library has a readable identity. A library without an identity gets
+  no reference, and borax reports nothing about that absence. References
+  are never pruned automatically. A stale reference is removed only when
+  borax repairs its root while writing a reference for the same library
+  and artifact.
 
   The library tracks a file when exactly one artifact record at the
   file's normalized path contains its content hash anywhere in its hash
@@ -178,14 +197,25 @@ how to install it, and a handful of examples.
    followed by ~et al.~ for three or more. ~via~ names Crossref,
    OpenAlex, arXiv, DataCite, PubMed, and a sidecar in that order,
    leaving out any the record does not name.
-   ~<where>~ is ~the library~, ~the response cache~, or ~the network~.
-   The content index holds an identifier rather than a record, so an
-   index answer ends with the service retrieval place: ~from the
-   response cache~ or ~from the network~. A tracked file ends with ~from
-   the library~. If the library cannot answer, borax appends ~; the
-   library could not answer: <what>~ to the ordinary resolution or skip
-   line after the fallback. ~--no-cache~ still asks the library because
-   the library is authoritative state, not a cache.
+   ~<where>~ is ~the library~, ~the library at <root>~, ~the response
+   cache~, or ~the network~. A reference answer ends ~from the library
+   at <root>~. The content index holds an identifier rather than a record,
+   so an index evidence answer ends with the service retrieval place:
+   ~from the response cache~ or ~from the network~. A tracked file ends
+   with ~from the library~. If the library cannot answer, borax appends
+   ~; the library could not answer: <what>~ to the ordinary resolution
+   or skip line after the fallback. ~--no-cache~ still asks the library
+   because the library is authoritative state, not a cache.
+
+   A reference that cannot answer adds ~; a library reference could not
+   answer: <what>~. The reason is ~<root> is missing~, ~<root> holds no
+   library~, ~<root> holds another library (<id>)~, ~<path> could not be
+   read (<message>)~, ~the library at <root> holds no item <item>~, or
+   ~the library at <root> holds item <item> in several files~. When
+   reachable references disagree, the line instead adds ~; library
+   references disagree: the library at <root> names <id>~ for each
+   reference, or ~names no identifier~. These clauses also appear on
+   skip lines. They precede any rejected-candidate clause.
 
    If an index-held identifier reaches no record, the file is skipped as
    ~unresolvable~. borax does not fall back to extracting the same file.
@@ -246,8 +276,20 @@ how to install it, and a handful of examples.
    into a library without an identity first creates
    ~.borax/library.toml~. If creating that file fails, any rename already
    made stands, but the admission is ~unwritten~ and the guarded store
-   write is not made. The message names the identity file. A preview
-   writes neither kind of record and creates no identity.
+   write is not made. The message names the identity file.
+
+   After recording a file in a library with a readable identity, an
+   applying run, including an applying batch, writes a content-index
+   reference for the recorded bytes. The reference follows the artifact
+   record and names the item that answers for those bytes. A separation
+   references the new artifact. A pending, outside, or unwritten
+   admission writes no reference. Neither does a preview or
+   ~--no-record~. A successful reference write is silent. A failed one
+   reads ~<path>: the content index could not keep its reference to the
+   library at <root> (<message>)~, but leaves the rename standing.
+
+   A preview writes neither kind of record or a reference and creates no
+   identity.
 
    With recording enabled, when an applying run finds unrecorded bytes
    at an artifact record's own path, it accepts them only when their
@@ -331,12 +373,18 @@ how to install it, and a handful of examples.
     library answer, it names the item's identifier without an origin
     clause because nothing was looked up. ~record~ names the service or
     services that supplied the record. It adds ~from the library~ when
-    an item's provenance names services. If a library item names no
-    service, it reads ~the library~.
+    the run's own library answered and the item's provenance names
+    services. If that item names no service, it reads ~the library~. A
+    reference answer instead adds ~from the library at <root>~, or reads
+    ~the library at <root>~ when the referenced item names no service.
 
     When the library could not answer, a ~library~ line states the
     problem. It follows ~record~ for a resolved file and follows the
-    reason lines for a file that did not resolve.
+    reason lines for a file that did not resolve. After that line, a
+    ~reference~ line names each reference that could not answer. A
+    ~references~ line follows them when reachable references disagree;
+    it begins ~disagree:~ and names what each referenced library's item
+    identifies. These lines also appear in a skip description.
 
     A library-answered file gets the same move question as any other
     resolved file. Supplying another identifier re-identifies it and
@@ -619,20 +667,22 @@ how to install it, and a handful of examples.
    #+end_src
 
    Reports what the on-disk response cache holds, or empties it. The
-   content index is separate and ~--clear~ leaves it in place. Old ~v1~
-   index entries under the cache directory are still counted as cache
-   files and removed by ~--clear~, but borax does not read or migrate
-   them.
+   content index is separate and ~--clear~ leaves it in place, including
+   its library references. Old ~v1~ index entries under the cache
+   directory are still counted as cache files and removed by ~--clear~,
+   but borax does not read or migrate them.
 
    On Unix, the content index is under
    ~$XDG_DATA_HOME/borax/v2/~, or =~/.local/share/borax/v2/= when
    ~XDG_DATA_HOME~ is unavailable. On Windows, it is under
    =%APPDATA%\borax\v2\=, falling back to ~XDG_DATA_HOME~. Each content
    hash has a directory under ~content/~. Its ~extracted.json~ and
-   ~operator.json~ files hold the two independent facts, and operator
-   evidence wins when both exist. If the platform provides no data
-   directory, borax keeps the index in memory for that run without a
-   warning.
+   ~operator.json~ files hold the two independent evidence facts, and
+   operator evidence wins when both exist. Its ~refs/~ directory holds
+   one file per library reference. Each reference names a library
+   identity, its last-known root, an artifact, and an item. If the
+   platform provides no data directory, borax keeps the index in memory
+   for that run without a warning.
 
    The four library commands below each accept
    ~--run-log~/~--no-run-log~ and ~--json~. ~--identify~ and ~--rehash~
@@ -845,6 +895,21 @@ how to install it, and a handful of examples.
    could not keep this answer (<message>)~, but does not fail the run.
    Restoring the index does not alter any library file.
 
+   After restoring operator evidence, ~reconcile~ writes or restores a
+   reference for every content hash in every artifact history. Historical
+   bytes name the item under which they were accepted. A record that links
+   no item gets no reference for its newest bytes.
+   If a record was re-linked, reconciliation rewrites its reference with
+   the item that now answers.
+
+   Reconciliation also repairs references whose last-known root is
+   missing, is not a directory, holds no library identity, or holds a
+   different library identity. It writes the new reference before it
+   removes stale references and reports their roots as ~repaired_from~.
+   A root that cannot be read is not treated as stale. A live copy of the
+   same library is not stale either, and a later reconciliation keeps a
+   deleted copy's reference rather than pruning it.
+
 ** borax adopt
 
    #+begin_src sh
@@ -852,18 +917,27 @@ how to install it, and a handful of examples.
    #+end_src
 
    Records orphans from facts borax already knows locally. For each
-   orphan, it hashes the file and asks the content index for an
+   orphan, it hashes the file and first asks the content index for a
+   reference to another library. A reachable reference answers from that
+   library's item before borax checks the response cache. The adoption's
+   retrieval is ~library-reference~, and its history entry carries no
+   identification evidence.
+
+   If no reference answers, ~adopt~ asks the content index for an
    identifier, checking operator evidence before extracted evidence. It
    then reads the response cache in the usual service-priority order,
    whatever ~sources~ names. When a cached response answers, borax writes
    an artifact record and links it to an existing item or creates an
-   item. The history entry records the identifier with origin ~adopted~.
-   Adoption writes nothing to the content index. It queries no service,
-   opens no document, and moves, renames, and deletes nothing.
+   item. That history entry records the identifier with origin ~adopted~.
+   For every orphan it records, ~adopt~ writes a reference when the
+   library has a readable identity. It never writes evidence to the
+   content index. It queries no service, opens no document, and moves,
+   renames, and deletes nothing.
 
    Every orphan gets one report. An orphan is reported as ~unindexed~
    when borax can read it, no artifact record holds its bytes, and the
-   content index holds no evidence for them. Human output says:
+   content index has neither evidence nor a readable reference for them.
+   Human output says:
 
    #+begin_example
      <path>: the content index holds no record of its bytes, so it is still an orphan
@@ -876,6 +950,12 @@ how to install it, and a handful of examples.
      <path>: the content index knows its bytes as <identifier>, but no response cache holds that record, so it is still an orphan; borax resolve fetches it
    #+end_example
 
+   ~unanswered~ also covers an entry whose references did not answer and
+   that holds no identifier. Its line begins ~<path>: no library
+   reference the content index holds for its bytes answered, and it holds
+   no identifier for them, so it is still an orphan~. It then gives the
+   same unavailable-reference or disagreement clauses as ~resolve~.
+
    An orphan whose bytes already occur in an artifact record's hash
    history also stays an orphan and is reported as held by that record.
    It may be a recorded artifact moved outside borax, in which case run
@@ -885,9 +965,11 @@ how to install it, and a handful of examples.
    messages are unchanged.
 
    Running ~adopt~ again does not change records it already wrote. After
-   ~borax cache --clear~, identification evidence survives but the
-   response cache is empty. Such an orphan is ~unanswered~ until
-   ~borax resolve~ fetches the record again. Adoption still succeeds.
+   ~borax cache --clear~, identification evidence and library references
+   survive but the response cache is empty. A reachable reference can
+   still answer. An orphan with only identification evidence is
+   ~unanswered~ until ~borax resolve~ fetches the record again. Adoption
+   still succeeds.
 
    ~adopt~ neither reads citation sidecars nor the retired
    ~.borax/ledger.jsonl~. It refuses to run outside a library established
@@ -904,14 +986,15 @@ how to install it, and a handful of examples.
 
 ** Choosing how to record existing files
 
-   Use ~adopt~ when the content index has an identifier for the same
-   bytes and the response cache still has the corresponding record. It
-   is an offline operation that cannot rename anything. If adoption
-   reports ~unanswered~, run ~resolve~ first to fetch the record. Use
-   ~rename --apply~ when an orphan is unknown to the content index: it
-   can extract an identifier, query services, rename the file under the
-   current templates, and record it. Use ~reconcile~ when a record
-   already exists but its artifact was moved or edited outside borax.
+   Use ~adopt~ when another library holds the same bytes, or when the
+   content index has an identifier for them and the response cache still
+   has the corresponding record. It is an offline operation that cannot
+   rename anything. If adoption reports ~unanswered~, run ~resolve~ first
+   to fetch the record. Use ~rename --apply~ when an orphan is unknown to
+   the content index: it can extract an identifier, query services, rename
+   the file under the current templates, and record it. Use ~reconcile~
+   when a record already exists but its artifact was moved or edited
+   outside borax.
 
 * Settings
 
@@ -1782,9 +1865,23 @@ how to install it, and a handful of examples.
 
   ~content_index~ has separate ~read~ and ~write~ steps. A read is ~hit~,
   ~miss~, ~bypassed~, ~unavailable~ with a message, or
-  ~not-attempted~. A hit carries ~evidence~ with its ~identifier~ and
-  ~origin~. A write is ~written~, ~failed~ with a message, or
+  ~not-attempted~. A ~hit~ or ~miss~ carries ~references~ when the entry
+  held at least one readable reference. A hit carries ~evidence~ with its
+  ~identifier~ and ~origin~ only when that evidence answered. A reference
+  answer is a hit with ~references~ and no ~evidence~, and no lookup
+  follows. A miss means that neither a reference nor the evidence
+  answered. A write is ~written~, ~failed~ with a message, or
   ~not-attempted~, and writes extracted evidence rather than a record.
+
+  Each member of ~references~ carries ~library~, ~root~, ~artifact~,
+  ~item~, and ~status~. The status is ~answered~, ~agreed~,
+  ~disagreeing~, ~unavailable~, or ~item-unavailable~. A disagreeing
+  reference carries ~identifier~ when its item has one. An unavailable
+  reference has a ~cause~ of ~missing~, ~other-library~, or ~unreadable~;
+  ~other-library~ adds ~found~ when the root holds another identity, and
+  ~unreadable~ adds ~path~ and ~message~. An item-unavailable reference
+  has a cause of ~dangling~, ~unreadable~, or ~ambiguous~. Its unreadable
+  cause also adds ~path~ and ~message~, while ~ambiguous~ adds ~files~.
 
   ~extraction.result~ is ~found~ with an ~identifier~ and an
   ~embedded-metadata~ or ~text-layer~ tier; ~no-text-layer~,
@@ -1856,12 +1953,12 @@ how to install it, and a handful of examples.
   lookup; the rest of ~lookup~ describes the latest round.
 
   ~record_retrieval~ says where the record came from: ~library~ with the
-  artifact and the item whose record was returned, ~service-cache~ with
-  the service, or ~network~ with the service. The content index holds no
-  record and is never a retrieval place. For
-  restored bytes, the library item is the item they were accepted under,
-  not necessarily the artifact record's link. It is ~null~ when no record
-  was reached.
+  artifact and the item whose record was returned, ~library-reference~
+  with the library, root, artifact, and item, ~service-cache~ with the
+  service, or ~network~ with the service. The content index holds no
+  record and is never a retrieval place. For restored bytes, the library
+  item is the item they were accepted under, not necessarily the artifact
+  record's link. It is ~null~ when no record was reached.
   The service that supplied each record field remains in
   ~record.borax.provenance~. ~match_check~ is ~agreed~, ~conflict~ with
   both values and their similarity, ~insufficient-evidence~, or
@@ -1890,15 +1987,23 @@ how to install it, and a handful of examples.
   ~record_retrieval~ is ~null~, and its ~acceptance~ is
   ~not-applicable~. Work duplicates carry the record's evidence.
 
-  A ~content-index-write~ event reports an evidence write made after a
-  verdict: a rename-time write for an identifier you supplied, a
-  retried extracted lookup, an answer accepted over a conflict, or a
-  restoration by ~reconcile~. It carries ~hash~ and an ~entry~ naming
-  the identifier and origin. A rename-time event follows ~renamed~ and
-  any ~library-admission~ and carries the path after the move. A
-  reconcile event follows its per-object events and precedes its totals.
-  Its ~write~ status is ~written~ or ~failed~ with a message. It changes
-  no count and cannot make the rename or reconciliation fail.
+  A ~content-index-write~ event reports a write made after a verdict. An
+  evidence entry names the identifier and origin for an identifier you
+  supplied, a retried extracted lookup, an answer accepted over a
+  conflict, or an operator-evidence restoration by ~reconcile~. A
+  reference entry has kind ~reference~ and names its library, root,
+  artifact, and item. It carries ~repaired_from~ when the write removed
+  references at stale roots. Every write event also carries ~hash~.
+
+  In a rename, the ~renamed~ or ~already-named~ event comes first,
+  followed by library admissions, the reference write, and then the
+  evidence write. The path is where the run left the file. In
+  ~reconcile~, per-object events and operator-evidence restorations come
+  before reference writes, and the totals follow them. In ~adopt~, all
+  adoption events come first, followed by reference writes, missed
+  lookups, and totals. A write's status is ~written~ or ~failed~ with a
+  message. It changes no count and cannot make the rename,
+  reconciliation, or adoption fail.
 
   ~run-started~ includes the Boolean ~interactive~; an
   interactive run also reports ~applying: true~. A declined proposal is
@@ -1983,11 +2088,13 @@ how to install it, and a handful of examples.
   ~supplied~, and carries the identifier.
   Adoption emits one ~library-adoption~ event per orphan, with ~path~ and
   an ~adoption~ whose ~kind~ is ~recorded~, ~held~, ~unreadable~,
-  ~unwritten~, ~unindexed~, or ~unanswered~. ~recorded~ carries
-  ~retrieval~ of kind ~service-cache~ with its service. ~unanswered~
-  carries the identifier that lacked a cached response. ~unindexed~ now
-  means the content index held no evidence for the bytes. A consumer
-  that counts these events should dispatch on ~adoption.kind~. The
+  ~unwritten~, ~unindexed~, or ~unanswered~. ~recorded.retrieval~ is
+  either ~service-cache~ with its service or ~library-reference~ with
+  its library, root, artifact, and item. An ~unanswered~ adoption may
+  omit ~identifier~ and carries ~references~ when the entry held any.
+  ~unindexed~ now means the content index had neither evidence nor a
+  readable reference for the bytes. A consumer that counts these events
+  should dispatch on ~adoption.kind~. The
   events are followed by
   ~library-adopted~ with ~root~, ~adopted~, and ~orphans~; its ~orphans~
   count equals the number of adoption events whose kind is not

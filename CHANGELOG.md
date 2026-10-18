@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Content-index entries can now reference the item for the same bytes in
+  another library. Resolution asks the run's own library first, then these
+  references, then looks up the index's identifier, and finally extracts an
+  identifier. One reachable reference answers directly; several answer only
+  when their items agree on the preferred identifier. A reference answer
+  performs no service lookup.
+
+- Unavailable library references are retained and reported rather than
+  pruned. Resolution reports missing or unreadable roots, roots that hold no
+  library or a different one, and missing, unreadable, or ambiguous items.
+  When reachable references disagree, borax reports each library's answer
+  and continues with the index's identifier or extraction.
+
+- `borax reconcile` now restores references for every content hash in every
+  artifact history, updates a reference after a hand re-link, and repairs a
+  moved library's stale roots. A copied library can keep a reference for each
+  location; deleting one copy does not automatically remove its reference.
+
+- `borax adopt` can now record an orphan from an item in another library,
+  before consulting the response cache. It writes a reference for each
+  orphan it records and records no identification evidence when another
+  library supplied the item.
+
 - Artifact-record history entries now carry the identifier that identified
   their bytes and its origin: `extracted`, `supplied`, `overridden`, or
   `adopted`. Older entries remain valid without either field. Re-identifying
@@ -74,21 +97,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extracted fact. That fact cannot displace an operator's identifier because
   the two have separate files.
 
-- `borax adopt` now reads the index's operator fact before its extracted
-  fact, then searches the response cache in service-priority order regardless
-  of `sources`. It still queries no service and now writes nothing to the
-  index. Adopted history entries use origin `adopted`; `unindexed` now means
-  that the index has no evidence. After `cache --clear`, evidence survives
-  and affected orphans are `unanswered` until `resolve` fetches their records.
-  The `adopt` and `reconcile` help text reflects these behaviours.
+- `borax adopt` now checks library references before it reads the index's
+  operator fact and extracted fact, then searches the response cache in
+  service-priority order regardless of `sources`. It still queries no service
+  and writes references but never evidence to the index. History entries
+  adopted through cached evidence use origin `adopted`; entries adopted
+  through a reference carry no evidence. `unanswered` can now describe
+  references that did not answer when no identifier exists, and `unindexed`
+  now means that the index has neither evidence nor a readable reference.
+  After `cache --clear`, evidence and references survive; an orphan with only
+  evidence is `unanswered` until `resolve` fetches its record. The `adopt` and
+  `reconcile` help text reflects these behaviours.
 
-- **BREAKING:** JSONL events now use schema 5. A content-index read `hit`
-  carries `evidence`; `lookup.origin` adds `content-index`;
-  `record_retrieval` no longer has `content-index`;
-  `content-index-write` adds `hash` and `entry`, and reconciliation emits it
-  with the artifact's path. A recorded `library-adoption` gains `retrieval`
-  of kind `service-cache`; the new adoption kind `unanswered` carries its
-  identifier, and `unindexed` now means that no evidence exists.
+- **BREAKING:** JSONL events now use schema 5. Content-index read `hit` and
+  `miss` can carry `references`; a reference-backed hit can omit `evidence`
+  and performs no lookup. Reference statuses are `answered`, `agreed`,
+  `disagreeing`, `unavailable`, and `item-unavailable`, with structured
+  causes. `lookup.origin` adds `content-index`; `record_retrieval` no longer
+  has `content-index` and gains `library-reference` for reference answers.
+  `content-index-write` adds `hash` and `entry`, gains the `reference` entry
+  kind and optional `repaired_from`, and reconciliation emits it with the
+  artifact's path. A recorded `library-adoption` can retrieve from
+  `service-cache` or `library-reference`; `unanswered` can omit `identifier`
+  and carry `references`, and `unindexed` now means that neither evidence nor
+  a readable reference exists.
 
 - `borax reconcile` now refuses to run over a directory outside any library
   before it reads or writes anything, because reconciliation writes library
