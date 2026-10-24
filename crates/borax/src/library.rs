@@ -2699,7 +2699,7 @@ pub fn reconcile(root: &Path, reconciling: &Reconciling<'_>) -> Reconciliation {
     };
     reconciliation.not_pending = accepted
         .into_iter()
-        .filter(|(_, named)| !named.as_deref().is_some_and(&settled))
+        .filter(|(_, named)| !named.as_deref().is_some_and(settled))
         .map(|(given, _)| given)
         .collect();
     reconciliation.hashed = hashes.hashed;
