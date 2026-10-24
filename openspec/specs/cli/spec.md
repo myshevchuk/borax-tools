@@ -392,11 +392,13 @@ and remains accepted before or after, because every subcommand renders
 its stream through it.
 
 The surface is: `resolve` accepts the resolution, extraction, network
-and response-cache settings, and how many files may be resolved at once;
+and response-cache settings, how many files may be resolved at once,
+and `--refresh`;
 `rename` accepts those, minus how many files at once, plus the collision
 policy, the bibliography settings, the record gate, the batch pair, the
-skip-named pair, and `--apply`; `bib`
-accepts the resolution settings and the bibliography settings; `cache`
+skip-named pair, `--apply` and `--refresh`; `bib`
+accepts the resolution settings, the bibliography settings and
+`--refresh`; `cache`
 accepts `--clear`; `status` accepts the extraction settings and
 `--identify`; `validate` accepts no setting of its own; `reconcile`
 accepts the extraction settings, `--rehash` and `--accept`, since what
@@ -406,16 +408,20 @@ queries nothing, opens no document and renames nothing. Every
 subcommand additionally accepts the run-log pair, which is decided at
 dispatch and is therefore operative on all of them.
 
-`--identify`, `--rehash` and `--accept` are per-invocation selectors
+`--identify`, `--rehash`, `--accept` and `--refresh` are per-invocation
+selectors
 rather than settings: each says what this run is being asked to do
 rather than how borax behaves, so none is settable from configuration
 and none takes a `--no-` form. `--accept` names the paths whose pending
-changes this run accepts, and is given once per path.
+changes this run accepts, and is given once per path. `--refresh` asks
+this run's services again about every file and reports what differs
+from a library item, as the `resolution` capability states.
 
 `config` accepts every configurable setting. Passing an override there
 is not a no-op but the question the command answers — what this
 invocation would resolve to, and from which layer — so restricting it
-would remove the only way to ask.
+would remove the only way to ask. `config` does not accept
+`--refresh`, which is no setting.
 
 Configuration is unaffected: a configuration file and an environment
 variable SHALL continue to set every key regardless of which subcommand
@@ -476,6 +482,13 @@ runs, since neither is an argument to an invocation.
 - **THEN** the first aborts at config load naming the unknown key, the
   second is rejected as an unknown argument, and `borax reconcile
   --accept a.pdf --accept b.pdf` is the accepted form
+
+#### Scenario: Refreshing is a selector
+- **WHEN** a configuration file sets `refresh = true`, and separately
+  `borax config --refresh` and `borax rename --no-refresh papers/` run
+- **THEN** the first aborts at config load naming the unknown key, the
+  other two are rejected as unknown arguments, and `borax rename
+  --refresh papers/` is the accepted form
 
 ### Requirement: A question describes whichever verdict it is asking about
 A question put about a file SHALL be preceded by a description of the verdict the run is holding for it, whether that verdict is a resolution or a failure, and SHALL show only what that verdict's own event carries.

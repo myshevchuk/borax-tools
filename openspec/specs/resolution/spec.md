@@ -27,10 +27,23 @@ identifier, and resolved records SHALL additionally be indexed by the
 source file's content hash, through the identification evidence "The
 content index keeps identification evidence, one fact per file" states,
 and through the library references "The content index keeps references
-to libraries, one file each" states. A cache hit SHALL be used without any network request. A bypass
+to libraries, one file each" states. A cache hit SHALL be used without any network request, except in a run
+given `--refresh`. A bypass
 flag (`--no-cache`) SHALL force live queries for every file the run's
 library does not answer for, and SHALL skip reading the content index,
 and a cache subcommand SHALL be able to clear the cache.
+
+A refresh flag (`--refresh`) SHALL make every lookup of the run ask
+the service: no answer is read from the response cache, and each
+successful answer is stored in it over any answer it held, as the
+requirement "A refresh looks a file's library item up again and never
+replaces it" states. It SHALL NOT bypass the content index, which is
+read as it is without the flag, and SHALL NOT bypass the library. The
+two flags compose: `--refresh --no-cache` asks every service with no
+response cache in front, and still reads no content index. Where a
+requirement or a scenario says that a lookup is answered from the
+response cache with no network request, it describes a run not given
+`--refresh`.
 
 Only the response cache is a cache. The cache subcommand clears it and
 nothing else: the content index lives outside the cache directory and
@@ -38,10 +51,13 @@ survives clearing it. Neither is asked about a file its library tracks:
 the run's library answers first, as the requirement "A file its library
 tracks resolves from its library item" states. The library is not a
 cache, so `--no-cache` SHALL NOT bypass it, and clearing the cache SHALL
-change no answer the library gives.
+change no answer the library gives. The lookup a run given `--refresh`
+makes of a tracked file's item asks a service about the item, and
+answers nothing about the file.
 
 #### Scenario: Re-run over the same directory is offline
-- **WHEN** a directory is processed a second time with an intact cache
+- **WHEN** a directory is processed a second time with an intact cache,
+  by a run not given `--refresh`
 - **THEN** no network requests are made and results are identical to the
   first run
 
@@ -61,6 +77,18 @@ change no answer the library gives.
   where no library reference for its bytes answers, its identifier is
   looked up again over the network; where one answers, nothing is
   looked up and the record is the item's that reference names
+
+#### Scenario: A refresh asks again and keeps what it hears
+- **WHEN** a run given `--refresh` looks up a DOI whose answer the
+  response cache holds
+- **THEN** the service is asked, the run uses its answer, and the
+  response cache holds that answer afterwards in place of the old one
+
+#### Scenario: A refresh still reads the content index
+- **WHEN** a run given `--refresh` reaches an untracked file whose
+  bytes the content index holds an identifier for
+- **THEN** the file is not extracted, and that identifier is looked up
+  over the network
 
 ### Requirement: Network use is polite and bounded
 Every request SHALL carry a User-Agent identifying borax and its version
@@ -401,7 +429,7 @@ followed.
   supplied identifier is looked up over the network
 
 ### Requirement: A file its library tracks resolves from its library item
-A file the run's library tracks SHALL resolve to the record of its library item, and resolution SHALL ask the library before the content index and SHALL then ask neither the content index, extraction, nor any service for that file.
+A file the run's library tracks SHALL resolve to the record of its library item, and resolution SHALL ask the library before the content index and SHALL then ask neither the content index, extraction, nor any service for that file's record: a run given `--refresh` asks a service about the item, for a candidate that does not change what the file resolves to.
 
 A file is tracked when, among the artifact records whose last-known
 path is the file's own path, exactly one holds the file's content hash
@@ -469,13 +497,22 @@ and reading them SHALL NOT refuse a run. Every file of the run SHALL be
 consulted against the library as it was read then, and not as the
 run's own admissions have since left it: what a run learns from
 recording one file is not the library's statement about another.
+The one exception is an item whose record the operator replaced in
+this run by accepting a refresh candidate, as the `rename` capability
+states: that replacement is the library's own statement, written into
+its own text, and every later file of the run is consulted against
+the item as replaced.
 
 `borax resolve`, `borax rename` — batch and interactive, previewing and
 applying — and `borax bib` SHALL consult the library. `--no-cache`
 SHALL NOT bypass it: the library is not a cache. `--no-record` SHALL NOT
 bypass it either: that setting withholds the account of admissions and
 the writes behind it, and asking the library what a file is does
-neither.
+neither. `--refresh` SHALL NOT bypass it either: the file still
+resolves from its item, and the record a fresh lookup of the item's
+identifier finds is a candidate beside it, as the requirement "A
+refresh looks a file's library item up again and never replaces it"
+states.
 
 A library answer SHALL NOT open the file and SHALL NOT compare its
 titles against the item: the item is the library's accepted statement
@@ -492,7 +529,11 @@ library answer as to any other record.
 In an interactive run, a file the library answered for SHALL be put the
 question its record calls for, exactly as any resolved file is, and
 supplying an identifier for it re-identifies the file as the `library`
-capability states.
+capability states. In a run given `--refresh`, a file whose item's
+candidate differs is first asked whether the candidate replaces the
+item's record, as the `rename` capability's requirement "An
+interactive run asks whether a differing refresh candidate replaces
+the library's record" states.
 
 #### Scenario: A correction in the library wins over the content index
 - **WHEN** a tracked PDF's linked item has had its title corrected in a
@@ -622,6 +663,20 @@ capability states.
   been corrected
 - **THEN** the bibliography entry written for it carries the corrected
   title
+
+#### Scenario: A refresh does not change what a tracked file resolves to
+- **WHEN** the run in "A correction in the library wins over the content
+  index" is made with `--refresh`, and Crossref holds the old title
+- **THEN** the file resolves from its library item with the corrected
+  title, its `lookup` is not attempted because the library answered,
+  Crossref is asked once about the item's DOI for its `refresh`, which
+  reports the old title as a differing candidate, and the item file and
+  the content index's entry are unchanged
+
+#### Scenario: A replacement answers the item's next file
+- **WHEN** an interactive run given `--refresh` replaces an item's
+  record at the first of two files linked to that item
+- **THEN** the second file resolves to the item's record as replaced
 
 ### Requirement: A library that cannot answer for a file says so
 When the run's library cannot answer for a file it records or may record, resolution SHALL report why on the file's resolution event and SHALL then resolve the file as it resolves a file the library does not track.
@@ -947,7 +1002,10 @@ file's own identifier, extracted from it or held for it by the content
 index; one an operator asks for again after an outage, which keeps the
 extraction pass, or the content index, as its origin, whichever the
 lookup it repeats had; and one made from an identifier an operator
-supplied.
+supplied. It applies too to the lookup a run given `--refresh` makes
+of a library item's preferred identifier, whose identifier comes from
+the item, and which is retained with the refresh rather than as the
+file's lookup.
 
 A lookup the operator asks for again is the file's own lookup, and it
 SHALL become the file's current lookup, whether it finds a record or
@@ -1026,6 +1084,12 @@ and priority" fixes both.
   and the operator asks the services again and Crossref answers
 - **THEN** the record's current lookup names the content index as the
   DOI's origin, and the lookup that met the outage is retained before it
+
+#### Scenario: A refresh keeps its attempts
+- **WHEN** a refresh of a tracked file's item asks Crossref, which is
+  unreachable, and then OpenAlex, which supplies the record
+- **THEN** both attempts are retained with the refresh, Crossref's
+  first, and the file's own lookup is still not attempted
 
 ### Requirement: A resolution says where its record came from
 Every record a resolution reaches SHALL be retained with where it was retrieved from: the file's library item, naming the artifact and the item; the item a library reference names, naming the library, its root, the artifact and the item; a service's response cache, naming the service; or the network, naming the service.
@@ -1320,6 +1384,9 @@ The steps are:
 - the lookup;
 - the title check;
 - writing the record to the content index;
+- in a run given `--refresh`, the refresh of the library item that
+  answered for the file, and the operator's acceptance of the candidate
+  it found;
 - and, for each identifier an operator submitted, its lookup, its title
   check, and the operator's acceptance of what it reached.
 
@@ -1338,6 +1405,12 @@ The reasons are:
 - the text submitted named no identifier;
 - the record a submission reached led to no move, so it was never put
   to the operator;
+- for a refresh alone, the library item's record carries no identifier
+  to look up;
+- and, for a refresh candidate's acceptance alone: the item is another
+  library's, reached through a reference; the run records nothing into
+  its library; the operator already answered for the item at an
+  earlier file of the run; or, as for any step, no question was put;
 - and, for the content-index write alone, those the requirement "A
   resolution says what the content index did" names.
 
@@ -1402,6 +1475,18 @@ verdict retains the evidence of every step that ran before it.
 - **THEN** that submission's lookup, title check and acceptance are
   retained as not taken because the text named no identifier
 
+#### Scenario: A candidate nobody could accept
+- **WHEN** a batch run given `--refresh` reaches a tracked file whose
+  candidate differs from its item
+- **THEN** the candidate's acceptance is retained as not taken because
+  no question was put
+
+#### Scenario: An item with nothing to look up
+- **WHEN** a run given `--refresh` reaches a tracked file whose item
+  carries no identifier
+- **THEN** its refresh is retained as not taken because the item's
+  record carries no identifier
+
 ### Requirement: Resolution events carry their evidence in sections
 Every `resolved` event, and every `skipped` event that is a file's resolution verdict, SHALL carry the evidence of the file's resolution as eight sections, in the order the resolution runs: `library`, `content_index`, `extraction`, `identifier_input`, `lookup`, `record_retrieval`, `match_check` and `acceptance`.
 
@@ -1418,7 +1503,9 @@ the kebab-case name of why it was not taken: `no-library`,
 `outside-library`, `content-duplicate`, `library-answered`,
 `content-index-hit`, `extraction-failed`, `no-record`, `refused`,
 `unhashable`, `awaiting-acceptance`, `cache-bypassed`, `not-asked`,
-`not-supplied`, `unparsed`, or `no-move`. A step not taken SHALL NOT be
+`not-supplied`, `unparsed`, `no-move`, `no-identifier`,
+`another-library`, `not-recording`, or `already-asked`. The last four
+occur only within a `resolved` event's `refresh`. A step not taken SHALL NOT be
 left out, and SHALL NOT be reported as a step that ran and found
 nothing.
 
@@ -1497,6 +1584,28 @@ before, since `references` is left out when there are none. The
 version SHALL stay 5, as the requirement "JSON Lines output is
 first-class" allows for a schema no release has carried.
 
+Refreshing was then added to schema 5, before any release carried it.
+These are additions, each left out of every line a run not given
+`--refresh` writes:
+
+- `refresh` on `run-started`, `true` on a run given `--refresh`;
+- `refresh` on `resolved`, after `acceptance`, as the requirement "A
+  refresh is reported beside the verdict" states;
+- the event `library-replacement`, as the `library` capability's
+  requirement "An item's record is replaced only when an operator
+  accepts a refresh candidate" states;
+- the reasons `no-identifier`, `another-library`, `not-recording` and
+  `already-asked`.
+
+No meaning schema 5 had given changes with them. `lookup` is still the
+lookup the verdict's record came from, and never a refresh's.
+`record_retrieval` `library` still names the item whose record the
+verdict carries, which after a replacement the operator accepted in the
+run is the item's record as replaced. The verdict's `acceptance` is
+still about that record, and stays `automatic` for an item's. A line
+of a run not given `--refresh` is written exactly as before. The
+version SHALL stay 5.
+
 #### Scenario: A content-index answer in sections
 - **WHEN** a run with no library resolves a file from the content
   index's evidence, no library reference for its bytes answering, and
@@ -1542,6 +1651,16 @@ first-class" allows for a schema no release has carried.
 - **WHEN** any run emits a `resolved` event
 - **THEN** its line carries `identifier_input` after `extraction` and
   before `lookup`
+
+#### Scenario: A refresh after the sections
+- **WHEN** a run given `--refresh` resolves a tracked file
+- **THEN** its `resolved` event carries the eight sections as a library
+  answer does, followed by `refresh`, and schema version 5
+
+#### Scenario: A run without the flag is unchanged
+- **WHEN** a run not given `--refresh` resolves a tracked file
+- **THEN** its `resolved` event carries no `refresh` key, and its
+  `run-started` event no `refresh` key
 
 ### Requirement: A resolution reports what the content index did and every cache write
 The `content_index` section SHALL report the content index's `read` as `hit`, `miss`, `bypassed`, `unavailable` with the hashing error's `message`, or not attempted, and its `write` of the record reached as `written`, `failed` with the store's `message`, or not attempted with the earliest reason the requirement "A resolution says what the content index did" orders.
@@ -2079,6 +2198,36 @@ in entry order:
 
 A reference `answered` or `agreed` adds no clause.
 
+Where a `resolved` event carries `refresh`, its line SHALL carry one
+clause about it, after the reference clauses and before any rejected
+candidate:
+
+- `not-attempted`: `; no fresh record: the library's record carries no
+  identifier to ask about`;
+- `no-eligible-service`: `; no fresh record: no configured service
+  could be asked about <identifier>`;
+- `unresolved`: `; no fresh record: no source had a record for
+  <identifier>` followed by each service's answer in parentheses,
+  `; `-separated, as the `unresolvable` skip line writes them;
+- `current`: `; a fresh record from <service> does not differ`;
+- `differs`: `; a fresh record from <service> differs in <fields>; `
+  followed by what became of it.
+
+`<service>` is the service whose attempt found the record, named as
+after ` via `, and `<fields>` the differing fields' keys joined by `, `.
+What became of a differing candidate is written:
+
+- `not-asked`: `the library's record is unchanged`;
+- `another-library`: `only a rename in the library at <root> can take
+  it`, with the reference's root;
+- `not-recording`: `this run records nothing, so the library's record
+  is unchanged`;
+- `already-asked`: `answered at an earlier file of the same item`;
+- `declined`: `the library's record was kept`;
+- `accepted`: `the library's record was replaced`;
+- `unwritten`: `the library's record could not be replaced
+  (<message>)`.
+
 The human rendering of a resolution skip SHALL be `<path>: skipped, `
 followed by, for each kind:
 
@@ -2108,7 +2257,8 @@ submission that reached no record, or whose record led to no move,
 SHALL NOT be named in it.
 
 In the human rendering of a `resolved`, `skipped` or
-`content-index-write` event, the text after the leading `<path>: ` SHALL
+`content-index-write` or `library-replacement` event, the text after
+the leading `<path>: ` SHALL
 be escaped as the interactive description escapes it, so that a control
 character in any value that text takes from a record, a file's contents,
 a library store or a service is shown rather than acted on. The leading
@@ -2119,6 +2269,10 @@ made, and a line saying the content index could not keep the answer,
 with the store's message, when it failed. For an `entry` of kind
 `reference`, that line says the content index could not keep its
 reference to the library at the reference's root.
+A `library-replacement` event SHALL render `<path>: replaced <fields>
+in <file>` when its write was made, and `<path>: could not replace
+<fields> in <file> (<message>)` when it was not, with `<fields>` its
+fields joined by `, ` and `<file>` the item file.
 
 #### Scenario: A network answer read by a person
 - **WHEN** `borax resolve` resolves `paper.pdf` from Crossref over the
@@ -2170,6 +2324,25 @@ reference to the library at the reference's root.
   `doi:10.1039/c9cc02492a` reached
 - **THEN** the line is
   `paper.pdf: skipped, no identifier found in its metadata or the pages read; candidate rejected: doi:10.1039/c9cc02492a`
+
+#### Scenario: A differing candidate read by a person
+- **WHEN** `borax resolve --refresh` reports `paper.pdf`, tracked, whose
+  item's title differs from the record Crossref returned over the
+  network
+- **THEN** the line ends `from the library; a fresh record from crossref
+  differs in title; the library's record is unchanged`
+
+#### Scenario: A current item read by a person
+- **WHEN** the record Crossref returned equals the item in every
+  compared field
+- **THEN** the line ends `from the library; a fresh record from crossref
+  does not differ`
+
+#### Scenario: A replacement read by a person
+- **WHEN** an interactive run replaces the title in the item file
+  `/home/u/papers/items/klykov2015.<uuid>.toml` for `Klykov2015.pdf`
+- **THEN** the line is `Klykov2015.pdf: replaced title in
+  /home/u/papers/items/klykov2015.<uuid>.toml`
 
 ### Requirement: A resolution reports the identifiers an operator supplied
 Every `resolved` event and every resolution `skipped` event SHALL carry an `identifier_input` section, between `extraction` and `lookup`, reporting every text an operator submitted at the identifier prompt for the file, or why none was submitted.
@@ -2883,4 +3056,236 @@ be reported as a failure of the rename, adoption or reconcile.
   `content-index-write` event is `failed` with the store's message, its
   human line names the library's root, and the exit status is what it
   would have been had the write succeeded
+
+### Requirement: A refresh looks a file's library item up again and never replaces it
+A run given `--refresh` SHALL look up again the preferred identifier of the library item that answers for each file it resolves from an item, and SHALL report the record it finds as a candidate beside the item's record, never in its place.
+
+`borax resolve`, `borax rename` and `borax bib` accept `--refresh`, as
+the `cli` capability states. Every lookup a run given it makes SHALL
+ask the service. No answer is read from the response cache, and each
+successful answer is stored in it over any it held, as the requirement
+"Responses are cached locally" states. That holds for every lookup of
+the run: a candidate's, a file's own, and one an operator asks for
+again or supplies.
+
+A file gets a refresh when its verdict is `resolved` and the record it
+resolved to is a library item's: the run's own library's, reported with
+`record_retrieval` `library`, or another library's that a content-index
+reference names, reported with `library-reference`. The item refreshed
+SHALL be the one the verdict's record came from, which for bytes
+accepted under an earlier item is that item. A verdict that is not
+`resolved` gets no refresh, and neither does a work duplicate an
+operator then files as another artifact. Nor does a file answered by the content
+index's evidence or by extraction: its own lookup is made fresh, and
+what it reaches is its ordinary resolution, with its title check and
+its evidence written as ever.
+
+The identifier looked up SHALL be the item's preferred identifier: its
+DOI, else its arXiv identifier, its PMID, or its ISBN, the identifier
+the `resolved` event reports. The services SHALL be asked in the order
+the requirement "Sources are queried by identifier type and priority"
+gives. An item whose record carries none of the four SHALL be refreshed
+by no lookup and reported as having no identifier to ask about.
+
+The file SHALL still resolve to the item's record. Its sections, its
+name, its citation and its admission are what they would be without
+`--refresh`. The one exception is an item record the operator replaced
+in an interactive rename, as the `rename` capability's requirement "An
+interactive run asks whether a differing refresh candidate replaces the
+library's record" states. A refresh SHALL NOT open the file, read or
+write the content index, or check the candidate's title against the
+file's.
+
+The record found SHALL be compared with the item's record in these
+fields, in this order, each named by the key the record serializes it
+under: `type`, `title`, `author`, `issued`, `container-title`, `volume`,
+`issue`, `page`, `publisher`, `DOI`, `PMID`, `ISBN`, and the arXiv
+identifier, `arxiv`. Two values SHALL be equal exactly when the field
+serializes to the same JSON in both records, a field absent from both
+included. No value is normalised: authors are compared in order, a date
+of issue to its precision, and text as the source and the operator left
+it. The record's provenance, its confidence and its source fields SHALL
+NOT be compared, since they say where values came from and how a
+service files the work, not what the work is.
+
+A candidate equal to the item in every compared field is current, and
+nothing is offered or written for it. A candidate that differs SHALL be
+offered for acceptance only where the `rename` capability offers it.
+Everywhere else it SHALL be reported and SHALL NOT be written into any
+library: in `borax resolve`, `borax bib`, a batch `rename` previewing or
+applying, a rename that records nothing, and for an item of a library
+other than the run's own. No run writes into a library other than its
+own.
+
+An item SHALL be the run's own library's when the run's library
+answered for the file, or when a content-index reference answered for
+it whose library identity is the identity the run's library holds and
+whose root, normalised lexically, is the run's library root, normalised
+lexically. Such a self-reference answers for an untracked copy inside
+the run's library, and its item is treated exactly as an item the run's
+library answered with. Every other reference answer SHALL be another
+library's: a reference to another identity, or to the run's library's
+identity at another root, which is a copy of the library elsewhere. A
+run whose library has no readable identity has no self-reference, since
+no reference can name it.
+
+A refresh whose lookup no service answered SHALL leave the item as it
+is and report what each service said. Whether the services failed or
+said they do not hold the identifier, nothing is offered, and asking
+again is a later run's.
+
+#### Scenario: A hand correction survives a refresh
+- **WHEN** a tracked PDF's item has had its title corrected in a text
+  editor, Crossref still holds the old title for its DOI, and `borax
+  resolve --refresh --json` runs on the PDF
+- **THEN** its `resolved` event carries the corrected title and
+  `record_retrieval` `library`, its `refresh` reports a candidate
+  differing in `title` with Crossref's title, and the item file is
+  byte-identical afterwards
+
+#### Scenario: An applying batch run replaces nothing
+- **WHEN** `borax rename --refresh --apply` runs over the same file
+- **THEN** the file is named from the item's record, the candidate is
+  reported with its acceptance not attempted because no question was
+  put, and no item file is written
+
+#### Scenario: An item the services agree with
+- **WHEN** a tracked file's item equals what Crossref returns for its
+  DOI in every compared field, its provenance aside
+- **THEN** its refresh is reported current, and nothing is offered
+
+#### Scenario: A refresh during an outage
+- **WHEN** a run given `--refresh` reaches a tracked file while every
+  service it asks is unreachable
+- **THEN** the file resolves from its item, its refresh reports each
+  service's failure in order, and the item is unchanged
+
+#### Scenario: Another library's item
+- **WHEN** `borax resolve --refresh` runs on a file outside any library
+  that a reference to the library at `/home/u/papers` answers for, and
+  the candidate differs
+- **THEN** the candidate is reported with its acceptance not attempted
+  because the item is another library's, and nothing is written in that
+  library
+
+#### Scenario: A copy inside the library answered through its own library
+- **WHEN** a run in the library at `/home/u/papers` given `--refresh`
+  reaches an untracked copy of a tracked artifact, which a reference to
+  that library at `/home/u/papers` answers for, and the candidate
+  differs
+- **THEN** the item is the run's own library's, and in a batch run the
+  candidate's acceptance is not attempted because no question was put,
+  not because the item is another library's
+
+#### Scenario: A copy of the library is another library
+- **WHEN** the same run reaches a file answered by a reference to the
+  same library identity at `/media/backup/papers`
+- **THEN** the candidate is reported with its acceptance not attempted
+  because the item is another library's, and nothing is written at
+  either root
+
+#### Scenario: A file the content index answers for
+- **WHEN** a run given `--refresh` resolves an untracked file from the
+  identifier the content index holds, while the response cache holds an
+  answer for it
+- **THEN** the service is asked, its answer is the file's record and is
+  stored in the response cache in place of the one held, and the
+  `resolved` event carries no `refresh`
+
+#### Scenario: An item with no identifier
+- **WHEN** a run given `--refresh` reaches a tracked file whose item
+  carries no DOI, arXiv identifier, PMID or ISBN
+- **THEN** no service is asked about it, and its refresh is reported
+  not attempted because the item carries no identifier
+
+#### Scenario: Provenance is not a difference
+- **WHEN** a candidate equals the item in every compared field and its
+  source fields name subjects the item's do not
+- **THEN** the refresh is reported current
+
+### Requirement: A refresh is reported beside the verdict
+A `resolved` event of a run given `--refresh` SHALL carry a `refresh` key, after `acceptance`, exactly when the file got a refresh, and SHALL carry none otherwise.
+
+Which files get one is the requirement "A refresh looks a file's
+library item up again and never replaces it"'s to say: a file whose
+own resolution reached a library item's record, reported with
+`record_retrieval` `library` or `library-reference`. Where an
+operator's submission later displaced the file's own steps, the verdict
+reached from the submission SHALL still carry the file's refresh as it
+stood, and `identifier_input.displaced.record_retrieval` names the item.
+A resolution `skipped` event SHALL NOT carry `refresh`.
+
+`refresh` SHALL be an object tagged by `status`:
+
+- `not-attempted`, with `reason` `no-identifier`, for an item carrying
+  no identifier to look up;
+- `no-eligible-service`, with the `identifier`, when no configured
+  service supports its kind;
+- `unresolved`, with the `identifier` and its `attempts`, when no
+  service supplied a record;
+- `current`, with the `identifier` and its `attempts`, for a candidate
+  equal to the item in every compared field;
+- `differs`, with the `identifier`, its `attempts`, the `differences`,
+  the `candidate` and an `acceptance`, otherwise.
+
+The `identifier` SHALL be written as the stream writes one (`doi:…`).
+`attempts` SHALL be every service asked, in order, each as the `lookup`
+section reports an attempt, never empty, and with a found attempt last.
+`differences` SHALL be an array in the compared fields' order, one
+object per field that differs, carrying `field`, the field's key, and
+`item` and `candidate`, its value in each record as that record
+serializes it, each left out where that record has no value.
+`candidate` SHALL be the whole record found.
+
+`acceptance` SHALL be tagged by `status`:
+
+- `pending` while the operator is being asked, which only the event a
+  question's description is rendered from carries, and never a reported
+  verdict;
+- `accepted` when the operator replaced the item's record and the write
+  landed;
+- `unwritten`, with a `message`, when the operator chose to replace it
+  and the write failed or was refused, so the item stands;
+- `declined` when the operator kept the item's record;
+- `not-attempted`, with the first `reason` that applies:
+  `another-library` for an item of a library other than the run's own,
+  as the requirement "A refresh looks a file's library item up again and
+  never replaces it" defines it,
+  `not-asked` for a run with nobody to ask, `not-recording` for an
+  interactive rename that records nothing, and `already-asked` for an
+  item the operator already answered for at an earlier file of the run.
+
+`run-started` SHALL carry `refresh` with the value `true` on a run given
+`--refresh`, and SHALL leave it out otherwise.
+
+What the operator decided about a candidate SHALL be reported under
+`refresh`, never in the verdict's own `acceptance`, which stays about
+the record the file resolved to.
+
+#### Scenario: A differing candidate in the stream
+- **WHEN** a batch run given `--refresh` resolves a tracked file whose
+  item's title differs from Crossref's
+- **THEN** its `resolved` event's last key is `refresh`, with `status`
+  `differs`, the DOI as `identifier`, Crossref's found attempt, one
+  difference with `field` `title` and both titles, the candidate record,
+  and `acceptance` not attempted with reason `not-asked`
+
+#### Scenario: A value only one record has
+- **WHEN** the candidate names a volume and the item names none
+- **THEN** that difference carries `field` `volume` and the candidate's
+  value, and no `item` key
+
+#### Scenario: A run without the flag
+- **WHEN** a run not given `--refresh` resolves the same file
+- **THEN** its `resolved` event and its `run-started` event carry no
+  `refresh` key, and are written exactly as before this change
+
+#### Scenario: The run says it refreshed
+- **WHEN** `borax rename --refresh --json` runs
+- **THEN** its `run-started` event carries `refresh: true`
+
+#### Scenario: Pending is never reported
+- **WHEN** an operator answers the question about a differing candidate
+- **THEN** the file's reported `resolved` event carries `accepted`,
+  `unwritten` or `declined`, and never `pending`
 
