@@ -541,7 +541,7 @@ question changes.
 
 ## 8. Documents and state
 
-- [ ] 8.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
+- [x] 8.1 Doc writer (`codex-docs`), update job on `docs/manual.org`
       (Org, for CLI users). This is not the implementer's. Keep every
       existing example name. Sources:
       - this change's design.md (D1 to D11, D13, and the illustrative
@@ -569,7 +569,7 @@ question changes.
       - `* Run logs`: `run-started.refresh`, `resolved.refresh` and its
         statuses and acceptance, the four reasons, and
         `library-replacement`.
-- [ ] 8.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
+- [x] 8.2 Doc writer (`codex-docs`), update job on `CHANGELOG.md`
       (Markdown, Keep a Changelog). Extend the Unreleased entry from
       proposal.md and design.md. It covers:
       - `--refresh` on `resolve`, `rename` and `bib`;
@@ -577,7 +577,7 @@ question changes.
       - acceptance in an interactive `rename`, what a replacement writes
         and what it keeps;
       - the schema-5 additions, under Added.
-- [ ] 8.3 Orchestrator: read both diffs against the sources, for
+- [x] 8.3 Orchestrator: read both diffs against the sources, for
       anything invented and for anything dropped from the old text.
       Check the `#+AI_PASS` line the doc writer adds. Answer or remove
       every `TODO(docs)`.
