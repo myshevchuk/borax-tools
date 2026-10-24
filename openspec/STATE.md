@@ -6,8 +6,7 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-24, at 0.9.0 with `index-references-libraries`
-merged and `refresh-as-candidate` implemented on its branch.
+Last reviewed: 2026-10-24, at 0.10.0.
 
 ## What is built
 
@@ -446,7 +445,8 @@ reads the current round alone. `FileRecord` gained `accepted`, set by
 `not-supplied`, `unparsed` and `no-move`. A rejected candidate is
 still never written to the content index.
 
-`separate-change-from-acceptance` is implemented on top, as change 15
+`separate-change-from-acceptance` is implemented on top, ships in
+0.10.0, as change 15
 and the first of Phase 4, and keeps schema 4. Bytes at a record's path
 that no record's history holds become its history only once accepted:
 automatically when the identifier extraction finds in them is one the
@@ -488,7 +488,8 @@ entry's item is never a finding. A supplied identifier that leads to no
 move is set aside by the interactive driver, so a supplied identifier
 can accept or separate a file but never leave it pending in place.
 
-`library-identity` is implemented on top, as change 12 and the second
+`library-identity` is implemented on top, ships in 0.10.0, as change
+12 and the second
 of Phase 4, and keeps schema 4. A library's identity is a v7 UUID in
 `.borax/library.toml` (`library::IDENTITY_FILE`), the file exactly
 `id = "<uuid>"` and read as `borax_core::library::LibraryIdentity`:
@@ -532,7 +533,8 @@ root rewrote stale records there, against the `library` requirement
 that such a run writes no library state, and would have minted an
 identity too. It is now refused before it starts, as `adopt` is.
 
-`reduce-content-index` is implemented on top, as change 13a and the
+`reduce-content-index` is implemented on top, ships in 0.10.0, as
+change 13a and the
 third of Phase 4, and moves the event stream to schema 5. The content
 index lives under the data directory (`store::data_root`:
 `XDG_DATA_HOME`, then `HOME/.local/share` on Unix, `APPDATA`, then
@@ -573,7 +575,8 @@ loses `content-index`. A hand check over a copy of the real corpus
 traced resolve, clear, an interactive supply, deletion of the data
 directory then reconcile, and adoption into a second library.
 
-`index-references-libraries` is implemented on top, as change 13b and
+`index-references-libraries` is implemented on top, ships in 0.10.0,
+as change 13b and
 the fourth of Phase 4, and adds to schema 5 without a bump. An entry
 now also holds references to libraries, each its own file
 `content/<hash>/refs/<name>.json` holding `library`, `root`,
@@ -623,7 +626,8 @@ remains, since no filesystem offers a portable compare-and-delete; a
 reference lost in it is restored by the next `reconcile` in the
 library it names.
 
-`refresh-as-candidate` is implemented on top, as change 14 and the
+`refresh-as-candidate` is implemented on top, ships in 0.10.0, as
+change 14 and the
 last of Phase 4, and adds to schema 5 without a bump. `resolve`,
 `rename` and `bib` take `--refresh`, a selector and no setting, which
 `config` and `status` refuse and no configuration key sets. Every

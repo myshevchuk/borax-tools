@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-24
+
 ### Added
 
 - Content-index entries can now reference the item for the same bytes in
@@ -1023,7 +1025,8 @@ that development.
   which drops the archive that is part of such an identifier, so every
   pre-2007 preprint failed with a malformed-response error.
 
-[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/myshevchuk/borax-tools/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/myshevchuk/borax-tools/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/myshevchuk/borax-tools/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/myshevchuk/borax-tools/compare/v0.6.0...v0.7.0
