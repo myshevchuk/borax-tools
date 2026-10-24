@@ -11706,6 +11706,50 @@ fn replace_record_removes_a_key_the_record_no_longer_holds() {
 }
 
 #[test]
+fn replace_record_keeps_the_comment_above_a_key_it_removes() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(""));
+    let mut record = item.record.clone();
+    record.title = None;
+
+    replace_record(&file, &item, &record, &store_write).unwrap();
+
+    let after = lines_of(&file);
+    assert!(
+        !after
+            .iter()
+            .any(|line| line.starts_with("title = \"REVIEW")),
+        "got {after:?}"
+    );
+    assert!(
+        after.contains(&"# corrected by hand, 2026-10-12".to_string()),
+        "lost the comment: {after:?}"
+    );
+    assert_eq!(read_item(&file).record.title, None);
+}
+
+#[test]
+fn replace_record_keeps_the_comment_above_the_last_key_of_a_table_it_removes() {
+    let (_dir, file, item) = item_file_holding(&replaceable_text(
+        "# checked against the print\nvolume = \"7\"\n",
+    ));
+    let mut record = item.record.clone();
+    record.volume = None;
+
+    replace_record(&file, &item, &record, &store_write).unwrap();
+
+    let after = lines_of(&file);
+    assert!(
+        !after.iter().any(|line| line.starts_with("volume")),
+        "got {after:?}"
+    );
+    assert!(
+        after.contains(&"# checked against the print".to_string()),
+        "lost the comment: {after:?}"
+    );
+    assert_eq!(read_item(&file).record.volume, None);
+}
+
+#[test]
 fn replace_record_adds_a_key_the_item_lacked() {
     let (_dir, file, item) = item_file_holding(&replaceable_text(""));
     let mut record = item.record.clone();
