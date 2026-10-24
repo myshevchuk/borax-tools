@@ -23,6 +23,7 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-18 Sun] -- library references
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-24 Sat] -- refresh as a candidate
 #+AI_PASS: fact-check claude-opus-5-5 [2026-10-24 Sat] -- doc-writer model label corrected
+#+AI_PASS: fact-check claude-opus-5-5 [2026-10-24 Sat] -- refresh after a supplied identifier
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -1959,6 +1960,10 @@ how to install it, and a handful of examples.
   never in the reported stream. A file with no item answer has no
   ~refresh~ key. The verdict's own ~lookup~, ~record_retrieval~, and
   ~acceptance~ keep describing the item's record, not the candidate.
+  If you then supply an identifier at the file's own question, those
+  keys describe the supplied record instead, and
+  ~identifier_input.displaced~ names the item. The ~refresh~ key stays
+  as it stood.
 
   Every attempted replacement emits ~library-replacement~ immediately,
   before the file's own verdict. It carries ~path~, the item identity,
