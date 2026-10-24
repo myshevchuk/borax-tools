@@ -6,7 +6,9 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-24, at 0.10.0.
+Last reviewed: 2026-10-24, at 0.10.1. The v0.10.0 tag failed CI on a
+newer clippy and was never released, so what ships in 0.10.0 below
+first reached a release in 0.10.1.
 
 ## What is built
 

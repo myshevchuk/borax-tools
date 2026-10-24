@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-24
+
+### Changed
+
+- The v0.10.0 tag's CI run failed before any release job ran because stable
+  Rust 1.99's Clippy rejected a needless borrow in the borax library crate.
+  Therefore, 0.10.0 has no GitHub release or prebuilt binaries. Version
+  0.10.1 is the first release to carry the changes listed under
+  0.10.0.
+
+- A one-character change in commit `374dc54` removes the needless borrow.
+  This maintenance release does not change any command's behavior or output,
+  the event schema, which remains 5, or any file format from 0.10.0.
+
 ## [0.10.0] - 2026-10-24
 
 ### Added
@@ -1025,7 +1039,8 @@ that development.
   which drops the archive that is part of such an identifier, so every
   pre-2007 preprint failed with a malformed-response error.
 
-[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/myshevchuk/borax-tools/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/myshevchuk/borax-tools/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/myshevchuk/borax-tools/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/myshevchuk/borax-tools/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/myshevchuk/borax-tools/compare/v0.7.0...v0.8.0
