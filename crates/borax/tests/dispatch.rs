@@ -27784,6 +27784,49 @@ impl Klykov {
         )
     }
 
+    /// `command` as an interactive run answered by `asker`, through
+    /// `dispatch`, with the JSON stream read back as events: the whole
+    /// stream, `run-started` and `run-finished` included.
+    fn dispatched(
+        &self,
+        sources: &[&dyn Source],
+        effective: Effective,
+        command: Command,
+        asker: &mut dyn Asker,
+    ) -> Vec<Event> {
+        let index = ContentIndex::new(MemoryCache::new());
+        let bib_files = FakeBibFiles::new();
+        let state = tempdir().unwrap();
+        let adapters = Adapters {
+            documents: &self.documents,
+            sources,
+            index: &index,
+            filesystem: &RealFilesystem,
+            bib_files: &bib_files,
+            cache_root: None,
+            now: fixed_now,
+            collection_root: Some(self.root.clone()),
+            state_root: Some(state.path().to_path_buf()),
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        dispatch(
+            &cli(command, true),
+            &Configs::uniform(effective),
+            &adapters,
+            &mut Session::interactive(asker),
+            &mut Streams {
+                out: &mut out,
+                err: &mut err,
+            },
+        );
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
     /// The human output and outcome of an interactive `command`.
     fn told(
         &self,
@@ -27820,6 +27863,14 @@ impl Klykov {
         );
         (outcome, String::from_utf8(out).unwrap())
     }
+}
+
+/// [`snapshot`] of the library at `root` without the run logs a run
+/// through `dispatch` writes under its state directory.
+fn library_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut found = snapshot(root);
+    found.retain(|path, _| !path.starts_with(root.join(STATE_DIR).join("runs")));
+    found
 }
 
 fn resolved_at<'a>(events: &'a [Event], path: &Path) -> &'a Event {
@@ -28492,11 +28543,28 @@ fn assert_only_the_title_changed(before: &[String], after: &[String]) {
     assert_eq!(after[changed[0]], format!("title = \"{FRESH_TITLE}\""));
 }
 
+/// Whether the description holds a `label` field containing `text`,
+/// the field's continuation lines joined to it, since a value is folded
+/// to the width it is described at.
 fn description_has(question: &Question, label: &str, text: &str) -> bool {
-    question
-        .description
-        .iter()
-        .any(|line| line.starts_with(label) && line.contains(text))
+    let lines = &question.description;
+    lines.iter().enumerate().any(|(at, line)| {
+        if !line.starts_with(label) {
+            return false;
+        }
+        let field = lines[at..]
+            .iter()
+            .take(1)
+            .chain(
+                lines[at + 1..]
+                    .iter()
+                    .take_while(|next| next.starts_with("            ")),
+            )
+            .map(|line| line.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        field.contains(text)
+    })
 }
 
 impl Klykov {
@@ -28681,9 +28749,8 @@ fn interactive_refresh_replace_then_the_move_question_proposes_the_replaced_reco
     );
     let mut asker = ScriptedAsker::new(vec![Answer::Replace, Answer::Rename]);
 
-    let events = klykov.asked_with(
+    let events = klykov.dispatched(
         &[&klykov.crossref],
-        &ContentIndex::new(MemoryCache::new()),
         effective_skipping_named("[title:slug]", true),
         Command::rename(vec![klykov.path.clone()], false).refreshing(),
         &mut asker,
@@ -28732,9 +28799,8 @@ fn interactive_refresh_replace_then_quit_keeps_the_replacement_and_counts_the_fi
     let before = klykov.item_lines();
     let mut asker = ScriptedAsker::new(vec![Answer::Replace, Answer::Quit]);
 
-    let events = klykov.asked_with(
+    let events = klykov.dispatched(
         &[&klykov.crossref],
-        &ContentIndex::new(MemoryCache::new()),
         effective_skipping_named("[title:slug]", true),
         Command::rename(vec![klykov.path.clone()], false).refreshing(),
         &mut asker,
@@ -28752,11 +28818,16 @@ fn interactive_refresh_quit_at_the_refresh_question_writes_nothing() {
     let before = snapshot(&klykov.root);
     let mut asker = ScriptedAsker::new(vec![Answer::Quit]);
 
-    let events = klykov.asked(vec![klykov.path.clone()], &mut asker);
+    let events = klykov.dispatched(
+        &[&klykov.crossref],
+        effective_skipping_named("[auth][year]", true),
+        Command::rename(vec![klykov.path.clone()], false).refreshing(),
+        &mut asker,
+    );
 
     assert!(flow(&events).is_empty(), "got {events:?}");
     assert_eq!(finished_counts(&events).unreached, 1);
-    assert_eq!(snapshot(&klykov.root), before);
+    assert_eq!(library_snapshot(&klykov.root), before);
 }
 
 #[test]
@@ -29076,7 +29147,7 @@ fn interactive_refresh_with_no_record_asks_nothing_and_reports_not_recording() {
     assert!(text.contains("1 already named"), "got {text}");
     assert!(!text.contains("not shown"), "the file was shown: {text}");
     assert_eq!(
-        snapshot(&klykov.root),
+        library_snapshot(&klykov.root),
         before,
         "no admission, no write, no mint"
     );
@@ -29266,7 +29337,9 @@ fn interactive_refresh_second_file_through_a_self_reference_after_replace_sees_t
         record: record_by("Smith", 2020, "10.1000/self-reference-other"),
     };
     write_lib_item(&klykov.root, "smith2020", &other_item);
-    let other = write_real_file(&klykov.root, "inbox/Smith2020.pdf", b"refresh other bytes");
+    // In the tracked file's own directory, since a run takes the files
+    // of one directory together, in the order given.
+    let other = write_real_file(&klykov.root, "Smith2020.pdf", b"refresh other bytes");
     let other_hash = hash_bytes(b"refresh other bytes");
     klykov.with_document(&other, other_hash.clone(), pdf_with_no_identifier());
     let index = ContentIndex::new(MemoryCache::new());
