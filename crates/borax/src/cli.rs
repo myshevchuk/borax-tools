@@ -173,7 +173,8 @@ pub enum Command {
         /// Ask every service again rather than answer from the response
         /// cache, storing each fresh answer there, and look up again the
         /// record of each file a library item answers for, reporting the
-        /// fresh record beside the item's.
+        /// fresh record beside the item's. The item's record still
+        /// answers, and is never replaced.
         #[arg(long)]
         refresh: bool,
 
@@ -198,7 +199,11 @@ pub enum Command {
         /// Ask every service again rather than answer from the response
         /// cache, storing each fresh answer there, and look up again the
         /// record of each file a library item answers for, reporting the
-        /// fresh record beside the item's.
+        /// fresh record beside the item's. An interactive run that
+        /// records asks, once per item of its own library, whether a
+        /// fresh record that differs replaces the item's, keeping it by
+        /// default, even for a file `rename.skip-named` would pass over;
+        /// nothing else replaces an item's record.
         #[arg(long)]
         refresh: bool,
 
@@ -225,7 +230,8 @@ pub enum Command {
         /// Ask every service again rather than answer from the response
         /// cache, storing each fresh answer there, and look up again the
         /// record of each file a library item answers for, reporting the
-        /// fresh record beside the item's.
+        /// fresh record beside the item's. The item's record is still
+        /// the one cited, and is never replaced.
         #[arg(long)]
         refresh: bool,
 

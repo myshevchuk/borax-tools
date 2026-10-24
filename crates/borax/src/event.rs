@@ -63,8 +63,9 @@ pub enum Event {
     /// is which line to add to their file, and that is one line however
     /// many documents wanted it.
     LookupMissed { table: String, input: String },
-    /// A file's resolution: the record it reached, and what every step
-    /// of reaching it found out.
+    /// A file's resolution: the record it reached, what every step of
+    /// reaching it found out, and, in a run given `--refresh`, how a
+    /// fresh lookup of the library item it came from compares with it.
     Resolved {
         path: PathBuf,
         /// The record's preferred identifier ([`Record`]'s DOI, else its
@@ -87,6 +88,14 @@ pub enum Event {
         /// eight keys beside `record`.
         #[serde(flatten)]
         sections: Box<Sections>,
+        /// A fresh lookup of the library item `record` came from, and
+        /// what became of its candidate: present only in a run given
+        /// `--refresh`, for a verdict whose own resolution an item
+        /// answered, the run's library's or another's through a
+        /// reference. Written after the sections, and left off the line
+        /// otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refresh: Option<Box<RefreshStep>>,
     },
     /// A rename that would happen. Emitted by a preview run only; an
     /// applying run emits [`Event::Renamed`] instead, so no file is
@@ -369,6 +378,27 @@ pub enum Event {
         /// Orphans left after the run: those the content index had no
         /// record for, and those the run could not adopt.
         orphans: usize,
+    },
+    /// What an interactive rename's replacement of a library item's
+    /// record with a refresh's candidate came to, emitted when the
+    /// write was made, at the operator's answer and before the file's
+    /// own verdict.
+    ///
+    /// Every replacement attempted produces one, written or not.
+    /// Counts toward no total, and a failure changes no exit status.
+    LibraryReplacement {
+        /// The file the question was about, where it is now.
+        path: PathBuf,
+        /// The item's identity, as canonical UUID text.
+        item: String,
+        /// The item file, as a full path.
+        file: PathBuf,
+        /// The record keys replaced, in the order a refresh compares
+        /// fields in.
+        fields: Vec<String>,
+        /// [`WriteStep::Written`], or [`WriteStep::Failed`] with why
+        /// nothing was written.
+        write: WriteStep,
     },
     /// The run is over. Always the last event.
     RunFinished { counts: Counts },
@@ -1757,14 +1787,16 @@ pub fn human_line(event: &Event) -> Option<String> {
             identifier,
             record,
             sections,
+            refresh,
         } => Some(format!(
             "{}: {}",
             path.display(),
             escaped(&format!(
-                "{}{}{}{}",
+                "{}{}{}{}{}",
                 resolved_as(identifier, record, sections),
                 unanswered(sections.library.answer()),
                 reference_clauses(references_read(sections)),
+                refreshed(refresh.as_deref(), sections),
                 rejected_candidates(Some(sections))
             ))
         )),
@@ -1928,6 +1960,26 @@ pub fn human_line(event: &Event) -> Option<String> {
             )),
             WriteStep::Written | WriteStep::NotAttempted { .. } => None,
         },
+        Event::LibraryReplacement {
+            path,
+            file,
+            fields,
+            write,
+            ..
+        } => Some(format!(
+            "{}: {}",
+            path.display(),
+            escaped(&match write {
+                WriteStep::Failed { message } => format!(
+                    "could not replace {} in {} ({message})",
+                    fields.join(", "),
+                    file.display()
+                ),
+                WriteStep::Written | WriteStep::NotAttempted { .. } => {
+                    format!("replaced {} in {}", fields.join(", "), file.display())
+                }
+            })
+        )),
         Event::LibraryAdopted {
             root,
             adopted,
@@ -2156,6 +2208,114 @@ fn work_of(record: &Record) -> Option<String> {
     let credit = (!credit.is_empty()).then(|| format!("({})", credit.join(", ")));
     let work: Vec<String> = title.into_iter().chain(credit).collect();
     (!work.is_empty()).then(|| work.join(" "))
+}
+
+/// The clause a `resolved` line carries for its `refresh`, unescaped,
+/// and nothing for a verdict with none:
+///
+/// - `; no fresh record: …` for a refresh that found none, saying why;
+/// - `; a fresh record from <service> does not differ`;
+/// - `; a fresh record from <service> differs in <fields>; <what became
+///   of it>`.
+///
+/// `<service>` is the service that answered, and the library that can
+/// take a candidate another library's item was refreshed from is the
+/// root `sections` names it by.
+fn refreshed(refresh: Option<&RefreshStep>, sections: &Sections) -> String {
+    let Some(refresh) = refresh else {
+        return String::new();
+    };
+    match refresh {
+        RefreshStep::NotAttempted { .. } => {
+            "; no fresh record: the library's record carries no identifier to ask about".to_string()
+        }
+        RefreshStep::NoEligibleService { identifier } => {
+            format!("; no fresh record: no configured service could be asked about {identifier}")
+        }
+        RefreshStep::Unresolved {
+            identifier,
+            attempts,
+        } => {
+            let said: Vec<String> = attempts.iter().map(ServiceAnswer::said).collect();
+            format!(
+                "; no fresh record: no source had a record for {identifier} ({})",
+                said.join("; ")
+            )
+        }
+        RefreshStep::Current { attempts, .. } => format!(
+            "; a fresh record from {} does not differ",
+            answered_by(attempts)
+        ),
+        RefreshStep::Differs {
+            attempts,
+            differences,
+            acceptance,
+            ..
+        } => {
+            let fields: Vec<&str> = differences
+                .iter()
+                .map(|difference| difference.field.as_str())
+                .collect();
+            format!(
+                "; a fresh record from {} differs in {}; {}",
+                answered_by(attempts),
+                fields.join(", "),
+                match acceptance {
+                    RefreshAcceptance::NotAttempted { reason } => match reason.as_str() {
+                        "another-library" => format!(
+                            "only a rename in the library at {} can take it",
+                            referenced_root(sections)
+                        ),
+                        "not-recording" => {
+                            "this run records nothing, so the library's record is unchanged"
+                                .to_string()
+                        }
+                        "already-asked" => {
+                            "answered at an earlier file of the same item".to_string()
+                        }
+                        _ => "the library's record is unchanged".to_string(),
+                    },
+                    RefreshAcceptance::Declined => "the library's record was kept".to_string(),
+                    RefreshAcceptance::Accepted => "the library's record was replaced".to_string(),
+                    RefreshAcceptance::Unwritten { message } => {
+                        format!("the library's record could not be replaced ({message})")
+                    }
+                    RefreshAcceptance::Pending => "awaiting an answer".to_string(),
+                }
+            )
+        }
+    }
+}
+
+/// The service a refresh's found attempt names, which is the last of
+/// `attempts`; empty for attempts with none found.
+pub(crate) fn answered_by(attempts: &[ServiceAnswer]) -> &str {
+    attempts
+        .last()
+        .filter(|attempt| matches!(attempt.outcome, ServiceOutcome::Found { .. }))
+        .map_or("", |attempt| attempt.service.as_str())
+}
+
+/// The root of the other library a verdict's record came from, as
+/// `sections` names it: the record's own retrieval, or the one an
+/// operator's submission displaced. Empty where neither is a
+/// reference's.
+pub(crate) fn referenced_root(sections: &Sections) -> String {
+    let displaced = match &sections.identifier_input {
+        IdentifierInputStep::Supplied {
+            displaced: Some(displaced),
+            ..
+        } => displaced.record_retrieval.as_ref(),
+        _ => None,
+    };
+    [sections.record_retrieval.as_ref(), displaced]
+        .into_iter()
+        .flatten()
+        .find_map(|retrieval| match retrieval {
+            RetrievedFrom::LibraryReference { root, .. } => Some(root.display().to_string()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// The clause a resolution's human line ends with when its library

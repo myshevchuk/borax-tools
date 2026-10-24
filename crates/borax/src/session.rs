@@ -158,6 +158,15 @@ pub enum Answer {
     /// Try the same lookup again, where what failed was the asking
     /// rather than the answer.
     Retry,
+    /// Keep the library item's record as it is, and go on to the
+    /// file's own question. Offered, as the default, only by the
+    /// question about a fresh record that differs from the item's, so
+    /// Enter never overwrites a correction.
+    KeepRecord,
+    /// Replace the library item's record with the fresh one, field by
+    /// field, and go on to the file's own question with the record
+    /// that then stands.
+    Replace,
     /// Leave the file as it is and go on to the next.
     Skip,
     /// End the run here, leaving this file and every file after it
@@ -315,6 +324,8 @@ impl fmt::Display for Choice {
             Answer::File => formatter.write_str("File as another artifact of this work"),
             Answer::Supply => formatter.write_str("Supply an identifier"),
             Answer::Retry => formatter.write_str("Try the services again"),
+            Answer::KeepRecord => formatter.write_str("Keep the library's record"),
+            Answer::Replace => formatter.write_str("Replace it with the fresh record"),
             Answer::Skip => formatter.write_str("Skip"),
             Answer::Quit => formatter.write_str("Quit"),
         }

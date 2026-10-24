@@ -114,14 +114,14 @@ no request uses `--sources arxiv` with an item carrying only a DOI.
 
 Green point: additive.
 
-- [ ] 1.1 Red, in `crates/borax-sources/tests/cache.rs`:
+- [x] 1.1 Red, in `crates/borax-sources/tests/cache.rs`:
       - `refreshing_cached_source_asks_the_source_when_the_cache_holds_the_key`.
       - `refreshing_cached_source_stores_the_fresh_answer_over_the_one_held`.
       - `refreshing_cached_source_reports_a_network_retrieval_with_its_write`.
       - `refreshing_cached_source_reports_a_failed_write_as_stored_failed`.
       - `refreshing_cached_source_stores_nothing_for_a_failure`.
       - `new_cached_source_still_serves_a_held_answer_without_asking`.
-- [ ] 1.2 Green: `Cached::refreshing`, and `fetch` honouring it (D6,
+- [x] 1.2 Green: `Cached::refreshing`, and `fetch` honouring it (D6,
       D12).
 
 ## 2. The selector
@@ -130,7 +130,7 @@ Green point: `ResolveConfig` gains a field, read by nothing yet.
 `RunStarted` gains a field. Their test literals change in this pair
 (D15).
 
-- [ ] 2.1 Red. Make the group-2 D15 edits: the `config` helper in
+- [x] 2.1 Red. Make the group-2 D15 edits: the `config` helper in
       `pipeline.rs`, and `run_started` and `run_started_with_a_table`
       in `event.rs`.
 
@@ -163,7 +163,7 @@ Green point: `ResolveConfig` gains a field, read by nothing yet.
 
       In `crates/borax/tests/binary.rs`:
       - `resolve_refresh_over_an_empty_directory_reports_refresh_on_run_started`.
-- [ ] 2.2 Green:
+- [x] 2.2 Green:
       - `refresh` on `Command::Resolve`, `Rename` and `Bib`, with its
         help text, and `Command::refreshing` and `refreshes`;
       - `ResolveConfig::refresh`, and `resolving` taking the selector;
@@ -178,7 +178,7 @@ Green point: `ResolveConfig` gains a field, read by nothing yet.
 Green point: additive. Nothing calls `borax::refresh` or the new step
 types yet, and `Event` is unchanged.
 
-- [ ] 3.1 Red, in a new `crates/borax/tests/refresh.rs`.
+- [x] 3.1 Red, in a new `crates/borax/tests/refresh.rs`.
 
       The comparison (D7):
       - `fields_are_the_records_own_keys_in_record_order`: `Field::ALL`
@@ -246,7 +246,7 @@ types yet, and `Event` is unchanged.
       - `refresh_acceptance_of_each_status_serializes_as_design_d8`.
       - `difference_step_leaves_out_an_absent_side`.
       - `refresh_step_round_trips_every_status_and_acceptance`.
-- [ ] 3.2 Green:
+- [x] 3.2 Green:
       - `Stores::root` and `Stores::identity`, `Stores::read` reading
         the identity without writing;
       - `borax::refresh`: `Field`, `Difference`, `differences`,
@@ -265,7 +265,7 @@ literal and full pattern of either changes in this pair (D15), and so
 does every `src` site. The behaviour is behind `ResolveConfig::refresh`,
 which every existing test leaves false.
 
-- [ ] 4.1 Red. Make the group-4 D15 edits: the `FileRecord` literals and
+- [x] 4.1 Red. Make the group-4 D15 edits: the `FileRecord` literals and
       the `Event::Resolved` literals and patterns.
 
       In `crates/borax/tests/pipeline.rs`:
@@ -329,7 +329,7 @@ which every existing test leaves false.
       - `resolve_refresh_reports_no_eligible_service_for_a_tracked_doi_with_only_arxiv`:
         `resolve --refresh --json --sources arxiv` over
         `seed_tracked_binary_fixture`'s file, with a DOI on its item.
-- [ ] 4.2 Green:
+- [x] 4.2 Green:
       - `FileRecord::refresh`;
       - `standing_in` attaching a `Refresh` to a resolved verdict from
         an item;
@@ -343,7 +343,7 @@ which every existing test leaves false.
 Green point: additive. No driver calls `replace_record` yet.
 `human_line` gains the new event's arm.
 
-- [ ] 5.1 Red.
+- [x] 5.1 Red.
 
       In `crates/borax/tests/library.rs`:
       - `replace_record_changes_only_the_lines_of_the_differing_keys`:
@@ -398,7 +398,7 @@ Green point: additive. No driver calls `replace_record` yet.
       - `human_line_of_library_replacement_escapes_after_the_path`.
       - `library_replacement_counts_toward_nothing`.
       - `library_replacement_round_trips`.
-- [ ] 5.2 Green: `replace_record` with its annotation check,
+- [x] 5.2 Green: `replace_record` with its annotation check,
       `Stores::item_file`, `Stores::learn_item`, `Libraries::forget`,
       `Event::LibraryReplacement` and its human line (D9, D11, D12).
 
@@ -408,7 +408,7 @@ Green point: `Answer` gains two variants, and `Choice`'s `Display` gains
 their arms. No existing test passes `--refresh`, so no existing
 question changes.
 
-- [ ] 6.1 Red.
+- [x] 6.1 Red.
 
       In `crates/borax/tests/dispatch.rs`, each with `ScriptedAsker`
       over `RealFilesystem` and a tracked library:
@@ -477,7 +477,7 @@ question changes.
       - `description_refresh_lines_follow_file_says_and_precede_new_name`.
       - `description_refresh_writes_the_identifier_whole`.
       - `description_refresh_escapes_record_values`.
-- [ ] 6.2 Green:
+- [x] 6.2 Green:
       - `Answer::KeepRecord` and `Answer::Replace`, with D11's labels;
       - in the rename driver:
         - the refresh question, first, with the hold ended;
@@ -495,13 +495,13 @@ question changes.
 
 ## 7. Audit and verification
 
-- [ ] 7.1 Audit every edit to a pre-existing test against the preamble's
+- [x] 7.1 Audit every edit to a pre-existing test against the preamble's
       rules and D15. Report any test that needed anything else.
-- [ ] 7.2 Run `cargo test --workspace`, `cargo clippy --workspace
+- [x] 7.2 Run `cargo test --workspace`, `cargo clippy --workspace
       --all-targets -- -D warnings` and `cargo fmt --check`. Run all
       three at the end of every group too, since each group is a green
       point.
-- [ ] 7.3 Search `crates/*/src/` for what this change makes false. Each
+- [x] 7.3 Search `crates/*/src/` for what this change makes false. Each
       search must find nothing, or a hit the report justifies:
       - `admit`'s and `select_item`'s docstrings implying that nothing
         but a mint writes an item;
@@ -514,9 +514,9 @@ question changes.
         their keys without `refresh`;
       - `situation`'s and `rename_events`' docstrings saying an
         already-named file under `skip-named` is never shown.
-- [ ] 7.4 Run `openspec validate refresh-as-candidate --strict` and
+- [x] 7.4 Run `openspec validate refresh-as-candidate --strict` and
       `python3 scripts/check-spec-deltas.py`.
-- [ ] 7.5 By hand, over a copy of a library built from the real-PDF
+- [x] 7.5 By hand, over a copy of a library built from the real-PDF
       corpus, which lives outside the repository, in a pty for the
       interactive steps:
       1. Edit one item's title by hand, then `borax resolve --refresh`
@@ -581,7 +581,7 @@ question changes.
       anything invented and for anything dropped from the old text.
       Check the `#+AI_PASS` line the doc writer adds. Answer or remove
       every `TODO(docs)`.
-- [ ] 8.4 Implementer, in `openspec/STATE.md`:
+- [x] 8.4 Implementer, in `openspec/STATE.md`:
       - add a paragraph for this change after the
         `index-references-libraries` paragraphs, as change 14 and the
         last of Phase 4;

@@ -32,7 +32,9 @@ use borax_core::library::{
 use borax_core::record::Record;
 use borax_core::template::slug;
 use borax_sources::store::{create_atomically, hash_file, write_atomically};
-use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table, Value, value};
+use toml_edit::{
+    ArrayOfTables, Decor, DocumentMut, Item as TomlItem, Table, TableLike, Value, value,
+};
 use uuid::Uuid;
 
 use crate::config::OVERRIDE_FILE;
@@ -1141,6 +1143,32 @@ impl Stores {
     /// were read, where it was [`Identity::Present`]; `None` otherwise.
     pub fn identity(&self) -> Option<&LibraryId> {
         self.identity.as_ref()
+    }
+
+    /// The file the item of identity `id` was read from, or `None`
+    /// when these stores hold no such item, or hold it only as one a
+    /// preview learned it would mint.
+    pub fn item_file(&self, id: &ItemId) -> Option<&Path> {
+        self.items.file_of(id)
+    }
+
+    /// Hold `item` in place of the held item of its identity, keeping
+    /// the file that item was read from, so every later consultation
+    /// and check answers with `item`'s record. Nothing, for an identity
+    /// these stores do not hold.
+    ///
+    /// What a run learns after replacing an item's record on disk
+    /// ([`replace_record`]): the stores then answer as if they had been
+    /// read after the write.
+    pub fn learn_item(&mut self, item: Item) {
+        for (_, held) in self
+            .items
+            .entries
+            .iter_mut()
+            .filter(|(_, held)| held.id == item.id)
+        {
+            *held = item.clone();
+        }
     }
 
     /// These stores as the account a check is made against, answering
@@ -3015,7 +3043,8 @@ pub struct Unrecorded {
 ///
 /// A minted item is written at [`ITEM_STORE`]`/`[`item_file_name`];
 /// an item that was already there is not rewritten, an admission
-/// having nothing to add to it.
+/// having nothing to add to it. Replacing an item's record is
+/// [`replace_record`]'s, and only an operator's acceptance makes one.
 ///
 /// **What the artifact record says.** Its identity is the held
 /// record's, or one minted for a file that had none. Its path is
@@ -3175,8 +3204,9 @@ fn identifiers(record: &Record) -> Vec<Identifier> {
 /// written through `write` when the library holds none.
 ///
 /// A minted item is written whole at [`ITEM_STORE`]`/`
-/// [`item_file_name`]. Fails with what `write` said, in which case no
-/// item carries the identity minted for it.
+/// [`item_file_name`]; a selected one is not written. Fails with what
+/// `write` said, in which case no item carries the identity minted for
+/// it.
 fn select_item(
     root: &Path,
     admitting: &Admitting<'_>,
@@ -3230,6 +3260,392 @@ fn write_whole(
 /// no identity: that is the writer's.
 pub fn store_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomically(path, bytes)
+}
+
+/// Replace the record of the item `expected` held in `file` with
+/// `record`, writing through `write`: the replacement an operator's
+/// acceptance of a refresh candidate makes.
+///
+/// The keys replaced are the compared fields whose value differs
+/// between `expected.record` and `record` ([`crate::refresh::Field`]),
+/// and the provenance entries under those fields' names that differ.
+/// The file is re-read and edited as a document: each such key is set
+/// to `record`'s value, keeping the form the file writes it in, or
+/// removed where `record` has none. The `id`, every other key, every
+/// key the record model does not know, every comment, and the file's
+/// name are left as they were. `record`'s confidence and source fields
+/// are not written.
+///
+/// Fails with [`Unrecorded`], writing nothing, in this order of
+/// checking:
+///
+/// - `<file> could not be read (<error>)`;
+/// - `<file> no longer holds item <id>`, for text that is not an item
+///   or holds another one;
+/// - `<file> changed after this run read it`, for an item whose record
+///   is no longer `expected.record`;
+/// - `<file> holds notes in <keys> that replacing them would discard`,
+///   when any value to be replaced holds a comment or a key the record
+///   model does not read, naming every such key in field order, a
+///   provenance entry as `provenance.<field>`.
+///
+/// A write that fails is [`Unrecorded`] with what `write` said, which
+/// for a [`StoreWriter`] that could not mint the library's identity
+/// names the identity file. An edit saved between the re-read and the
+/// write is not detected, and is overwritten.
+pub fn replace_record(
+    file: &Path,
+    expected: &Item,
+    record: &Record,
+    write: &dyn Fn(&Path, &[u8]) -> io::Result<()>,
+) -> Result<(), Unrecorded> {
+    let refused = |why: String| Unrecorded {
+        message: format!("{} {why}", file.display()),
+    };
+    let text = fs::read_to_string(file)
+        .map_err(|error| refused(format!("could not be read ({error})")))?;
+    let held = Item::from_toml(&text)
+        .ok()
+        .map(|parsed| parsed.item)
+        .filter(|held| held.id == expected.id)
+        .ok_or_else(|| refused(format!("no longer holds item {}", expected.id)))?;
+    if held.record != expected.record {
+        return Err(refused("changed after this run read it".to_string()));
+    }
+    let mut document: DocumentMut = text
+        .parse()
+        .map_err(|_| refused(format!("no longer holds item {}", expected.id)))?;
+
+    let keys = replaced_keys(&expected.record, record);
+    let annotated: Vec<&str> = keys
+        .iter()
+        .filter(|key| {
+            key.get(&document)
+                .is_some_and(|item| key.annotated(item, &document))
+        })
+        .map(|key| key.name.as_str())
+        .collect();
+    if !annotated.is_empty() {
+        return Err(refused(format!(
+            "holds notes in {} that replacing them would discard",
+            annotated.join(", ")
+        )));
+    }
+
+    let canonical: DocumentMut = Item {
+        id: expected.id.clone(),
+        record: record.clone(),
+    }
+    .to_toml()
+    .parse()
+    .map_err(|error| Unrecorded {
+        message: format!("the replacement record could not be rendered as TOML ({error})"),
+    })?;
+    for key in &keys {
+        key.set(&mut document, key.get(&canonical).cloned())
+            .ok_or_else(|| refused(format!("no longer holds item {}", expected.id)))?;
+    }
+
+    let rendered = document.to_string();
+    match rendered == text {
+        true => Ok(()),
+        false => write(file, rendered.as_bytes()).map_err(|error| Unrecorded {
+            message: error.to_string(),
+        }),
+    }
+}
+
+/// One key of an item file a replacement may set: where it sits, what
+/// a refusal names it, and which keys its value may hold.
+struct ReplacedKey {
+    /// The tables leading to it, from the document's root.
+    table: &'static [&'static str],
+    /// The key itself.
+    key: &'static str,
+    /// The name a refusal gives it: the field's, or `provenance.<field>`.
+    name: String,
+    /// The keys the record model reads inside the value.
+    shape: Shape,
+}
+
+/// The keys the record model reads inside a compared field's value.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// None: a string, a number, or an array of those.
+    Plain,
+    /// An array of names, each holding `family` and `given`.
+    Authors,
+    /// A name: `family` and `given`, each plain.
+    Name,
+    /// A date: `date-parts`, plain.
+    Issued,
+}
+
+impl Shape {
+    /// The shape of `key`'s value, where this shape reads `key`;
+    /// `None` for a key it does not read.
+    fn of_key(self, key: &str) -> Option<Shape> {
+        match (self, key) {
+            (Shape::Name, "family" | "given") | (Shape::Issued, "date-parts") => Some(Shape::Plain),
+            _ => None,
+        }
+    }
+
+    /// The shape of each element of an array of this shape.
+    fn element(self) -> Shape {
+        match self {
+            Shape::Authors => Shape::Name,
+            other => other,
+        }
+    }
+}
+
+/// Every key replacing `item`'s record with `record` sets or removes,
+/// in field order: each compared field whose value differs, followed by
+/// its provenance entry where that differs.
+fn replaced_keys(item: &Record, record: &Record) -> Vec<ReplacedKey> {
+    use crate::refresh::Field;
+    let differing = crate::refresh::differences(item, record);
+    Field::ALL
+        .into_iter()
+        .flat_map(|field| {
+            let key = field.as_str();
+            let value = differing
+                .iter()
+                .any(|difference| difference.field == field)
+                .then(|| ReplacedKey {
+                    table: match field {
+                        Field::Arxiv => &["record", "borax"],
+                        _ => &["record"],
+                    },
+                    key,
+                    name: key.to_string(),
+                    shape: match field {
+                        Field::Author => Shape::Authors,
+                        Field::Issued => Shape::Issued,
+                        _ => Shape::Plain,
+                    },
+                });
+            let provenance = (item.borax.provenance.get(key) != record.borax.provenance.get(key))
+                .then(|| ReplacedKey {
+                    table: &["record", "borax", "provenance"],
+                    key,
+                    name: format!("provenance.{key}"),
+                    shape: Shape::Plain,
+                });
+            value.into_iter().chain(provenance)
+        })
+        .collect()
+}
+
+impl ReplacedKey {
+    /// The key's value in `document`, or `None` where it has none.
+    fn get<'d>(&self, document: &'d DocumentMut) -> Option<&'d TomlItem> {
+        let mut table = document.as_table() as &dyn TableLike;
+        for name in self.table {
+            table = table.get(name)?.as_table_like()?;
+        }
+        table.get(self.key).filter(|item| !item.is_none())
+    }
+
+    /// Whether `value`, this key's value in `document`, carries a note
+    /// a replacement would discard: a comment on a line it occupies, a
+    /// comment directly above one of its table headers, or a key the
+    /// record model does not read.
+    fn annotated(&self, value: &TomlItem, document: &DocumentMut) -> bool {
+        let last_table = |value: &TomlItem| match value {
+            TomlItem::Table(table) => table.position(),
+            TomlItem::ArrayOfTables(tables) => tables.iter().filter_map(Table::position).max(),
+            _ => None,
+        };
+        // Comments after the last table of a document are its trailing
+        // text, and belong to the value whose lines they follow.
+        let trails = last_table(value).is_some_and(|position| {
+            table_positions(document.as_table()).all(|other| other <= position)
+                && document.trailing().as_str().is_some_and(commented)
+        });
+        trails || item_notes(value, self.shape)
+    }
+
+    /// Set this key in `document` to `value`, taken from the rendering
+    /// of the replacement record, or remove it where `value` is `None`.
+    ///
+    /// A value the document already holds keeps its form — a plain
+    /// value, a table, or an array of tables — its decoration, and its
+    /// tables' place in the document; a value it lacked is added as
+    /// rendered, its tables placed after its parent table's keys.
+    fn set(&self, document: &mut DocumentMut, value: Option<TomlItem>) -> Option<()> {
+        let mut position = document.as_table().position();
+        let mut table = document.as_table_mut() as &mut dyn TableLike;
+        for name in self.table {
+            let item = table.entry(name).or_insert_with(|| {
+                let mut created = Table::new();
+                created.set_implicit(true);
+                TomlItem::Table(created)
+            });
+            if let Some(own) = item.as_table().and_then(Table::position) {
+                position = Some(own);
+            }
+            table = item.as_table_like_mut()?;
+        }
+        let Some(mut value) = value else {
+            table.remove(self.key);
+            return Some(());
+        };
+        match table.get_mut(self.key) {
+            Some(held) if !held.is_none() => *held = reshaped(value, held),
+            _ => {
+                place(&mut value, position, None);
+                table.insert(self.key, value);
+            }
+        }
+        Some(())
+    }
+}
+
+/// The positions of every table in `table`, its own and its subtables',
+/// at any depth.
+fn table_positions(table: &Table) -> Box<dyn Iterator<Item = isize> + '_> {
+    let own = table.position().into_iter();
+    let nested = table
+        .iter()
+        .flat_map(|(_, item)| -> Box<dyn Iterator<Item = isize> + '_> {
+            match item {
+                TomlItem::Table(table) => table_positions(table),
+                TomlItem::ArrayOfTables(tables) => {
+                    Box::new(tables.iter().flat_map(table_positions))
+                }
+                _ => Box::new(std::iter::empty()),
+            }
+        });
+    Box::new(own.chain(nested))
+}
+
+/// `value`, from the rendering of a replacement record, in the form
+/// `held` writes the same key in, with `held`'s decoration and its
+/// tables' place in the document. Taken as rendered where it cannot be
+/// written in that form.
+fn reshaped(value: TomlItem, held: &TomlItem) -> TomlItem {
+    match held {
+        TomlItem::Value(old) => match value.into_value() {
+            Ok(mut new) => {
+                *new.decor_mut() = old.decor().clone();
+                TomlItem::Value(new)
+            }
+            Err(value) => value,
+        },
+        TomlItem::Table(old) => match value.into_table() {
+            Ok(new) => {
+                let mut new = TomlItem::Table(new);
+                place(&mut new, old.position(), Some(old.decor()));
+                new
+            }
+            Err(value) => value,
+        },
+        TomlItem::ArrayOfTables(old) => match value.into_array_of_tables() {
+            Ok(new) => {
+                let first = old.iter().next();
+                let mut new = TomlItem::ArrayOfTables(new);
+                place(
+                    &mut new,
+                    first.and_then(Table::position),
+                    first.map(Table::decor),
+                );
+                new
+            }
+            Err(value) => value,
+        },
+        TomlItem::None => value,
+    }
+}
+
+/// Give every table of `value` the place `position` in the document, and
+/// its first one `decor`, so it is written where the value it replaces
+/// was. Nothing for a plain value.
+fn place(value: &mut TomlItem, position: Option<isize>, decor: Option<&Decor>) {
+    let tables: Vec<&mut Table> = match value {
+        TomlItem::Table(table) => vec![table],
+        TomlItem::ArrayOfTables(tables) => tables.iter_mut().collect(),
+        _ => Vec::new(),
+    };
+    for (index, table) in tables.into_iter().enumerate() {
+        if let Some(position) = position {
+            table.set_position(position);
+        }
+        if let (0, Some(decor)) = (index, decor) {
+            *table.decor_mut() = decor.clone();
+        }
+    }
+}
+
+/// Whether `text`, whitespace and comments between TOML tokens, holds a
+/// comment.
+fn commented(text: &str) -> bool {
+    text.contains('#')
+}
+
+/// Whether `decor` holds a comment.
+fn decor_notes(decor: &Decor) -> bool {
+    [decor.prefix(), decor.suffix()]
+        .into_iter()
+        .flatten()
+        .any(|raw| raw.as_str().is_some_and(commented))
+}
+
+/// Whether `item`, a value of `shape`, holds a comment or a key `shape`
+/// does not read, at any depth.
+fn item_notes(item: &TomlItem, shape: Shape) -> bool {
+    match item {
+        TomlItem::None => false,
+        TomlItem::Value(value) => value_notes(value, shape),
+        TomlItem::Table(table) => table_notes(table, shape),
+        TomlItem::ArrayOfTables(tables) => tables
+            .iter()
+            .any(|table| table_notes(table, shape.element())),
+    }
+}
+
+/// [`item_notes`] for a table written with a header, the comments above
+/// that header included.
+fn table_notes(table: &Table, shape: Shape) -> bool {
+    decor_notes(table.decor())
+        || table.iter().any(|(key, item)| {
+            let decorated = table.key(key).is_some_and(|key| {
+                decor_notes(key.leaf_decor()) || decor_notes(key.dotted_decor())
+            });
+            decorated
+                || match shape.of_key(key) {
+                    Some(inner) => item_notes(item, inner),
+                    None => true,
+                }
+        })
+}
+
+/// [`item_notes`] for a value written inline.
+fn value_notes(value: &Value, shape: Shape) -> bool {
+    decor_notes(value.decor())
+        || match value {
+            Value::Array(array) => {
+                array.trailing().as_str().is_some_and(commented)
+                    || array
+                        .iter()
+                        .any(|element| value_notes(element, shape.element()))
+            }
+            Value::InlineTable(table) => {
+                table.preamble().as_str().is_some_and(commented)
+                    || table.iter().any(|(key, inner)| {
+                        let decorated = table.key(key).is_some_and(|key| {
+                            decor_notes(key.leaf_decor()) || decor_notes(key.dotted_decor())
+                        });
+                        decorated
+                            || match shape.of_key(key) {
+                                Some(shape) => value_notes(inner, shape),
+                                None => true,
+                            }
+                    })
+            }
+            _ => false,
+        }
 }
 
 /// The event reporting what an admission of the file now at `path`

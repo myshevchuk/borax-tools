@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use borax_core::content::ContentHash;
 use borax_core::identifier::Identifier;
-use borax_core::library::{DuplicateReason, EvidenceOrigin, IdentificationEvidence, Item};
+use borax_core::library::{DuplicateReason, EvidenceOrigin, IdentificationEvidence, Item, ItemId};
 use borax_core::record::Record;
 use borax_pdf::pure::PurePdf;
 use borax_pdf::scan::xmp_title;
@@ -38,6 +38,7 @@ use crate::evidence::{
 };
 use crate::library::{Account, Consulted, Stores, WorkDuplicate};
 use crate::references::{Libraries, ReferenceRead};
+use crate::refresh::{Decision, Refresh, Whose, refresh, whose};
 
 /// The documents a run works on, as something that can be read.
 ///
@@ -84,6 +85,14 @@ pub struct FileRecord {
     /// so it is `false` on every record the batch path reaches; only a
     /// record an operator supplied reads it.
     pub accepted: bool,
+    /// The fresh lookup of the library item the file's own resolution
+    /// reached, and what became of its candidate: `Some` exactly in a
+    /// run given `--refresh` ([`ResolveConfig::refresh`]) for a file
+    /// that resolved from an item, the run's library's or another's
+    /// through a reference. `None` for every other verdict, a file
+    /// answered by the content index's evidence or by extraction
+    /// included, since its own lookup is the fresh one.
+    pub refresh: Option<Refresh>,
 }
 
 impl FileRecord {
@@ -189,8 +198,10 @@ pub struct ResolveConfig {
     /// How far the text pass reads.
     pub extraction: ExtractionConfig,
     /// Whether the caches may be read and written. `false` is the
-    /// `--no-cache` bypass: every file is extracted and every
-    /// identifier asked about again. It does not bypass the library.
+    /// `--no-cache` bypass: every untracked file is extracted and every
+    /// identifier it yields asked about again. It does not bypass the
+    /// library, so a file an item answers for still asks nothing unless
+    /// [`ResolveConfig::refresh`] is set.
     pub cache: bool,
     /// Whether the run was given `--refresh`: a file a library item
     /// answers for still resolves to the item's record, and the item's
@@ -290,6 +301,7 @@ fn indexed_standing(
                 // that wrote it, not by this one.
                 overridden: false,
                 accepted: false,
+                refresh: None,
             };
             Standing::of(path, file, account)
         }
@@ -339,6 +351,7 @@ fn referenced_standing(
         // The item is the referenced library's decision, made there.
         overridden: false,
         accepted: false,
+        refresh: None,
     };
     Standing::of(path, file, account)
 }
@@ -363,6 +376,7 @@ fn library_record(record: Record, hash: Option<ContentHash>, answer: LibraryAnsw
         // here to reach it.
         overridden: false,
         accepted: false,
+        refresh: None,
     }
 }
 
@@ -535,6 +549,15 @@ pub fn title_check(titles: &Titles, record: &Record) -> MatchCheck {
 /// [`FileOutcome::Skipped`] carrying the reason, because one unreadable
 /// file must not end a batch.
 ///
+/// Under [`ResolveConfig::refresh`], a file that resolves from an item,
+/// by the first pass or by a reference in the second, still resolves to
+/// the item's record, and the item's preferred identifier is then
+/// looked up over `sources` for a fresh record to compare it with
+/// ([`FileRecord::refresh`]). That lookup is the only service a tracked
+/// file asks, and it opens nothing, checks no title, and reads and
+/// writes no content index. A verdict that is not resolved, a work
+/// duplicate included, gets no refresh and asks nothing.
+///
 /// The verdict of [`standing`], which runs the same passes and keeps
 /// what they produced along the way. A caller that acts on the verdict
 /// alone wants this one.
@@ -622,6 +645,36 @@ impl Standing {
             refused: None,
             duplicated,
         }
+    }
+
+    /// This standing with its verdict's record, the record of the item
+    /// `item`, refreshed over `sources` ([`refresh`]) where `config`
+    /// asks for a refresh and the verdict is resolved.
+    ///
+    /// The candidate is offered to nobody here: its decision is not
+    /// attempted, as [`Unattempted::NotAsked`] for the run's own item
+    /// and [`Unattempted::AnotherLibrary`] for another library's. Any
+    /// other verdict, a work duplicate included, is left as it is and
+    /// asks no service.
+    fn refreshed(
+        mut self,
+        config: &ResolveConfig,
+        item: ItemId,
+        whose: Whose,
+        sources: &[&dyn Source],
+    ) -> Standing {
+        if let (true, FileOutcome::Resolved(file)) = (config.refresh, &mut self.verdict) {
+            file.refresh = Some(Refresh {
+                item,
+                whose,
+                fresh: refresh(&file.record, sources),
+                decision: Decision::NotAttempted(match whose {
+                    Whose::Own => Unattempted::NotAsked,
+                    Whose::Referenced => Unattempted::AnotherLibrary,
+                }),
+            });
+        }
+        self
     }
 
     /// A skip reached with no record, carrying `evidence`.
@@ -735,6 +788,11 @@ pub fn standing<S: IndexStore>(
 /// name through `libraries`, so that each library root is read at most
 /// once across every file a run resolves through it: what a root holds
 /// is what the first read of it found.
+///
+/// The refresh [`ResolveConfig::refresh`] asks for is attached here:
+/// to a verdict the run's library answered, as the run's own item's,
+/// and to one a reference answered, as whichever library's [`whose`]
+/// says. Its candidate is offered to nobody.
 #[allow(clippy::too_many_arguments)]
 pub fn standing_in<S: IndexStore>(
     path: &Path,
@@ -768,7 +826,12 @@ pub fn standing_in<S: IndexStore>(
         Ok(Consulted {
             answer,
             item: Some(item),
-        }) => Standing::of(path, library_record(item.record, hash, answer), account),
+        }) => Standing::of(path, library_record(item.record, hash, answer), account).refreshed(
+            config,
+            item.id,
+            Whose::Own,
+            sources,
+        ),
         Ok(Consulted { answer, item: None }) => beyond_library(
             path,
             hashed.as_ref().map_err(message_of),
@@ -777,7 +840,7 @@ pub fn standing_in<S: IndexStore>(
             index,
             config,
             account,
-            Consultation::Consulted(answer),
+            (Consultation::Consulted(answer), library),
             libraries,
         ),
         Err(reason) => beyond_library(
@@ -788,7 +851,7 @@ pub fn standing_in<S: IndexStore>(
             index,
             config,
             account,
-            Consultation::NotConsulted(reason),
+            (Consultation::NotConsulted(reason), library),
             libraries,
         ),
     }
@@ -796,14 +859,16 @@ pub fn standing_in<S: IndexStore>(
 
 /// The passes after the library, for a file whose hash is `hashed` —
 /// or the message of the error that kept it from being computed — and
-/// which the library did not answer for: `library` is what it said
+/// which the library did not answer for. `library` is what it said
 /// instead, or why it was not asked, carried onto the evidence of
-/// every verdict reached here.
+/// every verdict reached here, beside the run's library as read, which
+/// decides whose item a reference answers with ([`whose`]).
 ///
 /// The entry's references are read first, through `libraries`, for a
 /// hashed file with the cache on; a reference that answers ends the
-/// passes. The references read are carried onto every verdict's
-/// evidence.
+/// passes, and its item is refreshed under [`ResolveConfig::refresh`]
+/// as a library's is. The references read are carried onto every
+/// verdict's evidence.
 #[allow(clippy::too_many_arguments)]
 fn beyond_library<S: IndexStore>(
     path: &Path,
@@ -813,7 +878,7 @@ fn beyond_library<S: IndexStore>(
     index: &ContentIndex<S>,
     config: &ResolveConfig,
     account: Option<&Account<'_>>,
-    library: Consultation,
+    (library, stores): (Consultation, Option<&Stores>),
     libraries: &Libraries,
 ) -> Standing {
     let hash = hashed.as_ref().ok().map(|hash| (*hash).clone());
@@ -821,8 +886,14 @@ fn beyond_library<S: IndexStore>(
         (Ok(hash), true) => crate::references::read(index, hash, libraries),
         _ => (None, Vec::new()),
     };
-    if let Some((_, item)) = answer {
-        return referenced_standing(path, item, references, hash, account, library);
+    if let Some((reference, item)) = answer {
+        let id = item.id.clone();
+        return referenced_standing(path, item, references, hash, account, library).refreshed(
+            config,
+            id,
+            whose(&reference, stores),
+            sources,
+        );
     }
     let read = index_read(
         hashed.as_ref().map(|hash| *hash).map_err(String::as_str),
@@ -909,6 +980,7 @@ fn beyond_library<S: IndexStore>(
         // it records that it did.
         overridden: false,
         accepted: false,
+        refresh: None,
     };
 
     if file.conflict().is_some() {
@@ -1047,6 +1119,7 @@ pub fn resolve_supplied(
         // record is the caller's decision, and [`accept`] records it.
         overridden: false,
         accepted: false,
+        refresh: None,
     })
 }
 
@@ -1102,6 +1175,7 @@ pub fn resolve_indexed_again(
         // wrote it, not by this one.
         overridden: false,
         accepted: false,
+        refresh: None,
     })
 }
 
@@ -1436,7 +1510,8 @@ pub fn resolution_skip(
 }
 
 /// The event that reports `file` as `path`'s resolution, with its
-/// evidence's sections and [`FileRecord::acceptance`].
+/// evidence's sections, [`FileRecord::acceptance`], and its refresh's
+/// step where it has one.
 ///
 /// Public because the description an interactive run shows is a
 /// rendering of this event and of nothing else: the operator at the
@@ -1449,6 +1524,10 @@ pub fn resolved_event(path: &Path, file: &FileRecord) -> Event {
         identifier: identifier_of(&file.record),
         record: Box::new(file.record.clone()),
         sections: Box::new(file.evidence.sections(file.acceptance())),
+        refresh: file
+            .refresh
+            .as_ref()
+            .map(|refresh| Box::new(refresh.step())),
     }
 }
 
