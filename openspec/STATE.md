@@ -6,8 +6,8 @@ reality. Read it before planning a change or cutting a release; update it
 whenever it stops being true, and at the latest before every version
 bump.
 
-Last reviewed: 2026-10-18, at 0.9.0 with `reduce-content-index` merged
-and `index-references-libraries` implemented on its branch.
+Last reviewed: 2026-10-24, at 0.9.0 with `index-references-libraries`
+merged and `refresh-as-candidate` implemented on its branch.
 
 ## What is built
 
@@ -302,7 +302,8 @@ run's library (`Stores::consult`) before the content index. A file
 whose recorded path holds a record with its bytes in any history
 entry, linking one readable item, resolves from that item with no
 extraction, no service and no content-index traffic, whatever
-`--no-cache` or `--no-record` say. Any other answer from a library
+`--no-cache` or `--no-record` say; `--refresh` (`refresh-as-candidate`)
+asks a service for a candidate and still answers from the item. Any other answer from a library
 that records the path is a `LibraryAnswer` problem carried on the
 fallback's `resolved` or `skipped` event, never a skip of its own.
 `store_files` now treats only a missing directory as an empty store,
@@ -621,6 +622,44 @@ one that changed. The window between that check and the removal
 remains, since no filesystem offers a portable compare-and-delete; a
 reference lost in it is restored by the next `reconcile` in the
 library it names.
+
+`refresh-as-candidate` is implemented on top, as change 14 and the
+last of Phase 4, and adds to schema 5 without a bump. `resolve`,
+`rename` and `bib` take `--refresh`, a selector and no setting, which
+`config` and `status` refuse and no configuration key sets. Every
+lookup of such a run goes through `Cached::refreshing`, which never
+reads the response cache and stores each fresh answer, and
+`run-started` carries `refresh: true`. A file a library item answers
+for, the run's own or another library's through a reference, still
+resolves to the item's record; the item's preferred identifier is then
+looked up (`refresh::refresh`) and compared over thirteen fields
+(`refresh::differences`), reported as `resolved.refresh` with status
+`not-attempted` (`no-identifier`), `no-eligible-service`,
+`unresolved`, `current` or `differs`, the last carrying `differences`,
+`candidate` and an `acceptance`. Files answered by evidence or
+extraction, and a work duplicate, get no refresh; their own lookup is
+the fresh one. Only an interactive `rename` that records offers a
+differing candidate of its own library's item, a reference to the
+run's own identity at its own lexically normalised root counting as
+its own: a question put first, before the file's own and whatever
+`rename.skip-named` says, once per item per run, with Keep the
+default. Replace calls `library::replace_record`, which re-reads the
+item file, refuses a file that changed since the run read it or whose
+replaced values hold a comment or a key the model does not read, edits
+the differing keys and their provenance entries in place through
+`toml_edit`, and writes through the run's `StoreWriter`; the
+`library-replacement` event reports every attempt at the answer, and
+the consulted stores and the account learn the item while
+`references::Libraries` forgets the run's root. Every other refresh is
+reported with `another-library`, `not-asked`, `not-recording` or
+`already-asked`. An already-named file is passed over only when its
+refresh is absent or `current`. A hand check over a copy of a library
+built from the real corpus traced a hand-corrected title reported as
+`differs` by `resolve`, Keep and then Replace in a pty (the title line
+alone changed and a comment above it survived), `current` with nothing
+asked afterwards, `unresolved` with the network unshared, an `orcid` in
+an author table refusing a replacement in `author`, and a copy outside
+the library reported `another-library` naming the root.
 
 ## Not built yet
 

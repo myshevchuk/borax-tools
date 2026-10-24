@@ -198,8 +198,9 @@ impl IndexStore for MemoryCache {
     }
 }
 
-/// A [`Source`] that answers from a [`Cache`] before asking the source
-/// it wraps.
+/// A [`Source`] that stores the answers of the source it wraps in a
+/// [`Cache`], and, unless built with [`Cached::refreshing`], answers
+/// from that cache before asking the source.
 ///
 /// Wrapping rather than building caching into each client keeps the
 /// clients ignorant of it and makes "was the network touched?" a
@@ -208,13 +209,28 @@ impl IndexStore for MemoryCache {
 pub struct Cached<S, C> {
     source: S,
     cache: C,
+    reads: bool,
 }
 
 impl<S, C> Cached<S, C> {
     /// Wrap `source` so its answers are served from, and stored in,
     /// `cache`.
     pub fn new(source: S, cache: C) -> Cached<S, C> {
-        Cached { source, cache }
+        Cached {
+            source,
+            cache,
+            reads: true,
+        }
+    }
+
+    /// Wrap `source` so every answer is asked of it and stored in
+    /// `cache`, and none is served from it.
+    pub fn refreshing(source: S, cache: C) -> Cached<S, C> {
+        Cached {
+            source,
+            cache,
+            reads: false,
+        }
     }
 }
 
@@ -228,17 +244,21 @@ impl<S: Source, C: Cache> Source for Cached<S, C> {
     }
 
     /// A cache hit is returned as [`Retrieval::ServiceCache`] without
-    /// consulting the wrapped source.
+    /// consulting the wrapped source. A refreshing cache never reads, so
+    /// it has no hit.
     ///
-    /// On a miss the source is asked, and a successful answer is stored
-    /// and returned as [`Retrieval::Network`] whose `stored` is the
-    /// write's result. A failure is returned as the source gave it and
-    /// never cached, so a service that was down is asked again next
-    /// time rather than remembered as broken. A write that failed
-    /// leaves the next fetch to ask the source again.
+    /// Otherwise the source is asked, and a successful answer is stored,
+    /// over any answer held under the same key, and returned as
+    /// [`Retrieval::Network`] whose `stored` is the write's result. A
+    /// failure is returned as the source gave it and never cached, so a
+    /// service that was down is asked again next time rather than
+    /// remembered as broken, and an answer already held stays held. A
+    /// write that failed leaves the next fetch to ask the source again.
     fn fetch(&self, identifier: &Identifier) -> Result<Fetched, SourceError> {
         let key = key(self.source.name(), identifier);
-        if let Some(record) = self.cache.get(&key) {
+        if self.reads
+            && let Some(record) = self.cache.get(&key)
+        {
             return Ok(Fetched {
                 record,
                 retrieval: Retrieval::ServiceCache,

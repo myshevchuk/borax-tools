@@ -1126,3 +1126,104 @@ fn cache_clear_leaves_the_content_index_so_a_reference_still_answers() {
     assert_eq!(resolved["record"]["title"], "The Surviving Title");
     assert_eq!(resolved["record_retrieval"]["kind"], "library-reference");
 }
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate, group 2: the flag reaches `run-started`
+// ---------------------------------------------------------------------
+
+/// design D8: `borax resolve --refresh --json` over an empty directory
+/// asks nothing and finds nothing, and still says on its first line why
+/// no answer came from the response cache.
+#[test]
+fn resolve_refresh_over_an_empty_directory_reports_refresh_on_run_started() {
+    let library = tempfile::tempdir().expect("a temporary library");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+
+    let output = borax_in(
+        &["resolve", "--refresh", "--json", "."],
+        library.path(),
+        config_home.path(),
+        cache_home.path(),
+        data_home.path(),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first = stdout.lines().next().expect("a first line");
+    assert!(first.contains(r#""event":"run-started""#), "got {first}");
+    assert!(first.ends_with(r#""refresh":true}"#), "got {first}");
+}
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate, group 4: a refresh no service can take
+// ---------------------------------------------------------------------
+
+/// design D2, D8, the preamble: `resolve --refresh --json --sources
+/// arxiv` over a tracked file whose item carries a DOI. The one
+/// configured service supports no DOI, so nothing is asked, and the
+/// file's `resolved` event reports `no-eligible-service` beside the
+/// item's record.
+#[test]
+fn resolve_refresh_reports_no_eligible_service_for_a_tracked_doi_with_only_arxiv() {
+    use borax_core::identifier::Doi;
+    use borax_core::library::Item;
+
+    let library = tempfile::tempdir().expect("a temporary library");
+    let cache_home = tempfile::tempdir().expect("a temporary cache home");
+    let data_home = tempfile::tempdir().expect("a temporary data home");
+    let config_home = tempfile::tempdir().expect("a temporary config home");
+    let root = library.path();
+    fs::write(root.join(".borax.toml"), b"").expect("marker");
+    let bytes = b"refresh binary fixture bytes";
+    fs::write(root.join("paper.pdf"), bytes).expect("paper.pdf");
+    seed_tracked_binary_fixture(root, "paper.pdf", bytes, "The Corrected Title");
+    let item_file = fs::read_dir(root.join("items"))
+        .expect("items dir")
+        .next()
+        .expect("the seeded item")
+        .expect("an entry")
+        .path();
+    let mut item = Item::from_toml(&fs::read_to_string(&item_file).expect("item text"))
+        .expect("an item")
+        .item;
+    item.record.doi = Some(Doi::parse("10.1000/binary-refresh").expect("a DOI"));
+    fs::write(&item_file, item.to_toml()).expect("item with a DOI");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_borax"))
+        .args([
+            "resolve",
+            "--refresh",
+            "--json",
+            "--sources",
+            "arxiv",
+            "paper.pdf",
+        ])
+        .current_dir(root)
+        .env_clear()
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("APPDATA", config_home.path())
+        .env("XDG_CACHE_HOME", cache_home.path())
+        .env("XDG_DATA_HOME", data_home.path())
+        .output()
+        .expect("the binary should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let resolved: serde_json::Value = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json"))
+        .find(|line: &serde_json::Value| line["event"] == "resolved")
+        .unwrap_or_else(|| panic!("no resolved event: {stdout}"));
+    assert_eq!(resolved["record_retrieval"]["kind"], "library", "{stdout}");
+    assert_eq!(resolved["record"]["title"], "The Corrected Title");
+    assert_eq!(
+        resolved["refresh"],
+        serde_json::json!({
+            "status": "no-eligible-service",
+            "identifier": "doi:10.1000/binary-refresh",
+        }),
+        "{stdout}"
+    );
+}

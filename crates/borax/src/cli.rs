@@ -170,6 +170,14 @@ pub enum Command {
         #[command(flatten)]
         resolution: ResolutionOptions,
 
+        /// Ask every service again rather than answer from the response
+        /// cache, storing each fresh answer there, and look up again the
+        /// record of each file a library item answers for, reporting the
+        /// fresh record beside the item's. The item's record still
+        /// answers, and is never replaced.
+        #[arg(long)]
+        refresh: bool,
+
         /// How many files may be resolved at once.
         #[arg(long, value_name = "N")]
         concurrency: Option<usize>,
@@ -187,6 +195,17 @@ pub enum Command {
         /// move.
         #[arg(long, conflicts_with = "no_batch")]
         apply: bool,
+
+        /// Ask every service again rather than answer from the response
+        /// cache, storing each fresh answer there, and look up again the
+        /// record of each file a library item answers for, reporting the
+        /// fresh record beside the item's. An interactive run that
+        /// records asks, once per item of its own library, whether a
+        /// fresh record that differs replaces the item's, keeping it by
+        /// default, even for a file `rename.skip-named` would pass over;
+        /// nothing else replaces an item's record.
+        #[arg(long)]
+        refresh: bool,
 
         #[command(flatten)]
         resolution: ResolutionOptions,
@@ -207,6 +226,14 @@ pub enum Command {
     Bib {
         #[arg(value_name = "PATH", required = true)]
         paths: Vec<PathBuf>,
+
+        /// Ask every service again rather than answer from the response
+        /// cache, storing each fresh answer there, and look up again the
+        /// record of each file a library item answers for, reporting the
+        /// fresh record beside the item's. The item's record is still
+        /// the one cited, and is never replaced.
+        #[arg(long)]
+        refresh: bool,
 
         #[command(flatten)]
         resolution: ResolutionOptions,
@@ -545,6 +572,7 @@ impl Command {
         Command::Resolve {
             paths,
             resolution: ResolutionOptions::default(),
+            refresh: false,
             concurrency: None,
             run_log: RunLogOptions::default(),
         }
@@ -557,6 +585,7 @@ impl Command {
         Command::Rename {
             paths,
             apply,
+            refresh: false,
             resolution: ResolutionOptions::default(),
             rename: RenameOptions::default(),
             bibliography: BibliographyOptions::default(),
@@ -569,6 +598,7 @@ impl Command {
     pub fn bib(paths: Vec<PathBuf>) -> Command {
         Command::Bib {
             paths,
+            refresh: false,
             resolution: ResolutionOptions::default(),
             bibliography: BibliographyOptions::default(),
             run_log: RunLogOptions::default(),
@@ -645,6 +675,33 @@ impl Command {
         Command::Adopt {
             path,
             run_log: RunLogOptions::default(),
+        }
+    }
+
+    /// This command given `--refresh`; a command that does not take it,
+    /// unchanged.
+    pub fn refreshing(mut self) -> Command {
+        if let Command::Resolve { refresh, .. }
+        | Command::Rename { refresh, .. }
+        | Command::Bib { refresh, .. } = &mut self
+        {
+            *refresh = true;
+        }
+        self
+    }
+
+    /// Whether this command was given `--refresh`.
+    pub fn refreshes(&self) -> bool {
+        match self {
+            Command::Resolve { refresh, .. }
+            | Command::Rename { refresh, .. }
+            | Command::Bib { refresh, .. } => *refresh,
+            Command::Config { .. }
+            | Command::Cache { .. }
+            | Command::Status { .. }
+            | Command::Validate { .. }
+            | Command::Reconcile { .. }
+            | Command::Adopt { .. } => false,
         }
     }
 

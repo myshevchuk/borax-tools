@@ -21,6 +21,9 @@
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-17 Sat] -- reduced content index
 #+AI_PASS: fact-check claude-opus-5-5 [2026-10-17 Sat] -- remaining JSONL examples moved to schema 5
 #+AI_PASS: doc-writer gpt-5.6-sol [2026-10-18 Sun] -- library references
+#+AI_PASS: doc-writer gpt-5.6-sol [2026-10-24 Sat] -- refresh as a candidate
+#+AI_PASS: fact-check claude-opus-5-5 [2026-10-24 Sat] -- doc-writer model label corrected
+#+AI_PASS: fact-check claude-opus-5-5 [2026-10-24 Sat] -- refresh after a supplied identifier
 #+OPTIONS: toc:t num:nil
 #+STARTUP: content
 
@@ -40,9 +43,13 @@ how to install it, and a handful of examples.
      file is currently called.
   2. *Ask the library.* If the run's library tracks this path and these
      bytes, the item the artifact record answers with supplies the
-     record. borax does not open the file, extract anything, ask a
-     service or either cache, compare titles, or update the content
-     index for that file.
+     record. borax does not open the file, extract anything, compare
+     titles, or update the content index for that file. Without
+     ~--refresh~, it asks no service or cache. With ~--refresh~, borax
+     asks the services again about the item's preferred identifier and
+     compares the fresh record with the item as a candidate. The item
+     still supplies the file's record unless you accept a replacement
+     in an interactive, recording ~rename~.
   3. *Otherwise, ask the content index.* Unless you used ~--no-cache~,
      borax first checks the entry for these bytes for references to other
      libraries. One reachable reference answers from its library item.
@@ -182,6 +189,7 @@ how to install it, and a handful of examples.
 
    #+begin_src sh
      borax resolve papers/
+     borax resolve --refresh papers/
    #+end_src
 
    Resolves each file to a record and reports what was found, changing
@@ -217,6 +225,37 @@ how to install it, and a handful of examples.
    reference, or ~names no identifier~. These clauses also appear on
    skip lines. They precede any rejected-candidate clause.
 
+   Use ~--refresh~ when you want every lookup in this run to ask the
+   services again. borax does not read a held response, but stores each
+   successful fresh answer over the held one. An unsuccessful lookup
+   leaves the held response alone. The content index and the library
+   are still read; combine ~--refresh~ with ~--no-cache~ when you also
+   want to bypass the content index.
+
+   When a library item answers for a file, ~--refresh~ looks up the
+   item's preferred identifier: DOI, then arXiv, PMID, or ISBN. The item
+   remains the file's record. The fresh record is a candidate, compared
+   in ~type~, ~title~, ~author~, ~issued~, ~container-title~, ~volume~,
+   ~issue~, ~page~, ~publisher~, ~DOI~, ~PMID~, ~ISBN~, and ~arxiv~.
+   Provenance, confidence, and source fields are not compared. A file
+   answered by identification evidence or extraction has no separate
+   candidate because its own lookup is already fresh. Neither does a
+   work duplicate.
+
+   ~resolve~ never replaces an item's record. Its resolved line adds
+   one of these clauses after any library-reference clauses:
+
+   - ~; no fresh record: the library's record carries no identifier to ask about~
+   - ~; no fresh record: no configured service could be asked about <identifier>~
+   - ~; no fresh record: no source had a record for <identifier> (<answers>)~
+   - ~; a fresh record from <service> does not differ~
+   - ~; a fresh record from <service> differs in <fields>; the library's record is unchanged~
+
+   A candidate from a reference to another library instead ends ~only a
+   rename in the library at <root> can take it~. The lookup attempts
+   distinguish an unavailable service from one that did not find the
+   identifier.
+
    If an index-held identifier reaches no record, the file is skipped as
    ~unresolvable~. borax does not fall back to extracting the same file.
 
@@ -245,6 +284,7 @@ how to install it, and a handful of examples.
 
    #+begin_src sh
      borax rename papers/           # ask before each move
+     borax rename --refresh papers/ # ask about fresh item records
      borax rename --batch papers/   # preview the whole plan
      borax rename --apply papers/   # move the whole plan
    #+end_src
@@ -261,6 +301,12 @@ how to install it, and a handful of examples.
    cron, or ~--json~ run is always a batch and never asks a question.
    A batch reports every file already carrying its rendered name as
    ~already named~.
+
+   With ~--refresh~, a preview or applying batch reports fresh
+   candidates but never replaces an item. An interactive run can offer
+   a differing candidate for an item in its own library. It can replace
+   the item only when recording is enabled and you choose the
+   replacement. ~--no-record~ therefore asks no refresh question.
 
    Use ~--no-batch~ to override a configured batch default when you want
    questions at a terminal. ~--apply --no-batch~ is a usage error naming
@@ -386,12 +432,62 @@ how to install it, and a handful of examples.
     it begins ~disagree:~ and names what each referenced library's item
     identifies. These lines also appear in a skip description.
 
+    With ~--refresh~, a differing candidate for an item in the run's
+    own library produces a question before the file's move or filing
+    question. It does so even when ~rename.skip-named~ would otherwise
+    pass the file over. A reference answer counts as the run's own item
+    only when both the library identity and the lexically normalized
+    root match.
+    Every other referenced item belongs to another library and is
+    reported without a replacement question.
+
+    The description adds a ~refresh~ line for the identifier and what
+    the service said. A differing candidate adds one ~differs~ line per
+    field, in the form ~<field>: <value> in the library, <value> from
+    <service>~, followed by a ~decision~ line. The choices are ~Keep the
+    library's record~, ~Replace it with the fresh record~, and ~Quit~.
+    Keeping is the default, so Enter never replaces a correction. This
+    question offers neither Retry nor Supply.
+
+    borax asks once per item per run. After you keep the item, a later
+    file of the same item reports ~answered at an earlier file of the
+    same item~. After a successful replacement, later files consult the
+    replaced record and normally report that the fresh record does not
+    differ.
+
+    A replacement happens as soon as you answer. It writes only the
+    differing compared fields and their provenance entries in the item
+    file. The item's ~id~, its file name, every other field, unknown
+    keys, comments, confidence, and source fields survive. borax refuses
+    the whole replacement when a value it would replace contains a
+    comment or a key the record model does not read, such as ~orcid~ in
+    an author table. It also refuses when the item file changed after
+    the run read it. The line reads ~<path>: could not replace <fields>
+    in <file> (<message>)~, and the file continues with the record the
+    run read. A successful line reads ~<path>: replaced <fields> in
+    <file>~.
+
+    The file's resolved line says ~the library's record was kept~ or
+    ~the library's record was replaced~ after your answer. A refused
+    write says ~the library's record could not be replaced (<message>)~.
+    With ~--no-record~ it says ~this run records nothing, so the
+    library's record is unchanged~. A later file for an item you kept,
+    or whose replacement could not be written, says ~answered at an
+    earlier file of the same item~.
+
+    The re-read protects an edit saved before it. An edit saved between
+    that re-read and borax's write is not detected. A refused or failed
+    replacement does not by itself fail the run. If you replace the
+    item and then quit at the file's later question, the replacement
+    stands and the file counts as not reached.
+
     A library-answered file gets the same move question as any other
     resolved file. Supplying another identifier re-identifies it and
     re-links its artifact as described under
     [[*Remembering your answer][Remembering your answer]]. An
-    already-named tracked file is still passed over when
-    ~rename.skip-named~ is on.
+    already-named tracked file is passed over when
+    ~rename.skip-named~ is on only when it has no refresh to report or
+    its fresh record is current.
 
     ~type~, ~title~, ~authors~, ~issued~, and ~in~ come from the record.
     A field the record does not contain is omitted. The author line
@@ -441,17 +537,18 @@ how to install it, and a handful of examples.
     The choices depend on what borax knows. The first choice is what
     Enter selects:
 
-    | Situation                                        | Choices                                                     |
-    |--------------------------------------------------+-------------------------------------------------------------|
-    | A record produces a move                         | Rename; Supply an identifier; Skip; Quit                     |
-    | No identifier was found                          | Supply an identifier; Skip; Quit                             |
-    | No service holds the identifier                  | Supply an identifier; Skip; Quit                             |
-    | Services could not give a usable answer          | Try the services again; Supply an identifier; Skip; Quit     |
-    | A conflicting record produces a move             | Skip; Rename anyway, to =<name>=; Supply an identifier; Quit |
-    | A conflicting record produces no move            | Skip; Supply an identifier; Quit                             |
-    | The file is encrypted, but its hash is known     | Supply an identifier; Skip; Quit                             |
-    | The file is unreadable, but its hash is known    | Supply an identifier; Skip; Quit                             |
-    | The file is already named under ~--no-skip-named~ | Keep this name; Supply an identifier; Quit                   |
+    | Situation                                         | Choices                                                           |
+    |---------------------------------------------------+-------------------------------------------------------------------|
+    | A fresh record differs from this library's item   | Keep the library's record; Replace it with the fresh record; Quit |
+    | A record produces a move                          | Rename; Supply an identifier; Skip; Quit                          |
+    | No identifier was found                           | Supply an identifier; Skip; Quit                                  |
+    | No service holds the identifier                   | Supply an identifier; Skip; Quit                                  |
+    | Services could not give a usable answer           | Try the services again; Supply an identifier; Skip; Quit          |
+    | A conflicting record produces a move              | Skip; Rename anyway, to =<name>=; Supply an identifier; Quit      |
+    | A conflicting record produces no move             | Skip; Supply an identifier; Quit                                  |
+    | The file is encrypted, but its hash is known      | Supply an identifier; Skip; Quit                                  |
+    | The file is unreadable, but its hash is known     | Supply an identifier; Skip; Quit                                  |
+    | The file is already named under ~--no-skip-named~ | Keep this name; Supply an identifier; Quit                        |
 
     A title conflict shows the record's ~title~, the file's ~file
     says~ title, and their similarity on a ~conflict~ line. Skipping is
@@ -618,6 +715,7 @@ how to install it, and a handful of examples.
 
    #+begin_src sh
      borax bib --bib library.bib papers/
+     borax bib --refresh --bib library.bib papers/
    #+end_src
 
    Writes bibliography output for each file — entries merged into a
@@ -629,6 +727,11 @@ how to install it, and a handful of examples.
    A tracked file is cited from its linked item's record, so a correction
    made directly to that item appears in the bibliography without a
    service query.
+
+   With ~--refresh~, every lookup asks the services again and each
+   successful answer replaces the response-cache entry it found there.
+   For a tracked file, ~bib~ reports the fresh record as a candidate but
+   still cites the item's record. It never replaces an item.
 
    ~bib~ takes files as input. An item with no artifact has no file for
    this command to resolve, so it produces no bibliography entry.
@@ -671,6 +774,12 @@ how to install it, and a handful of examples.
    its library references. Old ~v1~ index entries under the cache
    directory are still counted as cache files and removed by ~--clear~,
    but borax does not read or migrate them.
+
+   ~--refresh~ is a selector on ~resolve~, ~rename~, and ~bib~, not an
+   option of ~cache~. It makes that run skip response-cache reads while
+   still storing every successful fresh answer over the held entry. A
+   failed lookup does not replace the held entry. With ~--no-cache~ as
+   well, borax neither reads nor writes the response cache.
 
    On Unix, the content index is under
    ~$XDG_DATA_HOME/borax/v2/~, or =~/.local/share/borax/v2/= when
@@ -1194,6 +1303,14 @@ how to install it, and a handful of examples.
    invocation. So ~network.concurrency~ set in a file is reported by
    ~borax config~ and refuses nothing on a ~rename~ that will not read
    it.
+
+   Four command-line selectors are not settings: ~--identify~ on
+   ~status~, ~--rehash~ and the repeatable ~--accept~ on ~reconcile~,
+   and ~--refresh~ on ~resolve~, ~rename~, and ~bib~. They describe work
+   for one invocation. They have no configuration keys and no ~--no-~
+   forms. A configuration file containing ~refresh~ gets the ordinary
+   unknown-key error. ~borax config --refresh~, ~borax status
+   --refresh~, and ~borax rename --no-refresh~ are unknown arguments.
 
    Every configurable boolean is offered as a pair of flags —
    ~--cache~/~--no-cache~, ~--sidecars~/~--no-sidecars~,
@@ -1824,7 +1941,36 @@ how to install it, and a handful of examples.
   ~library-answered~, ~content-index-hit~, ~extraction-failed~,
   ~no-record~, ~refused~, ~unhashable~, ~awaiting-acceptance~,
   ~cache-bypassed~, ~not-asked~, ~not-supplied~, ~unparsed~, and
-  ~no-move~.
+  ~no-move~. A refresh can additionally use ~no-identifier~,
+  ~another-library~, ~not-recording~, and ~already-asked~.
+
+  A run given ~--refresh~ adds ~"refresh":true~ to ~run-started~. The
+  key is absent otherwise. No ~service-cache~ retrieval appears in a
+  refresh run because every lookup asks the service.
+
+  A ~resolved~ event whose record came from a library item adds
+  ~refresh~ after ~acceptance~. Its status is ~not-attempted~ with
+  reason ~no-identifier~, ~no-eligible-service~, ~unresolved~ with the
+  ordered attempts, ~current~, or ~differs~. A differing refresh carries
+  ~differences~ in field order, the full ~candidate~, and its own
+  ~acceptance~. That acceptance is ~accepted~, ~unwritten~ with a
+  message, ~declined~, or ~not-attempted~ with reason
+  ~another-library~, ~not-asked~, ~not-recording~, or ~already-asked~.
+  ~pending~ appears only in the event used to draw an open question,
+  never in the reported stream. A file with no item answer has no
+  ~refresh~ key. The verdict's own ~lookup~, ~record_retrieval~, and
+  ~acceptance~ keep describing the item's record, not the candidate.
+  If you then supply an identifier at the file's own question, those
+  keys describe the supplied record instead, and
+  ~identifier_input.displaced~ names the item. The ~refresh~ key stays
+  as it stood.
+
+  Every attempted replacement emits ~library-replacement~ immediately,
+  before the file's own verdict. It carries ~path~, the item identity,
+  the item ~file~, the ordered ~fields~, and a ~write~ status of
+  ~written~ or ~failed~ with a message. A failed write changes no count
+  or exit status. The event remains in the log if a later Quit leaves
+  that file unreached.
 
   ~library~ is ~consulted~ with its former kind-tagged answer nested
   under ~answer~, or ~not-attempted~ with reason ~no-library~,

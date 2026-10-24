@@ -64,6 +64,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   immediately after `root` when the library has a readable identity. This is
   additive; the schema version change is described below.
 
+- `borax resolve`, `borax rename`, and `borax bib` now accept `--refresh`.
+  Every lookup in that run asks the service instead of reading the response
+  cache, and each successful fresh answer replaces the cached one. The flag
+  composes with `--no-cache`; it is a per-run selector, with no configuration
+  key or `--no-refresh` form.
+
+- When a library item answers for a file, `--refresh` reports a fresh lookup
+  of its preferred identifier as a candidate beside the item's record. It
+  compares `type`, `title`, `author`, `issued`, `container-title`, `volume`,
+  `issue`, `page`, `publisher`, `DOI`, `PMID`, `ISBN`, and `arxiv`, excluding
+  provenance, confidence, and source fields. The item still supplies the
+  file's record.
+
+- An interactive, recording `borax rename --refresh` now asks, once per
+  item of its own library, whether a differing candidate replaces the
+  item's record, keeping the item as the default. Replacement changes only the differing
+  fields and their provenance entries; it preserves the item identity, file
+  name, other fields, unknown keys, comments, confidence, and source fields. It
+  is refused if the item changed after the run read it or a replaced value
+  contains a comment or an unknown nested key that would be discarded.
+
+- Schema 5 now adds `run-started.refresh`, `resolved.refresh`, and the
+  `library-replacement` event, plus the refresh-only reasons
+  `no-identifier`, `another-library`, `not-recording`, and `already-asked`.
+  Runs without `--refresh` omit the new keys.
+
 ### Changed
 
 - The content index now keeps an identifier and its origin for each content

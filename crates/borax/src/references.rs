@@ -23,6 +23,7 @@ use borax_sources::store::{ContentIndex, IndexStore, reference_key};
 
 use crate::event::{AcceptedItemCause, ReferenceStatusStep, ReferenceStep, UnavailableCause};
 use crate::library::{Identity, ItemStore, identity};
+use crate::paths::lexical;
 use crate::pipeline::preferred_identifier;
 
 /// Why a reference's root cannot answer for its library.
@@ -228,6 +229,21 @@ impl Libraries {
     /// be read is not known to be gone.
     pub fn is_stale(&self, root: &Path, library: &LibraryId) -> bool {
         self.root(root).holds(root).is_stale_for(library)
+    }
+
+    /// Drop what this run read of `root`, so the next reference to it
+    /// reads it afresh. Nothing for a root not read.
+    ///
+    /// Roots are compared normalised lexically, so a root read under
+    /// one spelling is forgotten under another. Every other root stays
+    /// as it was first read.
+    pub fn forget(&self, root: &Path) {
+        let normalised = |path: &Path| lexical(path).unwrap_or_else(|| path.to_path_buf());
+        let forgotten = normalised(root);
+        self.roots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|read, _| normalised(read) != forgotten);
     }
 
     /// The record of `root`, made empty the first time it is asked for.

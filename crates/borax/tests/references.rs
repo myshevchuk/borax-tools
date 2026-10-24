@@ -1436,3 +1436,89 @@ fn keep_leaves_a_stale_reference_another_run_rewrote_meanwhile() {
     assert!(kept.repaired_from.is_empty(), "got {kept:?}");
     assert_eq!(index.reference(&hash, &stale), Fact::Held(rewritten));
 }
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate 5.1: forgetting a root (design D10, D12)
+// ---------------------------------------------------------------------
+
+/// `item` as `reach` finds it, or a panic naming what was found.
+fn reached_item(libraries: &Libraries, reference: &LibraryReference) -> Item {
+    match libraries.reach(reference) {
+        Reach::Reachable(found) => found,
+        other => panic!("expected reachable, got {other:?}"),
+    }
+}
+
+#[test]
+fn libraries_forget_makes_the_next_reach_read_the_root_afresh() {
+    let original = item(ITEM, record_with_doi("10.1000/before-forget"));
+    let dir = library_holding(&original);
+    let held = reference(LIBRARY, dir.path(), ARTIFACT, ITEM);
+    let libraries = Libraries::new();
+    assert_eq!(reached_item(&libraries, &held), original);
+
+    let edited = item(ITEM, record_with_doi("10.1000/after-forget"));
+    write_item(dir.path(), &format!("{}.toml", edited.id), &edited);
+    assert_eq!(
+        reached_item(&libraries, &held),
+        original,
+        "until it is forgotten, the root is as first read"
+    );
+
+    libraries.forget(dir.path());
+
+    assert_eq!(reached_item(&libraries, &held), edited);
+}
+
+#[test]
+fn libraries_forget_leaves_every_other_root_as_read() {
+    let first = item(ITEM, record_with_doi("10.1000/first-root"));
+    let second = item(ITEM, record_with_doi("10.1000/second-root"));
+    let first_dir = library_holding(&first);
+    let second_dir = library_holding(&second);
+    let first_reference = reference(LIBRARY, first_dir.path(), ARTIFACT, ITEM);
+    let second_reference = reference(LIBRARY, second_dir.path(), ARTIFACT, ITEM);
+    let libraries = Libraries::new();
+    reached_item(&libraries, &first_reference);
+    reached_item(&libraries, &second_reference);
+    let first_edited = item(ITEM, record_with_doi("10.1000/first-edited"));
+    let second_edited = item(ITEM, record_with_doi("10.1000/second-edited"));
+    write_item(
+        first_dir.path(),
+        &format!("{}.toml", first_edited.id),
+        &first_edited,
+    );
+    write_item(
+        second_dir.path(),
+        &format!("{}.toml", second_edited.id),
+        &second_edited,
+    );
+
+    libraries.forget(first_dir.path());
+
+    assert_eq!(reached_item(&libraries, &first_reference), first_edited);
+    assert_eq!(
+        reached_item(&libraries, &second_reference),
+        second,
+        "a root that was not forgotten is as it was first read"
+    );
+}
+
+#[test]
+fn libraries_forget_of_a_root_not_read_changes_nothing() {
+    let read = item(ITEM, record_with_doi("10.1000/read-root"));
+    let unread = item(ITEM, record_with_doi("10.1000/unread-root"));
+    let read_dir = library_holding(&read);
+    let unread_dir = library_holding(&unread);
+    let read_reference = reference(LIBRARY, read_dir.path(), ARTIFACT, ITEM);
+    let unread_reference = reference(LIBRARY, unread_dir.path(), ARTIFACT, ITEM);
+    let libraries = Libraries::new();
+    reached_item(&libraries, &read_reference);
+    let edited = item(ITEM, record_with_doi("10.1000/read-root-edited"));
+    write_item(read_dir.path(), &format!("{}.toml", edited.id), &edited);
+
+    libraries.forget(unread_dir.path());
+
+    assert_eq!(reached_item(&libraries, &read_reference), read);
+    assert_eq!(reached_item(&libraries, &unread_reference), unread);
+}

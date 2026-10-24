@@ -17,9 +17,9 @@ use borax_core::record::{DateParts, EntryType, Name, Record};
 
 use crate::event::{
     Acceptance, Claim, ClaimOrigin, Event, ExtractionResultStep, IdentifierOrigin, IndexReadStep,
-    LibraryAnswer, LookupStep, MatchCheckStep, RetrievedFrom, Sections, ServiceAnswer, SkipReason,
-    TitlesStep, disagreement, references_read, rejected_identifiers, services_of, why_unanswered,
-    why_unreachable,
+    LibraryAnswer, LookupStep, MatchCheckStep, RefreshAcceptance, RefreshStep, RetrievedFrom,
+    Sections, ServiceAnswer, SkipReason, TitlesStep, answered_by, disagreement, referenced_root,
+    references_read, rejected_identifiers, services_of, why_unanswered, why_unreachable,
 };
 
 /// The move a description is about: where the file would go, and the
@@ -91,9 +91,11 @@ const NAMED_AUTHORS: usize = 3;
 /// disagreeing one names; the record's type, title,
 /// authors, date of issue and container; what the file's own titles
 /// say — each title with where it was read, or that it claims none,
-/// could not be opened, or was not read and why; the conflict an
-/// operator accepted the record over, or that a pending candidate
-/// carries; a `rejected` line for each candidate the operator rejected,
+/// could not be opened, or was not read and why; in a run given
+/// `--refresh`, the `refresh` lines, and for a fresh record that
+/// differs from the library item's its `differs` and `decision` lines;
+/// the conflict an operator accepted the record over, or that a pending
+/// candidate carries; a `rejected` line for each candidate the operator rejected,
 /// in submission order, its identifier written whole; the `candidate`
 /// line, while the record is an operator's candidate pending an answer;
 /// and the name the file would take, with a line saying which rendered
@@ -129,6 +131,7 @@ pub fn describe(
         identifier,
         record,
         sections,
+        refresh,
         ..
     } = resolved
     else {
@@ -181,6 +184,9 @@ pub fn describe(
         description.field("in", &within);
     }
     file_says(&mut description, &sections.extraction.titles);
+    if let Some(refresh) = refresh {
+        refreshed(&mut description, refresh, sections);
+    }
     if let (
         Acceptance::Overridden | Acceptance::Pending,
         MatchCheckStep::Conflict {
@@ -362,6 +368,137 @@ fn looked_up(sections: &Sections) -> Option<String> {
     Some(match whence {
         Some(whence) => format!("{identifier}, {whence}"),
         None => identifier.clone(),
+    })
+}
+
+/// The lines of a refresh of the library item the record came from:
+///
+/// - a `refresh` line naming the identifier looked up, written whole,
+///   and a line under it saying what the services said: that the fresh
+///   record does or does not differ from the library's, that no
+///   configured service can be asked, or each service's answer, one to
+///   a line; for an item with no identifier, one `refresh` line saying
+///   so;
+/// - for a fresh record that differs, a `differs` line per difference,
+///   giving the library's value and the service's, and a `decision`
+///   line saying what became of it, the library that can take it named
+///   by the root `sections` gives.
+fn refreshed(description: &mut Description, refresh: &RefreshStep, sections: &Sections) {
+    let (identifier, attempts) = match refresh {
+        RefreshStep::NotAttempted { .. } => {
+            description.field(
+                "refresh",
+                "the library's record carries no identifier to ask about",
+            );
+            return;
+        }
+        RefreshStep::NoEligibleService { identifier } => (identifier, &[][..]),
+        RefreshStep::Unresolved {
+            identifier,
+            attempts,
+        }
+        | RefreshStep::Current {
+            identifier,
+            attempts,
+        }
+        | RefreshStep::Differs {
+            identifier,
+            attempts,
+            ..
+        } => (identifier, attempts.as_slice()),
+    };
+    description.whole("refresh", identifier);
+    let service = service_name(answered_by(attempts));
+    match refresh {
+        RefreshStep::NotAttempted { .. } => {}
+        RefreshStep::NoEligibleService { .. } => {
+            description.field("", "no configured service can be asked about it");
+        }
+        RefreshStep::Unresolved { attempts, .. } => {
+            for attempt in attempts {
+                description.field("", &attempt.said());
+            }
+        }
+        RefreshStep::Current { .. } => {
+            description.field(
+                "",
+                &format!("{service} does not differ from the library's record"),
+            );
+        }
+        RefreshStep::Differs {
+            differences,
+            acceptance,
+            ..
+        } => {
+            description.field("", &format!("{service} differs from the library's record"));
+            for difference in differences {
+                let value = |value: Option<&serde_json::Value>| {
+                    value.map_or("nothing".to_string(), |value| {
+                        written(&difference.field, value)
+                    })
+                };
+                description.field(
+                    "differs",
+                    &format!(
+                        "{}: {} in the library, {} from {service}",
+                        difference.field,
+                        value(difference.item.as_ref()),
+                        value(difference.candidate.as_ref())
+                    ),
+                );
+            }
+            description.field(
+                "decision",
+                &match acceptance {
+                    RefreshAcceptance::Pending => {
+                        "pending; keeping it leaves the library's record as it is".to_string()
+                    }
+                    RefreshAcceptance::Accepted => "the library's record was replaced".to_string(),
+                    RefreshAcceptance::Unwritten { message } => {
+                        format!("the library's record could not be replaced ({message})")
+                    }
+                    RefreshAcceptance::Declined => "the library's record was kept".to_string(),
+                    RefreshAcceptance::NotAttempted { reason } => match reason.as_str() {
+                        "another-library" => format!(
+                            "only a rename in the library at {} can take it",
+                            referenced_root(sections)
+                        ),
+                        "not-recording" => {
+                            "this run records nothing, so the library's record stays as it is"
+                                .to_string()
+                        }
+                        "already-asked" => {
+                            "answered at an earlier file of the same item".to_string()
+                        }
+                        _ => "the library's record is unchanged".to_string(),
+                    },
+                },
+            );
+        }
+    }
+}
+
+/// One side of a refresh's difference in `field`, as a `differs` line
+/// writes it: the type as the `type` line names it, every author given
+/// name first, the date as the `issued` line writes it, and any other
+/// text in double quotes. A value that does not read as its field's is
+/// written as the record serializes it.
+fn written(field: &str, value: &serde_json::Value) -> String {
+    let parsed = match field {
+        "type" => serde_json::from_value::<EntryType>(value.clone())
+            .ok()
+            .map(|entry_type| type_name(entry_type).to_string()),
+        "author" => serde_json::from_value::<Vec<Name>>(value.clone())
+            .ok()
+            .map(|names| names.iter().map(full_name).collect::<Vec<_>>().join(", ")),
+        "issued" => serde_json::from_value::<DateParts>(value.clone())
+            .ok()
+            .map(|issued| issued_on(&issued)),
+        _ => None,
+    };
+    parsed.unwrap_or_else(|| match value {
+        serde_json::Value::String(text) => format!("\"{text}\""),
+        other => other.to_string(),
     })
 }
 

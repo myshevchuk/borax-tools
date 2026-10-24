@@ -357,6 +357,24 @@ fn layer_from_toml_rejects_rehash_as_an_unknown_key() {
     }
 }
 
+/// design D1: `--refresh` is a selector like `--identify`, so a
+/// configuration file naming it, at the top or under `[network]`, is
+/// refused as an unknown key.
+#[test]
+fn a_configuration_file_setting_refresh_is_an_unknown_key() {
+    for text in ["refresh = true", "[network]\nrefresh = true\n"] {
+        let err = layer_from_toml(text, Path::new("/refresh.toml")).unwrap_err();
+
+        match err {
+            ConfigError::Unreadable { message, .. } => {
+                assert!(message.contains("refresh"), "got {message:?}");
+                assert!(message.contains("unknown field"), "got {message:?}");
+            }
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
+    }
+}
+
 /// design D4: `--accept` is a selector, like `--identify` and
 /// `--rehash`, not a configurable setting.
 #[test]

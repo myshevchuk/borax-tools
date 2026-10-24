@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 use borax::event::{
     Acceptance, AcceptedBy, AcceptedItemCause, Admission, Adoption, Claim, ClaimOrigin, Condition,
-    ContentIndexSection, Counts, Diagnostic, Displaced, Event, EvidenceStep, Extraction,
-    ExtractionResultStep, ExtractionSection, FetchedFrom, Format, IdentifierInputStep,
+    ContentIndexSection, Counts, Diagnostic, DifferenceStep, Displaced, Event, EvidenceStep,
+    Extraction, ExtractionResultStep, ExtractionSection, FetchedFrom, Format, IdentifierInputStep,
     IdentifierOrigin, IndexReadStep, Level, LibraryAnswer, LibraryStep, LookupRound, LookupStep,
-    MatchCheckStep, ReferenceStatusStep, ReferenceStep, Repair, RetrievedFrom, SCHEMA, Sections,
-    ServiceAnswer, ServiceOutcome, SkipReason, Submission, SubmissionAcceptance, SubmissionOutcome,
-    Summary, SyntaxStep, TableUsed, TitlesStep, UnavailableCause, WriteStep, WrittenEntry,
-    human_line, human_summary, json_line, render,
+    MatchCheckStep, ReferenceStatusStep, ReferenceStep, RefreshAcceptance, RefreshStep, Repair,
+    RetrievedFrom, SCHEMA, Sections, ServiceAnswer, ServiceOutcome, SkipReason, Submission,
+    SubmissionAcceptance, SubmissionOutcome, Summary, SyntaxStep, TableUsed, TitlesStep,
+    UnavailableCause, WriteStep, WrittenEntry, human_line, human_summary, json_line, render,
 };
 use borax::evidence::{
     Consultation, Evidence, ExtractionEvidence, ExtractionStep, IdentifierInput, IndexEvidence,
@@ -323,6 +323,7 @@ fn run_started() -> Event {
         applying: true,
         interactive: false,
         tables: Vec::new(),
+        refresh: false,
     }
 }
 
@@ -337,6 +338,7 @@ fn run_started_with_a_table() -> Event {
             path: PathBuf::from("/collection/journals.tsv"),
             digest: "sha256-abc123".to_string(),
         }],
+        refresh: false,
     }
 }
 
@@ -348,6 +350,7 @@ fn resolved() -> Event {
         identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz123")),
+        refresh: None,
     }
 }
 
@@ -774,6 +777,16 @@ fn all_events() -> Vec<Event> {
         cache_cleared(),
         lookup_missed(),
         run_finished(),
+        resolved_through_the_library(Some(differs_with(RefreshAcceptance::NotAttempted {
+            reason: "not-asked".to_string(),
+        }))),
+        library_replacement(&["title"], WriteStep::Written),
+        library_replacement(
+            &["title", "volume"],
+            WriteStep::Failed {
+                message: "changed after this run read it".to_string(),
+            },
+        ),
     ]);
     events
 }
@@ -1110,6 +1123,7 @@ fn json_line_of_a_hit_carries_its_evidence() {
         evidence: evidence_via_content_index_hit(),
         overridden: false,
         accepted: false,
+        refresh: None,
     };
     let event = resolved_event(&path, &file);
 
@@ -1135,6 +1149,7 @@ fn json_line_of_a_lookup_from_the_content_index_has_origin_content_index() {
         evidence: evidence_via_content_index_hit(),
         overridden: false,
         accepted: false,
+        refresh: None,
     };
     let event = resolved_event(&path, &file);
 
@@ -1174,6 +1189,7 @@ fn human_line_of_an_evidence_answer_ends_from_the_response_cache() {
         evidence: evidence_via_content_index_hit(),
         overridden: false,
         accepted: false,
+        refresh: None,
     };
     let event = resolved_event(&path, &file);
 
@@ -1998,6 +2014,7 @@ fn pending_candidate_event() -> Event {
         identifier: "doi:10.1039/c9cc02492a".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     }
 }
 
@@ -2090,6 +2107,7 @@ fn a_supplied_resolved_event_with_displaced_record_round_trips() {
         identifier: "doi:10.1000/ref".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     };
     let line = json_line(&event);
     let parsed: Event = serde_json::from_str(&line).unwrap();
@@ -2525,6 +2543,7 @@ fn human_line_of_resolved_with_two_rejected_candidates() {
         identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     };
     assert!(
         human_line(&event)
@@ -2550,6 +2569,7 @@ fn human_line_of_resolved_with_one_rejected_candidate_follows_the_library_clause
         identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     };
     let line = human_line(&event).unwrap();
     assert!(
@@ -2579,6 +2599,7 @@ fn human_line_has_no_clause_when_nothing_was_rejected() {
             identifier: "doi:10.1000/xyz123".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             sections: Box::new(sections),
+            refresh: None,
         };
         assert!(
             !human_line(&event).unwrap().contains("rejected"),
@@ -2593,6 +2614,7 @@ fn human_line_has_no_clause_when_nothing_was_rejected() {
         identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(not_attempted),
+        refresh: None,
     };
     assert!(!human_line(&event).unwrap().contains("rejected"));
 }
@@ -2612,6 +2634,7 @@ fn human_line_escapes_a_control_character_in_a_rejected_identifier() {
         identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     };
     let line = human_line(&event).unwrap();
     assert!(!line.contains('\u{7}'), "got {line:?}");
@@ -3084,6 +3107,255 @@ fn human_line_of_run_started_is_silent_even_with_tables() {
     assert_eq!(human_line(&run_started_with_a_table()), None);
 }
 
+// --- run-started.refresh (design D8) ---
+
+fn run_started_refreshing() -> Event {
+    match run_started() {
+        Event::RunStarted {
+            command,
+            version,
+            applying,
+            interactive,
+            tables,
+            ..
+        } => Event::RunStarted {
+            command,
+            version,
+            applying,
+            interactive,
+            tables,
+            refresh: true,
+        },
+        other => panic!("expected RunStarted, got {other:?}"),
+    }
+}
+
+#[test]
+fn json_line_of_run_started_carries_refresh_true_only_when_set() {
+    let line = json_line(&run_started_refreshing());
+
+    assert!(
+        line.ends_with(r#""tables":[],"refresh":true}"#),
+        "got {line}"
+    );
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["refresh"], Value::Bool(true));
+}
+
+#[test]
+fn json_line_of_run_started_without_refresh_has_no_refresh_key() {
+    let line = json_line(&run_started());
+
+    assert!(!line.contains("refresh"), "got {line}");
+    assert!(line.ends_with(r#""tables":[]}"#), "got {line}");
+}
+
+#[test]
+fn run_started_round_trips_with_and_without_refresh() {
+    for event in [run_started(), run_started_refreshing()] {
+        let parsed: Event = serde_json::from_str(&json_line(&event)).unwrap();
+        assert_eq!(parsed, event);
+    }
+    let bare: Event = serde_json::from_str(
+        r#"{"event":"run-started","command":"rename","version":"0.1.0","applying":true,"interactive":false,"tables":[]}"#,
+    )
+    .unwrap();
+    assert_eq!(bare, run_started());
+}
+
+// --- the refresh key's value (design D8) ---
+
+const REFRESH_DOI: &str = "10.1039/c5ay00042d";
+
+fn crossref_wrote() -> ServiceAnswer {
+    ServiceAnswer {
+        service: "crossref".to_string(),
+        outcome: ServiceOutcome::Found {
+            retrieval: FetchedFrom::Network,
+            stored: Some(WriteStep::Written),
+        },
+    }
+}
+
+fn candidate_record() -> Record {
+    let mut record = Record::new(EntryType::Article);
+    record.title = Some("Determination of things".to_string());
+    record.doi = Some(doi(REFRESH_DOI));
+    record
+}
+
+fn title_difference() -> DifferenceStep {
+    DifferenceStep {
+        field: "title".to_string(),
+        item: Some(Value::from("REVIEW CORRECTION: Determination of things")),
+        candidate: Some(Value::from("Determination of things")),
+    }
+}
+
+fn differs_with(acceptance: RefreshAcceptance) -> RefreshStep {
+    RefreshStep::Differs {
+        identifier: format!("doi:{REFRESH_DOI}"),
+        attempts: vec![crossref_wrote()],
+        differences: vec![title_difference()],
+        candidate: Box::new(candidate_record()),
+        acceptance,
+    }
+}
+
+fn every_refresh_step() -> Vec<RefreshStep> {
+    let identifier = format!("doi:{REFRESH_DOI}");
+    vec![
+        RefreshStep::NotAttempted {
+            reason: "no-identifier".to_string(),
+        },
+        RefreshStep::NoEligibleService {
+            identifier: identifier.clone(),
+        },
+        RefreshStep::Unresolved {
+            identifier: identifier.clone(),
+            attempts: vec![
+                ServiceAnswer {
+                    service: "crossref".to_string(),
+                    outcome: ServiceOutcome::Unavailable {
+                        message: "timed out".to_string(),
+                    },
+                },
+                ServiceAnswer {
+                    service: "openalex".to_string(),
+                    outcome: ServiceOutcome::NotFound,
+                },
+            ],
+        },
+        RefreshStep::Current {
+            identifier,
+            attempts: vec![crossref_wrote()],
+        },
+        differs_with(RefreshAcceptance::Pending),
+    ]
+}
+
+fn every_refresh_acceptance() -> Vec<RefreshAcceptance> {
+    vec![
+        RefreshAcceptance::Pending,
+        RefreshAcceptance::Accepted,
+        RefreshAcceptance::Unwritten {
+            message: "changed after this run read it".to_string(),
+        },
+        RefreshAcceptance::Declined,
+        RefreshAcceptance::NotAttempted {
+            reason: "another-library".to_string(),
+        },
+    ]
+}
+
+fn raw(value: &impl serde::Serialize) -> String {
+    serde_json::to_string(value).unwrap()
+}
+
+#[test]
+fn refresh_step_differs_serializes_as_design_d8() {
+    let step = differs_with(RefreshAcceptance::NotAttempted {
+        reason: "not-asked".to_string(),
+    });
+
+    assert_eq!(
+        raw(&step),
+        concat!(
+            r#"{"status":"differs","identifier":"doi:10.1039/c5ay00042d","#,
+            r#""attempts":[{"service":"crossref","outcome":{"status":"found","#,
+            r#""retrieval":"network","stored":{"status":"written"}}}],"#,
+            r#""differences":[{"field":"title","#,
+            r#""item":"REVIEW CORRECTION: Determination of things","#,
+            r#""candidate":"Determination of things"}],"#,
+            r#""candidate":{"type":"article-journal","title":"Determination of things","#,
+            r#""DOI":"10.1039/c5ay00042d"},"#,
+            r#""acceptance":{"status":"not-attempted","reason":"not-asked"}}"#,
+        )
+    );
+}
+
+#[test]
+fn refresh_step_of_each_status_serializes_as_design_d8() {
+    let steps = every_refresh_step();
+    let expected = [
+        r#"{"status":"not-attempted","reason":"no-identifier"}"#,
+        r#"{"status":"no-eligible-service","identifier":"doi:10.1039/c5ay00042d"}"#,
+        concat!(
+            r#"{"status":"unresolved","identifier":"doi:10.1039/c5ay00042d","attempts":["#,
+            r#"{"service":"crossref","outcome":{"status":"unavailable","message":"timed out"}},"#,
+            r#"{"service":"openalex","outcome":{"status":"not-found"}}]}"#,
+        ),
+        concat!(
+            r#"{"status":"current","identifier":"doi:10.1039/c5ay00042d","attempts":["#,
+            r#"{"service":"crossref","outcome":{"status":"found","retrieval":"network","#,
+            r#""stored":{"status":"written"}}}]}"#,
+        ),
+    ];
+
+    for (step, expected) in steps.iter().zip(expected) {
+        assert_eq!(raw(step), expected);
+    }
+    assert!(
+        raw(&steps[4]).starts_with(r#"{"status":"differs","#),
+        "got {}",
+        raw(&steps[4])
+    );
+}
+
+#[test]
+fn refresh_acceptance_of_each_status_serializes_as_design_d8() {
+    let expected = [
+        r#"{"status":"pending"}"#,
+        r#"{"status":"accepted"}"#,
+        r#"{"status":"unwritten","message":"changed after this run read it"}"#,
+        r#"{"status":"declined"}"#,
+        r#"{"status":"not-attempted","reason":"another-library"}"#,
+    ];
+
+    for (acceptance, expected) in every_refresh_acceptance().iter().zip(expected) {
+        assert_eq!(raw(acceptance), expected);
+    }
+}
+
+#[test]
+fn difference_step_leaves_out_an_absent_side() {
+    let candidate_only = DifferenceStep {
+        field: "volume".to_string(),
+        item: None,
+        candidate: Some(Value::from("7")),
+    };
+    let item_only = DifferenceStep {
+        field: "volume".to_string(),
+        item: Some(Value::from("7")),
+        candidate: None,
+    };
+
+    assert_eq!(
+        raw(&candidate_only),
+        r#"{"field":"volume","candidate":"7"}"#
+    );
+    assert_eq!(raw(&item_only), r#"{"field":"volume","item":"7"}"#);
+    let parsed: DifferenceStep =
+        serde_json::from_str(r#"{"field":"volume","candidate":"7"}"#).unwrap();
+    assert_eq!(parsed, candidate_only);
+}
+
+#[test]
+fn refresh_step_round_trips_every_status_and_acceptance() {
+    let mut steps = every_refresh_step();
+    steps.extend(every_refresh_acceptance().into_iter().map(differs_with));
+
+    for step in steps {
+        let text = raw(&step);
+        let parsed: RefreshStep = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, step, "text was {text}");
+    }
+    for acceptance in every_refresh_acceptance() {
+        let parsed: RefreshAcceptance = serde_json::from_str(&raw(&acceptance)).unwrap();
+        assert_eq!(parsed, acceptance);
+    }
+}
+
 // --- Diagnostic Display and Level ordering ---
 
 #[test]
@@ -3127,12 +3399,14 @@ fn a_plausible_run_renders_as_json_lines_ending_in_the_summary() {
             identifier: "doi:10.1000/aaa".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             sections: Box::new(sections_via_network("crossref", "doi:10.1000/aaa")),
+            refresh: None,
         },
         Event::Resolved {
             path: PathBuf::from("b.pdf"),
             identifier: "doi:10.1000/bbb".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             sections: Box::new(sections_via_content_index()),
+            refresh: None,
         },
         Event::Renamed {
             path: PathBuf::from("a.pdf"),
@@ -3249,6 +3523,7 @@ fn resolved_serializes_claims_as_design_d3_shows() {
         identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     };
 
     let value: Value = serde_json::from_str(&json_line(&event)).unwrap();
@@ -3283,6 +3558,7 @@ fn an_arxiv_found_identifier_survives_a_doi_carrying_record() {
         ),
         overridden: false,
         accepted: false,
+        refresh: None,
     };
 
     let event = resolved_event(&path, &file);
@@ -3333,6 +3609,7 @@ fn a_content_index_answer_whose_provenance_names_crossref_reports_crossref() {
         evidence: evidence_via_content_index_hit(),
         overridden: false,
         accepted: false,
+        refresh: None,
     };
 
     let event = resolved_event(&path, &file);
@@ -3387,6 +3664,7 @@ fn a_record_naming_two_services_orders_them_crossref_then_openalex() {
         identifier: String::new(),
         record: Box::new(record),
         sections: Box::new(sections_via_library("artifact-id", "item-id")),
+        refresh: None,
     };
 
     assert!(
@@ -3416,6 +3694,7 @@ fn a_record_whose_provenance_names_no_service_names_no_via() {
         identifier: String::new(),
         record: Box::new(record),
         sections: Box::new(sections_via_library("artifact-id", "item-id")),
+        refresh: None,
     };
     let line = human_line(&event).unwrap();
 
@@ -3447,6 +3726,7 @@ fn resolved_with_library(answer: LibraryAnswer) -> Event {
         identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     }
 }
 
@@ -3656,6 +3936,7 @@ fn human_line_appends_the_library_problem_clause_to_a_content_index_resolved_lin
         identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     };
 
     assert_eq!(
@@ -3731,6 +4012,7 @@ fn human_line_of_a_supplied_tracked_file_names_the_service() {
         identifier: "doi:10.1000/xyz123".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     };
 
     assert_eq!(
@@ -3786,6 +4068,7 @@ fn human_line_of_resolved_shows_the_work_and_the_from_clause() {
         identifier: "doi:10.1039/c5ay00042d".to_string(),
         record: Box::new(record),
         sections: Box::new(sections),
+        refresh: None,
     };
 
     assert_eq!(
@@ -3804,6 +4087,7 @@ fn human_line_of_resolved_renders_author_counts() {
         identifier: "doi:10.1000/xyz".to_string(),
         record: Box::new(two),
         sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+        refresh: None,
     };
     assert!(
         human_line(&event)
@@ -3819,6 +4103,7 @@ fn human_line_of_resolved_renders_author_counts() {
         identifier: "doi:10.1000/xyz".to_string(),
         record: Box::new(three),
         sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+        refresh: None,
     };
     assert!(
         human_line(&event).unwrap().contains("(Smith et al., 2020)"),
@@ -3837,6 +4122,7 @@ fn human_line_of_resolved_drops_absent_parts_of_the_work_clause() {
         identifier: "doi:10.1000/xyz".to_string(),
         record: Box::new(no_title),
         sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+        refresh: None,
     };
     let line = human_line(&event).unwrap();
     assert!(!line.contains('"'), "got {line:?}");
@@ -3848,6 +4134,7 @@ fn human_line_of_resolved_drops_absent_parts_of_the_work_clause() {
         identifier: "doi:10.1000/xyz".to_string(),
         record: Box::new(no_authors_or_year),
         sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+        refresh: None,
     };
     let line = human_line(&event).unwrap();
     assert!(line.contains("\"A Title\""), "got {line:?}");
@@ -3859,6 +4146,7 @@ fn human_line_of_resolved_drops_absent_parts_of_the_work_clause() {
         identifier: "doi:10.1000/xyz".to_string(),
         record: Box::new(nothing),
         sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+        refresh: None,
     };
     let line = human_line(&event).unwrap();
     assert!(!line.contains(" to "), "got {line:?}");
@@ -3876,6 +4164,7 @@ fn human_line_of_resolved_names_the_response_cache() {
         identifier: "doi:10.1000/xyz".to_string(),
         record: Box::new(Record::new(EntryType::Article)),
         sections: Box::new(sections),
+        refresh: None,
     };
     assert_eq!(
         human_line(&event).unwrap(),
@@ -3895,6 +4184,7 @@ fn human_line_never_shows_the_schema_3_cached_or_from_the_library_suffixes() {
             identifier: "doi:10.1000/xyz".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             sections: Box::new(sections_via_content_index()),
+            refresh: None,
         },
     ] {
         let line = human_line(&event).unwrap();
@@ -3917,6 +4207,7 @@ fn human_line_of_resolved_escapes_a_control_character_in_the_title() {
         identifier: "doi:10.1000/xyz".to_string(),
         record: Box::new(record),
         sections: Box::new(sections_via_network("crossref", "doi:10.1000/xyz")),
+        refresh: None,
     };
     assert!(
         human_line(&event).unwrap().contains("Evil\\x1b[2JTitle"),
@@ -5305,6 +5596,7 @@ fn resolved_event_of(record: Record, sections: Sections) -> Event {
         identifier: "doi:10.1039/c5ay00042d".to_string(),
         record: Box::new(record),
         sections: Box::new(sections),
+        refresh: None,
     }
 }
 
@@ -5691,6 +5983,7 @@ fn human_line_names_each_reference_that_could_not_answer_after_the_library_claus
             identifier: "doi:10.1000/xyz123".to_string(),
             record: Box::new(Record::new(EntryType::Article)),
             sections: Box::new(sections),
+            refresh: None,
         };
 
         assert_eq!(
@@ -6022,4 +6315,432 @@ fn human_line_of_library_adoption_unanswered_with_an_identifier_and_references_e
          disagree: the library at /home/u/a names doi:10.1000/x, the library at /home/u/b \
          names doi:10.1000/y"
     );
+}
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate 4.1: `resolved.refresh` (design D8, D11)
+// ---------------------------------------------------------------------
+
+/// The record of a corrected library item, as the `resolved` lines of
+/// design D11 show it.
+fn corrected_item_record() -> Record {
+    let mut record = record_with(
+        Some("REVIEW CORRECTION: Determination of things"),
+        &["Klykov"],
+        Some(2015),
+    );
+    record.doi = Some(doi(REFRESH_DOI));
+    record
+        .borax
+        .provenance
+        .insert("title".to_string(), Source::Crossref);
+    record
+}
+
+/// A `resolved` event answered by the library's item, carrying `refresh`.
+fn resolved_through_the_library(refresh: Option<RefreshStep>) -> Event {
+    Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: format!("doi:{REFRESH_DOI}"),
+        record: Box::new(corrected_item_record()),
+        sections: Box::new(sections_via_library(
+            "0190c3a2-7f21-7abc-8def-0123456789ab",
+            "0190c3a2-7f21-7abc-8def-0123456789ac",
+        )),
+        refresh: refresh.map(Box::new),
+    }
+}
+
+/// The line of design D11 up to the refresh clause.
+const LIBRARY_LINE: &str = "paper.pdf: resolved doi:10.1039/c5ay00042d to \"REVIEW CORRECTION: \
+     Determination of things\" (Klykov, 2015) via crossref, from the library";
+
+fn not_asked() -> RefreshAcceptance {
+    RefreshAcceptance::NotAttempted {
+        reason: "not-asked".to_string(),
+    }
+}
+
+#[test]
+fn json_line_of_resolved_without_refresh_has_no_refresh_key() {
+    for event in [resolved(), resolved_through_the_library(None)] {
+        let line = json_line(&event);
+
+        assert!(!line.contains("refresh"), "got {line}");
+    }
+}
+
+#[test]
+fn json_line_of_resolved_with_refresh_puts_refresh_after_acceptance() {
+    let step = differs_with(not_asked());
+
+    let line = json_line(&resolved_through_the_library(Some(step.clone())));
+
+    let expected_tail = format!(
+        r#""acceptance":{{"status":"automatic"}},"refresh":{}}}"#,
+        raw(&step)
+    );
+    assert!(line.ends_with(&expected_tail), "got {line}");
+    assert_eq!(line.matches(r#""refresh""#).count(), 1, "got {line}");
+}
+
+#[test]
+fn human_line_of_resolved_with_a_current_refresh_matches_design_d11() {
+    let event = resolved_through_the_library(Some(RefreshStep::Current {
+        identifier: format!("doi:{REFRESH_DOI}"),
+        attempts: vec![crossref_wrote()],
+    }));
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!("{LIBRARY_LINE}; a fresh record from crossref does not differ")
+    );
+}
+
+#[test]
+fn human_line_of_resolved_with_a_differing_refresh_not_asked_matches_design_d11() {
+    let event = resolved_through_the_library(Some(differs_with(not_asked())));
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!(
+            "{LIBRARY_LINE}; a fresh record from crossref differs in title; \
+             the library's record is unchanged"
+        )
+    );
+}
+
+fn unresolved_refresh(first: &str) -> RefreshStep {
+    RefreshStep::Unresolved {
+        identifier: format!("doi:{REFRESH_DOI}"),
+        attempts: vec![
+            ServiceAnswer {
+                service: "crossref".to_string(),
+                outcome: ServiceOutcome::Unavailable {
+                    message: first.to_string(),
+                },
+            },
+            ServiceAnswer {
+                service: "openalex".to_string(),
+                outcome: ServiceOutcome::NotFound,
+            },
+        ],
+    }
+}
+
+#[test]
+fn human_line_of_resolved_with_an_unresolved_refresh_matches_design_d11() {
+    let event = resolved_through_the_library(Some(unresolved_refresh("timed out")));
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!(
+            "{LIBRARY_LINE}; no fresh record: no source had a record for \
+             doi:10.1039/c5ay00042d (crossref: unavailable: timed out; openalex: not found)"
+        )
+    );
+}
+
+#[test]
+fn human_line_of_resolved_with_no_eligible_service_matches_design_d11() {
+    let event = resolved_through_the_library(Some(RefreshStep::NoEligibleService {
+        identifier: format!("doi:{REFRESH_DOI}"),
+    }));
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!(
+            "{LIBRARY_LINE}; no fresh record: no configured service could be asked about \
+             doi:10.1039/c5ay00042d"
+        )
+    );
+}
+
+#[test]
+fn human_line_of_resolved_with_no_identifier_matches_design_d11() {
+    let event = resolved_through_the_library(Some(RefreshStep::NotAttempted {
+        reason: "no-identifier".to_string(),
+    }));
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!(
+            "{LIBRARY_LINE}; no fresh record: the library's record carries no identifier \
+             to ask about"
+        )
+    );
+}
+
+#[test]
+fn human_line_of_resolved_with_each_acceptance_matches_design_d11() {
+    let cases = [
+        (not_asked(), "the library's record is unchanged"),
+        (
+            RefreshAcceptance::NotAttempted {
+                reason: "not-recording".to_string(),
+            },
+            "this run records nothing, so the library's record is unchanged",
+        ),
+        (
+            RefreshAcceptance::NotAttempted {
+                reason: "already-asked".to_string(),
+            },
+            "answered at an earlier file of the same item",
+        ),
+        (RefreshAcceptance::Declined, "the library's record was kept"),
+        (
+            RefreshAcceptance::Accepted,
+            "the library's record was replaced",
+        ),
+        (
+            RefreshAcceptance::Unwritten {
+                message: "changed after this run read it".to_string(),
+            },
+            "the library's record could not be replaced (changed after this run read it)",
+        ),
+        (RefreshAcceptance::Pending, "awaiting an answer"),
+    ];
+
+    for (acceptance, text) in cases {
+        let event = resolved_through_the_library(Some(differs_with(acceptance.clone())));
+
+        assert_eq!(
+            human_line(&event).unwrap(),
+            format!("{LIBRARY_LINE}; a fresh record from crossref differs in title; {text}"),
+            "for {acceptance:?}"
+        );
+    }
+}
+
+#[test]
+fn human_line_of_resolved_joins_the_differing_fields_with_commas() {
+    let mut step = differs_with(not_asked());
+    if let RefreshStep::Differs { differences, .. } = &mut step {
+        differences.push(DifferenceStep {
+            field: "volume".to_string(),
+            item: None,
+            candidate: Some(Value::from("7")),
+        });
+    }
+
+    let line = human_line(&resolved_through_the_library(Some(step))).unwrap();
+
+    assert!(
+        line.contains("; a fresh record from crossref differs in title, volume; "),
+        "got {line}"
+    );
+}
+
+#[test]
+fn human_line_of_another_library_names_the_references_root() {
+    let event = Event::Resolved {
+        path: PathBuf::from("/home/u/Downloads/paper.pdf"),
+        identifier: format!("doi:{REFRESH_DOI}"),
+        record: Box::new(corrected_item_record()),
+        sections: Box::new(sections_via_reference()),
+        refresh: Some(Box::new(differs_with(RefreshAcceptance::NotAttempted {
+            reason: "another-library".to_string(),
+        }))),
+    };
+
+    let line = human_line(&event).unwrap();
+
+    assert!(
+        line.ends_with(
+            ", from the library at /home/u/papers; a fresh record from crossref differs in \
+             title; only a rename in the library at /home/u/papers can take it"
+        ),
+        "got {line}"
+    );
+}
+
+#[test]
+fn human_line_refresh_clause_precedes_the_rejected_candidate_clause() {
+    let mut sections = sections_via_library(
+        "0190c3a2-7f21-7abc-8def-0123456789ab",
+        "0190c3a2-7f21-7abc-8def-0123456789ac",
+    );
+    sections.identifier_input = IdentifierInputStep::Supplied {
+        submissions: vec![rejected_candidate_submission(1, "doi:10.1000/a")],
+        used: None,
+        displaced: None,
+    };
+    let event = Event::Resolved {
+        path: PathBuf::from("paper.pdf"),
+        identifier: format!("doi:{REFRESH_DOI}"),
+        record: Box::new(corrected_item_record()),
+        sections: Box::new(sections),
+        refresh: Some(Box::new(differs_with(not_asked()))),
+    };
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!(
+            "{LIBRARY_LINE}; a fresh record from crossref differs in title; \
+             the library's record is unchanged; candidate rejected: doi:10.1000/a"
+        )
+    );
+}
+
+#[test]
+fn human_line_refresh_clause_escapes_record_values() {
+    let service_message = unresolved_refresh("timed\u{7} out");
+    let unwritten = differs_with(RefreshAcceptance::Unwritten {
+        message: "disk\u{7} full".to_string(),
+    });
+    let mut differing = differs_with(not_asked());
+    if let RefreshStep::Differs { differences, .. } = &mut differing {
+        differences[0].field = "ti\u{7}tle".to_string();
+    }
+
+    for step in [service_message, unwritten, differing] {
+        let line = human_line(&resolved_through_the_library(Some(step.clone()))).unwrap();
+
+        assert!(!line.contains('\u{7}'), "for {step:?}: {line:?}");
+        assert!(
+            line.starts_with(LIBRARY_LINE) && line.len() > LIBRARY_LINE.len(),
+            "the clause must still be written: {line:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// refresh-as-candidate 5.1: `library-replacement` (design D9, D11)
+// ---------------------------------------------------------------------
+
+const REPLACED_FILE: &str =
+    "/home/u/papers/items/klykov2015.0190c3a2-7f21-7abc-8def-0123456789ac.toml";
+
+fn library_replacement(fields: &[&str], write: WriteStep) -> Event {
+    Event::LibraryReplacement {
+        path: PathBuf::from("/home/u/papers/Klykov2015.pdf"),
+        item: "0190c3a2-7f21-7abc-8def-0123456789ac".to_string(),
+        file: PathBuf::from(REPLACED_FILE),
+        fields: fields.iter().map(ToString::to_string).collect(),
+        write,
+    }
+}
+
+#[test]
+fn json_line_of_library_replacement_matches_design_d9() {
+    assert_eq!(
+        json_line(&library_replacement(&["title"], WriteStep::Written)),
+        concat!(
+            r#"{"schema":5,"event":"library-replacement","#,
+            r#""path":"/home/u/papers/Klykov2015.pdf","#,
+            r#""item":"0190c3a2-7f21-7abc-8def-0123456789ac","#,
+            r#""file":"/home/u/papers/items/klykov2015.0190c3a2-7f21-7abc-8def-0123456789ac.toml","#,
+            r#""fields":["title"],"write":{"status":"written"}}"#,
+        )
+    );
+    assert_eq!(
+        json_line(&library_replacement(
+            &["title", "volume"],
+            WriteStep::Failed {
+                message: "changed after this run read it".to_string(),
+            }
+        )),
+        concat!(
+            r#"{"schema":5,"event":"library-replacement","#,
+            r#""path":"/home/u/papers/Klykov2015.pdf","#,
+            r#""item":"0190c3a2-7f21-7abc-8def-0123456789ac","#,
+            r#""file":"/home/u/papers/items/klykov2015.0190c3a2-7f21-7abc-8def-0123456789ac.toml","#,
+            r#""fields":["title","volume"],"#,
+            r#""write":{"status":"failed","message":"changed after this run read it"}}"#,
+        )
+    );
+}
+
+#[test]
+fn human_line_of_a_written_library_replacement_matches_design_d11() {
+    assert_eq!(
+        human_line(&library_replacement(&["title"], WriteStep::Written)).unwrap(),
+        format!("/home/u/papers/Klykov2015.pdf: replaced title in {REPLACED_FILE}")
+    );
+    assert_eq!(
+        human_line(&library_replacement(
+            &["title", "volume"],
+            WriteStep::Written
+        ))
+        .unwrap(),
+        format!("/home/u/papers/Klykov2015.pdf: replaced title, volume in {REPLACED_FILE}")
+    );
+}
+
+#[test]
+fn human_line_of_a_failed_library_replacement_matches_design_d11() {
+    let event = library_replacement(
+        &["title"],
+        WriteStep::Failed {
+            message: format!("{REPLACED_FILE} changed after this run read it"),
+        },
+    );
+
+    assert_eq!(
+        human_line(&event).unwrap(),
+        format!(
+            "/home/u/papers/Klykov2015.pdf: could not replace title in {REPLACED_FILE} \
+             ({REPLACED_FILE} changed after this run read it)"
+        )
+    );
+}
+
+#[test]
+fn human_line_of_library_replacement_escapes_after_the_path() {
+    let written = Event::LibraryReplacement {
+        path: PathBuf::from("/home/u/papers/Klykov2015.pdf"),
+        item: "0190c3a2-7f21-7abc-8def-0123456789ac".to_string(),
+        file: PathBuf::from("/home/u/papers/items/a\u{7}b.toml"),
+        fields: vec!["title".to_string()],
+        write: WriteStep::Written,
+    };
+    let failed = Event::LibraryReplacement {
+        path: PathBuf::from("/home/u/papers/Klykov2015.pdf"),
+        item: "0190c3a2-7f21-7abc-8def-0123456789ac".to_string(),
+        file: PathBuf::from("/home/u/papers/items/a\u{7}b.toml"),
+        fields: vec!["title".to_string()],
+        write: WriteStep::Failed {
+            message: "disk\u{7} full".to_string(),
+        },
+    };
+
+    for event in [written, failed] {
+        let line = human_line(&event).unwrap();
+        let (_, after_the_path) = line.split_once("Klykov2015.pdf: ").unwrap();
+
+        assert!(!after_the_path.contains('\u{7}'), "got {line:?}");
+        assert!(after_the_path.contains("title"), "got {line:?}");
+    }
+}
+
+#[test]
+fn library_replacement_counts_toward_nothing() {
+    let mut counts = Counts::default();
+
+    counts.observe(&library_replacement(&["title"], WriteStep::Written));
+    counts.observe(&library_replacement(
+        &["title"],
+        WriteStep::Failed {
+            message: "disk full".to_string(),
+        },
+    ));
+
+    assert_eq!(counts, Counts::default());
+}
+
+#[test]
+fn library_replacement_round_trips() {
+    for event in [
+        library_replacement(&["title"], WriteStep::Written),
+        library_replacement(
+            &["author", "issued"],
+            WriteStep::Failed {
+                message: "holds notes".to_string(),
+            },
+        ),
+    ] {
+        let parsed: Event = serde_json::from_str(&json_line(&event)).unwrap();
+
+        assert_eq!(parsed, event);
+    }
 }

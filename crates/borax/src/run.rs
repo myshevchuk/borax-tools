@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use borax_core::content::{ContentHash, hash_bytes};
 use borax_core::identifier::{Identifier, SuppliedError, supplied};
 use borax_core::index::{Fact, LibraryReference};
-use borax_core::library::ArtifactRecord;
+use borax_core::library::{ArtifactRecord, Item, ItemId};
 use borax_core::record::{EntryType, Record};
 use borax_core::tables::{LookupTables, Lookups, Table, TableSpec};
 use borax_core::template::{Miss, Template, TemplateTable};
@@ -47,7 +47,7 @@ use crate::config::{
 use crate::describe::{self, Candidate, Position, Proposal, describe};
 use crate::event::{
     AcceptedBy, Admission, Counts, Diagnostic, Event, Format, Level, Sections, SkipReason, Summary,
-    TableUsed, human_summary, render,
+    TableUsed, WriteStep, human_summary, render,
 };
 use crate::evidence::{
     CandidateDecision, Displaced, Displacement, Evidence, ExtractionStep, IdentifierInput,
@@ -59,6 +59,7 @@ use crate::pipeline::{
     Documents, Duplicated, FileOutcome, FileRecord, RealDocuments, ResolveConfig, Standing,
     resolution_skip, resolve_batch, resolved_event,
 };
+use crate::refresh::{Decision, Fresh, Whose};
 use crate::renaming::{
     Applying, Filesystem, Namespace, PlannedRename, Planning, Proposed, RealFilesystem,
 };
@@ -1056,8 +1057,8 @@ pub fn emit_events<S: IndexStore>(
             sink.emit(report.clone());
             Aftermath::default()
         }
-        (Command::Resolve { paths, .. }, _) => Aftermath {
-            library: resolve_events(paths, configs, adapters, sink),
+        (Command::Resolve { paths, refresh, .. }, _) => Aftermath {
+            library: resolve_events(paths, *refresh, configs, adapters, sink),
             ..Aftermath::default()
         },
         (Command::Status { identify, .. }, _) => {
@@ -1073,13 +1074,14 @@ pub fn emit_events<S: IndexStore>(
             ..Aftermath::default()
         },
         (
-            Command::Rename { apply, .. },
+            Command::Rename { apply, refresh, .. },
             Prepared::Grouped {
                 groups, library, ..
             },
         ) => rename_events(
             groups,
             *apply,
+            *refresh,
             session,
             library.as_ref(),
             configs,
@@ -1087,12 +1089,12 @@ pub fn emit_events<S: IndexStore>(
             sink,
         ),
         (
-            Command::Bib { .. },
+            Command::Bib { refresh, .. },
             Prepared::Grouped {
                 groups, library, ..
             },
         ) => {
-            bib_events(groups, library.as_ref(), configs, adapters, sink);
+            bib_events(groups, *refresh, library.as_ref(), configs, adapters, sink);
             Aftermath {
                 library: consultation_warning(
                     library.as_ref(),
@@ -1190,7 +1192,8 @@ fn cache_report(clear: bool, root: &Path) -> Result<Event, Diagnostic> {
 /// Write the events `borax resolve` produces for `paths` into `sink`.
 ///
 /// One event per file, in the order given, each resolved under the
-/// configuration its own directory implies.
+/// configuration its own directory implies, and refreshed when
+/// `refresh` ([`ResolveConfig::refresh`]).
 ///
 /// The batch is resolved before the first line is written, which is the
 /// price of `concurrency`: files finish in whatever order the network
@@ -1205,6 +1208,7 @@ fn cache_report(clear: bool, root: &Path) -> Result<Event, Diagnostic> {
 /// for, once for the run ([`consultation_warning`]).
 fn resolve_events<S: IndexStore>(
     paths: &[PathBuf],
+    refresh: bool,
     configs: &Configs,
     adapters: &Adapters<S>,
     sink: &mut dyn Sink,
@@ -1216,7 +1220,7 @@ fn resolve_events<S: IndexStore>(
         adapters.sources,
         adapters.index,
         library.as_ref(),
-        &|path| resolving(configs.for_path(path).config()),
+        &|path| resolving(configs.for_path(path).config(), refresh),
         // How many files at once is a network setting, so it comes from
         // the run rather than from any one file's directory.
         configs.run().config().concurrency,
@@ -1230,18 +1234,21 @@ fn resolve_events<S: IndexStore>(
     consultation_warning(library.as_ref(), covers_any(library.as_ref(), paths.iter()))
 }
 
-/// What a run may do while resolving, from `config`.
-fn resolving(config: &Config) -> ResolveConfig {
+/// What a run may do while resolving, from `config` and whether the
+/// run was given `--refresh`.
+fn resolving(config: &Config, refresh: bool) -> ResolveConfig {
     ResolveConfig {
         extraction: ExtractionConfig {
             page_limit: config.page_limit,
         },
         cache: config.cache,
+        refresh,
     }
 }
 
 /// Write the events `borax rename` produces for `groups` into `sink`,
-/// moving the files when `apply` is set.
+/// moving the files when `apply` is set and refreshing them when
+/// `refresh` is ([`ResolveConfig::refresh`]).
 ///
 /// `groups` is what [`preflight`] made of the run's paths: each
 /// directory the run spans, the files in it, and the template tables its
@@ -1297,6 +1304,16 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// and every file after it in [`Aftermath::unreached`], and still
 /// merges what the files it visited produced.
 ///
+/// Under `refresh`, an interactive run puts the refresh question
+/// ([`refresh_offered`]) before any other about a file whose refresh
+/// found a differing record of its own library's item, once per item
+/// per run and whatever `rename.skip-named` says. A replacement it
+/// writes stands whatever the file's own question then decides, a
+/// quit included, and the run consults the item as replaced from then
+/// on. An already-named file under `rename.skip-named` is passed over
+/// only when its refresh has nothing to report: none, or a record that
+/// does not differ.
+///
 /// Returns the warning a library whose artifact store could not be read
 /// whole calls for ([`consultation_warning`]), where the library was
 /// asked about a file the run reached, and a warning when any
@@ -1314,9 +1331,11 @@ fn resolving(config: &Config) -> ResolveConfig {
 /// [`crate::library::StoreWriter`] over the library, and the run
 /// returns [`crate::library::identity_fault_warning`] too when that
 /// writer wrote into a library whose identity file could not be read.
+#[allow(clippy::too_many_arguments)]
 fn rename_events<S: IndexStore>(
     groups: &[Group],
     apply: bool,
+    refresh: bool,
     session: &mut Session<'_>,
     snapshot: Option<&crate::library::Stores>,
     configs: &Configs,
@@ -1379,6 +1398,14 @@ fn rename_events<S: IndexStore>(
     // writes behind them. The run's own copy, since what it admits is
     // learned into it.
     let mut stores = snapshot.filter(|_| configs.run().config().record).cloned();
+    // The library as the run consults it: the start-of-run snapshot,
+    // and every item record the run replaces, learned as it is written
+    // so a later file of the same item is answered with what the item
+    // now holds.
+    let mut consulting = snapshot.cloned();
+    // Every item whose refresh question the run has put, so no item is
+    // asked about twice in one run.
+    let mut refreshes_asked: Vec<ItemId> = Vec::new();
     // Whether any file the run reached was one the library was asked
     // about, which is what a warning about the library's artifact store
     // is owed to.
@@ -1462,17 +1489,39 @@ fn rename_events<S: IndexStore>(
                 // the file's fate made of the verdict, which for a
                 // batch run is settled the moment the verdict is and
                 // for an interactive one is settled by its operator.
-                let standing = crate::pipeline::standing_in(
+                let mut standing = crate::pipeline::standing_in(
                     path,
                     adapters.documents,
                     adapters.sources,
                     adapters.index,
-                    &resolving(effective.config()),
+                    &resolving(effective.config(), refresh),
                     account.as_ref(),
-                    snapshot,
+                    consulting.as_ref(),
                     &libraries,
                 );
                 consulted |= standing.library().is_some();
+                // A refresh's candidate is offered before anything else
+                // is asked about the file, and what the answer writes
+                // is learned before the file is settled.
+                if session.mode == Mode::Interactive {
+                    let mut own = OwnLibrary {
+                        writer: writer.as_ref(),
+                        consulting: consulting.as_mut(),
+                        account: stores.as_mut(),
+                        libraries: &libraries,
+                        recording: configs.run().config().record,
+                        asked: &mut refreshes_asked,
+                    };
+                    let shown_at = among(groups, (index, position));
+                    if !refresh_offered(&mut standing, path, shown_at, session, &mut own, sink) {
+                        sink.release();
+                        break 'files Some(Stopped {
+                            at: (index, position),
+                            diagnostic: None,
+                        });
+                    }
+                }
+                let account = stores.as_ref().map(|stores| stores.account(&exists));
                 let about = About {
                     path,
                     position: among(groups, (index, position)),
@@ -1537,7 +1586,7 @@ fn rename_events<S: IndexStore>(
                                 held,
                                 items,
                                 adapters.documents,
-                                &resolving(effective.config()).extraction,
+                                &resolving(effective.config(), refresh).extraction,
                             )
                         })
                     }
@@ -1588,8 +1637,13 @@ fn rename_events<S: IndexStore>(
                     } => {
                         // A file already named is passed over whole, its
                         // own outcome line included, so the hold
-                        // outlasts the event that reports it.
-                        let named = matches!(decision, PlannedRename::AlreadyNamed { .. });
+                        // outlasts the event that reports it — unless its
+                        // refresh has something to report, which a run
+                        // given `--refresh` was asked for.
+                        let named = matches!(decision, PlannedRename::AlreadyNamed { .. })
+                            && file.refresh.as_ref().is_none_or(|refresh| {
+                                matches!(refresh.fresh, Fresh::Current { .. })
+                            });
                         if !named {
                             sink.release();
                         }
@@ -1793,6 +1847,184 @@ fn rename_events<S: IndexStore>(
     }
 }
 
+/// What an interactive rename's refresh question writes through, and
+/// what it remembers across the run's files.
+struct OwnLibrary<'r> {
+    /// The run's writer into its own library, `None` for a run in none.
+    writer: Option<&'r crate::library::StoreWriter<'r>>,
+    /// The stores the run consults, which learn a replaced item.
+    consulting: Option<&'r mut crate::library::Stores>,
+    /// The stores the run's account checks against, which learn it too;
+    /// `None` for a run that records nothing.
+    account: Option<&'r mut crate::library::Stores>,
+    /// The other roots the run has read, of which the run's own is
+    /// forgotten after a replacement.
+    libraries: &'r crate::references::Libraries,
+    /// Whether the run records: the record gate, `--no-record` included.
+    recording: bool,
+    /// Every item whose refresh question the run has put.
+    asked: &'r mut Vec<ItemId>,
+}
+
+/// Put the refresh question about the file at `path`, where its
+/// resolution's refresh calls for one, and settle the refresh's
+/// decision in `standing`; `false` when the operator quit at it.
+///
+/// Only a resolved file whose refresh is of the run's own library's
+/// item ([`Whose::Own`]) and found a record that differs has anything
+/// to decide. Its decision is, the first that holds:
+///
+/// - not attempted, [`Unattempted::NotRecording`], in a run that
+///   records nothing;
+/// - not attempted, [`Unattempted::AlreadyAsked`], for an item the run
+///   has already put the question about;
+/// - the operator's answer to the question, put now with the file's
+///   hold ended: Keep the library's record (the default), which is
+///   [`Decision::Declined`] and writes nothing, Replace it with the
+///   fresh record, or Quit.
+///
+/// Replace writes [`crate::refresh::replaced`] over the item's file
+/// through `own`'s writer ([`crate::library::replace_record`]) and
+/// emits [`Event::LibraryReplacement`] at once. Written, the decision is
+/// [`Decision::Accepted`], the file's record becomes the replaced one,
+/// the consulted stores and the account learn the item as replaced, and
+/// the run's own root is forgotten by `own.libraries`, so a later file
+/// reaching it through a reference reads it afresh. Not written, the
+/// decision is [`Decision::Unwritten`] with why, and the file goes on
+/// with the record as the run read it.
+///
+/// Every other refresh is left as resolution reported it, and asks
+/// nothing.
+fn refresh_offered(
+    standing: &mut Standing,
+    path: &Path,
+    position: Position,
+    session: &mut Session<'_>,
+    own: &mut OwnLibrary<'_>,
+    sink: &mut dyn Sink,
+) -> bool {
+    let FileOutcome::Resolved(file) = &mut standing.verdict else {
+        return true;
+    };
+    let Some(refresh) = file.refresh.as_mut() else {
+        return true;
+    };
+    let Fresh::Differs {
+        candidate,
+        differences,
+        ..
+    } = &refresh.fresh
+    else {
+        return true;
+    };
+    if refresh.whose != Whose::Own {
+        return true;
+    }
+    if !own.recording {
+        refresh.decision = Decision::NotAttempted(Unattempted::NotRecording);
+        return true;
+    }
+    if own.asked.contains(&refresh.item) {
+        refresh.decision = Decision::NotAttempted(Unattempted::AlreadyAsked);
+        return true;
+    }
+    own.asked.push(refresh.item.clone());
+    let candidate = candidate.clone();
+    let fields: Vec<String> = differences
+        .iter()
+        .map(|difference| difference.field.as_str().to_string())
+        .collect();
+
+    refresh.decision = Decision::Pending;
+    let description = describe(
+        &resolved_event(path, file),
+        &shown(path, &session.working),
+        None,
+        position,
+        session.width,
+    );
+    let Some(asker) = session.asker.as_deref_mut() else {
+        return false;
+    };
+    // The question is shown, and so is everything said about the file
+    // after it, whatever `rename.skip-named` would have made of it.
+    sink.release();
+    let answer = asker.choose(&Question {
+        path: path.to_path_buf(),
+        // No move is in play: the question is about the item.
+        target: path.to_path_buf(),
+        choices: vec![Answer::KeepRecord, Answer::Replace, Answer::Quit],
+        description,
+    });
+    let Some(refresh) = file.refresh.as_mut() else {
+        return true;
+    };
+    match answer {
+        Answer::Replace => {}
+        Answer::KeepRecord => {
+            refresh.decision = Decision::Declined;
+            return true;
+        }
+        _ => return false,
+    }
+
+    let expected = Item {
+        id: refresh.item.clone(),
+        record: file.record.clone(),
+    };
+    let replacement = crate::refresh::replaced(&file.record, &candidate);
+    let item_file = own
+        .consulting
+        .as_deref()
+        .and_then(|stores| stores.item_file(&expected.id))
+        .map(Path::to_path_buf);
+    let written = match (&item_file, own.writer) {
+        (Some(item_file), Some(writer)) => {
+            crate::library::replace_record(item_file, &expected, &replacement, &|path, bytes| {
+                writer.write(path, bytes)
+            })
+        }
+        _ => Err(crate::library::Unrecorded {
+            message: format!("no item file this run read holds item {}", expected.id),
+        }),
+    };
+    sink.emit(Event::LibraryReplacement {
+        path: path.to_path_buf(),
+        item: expected.id.to_string(),
+        file: item_file.unwrap_or_default(),
+        fields,
+        write: match &written {
+            Ok(()) => WriteStep::Written,
+            Err(unrecorded) => WriteStep::Failed {
+                message: unrecorded.message.clone(),
+            },
+        },
+    });
+    match written {
+        Ok(()) => {
+            refresh.decision = Decision::Accepted;
+            file.record = replacement.clone();
+            let learned = Item {
+                id: expected.id,
+                record: replacement,
+            };
+            if let Some(stores) = own.account.as_deref_mut() {
+                stores.learn_item(learned.clone());
+            }
+            if let Some(stores) = own.consulting.as_deref_mut() {
+                stores.learn_item(learned);
+                own.libraries.forget(stores.root());
+            }
+        }
+        Err(unrecorded) => {
+            refresh.decision = Decision::Unwritten {
+                message: unrecorded.message,
+            };
+        }
+    }
+    true
+}
+
 /// Where a run stopped before its inputs ran out, and why.
 struct Stopped {
     /// The group and the position within it of the file the run stopped
@@ -1867,7 +2099,10 @@ struct About<'a> {
     position: Position,
     /// `rename.skip-named` for the directory this file lies in, in a
     /// run that asks. A passed-over file is shown nothing and asked
-    /// nothing, and is reported exactly as a batch run reports it.
+    /// nothing, and is reported exactly as a batch run reports it. An
+    /// already-named file whose refresh has something to report is
+    /// shown all the same, though still not asked the already-named
+    /// question.
     passing_over: bool,
 }
 
@@ -1931,6 +2166,9 @@ enum Situation {
 /// work the library already holds, a file nothing identified, one no
 /// service holds a record for, one that could not be read, and — where
 /// `rename.skip-named` is off — one already carrying its record's name.
+/// A refresh's own question has been put before this one, by
+/// [`refresh_offered`], and is not put here; a record reached here in
+/// place of the file's own carries the file's refresh as it stood.
 /// Everything else is settled as [`alone`] settles it, since no answer
 /// would change what happens.
 ///
@@ -2135,7 +2373,9 @@ fn asked<S: IndexStore>(
         });
 
         match answer {
-            Answer::Quit => return Settled::Stop,
+            // Offered only by the refresh question, which is put before
+            // this one and answered there.
+            Answer::Quit | Answer::KeepRecord | Answer::Replace => return Settled::Stop,
             Answer::Skip => {
                 if let (Some(number), Some(on)) = (typed.open, offer.as_ref()) {
                     typed.close(number, on, CandidateDecision::Rejected);
@@ -2654,7 +2894,8 @@ impl Typed {
     }
 
     /// `file` carrying the operator's input, its record reached from
-    /// submission `used` or from the file's own passes.
+    /// submission `used` or from the file's own passes, and the refresh
+    /// of `own`, the file's own record, where `file` has none.
     fn carried(
         &self,
         mut file: FileRecord,
@@ -2663,6 +2904,12 @@ impl Typed {
         own: Option<&Offer>,
     ) -> FileRecord {
         file.evidence.identifier_input = self.input(used, evidence, own);
+        // A record reached in place of the file's own carries the
+        // file's refresh as it stood: refreshing the item and
+        // re-identifying the file are separate acts.
+        if file.refresh.is_none() {
+            file.refresh = own.and_then(|own| own.file.refresh.clone());
+        }
         file
     }
 
@@ -3392,8 +3639,9 @@ fn reidentified(file: &FileRecord) -> bool {
     by_operator || file.overridden
 }
 
-/// Resolve the file at `path` under `effective`, writing its verdict
-/// into `sink`, and hand back the record when there is one.
+/// Resolve the file at `path` under `effective`, refreshing it when
+/// `refresh` ([`ResolveConfig::refresh`]), writing its verdict into
+/// `sink`, and hand back the record when there is one.
 ///
 /// Renaming and bibliography output both work from the record rather
 /// than from the event, so the record is what this hands back; the event
@@ -3410,6 +3658,7 @@ fn reidentified(file: &FileRecord) -> bool {
 fn resolved_record<S: IndexStore>(
     path: &Path,
     effective: &Effective,
+    refresh: bool,
     library: Option<&crate::library::Stores>,
     libraries: &crate::references::Libraries,
     adapters: &Adapters<S>,
@@ -3420,7 +3669,7 @@ fn resolved_record<S: IndexStore>(
         adapters.documents,
         adapters.sources,
         adapters.index,
-        &resolving(effective.config()),
+        &resolving(effective.config(), refresh),
         None,
         library,
         libraries,
@@ -3432,7 +3681,8 @@ fn resolved_record<S: IndexStore>(
     }
 }
 
-/// Write the events `borax bib` produces for `groups` into `sink`.
+/// Write the events `borax bib` produces for `groups` into `sink`,
+/// refreshing each file when `refresh` ([`ResolveConfig::refresh`]).
 ///
 /// `groups` is what [`preflight`] made of the run's paths, as it is for
 /// [`rename_events`]: each directory, its files, and the template tables
@@ -3455,6 +3705,7 @@ fn resolved_record<S: IndexStore>(
 /// [`rename_events`] and for the same reason.
 fn bib_events<S: IndexStore>(
     groups: &[Group],
+    refresh: bool,
     library: Option<&crate::library::Stores>,
     configs: &Configs,
     adapters: &Adapters<S>,
@@ -3476,9 +3727,9 @@ fn bib_events<S: IndexStore>(
         let mut lookups = Lookups::new(&group.tables);
 
         for path in &group.paths {
-            if let Some(file) =
-                resolved_record(path, effective, library, &libraries, adapters, sink)
-            {
+            if let Some(file) = resolved_record(
+                path, effective, refresh, library, &libraries, adapters, sink,
+            ) {
                 cited.add(
                     path.clone(),
                     file,
@@ -3838,6 +4089,7 @@ pub fn dispatch<S: IndexStore>(
         applying: applying(&cli.command, session.mode),
         interactive,
         tables: tables_used(&prepared),
+        refresh: cli.command.refreshes(),
     };
 
     // Before the first event reaches the terminal, and so before any
@@ -3968,7 +4220,7 @@ fn status_events<S: IndexStore>(
     // The extraction settings are the run's own: a library command is
     // given a library rather than input files, so there is no per-file
     // directory to resolve them from.
-    let extraction = resolving(configs.run().config()).extraction;
+    let extraction = resolving(configs.run().config(), false).extraction;
     let identifiable = identify.then(|| {
         let mut found = 0;
         for artifact in &surveyed.artifacts {
@@ -4033,7 +4285,7 @@ fn reconcile_events<S: IndexStore>(
     sink: &mut dyn Sink,
 ) -> Option<Diagnostic> {
     let at = (adapters.now)();
-    let extraction = resolving(configs.run().config()).extraction;
+    let extraction = resolving(configs.run().config(), false).extraction;
     let extract = |path: &Path| crate::pipeline::extraction(path, adapters.documents, &extraction);
     let reconciliation = crate::library::reconcile(
         &reported_root(command, adapters),
@@ -4277,20 +4529,21 @@ pub fn execute(cli: &Cli, streams: &mut Streams) -> Outcome {
     };
     let interval = Duration::from_millis(effective.config().min_interval_ms);
     let caching = effective.config().cache;
+    let refresh = command.refreshes();
 
     let mut owned: Vec<Box<dyn Source>> = Vec::new();
     let selected = |name| effective.config().sources.contains(&name);
     if selected(SourceName::Crossref) {
         let client = CrossrefClient::new(transport.clone(), politeness.clone());
-        owned.push(polite(client, interval, caching));
+        owned.push(polite(client, interval, caching, refresh));
     }
     if selected(SourceName::OpenAlex) {
         let client = OpenAlexClient::new(transport.clone(), politeness.clone());
-        owned.push(polite(client, interval, caching));
+        owned.push(polite(client, interval, caching, refresh));
     }
     if selected(SourceName::Arxiv) {
         let client = ArxivClient::new(transport, politeness);
-        owned.push(polite(client, interval, caching));
+        owned.push(polite(client, interval, caching, refresh));
     }
     let sources: Vec<&dyn Source> = owned.iter().map(Box::as_ref).collect();
 
@@ -4380,7 +4633,9 @@ fn session_for<'a>(
 }
 
 /// `source` wrapped in the decorators a real run adds to it: pacing
-/// always, and the response cache unless the run was told to bypass it.
+/// always, and the response cache unless the run was told to bypass it
+/// (`caching` off). A run given `--refresh` (`refresh`) gets a cache
+/// that stores every answer and serves none ([`Cached::refreshing`]).
 ///
 /// The cache goes outside the pacing so an answer borax already holds
 /// costs neither a request nor the interval a request would have had to
@@ -4391,11 +4646,17 @@ fn session_for<'a>(
 /// the key carries the service's name, so two services cannot collide
 /// over one identifier — and a [`FileCache`] is a path, not an open
 /// handle, so holding three costs nothing.
-fn polite<S: Source + 'static>(source: S, interval: Duration, caching: bool) -> Box<dyn Source> {
+fn polite<S: Source + 'static>(
+    source: S,
+    interval: Duration,
+    caching: bool,
+    refresh: bool,
+) -> Box<dyn Source> {
     let paced = Paced::new(source, interval);
-    match caching {
-        true => Box::new(Cached::new(paced, response_cache())),
-        false => Box::new(paced),
+    match (caching, refresh) {
+        (true, false) => Box::new(Cached::new(paced, response_cache())),
+        (true, true) => Box::new(Cached::refreshing(paced, response_cache())),
+        (false, _) => Box::new(paced),
     }
 }
 
@@ -4471,17 +4732,20 @@ fn expanded(command: &Command) -> Command {
         Command::Resolve {
             paths,
             resolution,
+            refresh,
             concurrency,
             run_log,
         } => Command::Resolve {
             paths: inputs(paths),
             resolution: resolution.clone(),
+            refresh: *refresh,
             concurrency: *concurrency,
             run_log: run_log.clone(),
         },
         Command::Rename {
             paths,
             apply,
+            refresh,
             resolution,
             rename,
             bibliography,
@@ -4490,6 +4754,7 @@ fn expanded(command: &Command) -> Command {
         } => Command::Rename {
             paths: inputs(paths),
             apply: *apply,
+            refresh: *refresh,
             resolution: resolution.clone(),
             rename: rename.clone(),
             bibliography: bibliography.clone(),
@@ -4498,11 +4763,13 @@ fn expanded(command: &Command) -> Command {
         },
         Command::Bib {
             paths,
+            refresh,
             resolution,
             bibliography,
             run_log,
         } => Command::Bib {
             paths: inputs(paths),
+            refresh: *refresh,
             resolution: resolution.clone(),
             bibliography: bibliography.clone(),
             run_log: run_log.clone(),
