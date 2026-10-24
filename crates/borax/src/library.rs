@@ -3273,8 +3273,9 @@ pub fn store_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// to `record`'s value, keeping the form the file writes it in, or
 /// removed where `record` has none. The `id`, every other key, every
 /// key the record model does not know, every comment, and the file's
-/// name are left as they were. `record`'s confidence and source fields
-/// are not written.
+/// name are left as they were; the comment lines above a removed key
+/// are kept above whatever follows it. `record`'s confidence and source
+/// fields are not written.
 ///
 /// Fails with [`Unrecorded`], writing nothing, in this order of
 /// checking:
@@ -3468,7 +3469,9 @@ impl ReplacedKey {
     }
 
     /// Set this key in `document` to `value`, taken from the rendering
-    /// of the replacement record, or remove it where `value` is `None`.
+    /// of the replacement record, or remove it where `value` is `None`,
+    /// keeping the comment lines above it ahead of the table's next key
+    /// or else of the next header.
     ///
     /// A value the document already holds keeps its form — a plain
     /// value, a table, or an array of tables — its decoration, and its
@@ -3489,7 +3492,30 @@ impl ReplacedKey {
             table = item.as_table_like_mut()?;
         }
         let Some(mut value) = value else {
+            // The comment lines above a removed key belong to the key's
+            // line and not to its value, so they are kept: above the
+            // table's next key, or else above the next header.
+            let comment = table
+                .key(self.key)
+                .and_then(|key| key.leaf_decor().prefix())
+                .and_then(|prefix| prefix.as_str())
+                .filter(|prefix| commented(prefix))
+                .map(str::to_string);
+            let next = table
+                .iter()
+                .skip_while(|(key, _)| *key != self.key)
+                .skip(1)
+                .find(|(_, item)| item.is_value())
+                .map(|(key, _)| key.to_string());
             table.remove(self.key);
+            let Some(comment) = comment else {
+                return Some(());
+            };
+            if let Some(mut next) = next.and_then(|next| table.key_mut(&next)) {
+                prepend(next.leaf_decor_mut(), &comment);
+                return Some(());
+            }
+            keep_before_next_header(document, position, &comment);
             return Some(());
         };
         match table.get_mut(self.key) {
@@ -3501,6 +3527,51 @@ impl ReplacedKey {
         }
         Some(())
     }
+}
+
+/// Write `comment` before what `decor` already puts ahead of its item.
+fn prepend(decor: &mut Decor, comment: &str) {
+    let held = decor
+        .prefix()
+        .and_then(|prefix| prefix.as_str())
+        .unwrap_or_default();
+    decor.set_prefix(format!("{comment}{held}"));
+}
+
+/// Keep `comment`, the lines above a key removed as the last of the
+/// table at `position`, ahead of the first header written after that
+/// table, or at the document's end where no header follows it.
+fn keep_before_next_header(document: &mut DocumentMut, position: Option<isize>, comment: &str) {
+    let mut later: Vec<isize> = position.map_or_else(Vec::new, |position| {
+        table_positions(document.as_table())
+            .filter(|&other| other > position)
+            .collect()
+    });
+    later.sort_unstable();
+    for next in later {
+        if let Some(table) = table_at(document.as_table_mut(), next) {
+            prepend(table.decor_mut(), comment);
+            return;
+        }
+    }
+    let trailing = document.trailing().as_str().unwrap_or_default();
+    let kept = format!("{trailing}{comment}");
+    document.set_trailing(kept);
+}
+
+/// The table written with a header at `position` within `table`, at
+/// any depth, an array of tables' entries included.
+fn table_at(table: &mut Table, position: isize) -> Option<&mut Table> {
+    if table.position() == Some(position) && !table.is_implicit() {
+        return Some(table);
+    }
+    table.iter_mut().find_map(|(_, item)| match item {
+        TomlItem::Table(table) => table_at(table, position),
+        TomlItem::ArrayOfTables(tables) => tables
+            .iter_mut()
+            .find_map(|table| table_at(table, position)),
+        _ => None,
+    })
 }
 
 /// The positions of every table in `table`, its own and its subtables',
